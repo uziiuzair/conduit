@@ -4,7 +4,7 @@ version = "0.1.0"
 description = "Conduit — multiple real Claude Code terminals across projects, in one window."
 authors = ["uziiuzair"]
 license = "MIT"
-repository = "https://github.com/ooozzy/Conduit"
+repository = "https://github.com/uziiuzair/conduit"
 edition = "2021"
 
 [lib]

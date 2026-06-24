@@ -6,10 +6,10 @@
   "description": "A desktop app for running multiple real Claude Code terminals across projects, in one window.",
   "license": "MIT",
   "author": "uziiuzair",
-  "homepage": "https://github.com/ooozzy/Conduit",
+  "homepage": "https://github.com/uziiuzair/conduit",
   "repository": {
     "type": "git",
-    "url": "https://github.com/ooozzy/Conduit.git"
+    "url": "https://github.com/uziiuzair/conduit.git"
   },
   "keywords": [
     "claude-code",
