@@ -16,7 +16,7 @@
 use std::fs;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU16, AtomicU64, Ordering};
 use std::sync::mpsc::{sync_channel, Receiver, SyncSender, TrySendError};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -39,6 +39,10 @@ struct PtySession {
     sink: Sink,
     subscribers: Subscribers,
     next_sub_id: Arc<AtomicU64>,
+    /// Current (cols, rows). Desktop-authoritative: updated on every resize, read by a
+    /// newly-attached remote viewer so it matches the desktop instead of resizing the
+    /// shared PTY out from under it.
+    size: Arc<(AtomicU16, AtomicU16)>,
 }
 
 #[derive(Default)]
@@ -154,6 +158,7 @@ impl PtyManager {
                 sink: sink.clone(),
                 subscribers: subscribers.clone(),
                 next_sub_id: Arc::new(AtomicU64::new(0)),
+                size: Arc::new((AtomicU16::new(cols), AtomicU16::new(rows))),
             }),
         );
 
@@ -232,7 +237,10 @@ impl PtyManager {
                 pixel_width: 0,
                 pixel_height: 0,
             })
-            .map_err(|e| format!("resize: {e}"))
+            .map_err(|e| format!("resize: {e}"))?;
+        session.size.0.store(cols, Ordering::SeqCst);
+        session.size.1.store(rows, Ordering::SeqCst);
+        Ok(())
     }
 
     /// Attach an extra output consumer (a bridge connection) to a live session.
@@ -256,6 +264,17 @@ impl PtyManager {
                 }
             }
         }
+    }
+
+    /// Current (cols, rows) of a running session, so a freshly-attached remote viewer
+    /// can match the desktop's size instead of resizing the shared PTY. None if gone.
+    pub fn session_size(&self, session_id: &str) -> Option<(u16, u16)> {
+        let entry = self.sessions.get(session_id)?;
+        let session = entry.lock().ok()?;
+        Some((
+            session.size.0.load(Ordering::SeqCst),
+            session.size.1.load(Ordering::SeqCst),
+        ))
     }
 
     /// Ids of all currently-running sessions (for the bridge `list` message).

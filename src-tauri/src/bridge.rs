@@ -86,6 +86,14 @@ fn handle_conn(stream: TcpStream, pty: Arc<PtyManager>) {
                 }
                 Some(ClientMsg::Attach { session_id }) => {
                     if let Some((sub_id, rx)) = pty.subscribe(&session_id) {
+                        // Desktop-authoritative sizing: tell the new viewer the PTY's
+                        // current size so it renders at the desktop's dimensions rather
+                        // than resizing the shared TTY out from under the desktop.
+                        if let Some((cols, rows)) = pty.session_size(&session_id) {
+                            let _ = ws.send(Message::Text(
+                                json!({ "type": "size", "cols": cols, "rows": rows }).to_string(),
+                            ));
+                        }
                         attached = Some((session_id, sub_id, rx));
                     } else {
                         let _ = ws.send(Message::Text(
