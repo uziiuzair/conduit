@@ -93,7 +93,7 @@ impl PtyManager {
             )
         } else {
             format!(
-                "export CONDUIT_SESSION_ID={sid} CONDUIT_HOOK_PORT={port}; cd {dir} && claude; exec {shell} -i -l",
+                "export CONDUIT_SESSION_ID={sid} CONDUIT_HOOK_PORT={port} CLAUDE_CODE_ENABLE_TASKS=0; cd {dir} && claude; exec {shell} -i -l",
                 sid = shell_quote(&session_id),
                 port = hook_port,
                 dir = shell_quote(&working_directory),
@@ -109,6 +109,7 @@ impl PtyManager {
         if !shell_only {
             cmd.env("CONDUIT_SESSION_ID", &session_id);
             cmd.env("CONDUIT_HOOK_PORT", hook_port.to_string());
+            cmd.env("CLAUDE_CODE_ENABLE_TASKS", "0");
         }
 
         let child = pair
