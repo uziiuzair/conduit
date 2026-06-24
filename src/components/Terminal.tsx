@@ -3,31 +3,7 @@ import { Terminal as Xterm } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { CanvasAddon } from "@xterm/addon-canvas";
 import { invoke, Channel } from "@tauri-apps/api/core";
-
-// xterm ITheme ported from Theme.swift (term colors + the 16-color ANSI palette).
-const TERM_THEME = {
-  background: "#151110",
-  foreground: "#d2ccc4",
-  cursor: "#ce8a6e",
-  cursorAccent: "#151110",
-  selectionBackground: "#33302c",
-  black: "#15161e",
-  red: "#c97a72",
-  green: "#88b07c",
-  yellow: "#c2a063",
-  blue: "#ce8a6e",
-  magenta: "#b98ba6",
-  cyan: "#7fa6a0",
-  white: "#a9a199",
-  brightBlack: "#4a4540",
-  brightRed: "#c97a72",
-  brightGreen: "#88b07c",
-  brightYellow: "#c2a063",
-  brightBlue: "#ce8a6e",
-  brightMagenta: "#b98ba6",
-  brightCyan: "#7fa6a0",
-  brightWhite: "#d2ccc4",
-};
+import { currentTerminalTheme, registerTerminal } from "../themes";
 
 function b64ToBytes(b64: string): Uint8Array {
   const bin = atob(b64);
@@ -73,7 +49,7 @@ export function TerminalView({
       fontFamily: '"SF Mono", SFMono-Regular, Menlo, monospace',
       fontSize: 13,
       lineHeight: 1.0,
-      theme: TERM_THEME,
+      theme: currentTerminalTheme(),
       cursorBlink: true,
       allowProposedApi: true,
       scrollback: 5000,
@@ -117,6 +93,7 @@ export function TerminalView({
     });
 
     termRef.current = term;
+    const unregister = registerTerminal(term);
     fitRef.current = fit;
 
     // Re-fit when the host area changes size (window resize, panel toggles).
@@ -137,6 +114,7 @@ export function TerminalView({
     window.addEventListener("resize", onWinResize);
 
     return () => {
+      unregister();
       disposedRef.current = true;
       if (resizeTimer.current) window.clearTimeout(resizeTimer.current);
       window.removeEventListener("resize", onWinResize);
