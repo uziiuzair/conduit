@@ -4,6 +4,7 @@
 //!   PtyManager (TerminalLauncher) · Store (AppStore) · HookState/server (HookServer)
 //! and exposes them to the React frontend as Tauri commands.
 
+mod bridge;
 mod fsops;
 mod git;
 mod hooks;
