@@ -1186,3 +1186,83 @@ button {
 ::-webkit-scrollbar-track {
   background: transparent;
 }
+
+/* ---- Theme switcher (sidebar footer) ---- */
+.add-bar {
+  display: flex;
+  align-items: stretch;
+}
+.add-bar > button:first-child {
+  flex: 1;
+}
+.theme-switcher {
+  position: relative;
+  display: flex;
+}
+.add-bar .theme-btn {
+  width: 36px;
+  flex: 0 0 36px;
+  padding: 0;
+  border-left: 1px solid var(--border);
+  color: var(--accent);
+  font-size: 13px;
+}
+.theme-btn:hover {
+  background: var(--hover);
+}
+.theme-popover {
+  position: absolute;
+  bottom: calc(100% + 6px);
+  right: 6px;
+  min-width: 196px;
+  background: var(--sidebar-bg);
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  padding: 5px;
+  box-shadow: 0 12px 34px rgba(0, 0, 0, 0.45);
+  z-index: 1000;
+}
+.theme-popover-title {
+  font-size: 9px;
+  letter-spacing: 0.05em;
+  color: var(--text-dim);
+  padding: 4px 8px 5px;
+}
+.theme-row {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  width: 100%;
+  text-align: left;
+  padding: 6px 8px;
+  border-radius: 6px;
+  font-size: 12px;
+  color: var(--text-bright);
+}
+.theme-row:hover {
+  background: var(--selection-bg);
+}
+.theme-row-label {
+  flex: 1;
+}
+.theme-check {
+  color: var(--accent);
+  font-size: 11px;
+}
+.theme-popover-divider {
+  height: 1px;
+  background: var(--border);
+  margin: 4px 6px;
+}
+.theme-swatches {
+  display: flex;
+  width: 30px;
+  height: 14px;
+  border-radius: 3px;
+  overflow: hidden;
+  flex-shrink: 0;
+  box-shadow: 0 0 0 1px var(--border);
+}
+.theme-swatches > span {
+  flex: 1;
+}

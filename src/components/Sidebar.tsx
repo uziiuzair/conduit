@@ -18,6 +18,7 @@ import {
   EllipsisIcon,
   CircleFilledIcon,
 } from "./Icons";
+import { ThemeSwitcher } from "./ThemeSwitcher";
 
 export function Sidebar() {
   const projects = useStore((s) => s.projects);
@@ -46,6 +47,7 @@ export function Sidebar() {
           <FolderPlusIcon size={12} />
           <span>Add Project</span>
         </button>
+        <ThemeSwitcher />
       </div>
       <SessionContextMenu />
     </div>
@@ -108,6 +110,8 @@ function SessionRow({
 }) {
   const selected = useStore((s) => globalSelectedSessionId(s) === session.id);
   const status = useStore((s) => liveState(s.live, session.id).status);
+  const activity = useStore((s) => liveState(s.live, session.id).activity);
+  const compacting = useStore((s) => liveState(s.live, session.id).compacting);
   const editing = useStore((s) => s.editingSessionId === session.id);
   const selectSession = useStore((s) => s.selectSession);
   const openMenu = useStore((s) => s.openMenu);
@@ -140,7 +144,7 @@ function SessionRow({
       ) : (
         <span className="name">{session.name}</span>
       )}
-      <StatusAccessory status={status} />
+      <StatusAccessory status={status} activity={activity} compacting={compacting} />
     </div>
   );
 }
@@ -185,11 +189,27 @@ function RenameInput({
   );
 }
 
-function StatusAccessory({ status }: { status: string }) {
+function StatusAccessory({
+  status,
+  activity,
+  compacting,
+}: {
+  status: string;
+  activity?: string;
+  compacting?: boolean;
+}) {
   if (status === "needsInput") return <span className="pill-needs">needs you</span>;
+  if (compacting) return <span className="pill-compacting">compacting</span>;
+  if (status === "running")
+    return activity ? (
+      <span className="pill-activity" title={activity}>
+        {activity}
+      </span>
+    ) : (
+      <span className="dot running" />
+    );
   if (status === "done")
     return <CircleFilledIcon size={11} className="dot done" />;
-  if (status === "running") return <span className="dot running" />;
   return null;
 }
 
