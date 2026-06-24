@@ -243,6 +243,18 @@ fn transcript_exists(session_id: &str, projects_dir: &Path) -> bool {
         .any(|entry| entry.path().join(&file).exists())
 }
 
+/// The `claude` invocation for a *cold* spawn. Resume the pinned conversation when
+/// its transcript exists; otherwise start a new session pinned to our id. Each branch
+/// falls back to a bare `claude` so a resume/pin failure never strands the user.
+fn claude_invocation(session_id: &str, projects_dir: Option<&Path>) -> String {
+    let id = shell_quote(session_id);
+    if projects_dir.is_some_and(|d| transcript_exists(session_id, d)) {
+        format!("claude --resume {id} || claude")
+    } else {
+        format!("claude --session-id {id} || claude")
+    }
+}
+
 /// Single-quote a string for safe interpolation into a /bin/sh -c command.
 fn shell_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
@@ -302,5 +314,29 @@ mod tests {
         let missing = std::env::temp_dir().join("conduit_pty_does_not_exist_dir/projects");
         let _ = fs::remove_dir_all(&missing);
         assert!(!transcript_exists(ID, &missing));
+    }
+
+    #[test]
+    fn invocation_resumes_when_transcript_exists() {
+        let projects = fresh_projects_dir("resume");
+        plant_transcript(&projects, "-proj", ID);
+        let cmd = claude_invocation(ID, Some(projects.as_path()));
+        assert!(cmd.contains(&format!("--resume '{ID}'")), "got: {cmd}");
+        assert!(cmd.ends_with("|| claude"), "missing fallback: {cmd}");
+    }
+
+    #[test]
+    fn invocation_pins_new_session_when_absent() {
+        let projects = fresh_projects_dir("pin");
+        let cmd = claude_invocation(ID, Some(projects.as_path()));
+        assert!(cmd.contains(&format!("--session-id '{ID}'")), "got: {cmd}");
+        assert!(cmd.ends_with("|| claude"), "missing fallback: {cmd}");
+    }
+
+    #[test]
+    fn invocation_without_store_is_first_launch() {
+        let cmd = claude_invocation(ID, None);
+        assert!(cmd.contains("--session-id"), "got: {cmd}");
+        assert!(!cmd.contains("--resume"), "must not resume without a store: {cmd}");
     }
 }
