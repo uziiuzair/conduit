@@ -16,6 +16,8 @@
 use std::fs;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::mpsc::{sync_channel, Receiver, SyncSender, TrySendError};
 use std::sync::{Arc, Mutex};
 use std::thread;
 
@@ -272,6 +274,18 @@ fn shell_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
 }
 
+/// Per-subscriber buffered fan-out. Sends one base64 frame to every subscriber.
+/// A subscriber whose bounded buffer is full has the frame DROPPED (slow consumer —
+/// must never block the desktop webview); a subscriber whose receiver hung up is
+/// pruned from the list. Mutates `subs` in place.
+fn broadcast(subs: &mut Vec<(u64, SyncSender<String>)>, frame: &str) {
+    subs.retain(|(_, tx)| match tx.try_send(frame.to_string()) {
+        Ok(()) => true,
+        Err(TrySendError::Full(_)) => true,
+        Err(TrySendError::Disconnected(_)) => false,
+    });
+}
+
 #[cfg(test)]
 mod tests {
     // `super::*` brings in `fs`, `Path`, and `PathBuf` from the file's top-level
@@ -350,5 +364,39 @@ mod tests {
         let cmd = claude_invocation(ID, None);
         assert!(cmd.contains("--session-id"), "got: {cmd}");
         assert!(!cmd.contains("--resume"), "must not resume without a store: {cmd}");
+    }
+
+    #[test]
+    fn broadcast_delivers_same_frame_to_all() {
+        let (tx1, rx1) = sync_channel(8);
+        let (tx2, rx2) = sync_channel(8);
+        let mut subs = vec![(1u64, tx1), (2u64, tx2)];
+        broadcast(&mut subs, "QUJD");
+        assert_eq!(rx1.recv().unwrap(), "QUJD");
+        assert_eq!(rx2.recv().unwrap(), "QUJD");
+        assert_eq!(subs.len(), 2);
+    }
+
+    #[test]
+    fn broadcast_prunes_disconnected() {
+        let (tx1, rx1) = sync_channel(8);
+        let (tx2, rx2) = sync_channel(8);
+        drop(rx2);
+        let mut subs = vec![(1u64, tx1), (2u64, tx2)];
+        broadcast(&mut subs, "Zg==");
+        assert_eq!(rx1.recv().unwrap(), "Zg==");
+        assert_eq!(subs.len(), 1);
+        assert_eq!(subs[0].0, 1);
+    }
+
+    #[test]
+    fn broadcast_slow_subscriber_drops_frame_not_others() {
+        let (tx_slow, _rx_slow) = sync_channel(1);
+        tx_slow.try_send("queued".into()).unwrap();
+        let (tx_fast, rx_fast) = sync_channel(8);
+        let mut subs = vec![(1u64, tx_slow), (2u64, tx_fast)];
+        broadcast(&mut subs, "next");
+        assert_eq!(rx_fast.recv().unwrap(), "next");
+        assert_eq!(subs.len(), 2);
     }
 }
