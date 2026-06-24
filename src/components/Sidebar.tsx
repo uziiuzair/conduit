@@ -30,6 +30,8 @@ async function deleteSession(
   sessionId: string,
   removeSession: (p: string, s: string) => Promise<void>,
 ) {
+  // Resolve synchronously before any await: session path/branch are immutable for a
+  // given id, so the projects snapshot can't go stale across the awaits below.
   const found = findSession(projects, sessionId);
   const session = found?.session;
   if (!session) return;
@@ -47,7 +49,11 @@ async function deleteSession(
       try {
         await worktreeRemove(found.project.path, session.worktreePath, dirty);
       } catch (e) {
-        void invoke("notify_user", { title: "Conduit", subtitle: null, body: `Worktree not removed: ${e}` }).catch(() => {});
+        console.error("Worktree removal failed:", e);
+        void invoke("notify_user", {
+          title: "Conduit",
+          body: `Worktree not removed: ${e}`,
+        }).catch((err) => console.error("notify_user failed:", err));
       }
     }
   }

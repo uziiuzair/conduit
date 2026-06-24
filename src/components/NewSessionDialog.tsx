@@ -36,7 +36,7 @@ export function NewSessionDialog({
 
   return (
     <div className="dialog-overlay" onClick={onCancel}>
-      <div className="dialog" onClick={(e) => e.stopPropagation()}>
+      <div className="dialog" role="dialog" aria-modal="true" onClick={(e) => e.stopPropagation()}>
         <div className="dialog-title">New session</div>
         <input
           className="dialog-input"
