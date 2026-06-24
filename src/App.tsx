@@ -5,6 +5,7 @@ import {
   useStore,
   findSession,
   globalSelectedSessionId,
+  baseName,
   type TodoItem,
   type TodoStatus,
 } from "./store";
@@ -44,6 +45,8 @@ export default function App() {
       switch (event) {
         case "prompt":
           st.setStatus(session, "running");
+          st.setCompacting(session, false);
+          st.setActivity(session, undefined);
           void maybeAutoName(session, body?.prompt);
           break;
         case "todos":
@@ -52,8 +55,31 @@ export default function App() {
         case "tooluse":
           if (body?.tool_name === "TodoWrite") applyTodos(body?.tool_input, session);
           break;
+        case "pretool": {
+          // Fires before each tool runs: a more responsive "running" plus a
+          // live label of what it's doing. TodoWrite is shown in the To-dos panel.
+          st.setStatus(session, "running");
+          st.setCompacting(session, false);
+          st.setActivity(session, toolActivity(body?.tool_name, body?.tool_input));
+          break;
+        }
+        case "precompact":
+          st.setCompacting(session, true);
+          break;
+        case "sessionstart":
+          // New or resumed session: clear any stale transient state.
+          st.setCompacting(session, false);
+          st.setActivity(session, undefined);
+          break;
+        case "sessionend":
+          st.setStatus(session, "idle");
+          st.setCompacting(session, false);
+          st.setActivity(session, undefined);
+          break;
         case "stop":
           st.setStatus(session, "done");
+          st.setActivity(session, undefined);
+          st.setCompacting(session, false);
           notifyIfAway(session, "finished");
           break;
         case "notification": {
@@ -115,9 +141,49 @@ export default function App() {
     document.body.style.userSelect = "none";
   };
 
+  // Resizable sidebar (persisted). Mirrors the right-column resizer above.
+  const SB_MIN = 200;
+  const SB_MAX = 420;
+  const [sidebarWidth, setSidebarWidth] = useState<number>(() => {
+    const saved = Number(localStorage.getItem("conduit.sidebarWidth"));
+    return saved >= SB_MIN && saved <= SB_MAX ? saved : 232;
+  });
+  const sidebarWidthRef = useRef(sidebarWidth);
+  const [sidebarDragging, setSidebarDragging] = useState(false);
+
+  const startSidebarResize = (e: React.MouseEvent) => {
+    e.preventDefault();
+    setSidebarDragging(true);
+    const onMove = (ev: MouseEvent) => {
+      // clientX is the distance from the viewport's left edge = sidebar width.
+      const w = Math.min(SB_MAX, Math.max(SB_MIN, ev.clientX));
+      sidebarWidthRef.current = w;
+      setSidebarWidth(w);
+    };
+    const onUp = () => {
+      window.removeEventListener("mousemove", onMove);
+      window.removeEventListener("mouseup", onUp);
+      document.body.style.cursor = "";
+      document.body.style.userSelect = "";
+      setSidebarDragging(false);
+      localStorage.setItem("conduit.sidebarWidth", String(sidebarWidthRef.current));
+    };
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup", onUp);
+    document.body.style.cursor = "col-resize";
+    document.body.style.userSelect = "none";
+  };
+
   return (
-    <div className="app-root">
+    <div
+      className="app-root"
+      style={{ ["--sidebar-w" as string]: `${sidebarWidth}px` }}
+    >
       <Sidebar />
+      <div
+        className={`sidebar-resizer ${sidebarDragging ? "dragging" : ""}`}
+        onMouseDown={startSidebarResize}
+      />
       <div
         className="detail"
         style={{ ["--right-w" as string]: `${rightWidth}px` }}
@@ -161,6 +227,43 @@ async function maybeAutoName(sessionId: string, prompt: unknown) {
 }
 
 // ---- hook helpers ----
+/** Map a Claude Code tool name + input to a short, human "what it's doing now"
+ *  label for the sidebar. Returns undefined when there's nothing worth showing. */
+function toolActivity(toolName?: string, toolInput?: any): string | undefined {
+  if (typeof toolName !== "string" || !toolName) return undefined;
+  const file = (): string | undefined => {
+    const p = toolInput?.file_path ?? toolInput?.path ?? toolInput?.notebook_path;
+    return typeof p === "string" && p ? baseName(p) : undefined;
+  };
+  switch (toolName) {
+    case "Edit":
+    case "MultiEdit":
+    case "Write":
+    case "NotebookEdit": {
+      const f = file();
+      return f ? `Editing ${f}` : "Editing files";
+    }
+    case "Read": {
+      const f = file();
+      return f ? `Reading ${f}` : "Reading files";
+    }
+    case "Bash":
+      return "Running a command";
+    case "Grep":
+    case "Glob":
+      return "Searching the code";
+    case "Task":
+      return "Running a subagent";
+    case "WebFetch":
+    case "WebSearch":
+      return "Browsing the web";
+    case "TodoWrite":
+      return undefined; // surfaced in the To-dos panel instead
+    default:
+      return toolName;
+  }
+}
+
 function applyTodos(toolInput: any, sessionId: string) {
   const raw = toolInput?.todos;
   if (!Array.isArray(raw)) return;
