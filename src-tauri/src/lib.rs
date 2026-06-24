@@ -4,6 +4,7 @@
 //!   PtyManager (TerminalLauncher) · Store (AppStore) · HookState/server (HookServer)
 //! and exposes them to the React frontend as Tauri commands.
 
+mod bridge;
 mod fsops;
 mod git;
 mod hooks;
@@ -32,7 +33,7 @@ fn pty_spawn(
     rows: u16,
     shell_only: bool,
     on_event: Channel<String>,
-    pty: State<PtyManager>,
+    pty: State<Arc<PtyManager>>,
     hook_state: State<Arc<HookState>>,
 ) -> Result<(), String> {
     let port = hook_state.port.load(Ordering::SeqCst);
@@ -52,22 +53,22 @@ fn pty_spawn(
 }
 
 #[tauri::command]
-fn pty_write(session_id: String, data: String, pty: State<PtyManager>) -> Result<(), String> {
+fn pty_write(session_id: String, data: String, pty: State<Arc<PtyManager>>) -> Result<(), String> {
     pty.write(&session_id, &data)
 }
 
 #[tauri::command]
-fn pty_resize(session_id: String, cols: u16, rows: u16, pty: State<PtyManager>) -> Result<(), String> {
+fn pty_resize(session_id: String, cols: u16, rows: u16, pty: State<Arc<PtyManager>>) -> Result<(), String> {
     pty.resize(&session_id, cols, rows)
 }
 
 #[tauri::command]
-fn pty_kill(session_id: String, pty: State<PtyManager>) {
+fn pty_kill(session_id: String, pty: State<Arc<PtyManager>>) {
     pty.kill(&session_id);
 }
 
 #[tauri::command]
-fn pty_is_running(session_id: String, pty: State<PtyManager>) -> bool {
+fn pty_is_running(session_id: String, pty: State<Arc<PtyManager>>) -> bool {
     pty.has(&session_id)
 }
 
@@ -84,7 +85,7 @@ fn add_project(path: String, store: State<Store>) -> Project {
 }
 
 #[tauri::command]
-fn remove_project(id: String, store: State<Store>, pty: State<PtyManager>) {
+fn remove_project(id: String, store: State<Store>, pty: State<Arc<PtyManager>>) {
     if let Some(p) = store.list().into_iter().find(|p| p.id == id) {
         for s in p.sessions {
             pty.kill(&s.id);
@@ -114,7 +115,7 @@ fn remove_session(
     project_id: String,
     session_id: String,
     store: State<Store>,
-    pty: State<PtyManager>,
+    pty: State<Arc<PtyManager>>,
 ) {
     pty.kill(&session_id);
     pty.kill(&format!("{session_id}::term"));
@@ -296,12 +297,14 @@ pub fn run() {
         .plugin(tauri_plugin_window_state::Builder::default().build())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_notification::init())
-        .manage(PtyManager::new())
+        .manage(Arc::new(PtyManager::new()))
         .manage(Store::new())
         .manage(Arc::new(HookState::default()))
         .setup(|app| {
             let hook_state = app.state::<Arc<HookState>>().inner().clone();
             hooks::start(app.handle().clone(), hook_state);
+            let pty = app.state::<Arc<PtyManager>>().inner().clone();
+            bridge::start(pty, Arc::new(std::sync::atomic::AtomicU16::new(0)));
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -331,7 +334,7 @@ pub fn run() {
         .expect("error while building Conduit")
         .run(|app_handle, event| {
             if let tauri::RunEvent::ExitRequested { .. } = event {
-                app_handle.state::<PtyManager>().kill_all();
+                app_handle.state::<Arc<PtyManager>>().kill_all();
             }
         });
 }
