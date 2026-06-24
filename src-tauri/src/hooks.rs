@@ -164,6 +164,37 @@ pub fn install(dir: &str, port: u16) {
             vec![json!({ "hooks": [command("notification", port)] })],
         ),
     );
+    // Lifecycle events (Part B): finer "running" + activity (PreToolUse), a
+    // compaction indicator (PreCompact), and reliable session baseline reset
+    // (SessionStart/SessionEnd). Same per-session routing as the events above.
+    hooks.insert(
+        "PreToolUse".into(),
+        merged(
+            hooks.get("PreToolUse"),
+            vec![json!({ "hooks": [command("pretool", port)] })],
+        ),
+    );
+    hooks.insert(
+        "PreCompact".into(),
+        merged(
+            hooks.get("PreCompact"),
+            vec![json!({ "hooks": [command("precompact", port)] })],
+        ),
+    );
+    hooks.insert(
+        "SessionStart".into(),
+        merged(
+            hooks.get("SessionStart"),
+            vec![json!({ "hooks": [command("sessionstart", port)] })],
+        ),
+    );
+    hooks.insert(
+        "SessionEnd".into(),
+        merged(
+            hooks.get("SessionEnd"),
+            vec![json!({ "hooks": [command("sessionend", port)] })],
+        ),
+    );
 
     obj.insert("hooks".into(), Value::Object(hooks));
 
@@ -208,4 +239,158 @@ fn is_conduit_entry(entry: &Value) -> bool {
             })
         })
         .unwrap_or(false)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::{Path, PathBuf};
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    /// A unique, empty temp directory for one test. Removed if a stale copy exists.
+    fn fresh_test_dir(tag: &str) -> PathBuf {
+        static COUNTER: AtomicU32 = AtomicU32::new(0);
+        let n = COUNTER.fetch_add(1, Ordering::SeqCst);
+        let dir = std::env::temp_dir()
+            .join(format!("conduit_hooks_test_{tag}_{}_{n}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).expect("create temp dir");
+        dir
+    }
+
+    fn settings_path(dir: &Path) -> PathBuf {
+        dir.join(".claude").join("settings.local.json")
+    }
+
+    fn write_settings(dir: &Path, v: &Value) {
+        let p = settings_path(dir);
+        fs::create_dir_all(p.parent().unwrap()).unwrap();
+        fs::write(p, serde_json::to_vec_pretty(v).unwrap()).unwrap();
+    }
+
+    fn read_settings(dir: &Path) -> Value {
+        serde_json::from_slice(&fs::read(settings_path(dir)).unwrap()).unwrap()
+    }
+
+    fn hooks_obj(v: &Value) -> &serde_json::Map<String, Value> {
+        v.get("hooks").and_then(|h| h.as_object()).expect("hooks object")
+    }
+
+    #[test]
+    fn install_wires_lifecycle_events() {
+        let dir = fresh_test_dir("lifecycle");
+        install(dir.to_str().unwrap(), 8423);
+
+        let v = read_settings(&dir);
+        let hooks = hooks_obj(&v);
+        for ev in ["PreToolUse", "PreCompact", "SessionStart", "SessionEnd"] {
+            assert!(hooks.contains_key(ev), "expected hook event {ev} to be installed");
+        }
+    }
+
+    #[test]
+    fn lifecycle_command_carries_session_event_and_port() {
+        let dir = fresh_test_dir("routing");
+        install(dir.to_str().unwrap(), 8431);
+
+        let v = read_settings(&dir);
+        let cmd = hooks_obj(&v)["SessionStart"][0]["hooks"][0]["command"]
+            .as_str()
+            .expect("SessionStart command string");
+        assert!(cmd.contains("event=sessionstart"), "event tag missing: {cmd}");
+        assert!(cmd.contains("CONDUIT_SESSION_ID"), "session routing missing: {cmd}");
+        assert!(cmd.contains("8431"), "fallback port missing: {cmd}");
+    }
+
+    // ---- regression guards: "don't break what was working" ----
+
+    #[test]
+    fn install_still_wires_the_original_events() {
+        let dir = fresh_test_dir("original");
+        install(dir.to_str().unwrap(), 8423);
+
+        let hooks = read_settings(&dir);
+        let hooks = hooks_obj(&hooks);
+        for ev in ["PostToolUse", "UserPromptSubmit", "Stop", "Notification"] {
+            assert!(hooks.contains_key(ev), "original event {ev} must remain installed");
+        }
+        // PostToolUse keeps both entries: the TodoWrite matcher and the generic catch-all.
+        assert_eq!(
+            hooks["PostToolUse"].as_array().map(|a| a.len()),
+            Some(2),
+            "PostToolUse should keep both Conduit entries"
+        );
+    }
+
+    #[test]
+    fn install_preserves_unrelated_settings_keys() {
+        let dir = fresh_test_dir("preserve");
+        write_settings(
+            &dir,
+            &json!({ "permissions": { "allow": ["Read(*)"] }, "model": "opus" }),
+        );
+        install(dir.to_str().unwrap(), 8423);
+
+        let v = read_settings(&dir);
+        assert_eq!(v["model"].as_str(), Some("opus"), "unrelated key dropped");
+        assert_eq!(
+            v["permissions"]["allow"].as_array().map(|a| a.len()),
+            Some(1),
+            "nested unrelated key altered"
+        );
+    }
+
+    #[test]
+    fn install_is_idempotent() {
+        let dir = fresh_test_dir("idempotent");
+        install(dir.to_str().unwrap(), 8423);
+        install(dir.to_str().unwrap(), 8423);
+
+        let v = read_settings(&dir);
+        let conduit_in = |event: &str| -> usize {
+            v["hooks"][event]
+                .as_array()
+                .map(|a| a.iter().filter(|e| is_conduit_entry(e)).count())
+                .unwrap_or(0)
+        };
+        assert_eq!(conduit_in("PostToolUse"), 2, "re-install duplicated PostToolUse entries");
+        assert_eq!(conduit_in("Stop"), 1, "re-install duplicated Stop entry");
+        assert_eq!(conduit_in("SessionStart"), 1, "re-install duplicated SessionStart entry");
+    }
+
+    #[test]
+    fn install_keeps_foreign_hooks() {
+        let dir = fresh_test_dir("foreign");
+        write_settings(
+            &dir,
+            &json!({
+                "hooks": {
+                    "Stop": [ { "hooks": [ { "type": "command", "command": "echo external" } ] } ]
+                }
+            }),
+        );
+        install(dir.to_str().unwrap(), 8423);
+
+        let v = read_settings(&dir);
+        let stop = v["hooks"]["Stop"].as_array().unwrap();
+        let has = |needle: &str| stop.iter().any(|e| serde_json::to_string(e).unwrap().contains(needle));
+        assert!(has("echo external"), "a third-party Stop hook must survive install");
+        assert!(has("CONDUIT_SESSION_ID"), "Conduit's own Stop hook must be added alongside");
+    }
+
+    #[test]
+    fn install_backs_up_pristine_file_once() {
+        let dir = fresh_test_dir("backup");
+        write_settings(&dir, &json!({ "model": "opus" }));
+        install(dir.to_str().unwrap(), 8423);
+        install(dir.to_str().unwrap(), 8423); // second pass must not clobber the backup
+
+        let backup = settings_path(&dir).with_extension("json.conduit-backup");
+        let saved = fs::read_to_string(&backup).expect("backup file should exist");
+        assert!(saved.contains("opus"), "backup should hold the original content");
+        assert!(
+            !saved.contains("CONDUIT_SESSION_ID"),
+            "backup must be the pre-Conduit file, not a post-install one"
+        );
+    }
 }
