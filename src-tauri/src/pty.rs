@@ -27,12 +27,18 @@ use portable_pty::{native_pty_system, CommandBuilder, PtySize};
 use tauri::ipc::Channel;
 
 type Sink = Arc<Mutex<Channel<String>>>;
+type Subscribers = Arc<Mutex<Vec<(u64, SyncSender<String>)>>>;
+
+/// Bounded buffer (frames) per remote subscriber before frames start dropping.
+const SUBSCRIBER_BUFFER: usize = 1024;
 
 struct PtySession {
     writer: Box<dyn Write + Send>,
     master: Box<dyn portable_pty::MasterPty + Send>,
     child: Box<dyn portable_pty::Child + Send + Sync>,
     sink: Sink,
+    subscribers: Subscribers,
+    next_sub_id: Arc<AtomicU64>,
 }
 
 #[derive(Default)]
@@ -135,6 +141,8 @@ impl PtyManager {
             .take_writer()
             .map_err(|e| format!("take writer: {e}"))?;
 
+        let subscribers: Subscribers = Arc::new(Mutex::new(Vec::new()));
+        let subs_for_reader = subscribers.clone();
         let sink: Sink = Arc::new(Mutex::new(on_event));
 
         self.sessions.insert(
@@ -144,6 +152,8 @@ impl PtyManager {
                 master: pair.master,
                 child,
                 sink: sink.clone(),
+                subscribers: subscribers.clone(),
+                next_sub_id: Arc::new(AtomicU64::new(0)),
             }),
         );
 
@@ -162,6 +172,9 @@ impl PtyManager {
                     Ok(0) => break,
                     Ok(n) => {
                         let encoded = engine.encode(&buf[..n]);
+                        if let Ok(mut subs) = subs_for_reader.lock() {
+                            broadcast(&mut subs, &encoded);
+                        }
                         let ok = sink
                             .lock()
                             .map(|s| s.send(encoded).is_ok())
@@ -179,8 +192,12 @@ impl PtyManager {
                 }
             }
             let notice = "\r\n\u{1b}[90m[process exited]\u{1b}[0m\r\n";
+            let enc_notice = engine.encode(notice);
+            if let Ok(mut subs) = subs_for_reader.lock() {
+                broadcast(&mut subs, &enc_notice);
+            }
             if let Ok(s) = sink.lock() {
-                let _ = s.send(engine.encode(notice));
+                let _ = s.send(enc_notice);
             }
         });
 
@@ -216,6 +233,34 @@ impl PtyManager {
                 pixel_height: 0,
             })
             .map_err(|e| format!("resize: {e}"))
+    }
+
+    /// Attach an extra output consumer (a bridge connection) to a live session.
+    /// Returns a receiver of base64 frames plus an id to detach with, or None if the
+    /// session isn't running. Buffer is bounded — see `broadcast` for drop semantics.
+    pub fn subscribe(&self, session_id: &str) -> Option<(u64, Receiver<String>)> {
+        let entry = self.sessions.get(session_id)?;
+        let session = entry.lock().ok()?;
+        let id = session.next_sub_id.fetch_add(1, Ordering::SeqCst);
+        let (tx, rx) = sync_channel(SUBSCRIBER_BUFFER);
+        session.subscribers.lock().ok()?.push((id, tx));
+        Some((id, rx))
+    }
+
+    /// Detach a previously-subscribed consumer. No-op if the session or id is gone.
+    pub fn unsubscribe(&self, session_id: &str, sub_id: u64) {
+        if let Some(entry) = self.sessions.get(session_id) {
+            if let Ok(session) = entry.lock() {
+                if let Ok(mut subs) = session.subscribers.lock() {
+                    subs.retain(|(id, _)| *id != sub_id);
+                }
+            }
+        }
+    }
+
+    /// Ids of all currently-running sessions (for the bridge `list` message).
+    pub fn session_ids(&self) -> Vec<String> {
+        self.sessions.iter().map(|e| e.key().clone()).collect()
     }
 
     pub fn kill(&self, session_id: &str) {
