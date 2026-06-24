@@ -199,7 +199,12 @@ export function WorkspaceCenter({
               <TerminalView
                 key={session.id}
                 sessionId={session.id}
-                workingDirectory={workingDirOf(project, session)}
+                workingDirectory={session.useWorktree ? project.path : workingDirOf(project, session)}
+                worktreeName={
+                  session.useWorktree && session.worktreePath
+                    ? baseName(session.worktreePath)
+                    : undefined
+                }
                 visible={pl.visible}
                 style={pl.style}
               />
