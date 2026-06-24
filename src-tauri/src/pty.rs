@@ -94,8 +94,11 @@ impl PtyManager {
                 shell = shell,
             )
         } else {
+            // Cold spawn only: the re-attach fast-path above returns before reaching
+            // here, so a live session is never "resumed" out from under itself.
+            let invocation = claude_invocation(&session_id, claude_projects_dir().as_deref());
             format!(
-                "export CONDUIT_SESSION_ID={sid} CONDUIT_HOOK_PORT={port} CLAUDE_CODE_ENABLE_TASKS=0; cd {dir} && claude; exec {shell} -i -l",
+                "export CONDUIT_SESSION_ID={sid} CONDUIT_HOOK_PORT={port} CLAUDE_CODE_ENABLE_TASKS=0; cd {dir} && {invocation}; exec {shell} -i -l",
                 sid = shell_quote(&session_id),
                 port = hook_port,
                 dir = shell_quote(&working_directory),
@@ -241,6 +244,15 @@ fn transcript_exists(session_id: &str, projects_dir: &Path) -> bool {
     entries
         .flatten()
         .any(|entry| entry.path().join(&file).exists())
+}
+
+/// Resolve Claude's transcript store: `$CLAUDE_CONFIG_DIR/projects` if set,
+/// else `~/.claude/projects`. None when no home dir is available.
+fn claude_projects_dir() -> Option<PathBuf> {
+    match std::env::var("CLAUDE_CONFIG_DIR") {
+        Ok(cfg) if !cfg.is_empty() => Some(PathBuf::from(cfg).join("projects")),
+        _ => dirs::home_dir().map(|h| h.join(".claude").join("projects")),
+    }
 }
 
 /// The `claude` invocation for a *cold* spawn. Resume the pinned conversation when
