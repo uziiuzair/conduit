@@ -10,6 +10,7 @@ mod hooks;
 mod notify;
 mod pty;
 mod store;
+mod worktree;
 
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
