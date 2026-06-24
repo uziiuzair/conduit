@@ -58,7 +58,7 @@ Green-field vs reuse: the **only** change to existing behavior is the fan-out si
 
 - **Continue a closed session (headline):** phone foreground → WS connect + auth → `list` → tap session → if not running, `spawn` → `attach` → base64 output → `xterm.write()` renders the **resumed** conversation → type → `input` → `pty.write`. The `spawn` path reuses the existing `claude_invocation` resume logic verbatim — the phone *remotes a trigger* for the continue feature already shipped.
 - **Push wake:** laptop hook fires needs-you → APNs push → tap notification → app opens to that session → attach.
-- **Concurrent desktop + phone:** both are subscribers of one fan-out; both render; either types into the one shared TTY.
+- **Concurrent desktop + phone (shared TTY size):** both are subscribers of one fan-out; both render; either types into the one shared TTY. But a PTY has a *single* window size, so the viewers can't each pick their own. **Policy: desktop-authoritative.** The desktop owns `cols×rows`; on `attach` the bridge sends the viewer the PTY's current size (`{type:"size",cols,rows}` from `PtyManager::session_size`) and the viewer renders at that size — it **never** pushes a resize while a desktop viewer is present (doing so reflows and garbles the desktop until its next winsize-nudge). The phone fits by scaling font / scrolling. Later refinement: when the phone is the *sole* viewer (you're away), it may take ownership of the size.
 
 ## Error handling
 
@@ -67,6 +67,7 @@ Green-field vs reuse: the **only** change to existing behavior is the fan-out si
 - **Token revoked/invalid:** bridge refuses attach → phone routes to re-pair.
 - **Process exited:** reader emits `[process exited]`; bridge forwards; phone offers `spawn` (resume).
 - **Two-place typing:** interleaves into one PTY — accepted, documented.
+- **Differing viewer sizes:** a secondary viewer never resizes the shared TTY (desktop-authoritative, above), so a phone attaching can't reflow/garble the desktop.
 - **Bind/port conflict:** port-range scan, mirroring `hooks.rs`.
 - **Pairing code:** one-time, short TTL, spent on first handshake.
 
