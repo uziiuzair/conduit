@@ -13,7 +13,9 @@
 //! at the new Channel and nudges the winsize to force a full repaint — so reloading
 //! the window reconnects to the running `claude` instead of orphaning it.
 
+use std::fs;
 use std::io::{Read, Write};
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::thread;
 
@@ -228,7 +230,77 @@ impl PtyManager {
     }
 }
 
+/// True if a transcript named `<session_id>.jsonl` exists under any project-slug
+/// subdirectory of `projects_dir`. Matching by the globally-unique UUID filename
+/// means we never reproduce Claude's cwd-slug algorithm (so worktree cwds work too).
+fn transcript_exists(session_id: &str, projects_dir: &Path) -> bool {
+    let file = format!("{session_id}.jsonl");
+    let Ok(entries) = fs::read_dir(projects_dir) else {
+        return false;
+    };
+    entries
+        .flatten()
+        .any(|entry| entry.path().join(&file).exists())
+}
+
 /// Single-quote a string for safe interpolation into a /bin/sh -c command.
 fn shell_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
+}
+
+#[cfg(test)]
+mod tests {
+    // `super::*` brings in `fs`, `Path`, and `PathBuf` from the file's top-level
+    // imports (same pattern as the hooks.rs test module).
+    use super::*;
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    const ID: &str = "11111111-2222-3333-4444-555555555555";
+
+    /// A unique, empty `.../projects` dir for one test.
+    fn fresh_projects_dir(tag: &str) -> PathBuf {
+        static COUNTER: AtomicU32 = AtomicU32::new(0);
+        let n = COUNTER.fetch_add(1, Ordering::SeqCst);
+        let dir = std::env::temp_dir()
+            .join(format!("conduit_pty_test_{tag}_{}_{n}", std::process::id()))
+            .join("projects");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).expect("create temp projects dir");
+        dir
+    }
+
+    /// Plant `<projects>/<slug>/<id>.jsonl` to simulate a Claude transcript.
+    fn plant_transcript(projects: &Path, slug: &str, id: &str) {
+        let slug_dir = projects.join(slug);
+        fs::create_dir_all(&slug_dir).unwrap();
+        fs::write(slug_dir.join(format!("{id}.jsonl")), b"{}\n").unwrap();
+    }
+
+    #[test]
+    fn transcript_absent_in_empty_store() {
+        let projects = fresh_projects_dir("absent");
+        assert!(!transcript_exists(ID, &projects));
+    }
+
+    #[test]
+    fn transcript_found_under_any_slug() {
+        let projects = fresh_projects_dir("found");
+        // Arbitrary slug incl. dots — detection must NOT depend on the cwd-slug algorithm.
+        plant_transcript(&projects, "-some-weird-Slug.with.dots", ID);
+        assert!(transcript_exists(ID, &projects));
+    }
+
+    #[test]
+    fn transcript_other_ids_ignored() {
+        let projects = fresh_projects_dir("others");
+        plant_transcript(&projects, "-proj", "99999999-0000-0000-0000-000000000000");
+        assert!(!transcript_exists(ID, &projects));
+    }
+
+    #[test]
+    fn transcript_missing_dir_is_false() {
+        let missing = std::env::temp_dir().join("conduit_pty_does_not_exist_dir/projects");
+        let _ = fs::remove_dir_all(&missing);
+        assert!(!transcript_exists(ID, &missing));
+    }
 }
