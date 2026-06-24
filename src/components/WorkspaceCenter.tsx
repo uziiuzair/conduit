@@ -200,6 +200,7 @@ export function WorkspaceCenter({
                 key={session.id}
                 sessionId={session.id}
                 workingDirectory={session.useWorktree ? project.path : workingDirOf(project, session)}
+                // Re-extract the slug Claude was given at create time (last path segment).
                 worktreeName={
                   session.useWorktree && session.worktreePath
                     ? baseName(session.worktreePath)
