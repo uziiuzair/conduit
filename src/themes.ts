@@ -257,5 +257,8 @@ export function applyTheme(id: ThemeId): void {
     root.style.setProperty(name, value);
   }
   root.dataset.theme = id;
-  for (const term of liveTerminals) term.options.theme = theme.terminal;
+  for (const term of liveTerminals) {
+    term.options.theme = theme.terminal;
+    term.refresh(0, term.rows - 1);
+  }
 }
