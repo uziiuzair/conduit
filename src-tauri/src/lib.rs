@@ -11,7 +11,9 @@ mod hooks;
 mod notify;
 mod pty;
 mod store;
+mod worktree;
 
+use std::path::Path;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
@@ -32,22 +34,39 @@ fn pty_spawn(
     cols: u16,
     rows: u16,
     shell_only: bool,
+    worktree_name: Option<String>,
     on_event: Channel<String>,
     pty: State<Arc<PtyManager>>,
     hook_state: State<Arc<HookState>>,
 ) -> Result<(), String> {
     let port = hook_state.port.load(Ordering::SeqCst);
-    // Install Claude Code hooks before launching `claude` (not for plain shells).
-    if !shell_only {
+
+    let (cwd, worktree_arg, settings_path) = if shell_only {
+        (working_directory.clone(), None, None)
+    } else if let Some(slug) = worktree_name.as_deref() {
+        // Worktree session: hooks load via --settings (the worktree won't see the
+        // project's settings.local.json). If Claude already created the worktree on a
+        // previous run, re-enter it directly instead of recreating it.
+        let settings = hooks::write_settings_file(port);
+        let wt_path = worktree::worktree_path(&working_directory, slug);
+        let exists = Path::new(&wt_path).exists();
+        let (cwd, worktree_arg) = worktree::spawn_target(&working_directory, slug, &wt_path, exists);
+        (cwd, worktree_arg, settings)
+    } else {
+        // Normal session: install hooks into the project's settings.local.json.
         hooks::install(&working_directory, port);
-    }
+        (working_directory.clone(), None, None)
+    };
+
     pty.spawn(
         session_id,
-        working_directory,
+        cwd,
         cols,
         rows,
         port,
         shell_only,
+        worktree_arg,
+        settings_path,
         on_event,
     )
 }
@@ -96,8 +115,13 @@ fn remove_project(id: String, store: State<Store>, pty: State<Arc<PtyManager>>) 
 }
 
 #[tauri::command]
-fn add_session(project_id: String, name: String, store: State<Store>) -> Option<Session> {
-    store.add_session(&project_id, name)
+fn add_session(
+    project_id: String,
+    name: String,
+    use_worktree: bool,
+    store: State<Store>,
+) -> Option<Session> {
+    store.add_session(&project_id, name, use_worktree)
 }
 
 #[tauri::command]
@@ -234,6 +258,18 @@ fn git_graph(dir: String) -> Vec<git::GraphCommit> {
     git::graph(&dir, 80)
 }
 
+// ---- Worktree lifecycle ------------------------------------------------------
+
+#[tauri::command]
+fn worktree_is_dirty(worktree_path: String) -> bool {
+    worktree::is_dirty(&worktree_path)
+}
+
+#[tauri::command]
+fn worktree_remove(repo_path: String, worktree_path: String, force: bool) -> Result<(), String> {
+    worktree::remove(&repo_path, &worktree_path, force)
+}
+
 // ---- Read-only filesystem (Files tab + viewer) ------------------------------
 
 #[tauri::command]
@@ -325,6 +361,8 @@ pub fn run() {
             git_changes,
             git_commits,
             git_graph,
+            worktree_is_dirty,
+            worktree_remove,
             list_dir,
             read_file,
             notify_user,

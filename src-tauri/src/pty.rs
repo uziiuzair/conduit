@@ -70,6 +70,8 @@ impl PtyManager {
         rows: u16,
         hook_port: u16,
         shell_only: bool,
+        worktree_name: Option<String>,
+        settings_path: Option<String>,
         on_event: Channel<String>,
     ) -> Result<(), String> {
         // Already running → re-attach the live reader to the new channel and force
@@ -101,20 +103,22 @@ impl PtyManager {
 
         let inner = if shell_only {
             format!(
-                "cd {dir} && exec {shell} -i -l",
+                "cd {dir} 2>/dev/null; exec {shell} -i -l",
                 dir = shell_quote(&working_directory),
                 shell = shell,
             )
         } else {
             // Cold spawn only: the re-attach fast-path above returns before reaching
-            // here, so a live session is never "resumed" out from under itself.
-            let invocation = claude_invocation(&session_id, claude_projects_dir().as_deref());
-            format!(
-                "export CONDUIT_SESSION_ID={sid} CONDUIT_HOOK_PORT={port} CLAUDE_CODE_ENABLE_TASKS=0; cd {dir} && {invocation}; exec {shell} -i -l",
-                sid = shell_quote(&session_id),
-                port = hook_port,
-                dir = shell_quote(&working_directory),
-                shell = shell,
+            // here, so a live session is never "resumed" out from under itself. The
+            // claude command resumes/pins the session AND applies worktree/settings.
+            claude_script(
+                &session_id,
+                hook_port,
+                &working_directory,
+                &shell,
+                worktree_name.as_deref(),
+                settings_path.as_deref(),
+                claude_projects_dir().as_deref(),
             )
         };
 
@@ -322,14 +326,15 @@ fn claude_projects_dir() -> Option<PathBuf> {
 }
 
 /// The `claude` invocation for a *cold* spawn. Resume the pinned conversation when
-/// its transcript exists; otherwise start a new session pinned to our id. Each branch
-/// falls back to a bare `claude` so a resume/pin failure never strands the user.
-fn claude_invocation(session_id: &str, projects_dir: Option<&Path>) -> String {
+/// its transcript exists; otherwise start a new session pinned to our id. `flags` is
+/// extra claude args (e.g. `--worktree`/`--settings`) injected onto BOTH the primary
+/// and the fallback `claude`, so a resume/pin failure still launches with them.
+fn claude_invocation(session_id: &str, projects_dir: Option<&Path>, flags: &str) -> String {
     let id = shell_quote(session_id);
     if projects_dir.is_some_and(|d| transcript_exists(session_id, d)) {
-        format!("claude --resume {id} || claude")
+        format!("claude{flags} --resume {id} || claude{flags}")
     } else {
-        format!("claude --session-id {id} || claude")
+        format!("claude{flags} --session-id {id} || claude{flags}")
     }
 }
 
@@ -348,6 +353,38 @@ fn broadcast(subs: &mut Vec<(u64, SyncSender<String>)>, frame: &str) {
         Err(TrySendError::Full(_)) => true,
         Err(TrySendError::Disconnected(_)) => false,
     });
+}
+
+/// Build the `sh -c` script that launches a `claude` session. `worktree` adds
+/// `--worktree <slug>` (Claude creates `<repo>/.claude/worktrees/<slug>` and runs in it);
+/// `settings` adds `--settings <path>` so Conduit's hooks load inside the worktree.
+/// The resume-vs-pin decision (and the `|| claude` fallback) is delegated to
+/// `claude_invocation`, with the worktree/settings flags applied to both claudes.
+fn claude_script(
+    session_id: &str,
+    port: u16,
+    working_directory: &str,
+    shell: &str,
+    worktree: Option<&str>,
+    settings: Option<&str>,
+    projects_dir: Option<&Path>,
+) -> String {
+    let mut flags = String::new();
+    if let Some(name) = worktree {
+        flags.push_str(&format!(" --worktree {}", shell_quote(name)));
+    }
+    if let Some(path) = settings {
+        flags.push_str(&format!(" --settings {}", shell_quote(path)));
+    }
+    let claude = claude_invocation(session_id, projects_dir, &flags);
+    format!(
+        "export CONDUIT_SESSION_ID={sid} CONDUIT_HOOK_PORT={port} CLAUDE_CODE_ENABLE_TASKS=0; cd {dir} && {claude}; exec {shell} -i -l",
+        sid = shell_quote(session_id),
+        port = port,
+        dir = shell_quote(working_directory),
+        claude = claude,
+        shell = shell,
+    )
 }
 
 #[cfg(test)]
@@ -410,7 +447,7 @@ mod tests {
     fn invocation_resumes_when_transcript_exists() {
         let projects = fresh_projects_dir("resume");
         plant_transcript(&projects, "-proj", ID);
-        let cmd = claude_invocation(ID, Some(projects.as_path()));
+        let cmd = claude_invocation(ID, Some(projects.as_path()), "");
         assert!(cmd.contains(&format!("--resume '{ID}'")), "got: {cmd}");
         assert!(cmd.ends_with("|| claude"), "missing fallback: {cmd}");
     }
@@ -418,14 +455,14 @@ mod tests {
     #[test]
     fn invocation_pins_new_session_when_absent() {
         let projects = fresh_projects_dir("pin");
-        let cmd = claude_invocation(ID, Some(projects.as_path()));
+        let cmd = claude_invocation(ID, Some(projects.as_path()), "");
         assert!(cmd.contains(&format!("--session-id '{ID}'")), "got: {cmd}");
         assert!(cmd.ends_with("|| claude"), "missing fallback: {cmd}");
     }
 
     #[test]
     fn invocation_without_store_is_first_launch() {
-        let cmd = claude_invocation(ID, None);
+        let cmd = claude_invocation(ID, None, "");
         assert!(cmd.contains("--session-id"), "got: {cmd}");
         assert!(!cmd.contains("--resume"), "must not resume without a store: {cmd}");
     }
@@ -462,5 +499,32 @@ mod tests {
         broadcast(&mut subs, "next");
         assert_eq!(rx_fast.recv().unwrap(), "next");
         assert_eq!(subs.len(), 2);
+    }
+
+    #[test]
+    fn invocation_applies_flags_to_both_primary_and_fallback() {
+        let cmd = claude_invocation(ID, None, " --worktree 'w' --settings '/s'");
+        assert_eq!(
+            cmd,
+            format!("claude --worktree 'w' --settings '/s' --session-id '{ID}' || claude --worktree 'w' --settings '/s'")
+        );
+    }
+
+    #[test]
+    fn script_pins_bare_claude_without_worktree() {
+        let s = claude_script("s1", 8423, "/repo", "/bin/zsh", None, None, None);
+        assert!(s.contains("export CONDUIT_SESSION_ID='s1'"));
+        assert!(s.contains("&& claude --session-id 's1' || claude;"), "got: {s}");
+        assert!(!s.contains("--worktree"));
+        assert!(!s.contains("--settings"));
+    }
+
+    #[test]
+    fn script_adds_worktree_and_settings() {
+        let s = claude_script("s1", 8423, "/repo", "/bin/zsh", Some("feat-x"), Some("/d/h.json"), None);
+        assert!(
+            s.contains("claude --worktree 'feat-x' --settings '/d/h.json' --session-id 's1' || claude --worktree 'feat-x' --settings '/d/h.json';"),
+            "got: {s}"
+        );
     }
 }

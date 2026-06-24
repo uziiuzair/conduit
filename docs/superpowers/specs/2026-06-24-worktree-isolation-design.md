@@ -96,6 +96,12 @@ Regression: the existing `hooks.rs` install tests must stay green (normal-sessio
 - **Deterministic path/name stability:** confirm Claude does not re-slugify a clean provided name and that the `.claude/worktrees/<name>` + `worktree-<name>` convention holds on 2.1.186. The post-spawn existence check is the safety net.
 - **Trust dialog:** first interactive `--worktree` use in a repo may require accepting Claude's workspace-trust prompt; normal Conduit sessions already run `claude` in the project, so trust is typically pre-accepted.
 
+## Implementation status (2026-06-24)
+
+Implemented per plan `docs/superpowers/plans/2026-06-24-worktree-isolation.md` (Tasks 1–6 backend, 8–12 frontend). Automated gates green: 25 Rust tests (incl. worktree slug/path/branch, dirty-check, force-remove, and the `spawn_target` re-enter-or-create decision) and a clean `tsc && vite build`. Two-stage review (spec compliance + code quality) passed for both halves; review nits fixed (notably: `worktree::is_dirty` and the `worktreeIsDirty` UI helper both default to **dirty** on git/IPC error, so a destructive force-remove is never gated by a falsely-clean reading).
+
+**Approach A (hooks via `--settings`) — chosen and built. Empirical validation PENDING the Task 13 manual smoke** (`pnpm tauri dev`): the "submit a prompt → status dot + to-dos update inside a worktree session" check is the first point a worktree session can be spawned through the UI, and it confirms `--settings`-delivered hooks actually fire. If that check fails, switch to **Approach B** (user-scope install into `~/.claude/settings.json`) per Task 7 of the plan — the UI is unaffected; only hook delivery changes. Until the smoke is run, treat Approach A as unverified against a live `claude` session.
+
 ## References
 - Worktrees: https://code.claude.com/docs/en/worktrees
 - Hooks (WorktreeCreate/WorktreeRemove): https://code.claude.com/docs/en/hooks
