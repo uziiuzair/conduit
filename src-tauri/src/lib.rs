@@ -163,8 +163,14 @@ fn claude_title(prompt: &str) -> Option<String> {
          punctuation, summarizing this coding task. Task:\n{prompt}"
     );
 
-    let mut child = Command::new("claude")
-        .args(["-p", "--model", "haiku"])
+    // Launch through an interactive login shell — exactly like pty.rs does — so the
+    // GUI-launched app inherits the user's real PATH. Spawning `claude` directly uses
+    // the bare Finder/Dock PATH (/usr/bin:/bin:/usr/sbin:/sbin), which doesn't include
+    // where `claude` actually lives (~/.nvm, ~/.local, Homebrew, …), so the titler
+    // silently fails and every session falls back to the first-words heuristic.
+    let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
+    let mut child = Command::new(&shell)
+        .args(["-i", "-l", "-c", "claude -p --model haiku"])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
