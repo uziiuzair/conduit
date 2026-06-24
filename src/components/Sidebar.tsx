@@ -1,12 +1,15 @@
 import { useEffect, useRef, useState } from "react";
 import { NewSessionDialog } from "./NewSessionDialog";
 import { open } from "@tauri-apps/plugin-dialog";
+import { invoke } from "@tauri-apps/api/core";
 import {
   useStore,
   liveState,
   findSession,
   workingDirOf,
   openInVscode,
+  worktreeIsDirty,
+  worktreeRemove,
   globalSelectedSessionId,
   type Project,
   type Session,
@@ -20,6 +23,36 @@ import {
   CircleFilledIcon,
 } from "./Icons";
 import { ThemeSwitcher } from "./ThemeSwitcher";
+
+async function deleteSession(
+  projects: Project[],
+  projectId: string,
+  sessionId: string,
+  removeSession: (p: string, s: string) => Promise<void>,
+) {
+  const found = findSession(projects, sessionId);
+  const session = found?.session;
+  if (!session) return;
+  if (!confirm(`Delete session "${session.name}"?`)) return;
+
+  if (session.useWorktree && session.worktreePath) {
+    const dirty = await worktreeIsDirty(session.worktreePath);
+    const msg = dirty
+      ? `Also remove its git worktree (${session.branch})?\n\nIt has uncommitted changes that will be permanently lost.`
+      : `Also remove its git worktree (${session.branch})?\n\nThe branch is kept; only the working copy is removed.`;
+    if (confirm(msg)) {
+      // Kill the live process first so git can release the worktree lock.
+      await invoke("pty_kill", { sessionId }).catch(() => {});
+      await invoke("pty_kill", { sessionId: `${sessionId}::term` }).catch(() => {});
+      try {
+        await worktreeRemove(found.project.path, session.worktreePath, dirty);
+      } catch (e) {
+        void invoke("notify_user", { title: "Conduit", subtitle: null, body: `Worktree not removed: ${e}` }).catch(() => {});
+      }
+    }
+  }
+  await removeSession(projectId, sessionId);
+}
 
 export function Sidebar() {
   const projects = useStore((s) => s.projects);
@@ -155,6 +188,11 @@ function SessionRow({
         />
       ) : (
         <span className="name">{session.name}</span>
+      )}
+      {!editing && session.branch && (
+        <span className="branch-chip" title={session.branch}>
+          {session.branch}
+        </span>
       )}
       <StatusAccessory status={status} activity={activity} compacting={compacting} />
     </div>
@@ -308,9 +346,7 @@ function SessionContextMenu() {
       <button
         className="danger"
         onClick={() => {
-          const found = findSession(projects, sid);
-          if (confirm(`Delete session "${found?.session.name ?? "session"}"?`))
-            void removeSession(menu.projectId, sid);
+          void deleteSession(projects, menu.projectId, sid, removeSession);
           closeMenu();
         }}
       >
