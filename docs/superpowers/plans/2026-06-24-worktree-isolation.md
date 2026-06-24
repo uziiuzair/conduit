@@ -810,12 +810,13 @@ export async function isGitRepo(dir: string): Promise<boolean> {
   }
 }
 
-/** True if a worktree has uncommitted/untracked changes (so removal needs force). */
+/** True if a worktree has uncommitted/untracked changes (so removal needs force).
+ *  On error, assume dirty (matches the backend's safe "unknown → dirty" default). */
 export async function worktreeIsDirty(worktreePath: string): Promise<boolean> {
   try {
     return await invoke<boolean>("worktree_is_dirty", { worktreePath });
   } catch {
-    return false;
+    return true;
   }
 }
 

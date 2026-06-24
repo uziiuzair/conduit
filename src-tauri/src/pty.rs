@@ -89,7 +89,7 @@ impl PtyManager {
 
         let inner = if shell_only {
             format!(
-                "cd {dir} && exec {shell} -i -l",
+                "cd {dir} 2>/dev/null; exec {shell} -i -l",
                 dir = shell_quote(&working_directory),
                 shell = shell,
             )
