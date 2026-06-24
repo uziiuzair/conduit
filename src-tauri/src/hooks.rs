@@ -21,8 +21,6 @@ use serde_json::{json, Value};
 use tauri::{AppHandle, Emitter};
 use tiny_http::{Method, Response, Server};
 
-use dirs;
-
 /// Holds the port the listener actually bound to, so pty spawns can inject it.
 pub struct HookState {
     pub port: AtomicU16,

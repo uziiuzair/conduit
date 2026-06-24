@@ -48,11 +48,9 @@ fn pty_spawn(
         // previous run, re-enter it directly instead of recreating it.
         let settings = hooks::write_settings_file(port);
         let wt_path = worktree::worktree_path(&working_directory, slug);
-        if Path::new(&wt_path).exists() {
-            (wt_path, None, settings)
-        } else {
-            (working_directory.clone(), Some(slug.to_string()), settings)
-        }
+        let exists = Path::new(&wt_path).exists();
+        let (cwd, worktree_arg) = worktree::spawn_target(&working_directory, slug, &wt_path, exists);
+        (cwd, worktree_arg, settings)
     } else {
         // Normal session: install hooks into the project's settings.local.json.
         hooks::install(&working_directory, port);

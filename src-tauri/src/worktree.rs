@@ -22,6 +22,7 @@ pub fn slug(name: &str, uid: &str) -> String {
     }
     let trimmed = base.trim_matches('-');
     let base = if trimmed.is_empty() { "session" } else { trimmed };
+    // uid is always an ASCII UUID, so byte-slicing here can't split a multibyte char.
     let short = &uid[..uid.len().min(6)];
     format!("{base}-{short}")
 }
@@ -41,15 +42,36 @@ pub fn branch_name(slug: &str) -> String {
     format!("worktree-{slug}")
 }
 
+/// Decide where a worktree session should run and whether to pass `--worktree`.
+/// If the worktree dir already exists, re-enter it directly (cwd = `wt_path`, no
+/// `--worktree`, so Claude doesn't try to recreate it). Otherwise stay in the repo
+/// root and pass `--worktree <slug>` so Claude creates it.
+pub fn spawn_target(
+    repo_root: &str,
+    slug: &str,
+    wt_path: &str,
+    wt_exists: bool,
+) -> (String, Option<String>) {
+    if wt_exists {
+        (wt_path.to_string(), None)
+    } else {
+        (repo_root.to_string(), Some(slug.to_string()))
+    }
+}
+
 /// True if the worktree has uncommitted changes or untracked files, so a plain
-/// `git worktree remove` would refuse and removal needs `--force`.
+/// `git worktree remove` would refuse and removal needs `--force`. If git can't be
+/// run or errors, we assume DIRTY — this gates a destructive force-remove, so the
+/// safe default for an unknown state is to keep the data and warn.
 pub fn is_dirty(worktree_path: &str) -> bool {
-    Command::new("git")
+    match Command::new("git")
         .args(["status", "--porcelain"])
         .current_dir(worktree_path)
         .output()
-        .map(|o| !o.stdout.is_empty())
-        .unwrap_or(false)
+    {
+        Ok(o) if o.status.success() => !o.stdout.is_empty(),
+        _ => true,
+    }
 }
 
 /// Remove a worktree via `git worktree remove`, run from the main repo. `force`
@@ -147,6 +169,24 @@ mod tests {
     }
 
     #[test]
+    fn is_dirty_detects_modified_tracked_file() {
+        let repo = fresh_repo("modified");
+        let wt = worktree_path(repo.to_str().unwrap(), "mod");
+        git(&["worktree", "add", "-q", &wt, "-b", "worktree-mod"], &repo);
+        assert!(!is_dirty(&wt), "fresh worktree is clean");
+        // README.md is a committed tracked file (created in fresh_repo).
+        fs::write(std::path::Path::new(&wt).join("README.md"), "changed").unwrap();
+        assert!(is_dirty(&wt), "modified tracked file should read as dirty");
+    }
+
+    #[test]
+    fn is_dirty_assumes_dirty_when_git_errors() {
+        // A path with no git repo / nonexistent dir: git errors → we must assume dirty
+        // so a destructive force-remove is never silently allowed.
+        assert!(is_dirty("/nonexistent/path/conduit-should-not-exist"));
+    }
+
+    #[test]
     fn remove_deletes_clean_worktree() {
         let repo = fresh_repo("remove");
         let wt = worktree_path(repo.to_str().unwrap(), "gone");
@@ -167,5 +207,19 @@ mod tests {
         assert!(remove(repo.to_str().unwrap(), &wt, false).is_err(), "dirty remove without force should fail");
         remove(repo.to_str().unwrap(), &wt, true).expect("force remove should succeed");
         assert!(!std::path::Path::new(&wt).exists());
+    }
+
+    #[test]
+    fn spawn_target_reenters_existing_worktree() {
+        let (cwd, arg) = spawn_target("/repo", "feat", "/repo/.claude/worktrees/feat", true);
+        assert_eq!(cwd, "/repo/.claude/worktrees/feat");
+        assert_eq!(arg, None);
+    }
+
+    #[test]
+    fn spawn_target_creates_when_absent() {
+        let (cwd, arg) = spawn_target("/repo", "feat", "/repo/.claude/worktrees/feat", false);
+        assert_eq!(cwd, "/repo");
+        assert_eq!(arg, Some("feat".to_string()));
     }
 }
