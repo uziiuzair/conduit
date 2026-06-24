@@ -56,6 +56,8 @@ impl PtyManager {
         rows: u16,
         hook_port: u16,
         shell_only: bool,
+        worktree_name: Option<String>,
+        settings_path: Option<String>,
         on_event: Channel<String>,
     ) -> Result<(), String> {
         // Already running → re-attach the live reader to the new channel and force
@@ -92,12 +94,13 @@ impl PtyManager {
                 shell = shell,
             )
         } else {
-            format!(
-                "export CONDUIT_SESSION_ID={sid} CONDUIT_HOOK_PORT={port} CLAUDE_CODE_ENABLE_TASKS=0; cd {dir} && claude; exec {shell} -i -l",
-                sid = shell_quote(&session_id),
-                port = hook_port,
-                dir = shell_quote(&working_directory),
-                shell = shell,
+            claude_script(
+                &session_id,
+                hook_port,
+                &working_directory,
+                &shell,
+                worktree_name.as_deref(),
+                settings_path.as_deref(),
             )
         };
 
@@ -231,4 +234,52 @@ impl PtyManager {
 /// Single-quote a string for safe interpolation into a /bin/sh -c command.
 fn shell_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
+}
+
+/// Build the `sh -c` script that launches a `claude` session. `worktree` adds
+/// `--worktree <slug>` (Claude creates `<repo>/.claude/worktrees/<slug>` and runs in it);
+/// `settings` adds `--settings <path>` so Conduit's hooks load inside the worktree.
+fn claude_script(
+    session_id: &str,
+    port: u16,
+    working_directory: &str,
+    shell: &str,
+    worktree: Option<&str>,
+    settings: Option<&str>,
+) -> String {
+    let mut claude = String::from("claude");
+    if let Some(name) = worktree {
+        claude.push_str(&format!(" --worktree {}", shell_quote(name)));
+    }
+    if let Some(path) = settings {
+        claude.push_str(&format!(" --settings {}", shell_quote(path)));
+    }
+    format!(
+        "export CONDUIT_SESSION_ID={sid} CONDUIT_HOOK_PORT={port} CLAUDE_CODE_ENABLE_TASKS=0; cd {dir} && {claude}; exec {shell} -i -l",
+        sid = shell_quote(session_id),
+        port = port,
+        dir = shell_quote(working_directory),
+        claude = claude,
+        shell = shell,
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn script_runs_bare_claude_without_worktree() {
+        let s = claude_script("s1", 8423, "/repo", "/bin/zsh", None, None);
+        assert!(s.contains("export CONDUIT_SESSION_ID='s1'"));
+        assert!(s.contains("&& claude;"), "got: {s}");
+        assert!(!s.contains("--worktree"));
+        assert!(!s.contains("--settings"));
+    }
+
+    #[test]
+    fn script_adds_worktree_and_settings() {
+        let s = claude_script("s1", 8423, "/repo", "/bin/zsh", Some("feat-x"), Some("/d/h.json"));
+        assert!(s.contains("claude --worktree 'feat-x' --settings '/d/h.json';"), "got: {s}");
+    }
 }
