@@ -16,6 +16,8 @@ interface Props {
   sessionId: string;
   workingDirectory: string;
   visible: boolean;
+  /** Slug to pass as `claude --worktree <slug>` for an isolated session. */
+  worktreeName?: string;
   /** Plain login shell instead of launching `claude` (the bottom-panel terminal). */
   shellOnly?: boolean;
   /** Positioning applied to the host (e.g. left/width % for the active group's slot). */
@@ -33,6 +35,7 @@ export function TerminalView({
   sessionId,
   workingDirectory,
   visible,
+  worktreeName,
   shellOnly = false,
   style,
 }: Props) {
@@ -155,6 +158,7 @@ export function TerminalView({
           cols,
           rows,
           shellOnly,
+          worktreeName: worktreeName ?? null,
           onEvent: channel,
         }).catch((e) => term.write(`\r\n[spawn error: ${e}]\r\n`));
       } else {

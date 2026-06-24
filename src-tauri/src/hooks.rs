@@ -105,6 +105,28 @@ fn parse_query(url: &str) -> (Option<String>, String) {
     (session, event)
 }
 
+/// Single source of truth for the (event, entries) Conduit installs. Used by both the
+/// project-file installer and the `--settings` writer so worktree and normal sessions
+/// get identical hook behavior.
+fn conduit_hook_entries(port: u16) -> Vec<(&'static str, Vec<Value>)> {
+    vec![
+        (
+            "PostToolUse",
+            vec![
+                json!({ "matcher": "TodoWrite", "hooks": [command("todos", port)] }),
+                json!({ "hooks": [command("tooluse", port)] }),
+            ],
+        ),
+        ("UserPromptSubmit", vec![json!({ "hooks": [command("prompt", port)] })]),
+        ("Stop", vec![json!({ "hooks": [command("stop", port)] })]),
+        ("Notification", vec![json!({ "hooks": [command("notification", port)] })]),
+        ("PreToolUse", vec![json!({ "hooks": [command("pretool", port)] })]),
+        ("PreCompact", vec![json!({ "hooks": [command("precompact", port)] })]),
+        ("SessionStart", vec![json!({ "hooks": [command("sessionstart", port)] })]),
+        ("SessionEnd", vec![json!({ "hooks": [command("sessionend", port)] })]),
+    ]
+}
+
 /// Write Conduit's hooks into <dir>/.claude/settings.local.json.
 /// Ports HooksInstaller.swift: backs up once, preserves non-hook keys, and is
 /// idempotent (our prior entries are stripped before re-adding).
@@ -136,71 +158,37 @@ pub fn install(dir: &str, port: u16) {
         .cloned()
         .unwrap_or_default();
 
-    hooks.insert(
-        "PostToolUse".into(),
-        merged(
-            hooks.get("PostToolUse"),
-            vec![
-                json!({ "matcher": "TodoWrite", "hooks": [command("todos", port)] }),
-                json!({ "hooks": [command("tooluse", port)] }),
-            ],
-        ),
-    );
-    hooks.insert(
-        "UserPromptSubmit".into(),
-        merged(
-            hooks.get("UserPromptSubmit"),
-            vec![json!({ "hooks": [command("prompt", port)] })],
-        ),
-    );
-    hooks.insert(
-        "Stop".into(),
-        merged(hooks.get("Stop"), vec![json!({ "hooks": [command("stop", port)] })]),
-    );
-    hooks.insert(
-        "Notification".into(),
-        merged(
-            hooks.get("Notification"),
-            vec![json!({ "hooks": [command("notification", port)] })],
-        ),
-    );
-    // Lifecycle events (Part B): finer "running" + activity (PreToolUse), a
-    // compaction indicator (PreCompact), and reliable session baseline reset
-    // (SessionStart/SessionEnd). Same per-session routing as the events above.
-    hooks.insert(
-        "PreToolUse".into(),
-        merged(
-            hooks.get("PreToolUse"),
-            vec![json!({ "hooks": [command("pretool", port)] })],
-        ),
-    );
-    hooks.insert(
-        "PreCompact".into(),
-        merged(
-            hooks.get("PreCompact"),
-            vec![json!({ "hooks": [command("precompact", port)] })],
-        ),
-    );
-    hooks.insert(
-        "SessionStart".into(),
-        merged(
-            hooks.get("SessionStart"),
-            vec![json!({ "hooks": [command("sessionstart", port)] })],
-        ),
-    );
-    hooks.insert(
-        "SessionEnd".into(),
-        merged(
-            hooks.get("SessionEnd"),
-            vec![json!({ "hooks": [command("sessionend", port)] })],
-        ),
-    );
+    for (event, entries) in conduit_hook_entries(port) {
+        let merged = merged(hooks.get(event), entries);
+        hooks.insert(event.to_string(), merged);
+    }
 
     obj.insert("hooks".into(), Value::Object(hooks));
 
     if let Ok(out) = serde_json::to_vec_pretty(&root) {
         let _ = fs::write(&settings_path, out);
     }
+}
+
+/// A settings object containing only Conduit's hooks, for `claude --settings <file>`.
+fn settings_value(port: u16) -> Value {
+    let mut hooks = serde_json::Map::new();
+    for (event, entries) in conduit_hook_entries(port) {
+        hooks.insert(event.to_string(), Value::Array(entries));
+    }
+    json!({ "hooks": Value::Object(hooks) })
+}
+
+/// Write Conduit's hooks to a settings file in the app data dir and return its path.
+/// Worktree sessions pass this via `claude --settings`, since a worktree is a separate
+/// working tree that doesn't see the project's settings.local.json.
+pub fn write_settings_file(port: u16) -> Option<String> {
+    let base = dirs::data_dir()?.join("ConduitTauri");
+    let _ = fs::create_dir_all(&base);
+    let path = base.join("conduit-hooks.json");
+    let data = serde_json::to_vec_pretty(&settings_value(port)).ok()?;
+    fs::write(&path, data).ok()?;
+    Some(path.to_string_lossy().into_owned())
 }
 
 /// A command hook that pipes the event JSON (stdin) to Conduit's server, tagged
@@ -392,5 +380,28 @@ mod tests {
             !saved.contains("CONDUIT_SESSION_ID"),
             "backup must be the pre-Conduit file, not a post-install one"
         );
+    }
+
+    #[test]
+    fn settings_value_carries_all_events() {
+        let v = settings_value(8423);
+        let hooks = v.get("hooks").and_then(|h| h.as_object()).expect("hooks object");
+        for ev in [
+            "PostToolUse", "UserPromptSubmit", "Stop", "Notification",
+            "PreToolUse", "PreCompact", "SessionStart", "SessionEnd",
+        ] {
+            assert!(hooks.contains_key(ev), "settings missing event {ev}");
+        }
+    }
+
+    #[test]
+    fn settings_value_command_carries_routing() {
+        let v = settings_value(8431);
+        let cmd = v["hooks"]["SessionStart"][0]["hooks"][0]["command"]
+            .as_str()
+            .expect("command string");
+        assert!(cmd.contains("event=sessionstart"));
+        assert!(cmd.contains("CONDUIT_SESSION_ID"));
+        assert!(cmd.contains("8431"));
     }
 }

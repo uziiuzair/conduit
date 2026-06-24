@@ -141,15 +141,25 @@ impl Store {
         self.save(&projects);
     }
 
-    pub fn add_session(&self, project_id: &str, name: String) -> Option<Session> {
+    pub fn add_session(&self, project_id: &str, name: String, use_worktree: bool) -> Option<Session> {
         let mut projects = self.projects.lock().unwrap_or_else(|e| e.into_inner());
         let project = projects.iter_mut().find(|p| p.id == project_id)?;
+        let id = Uuid::new_v4().to_string();
+        let (worktree_path, branch) = if use_worktree {
+            let slug = crate::worktree::slug(&name, &id);
+            (
+                Some(crate::worktree::worktree_path(&project.path, &slug)),
+                Some(crate::worktree::branch_name(&slug)),
+            )
+        } else {
+            (None, None)
+        };
         let session = Session {
-            id: Uuid::new_v4().to_string(),
+            id,
             name,
-            use_worktree: false,
-            worktree_path: None,
-            branch: None,
+            use_worktree,
+            worktree_path,
+            branch,
         };
         project.sessions.push(session.clone());
         self.save(&projects);
@@ -180,5 +190,49 @@ impl Store {
             project.sessions.retain(|s| s.id != session_id);
         }
         self.save(&projects);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    impl Store {
+        fn for_test(dir: &std::path::Path) -> Self {
+            Store {
+                projects: Mutex::new(Vec::new()),
+                save_path: dir.join("state.json"),
+            }
+        }
+    }
+
+    fn temp_dir(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("conduit_store_{tag}_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn add_session_without_worktree_leaves_fields_empty() {
+        let dir = temp_dir("plain");
+        let store = Store::for_test(&dir);
+        let p = store.add_project("/repo".into());
+        let s = store.add_session(&p.id, "Session 1".into(), false).unwrap();
+        assert!(!s.use_worktree);
+        assert!(s.worktree_path.is_none());
+        assert!(s.branch.is_none());
+    }
+
+    #[test]
+    fn add_session_with_worktree_computes_path_and_branch() {
+        let dir = temp_dir("wt");
+        let store = Store::for_test(&dir);
+        let p = store.add_project("/repo".into());
+        let s = store.add_session(&p.id, "My Feature".into(), true).unwrap();
+        assert!(s.use_worktree);
+        let path = s.worktree_path.unwrap();
+        assert!(path.starts_with("/repo/.claude/worktrees/"), "got {path}");
+        assert!(s.branch.unwrap().starts_with("worktree-"));
     }
 }
