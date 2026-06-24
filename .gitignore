@@ -40,5 +40,8 @@ lerna-debug.log*
 # Conduit worktrees (created at runtime)
 .conduit-worktrees/
 
+# Dev worktrees (superpowers isolated workspaces)
+.worktrees/
+
 # Superpowers visual-brainstorming companion (local mockups)
 .superpowers/
