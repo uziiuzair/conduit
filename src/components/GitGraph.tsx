@@ -1,4 +1,6 @@
 import { useMemo } from "react";
+import { useStore } from "../store";
+import { THEMES } from "../themes";
 
 export interface GraphCommit {
   hash: string;
@@ -7,19 +9,6 @@ export interface GraphCommit {
   author: string;
   refs: string;
 }
-
-// Warm lane palette derived from Theme.swift's ANSI colors.
-const LANE_COLORS = [
-  "#ce8a6e", // accent
-  "#88b07c", // green
-  "#c2a063", // amber
-  "#b98ba6", // magenta
-  "#7fa6a0", // cyan
-  "#c97a72", // red
-  "#9c8bd0", // violet
-  "#d2ccc4", // bright
-];
-const laneColor = (i: number) => LANE_COLORS[((i % LANE_COLORS.length) + LANE_COLORS.length) % LANE_COLORS.length];
 
 const ROW_H = 30;
 const LANE_W = 14;
@@ -167,6 +156,9 @@ function refBadges(refs: string) {
 }
 
 export function GitGraph({ commits }: { commits: GraphCommit[] }) {
+  const laneColors = THEMES[useStore((s) => s.activeThemeId)].gitLanes;
+  const laneColor = (i: number) =>
+    laneColors[((i % laneColors.length) + laneColors.length) % laneColors.length];
   const { rows, lanes } = useMemo(() => buildRows(commits), [commits]);
 
   if (commits.length === 0) {
