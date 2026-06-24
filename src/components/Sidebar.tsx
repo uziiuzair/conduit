@@ -1,4 +1,5 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
+import { NewSessionDialog } from "./NewSessionDialog";
 import { open } from "@tauri-apps/plugin-dialog";
 import {
   useStore,
@@ -57,6 +58,7 @@ export function Sidebar() {
 function ProjectBlock({ project }: { project: Project }) {
   const addSession = useStore((s) => s.addSession);
   const openMenu = useStore((s) => s.openMenu);
+  const [showNew, setShowNew] = useState(false);
 
   const openProjectMenu = (x: number, y: number) =>
     openMenu({ x, y, kind: "project", projectId: project.id });
@@ -91,12 +93,22 @@ function ProjectBlock({ project }: { project: Project }) {
         ))}
         <button
           className="new-session"
-          onClick={() => void addSession(project.id)}
+          onClick={() => setShowNew(true)}
         >
           <PlusIcon size={12} />
           <span>New session</span>
         </button>
       </div>
+      {showNew && (
+        <NewSessionDialog
+          projectPath={project.path}
+          onCancel={() => setShowNew(false)}
+          onCreate={(opts) => {
+            setShowNew(false);
+            void addSession(project.id, opts);
+          }}
+        />
+      )}
     </div>
   );
 }
