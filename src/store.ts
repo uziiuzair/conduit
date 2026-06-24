@@ -213,7 +213,7 @@ interface AppState {
   load: () => Promise<void>;
   addProject: (path: string) => Promise<void>;
   removeProject: (id: string) => Promise<void>;
-  addSession: (projectId: string) => Promise<void>;
+  addSession: (projectId: string, opts?: { name?: string; useWorktree?: boolean }) => Promise<void>;
   renameSession: (projectId: string, sessionId: string, name: string) => Promise<void>;
   removeSession: (projectId: string, sessionId: string) => Promise<void>;
 
@@ -318,10 +318,11 @@ export const useStore = create<AppState>((set, get) => {
       });
     },
 
-    addSession: async (projectId) => {
+    addSession: async (projectId, opts) => {
       const project = get().projects.find((p) => p.id === projectId);
-      const name = `Session ${(project?.sessions.length ?? 0) + 1}`;
-      const session = await invoke<Session | null>("add_session", { projectId, name });
+      const name = opts?.name?.trim() || `Session ${(project?.sessions.length ?? 0) + 1}`;
+      const useWorktree = opts?.useWorktree ?? false;
+      const session = await invoke<Session | null>("add_session", { projectId, name, useWorktree });
       if (!session) return;
       set((s) => ({
         projects: s.projects.map((p) =>
@@ -527,4 +528,31 @@ export async function openInVscode(dir: string): Promise<void> {
   } catch (e) {
     void invoke("notify_user", { title: "Conduit", body: String(e) }).catch(() => {});
   }
+}
+
+/** True if `dir` is inside a git work tree (used to gate the worktree toggle). */
+export async function isGitRepo(dir: string): Promise<boolean> {
+  try {
+    return (await invoke<string | null>("git_branch", { dir })) != null;
+  } catch {
+    return false;
+  }
+}
+
+/** True if a worktree has uncommitted/untracked changes (so removal needs force). */
+export async function worktreeIsDirty(worktreePath: string): Promise<boolean> {
+  try {
+    return await invoke<boolean>("worktree_is_dirty", { worktreePath });
+  } catch {
+    return false;
+  }
+}
+
+/** Remove a session's worktree via git. `force` discards a dirty tree. */
+export async function worktreeRemove(
+  repoPath: string,
+  worktreePath: string,
+  force: boolean,
+): Promise<void> {
+  await invoke("worktree_remove", { repoPath, worktreePath, force });
 }
