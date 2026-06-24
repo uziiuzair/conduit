@@ -248,7 +248,9 @@ function TodosView({ sessionId }: { sessionId: string }) {
       {todos.map((t, i) => (
         <div className={`todo ${t.status}`} key={i}>
           <TodoIcon status={t.status} />
-          <span className={`content ${t.status}`}>{t.content}</span>
+          <span className={`content ${t.status}`}>
+            {t.status === "in_progress" && t.activeForm ? t.activeForm : t.content}
+          </span>
         </div>
       ))}
       <div className="live-note">

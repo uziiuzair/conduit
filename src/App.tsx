@@ -169,6 +169,7 @@ function applyTodos(toolInput: any, sessionId: string) {
     .map((it) => ({
       content: it.content as string,
       status: (it.status as TodoStatus) ?? "pending",
+      activeForm: typeof it.activeForm === "string" ? (it.activeForm as string) : undefined,
     }));
   const st = useStore.getState();
   st.setTodos(sessionId, todos);
