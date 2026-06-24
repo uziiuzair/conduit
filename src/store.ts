@@ -1,6 +1,15 @@
 import { create } from "zustand";
 import { invoke } from "@tauri-apps/api/core";
 import { homeDir as getHomeDir } from "@tauri-apps/api/path";
+import {
+  type ThemeId,
+  type ThemePref,
+  applyTheme,
+  resolveThemeId,
+  systemPrefersDark,
+  readStoredPref,
+  writeStoredPref,
+} from "./themes";
 
 // ---- Types (mirror the Rust serde structs, rename_all = "camelCase") ----
 export interface Session {
@@ -51,6 +60,10 @@ export interface TodoItem {
 export interface LiveState {
   status: SessionStatus;
   todos: TodoItem[];
+  /** Short "what it's doing now" label while running (from PreToolUse). */
+  activity?: string;
+  /** True between a PreCompact event and the next activity, for a "compacting" hint. */
+  compacting?: boolean;
 }
 
 const EMPTY_LIVE: LiveState = { status: "idle", todos: [] };
@@ -194,6 +207,8 @@ interface AppState {
   homeDir: string | null;
   topTab: TopTab;
   bottomTab: BottomTab;
+  themePref: ThemePref;
+  activeThemeId: ThemeId;
 
   load: () => Promise<void>;
   addProject: (path: string) => Promise<void>;
@@ -227,6 +242,10 @@ interface AppState {
   cancelRename: () => void;
   setStatus: (id: string, status: SessionStatus) => void;
   setTodos: (id: string, todos: TodoItem[]) => void;
+  setActivity: (id: string, activity: string | undefined) => void;
+  setCompacting: (id: string, compacting: boolean) => void;
+  setThemePref: (pref: ThemePref) => void;
+  applySystemDark: (dark: boolean) => void;
 }
 
 export const useStore = create<AppState>((set, get) => {
@@ -263,6 +282,8 @@ export const useStore = create<AppState>((set, get) => {
     homeDir: null,
     topTab: "files",
     bottomTab: "terminal",
+    themePref: readStoredPref(),
+    activeThemeId: resolveThemeId(readStoredPref(), systemPrefersDark()),
 
     load: async () => {
       const [projects, home] = await Promise.all([
@@ -439,6 +460,28 @@ export const useStore = create<AppState>((set, get) => {
       set((s) => ({
         live: { ...s.live, [id]: { ...(s.live[id] ?? EMPTY_LIVE), todos } },
       })),
+    setActivity: (id, activity) =>
+      set((s) => ({
+        live: { ...s.live, [id]: { ...(s.live[id] ?? EMPTY_LIVE), activity } },
+      })),
+    setCompacting: (id, compacting) =>
+      set((s) => ({
+        live: { ...s.live, [id]: { ...(s.live[id] ?? EMPTY_LIVE), compacting } },
+      })),
+
+    setThemePref: (pref) => {
+      writeStoredPref(pref);
+      const id = resolveThemeId(pref, systemPrefersDark());
+      applyTheme(id);
+      set({ themePref: pref, activeThemeId: id });
+    },
+
+    applySystemDark: (dark) => {
+      if (get().themePref !== "auto") return;
+      const id = resolveThemeId("auto", dark);
+      applyTheme(id);
+      set({ activeThemeId: id });
+    },
   };
 });
 
