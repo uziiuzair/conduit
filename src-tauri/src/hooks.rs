@@ -71,6 +71,12 @@ pub fn start(app: AppHandle, state: Arc<HookState>) {
             let Some(session) = session else { continue };
             let parsed: Value = serde_json::from_str(&body).unwrap_or(Value::Null);
 
+            // Dev-only raw capture so we can inspect undocumented payloads
+            // (Task*, SessionStart, Subagent*). Enable with CONDUIT_HOOK_LOG=1.
+            if std::env::var("CONDUIT_HOOK_LOG").as_deref() == Ok("1") {
+                eprintln!("[hook] session={session} event={event} body={body}");
+            }
+
             let _ = app.emit(
                 "hook",
                 json!({
