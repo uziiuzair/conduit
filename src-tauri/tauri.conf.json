@@ -1,0 +1,46 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Conduit",
+  "version": "0.1.0",
+  "identifier": "com.conduit.tauri",
+  "build": {
+    "beforeDevCommand": "pnpm dev",
+    "devUrl": "http://localhost:1420",
+    "beforeBuildCommand": "pnpm build",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "Conduit",
+        "width": 1100,
+        "height": 720,
+        "minWidth": 980,
+        "minHeight": 600,
+        "theme": "Dark",
+        "titleBarStyle": "Overlay"
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["app"],
+    "category": "DeveloperTool",
+    "copyright": "© 2026 Conduit",
+    "shortDescription": "Run multiple real Claude Code terminals across projects.",
+    "longDescription": "Conduit is a native-feeling desktop app for running multiple real `claude` CLI sessions across your projects — each in a live terminal, with a file tree, git graph, and per-session to-dos driven by Claude Code hooks.",
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "macOS": {
+      "minimumSystemVersion": "13.0"
+    }
+  }
+}
