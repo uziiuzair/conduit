@@ -31,6 +31,9 @@ base64 = "0.22"
 # Hook server
 tiny_http = "0.12"
 
+# Mobile bridge (loopback WebSocket)
+tungstenite = "0.23"
+
 # State + utils
 dashmap = "6"
 uuid = { version = "1", features = ["v4"] }
