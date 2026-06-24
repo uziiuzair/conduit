@@ -1,0 +1,289 @@
+import { useEffect, useRef } from "react";
+import { open } from "@tauri-apps/plugin-dialog";
+import {
+  useStore,
+  liveState,
+  findSession,
+  workingDirOf,
+  openInVscode,
+  globalSelectedSessionId,
+  type Project,
+  type Session,
+} from "../store";
+import {
+  FolderIcon,
+  FolderPlusIcon,
+  TerminalIcon,
+  PlusIcon,
+  EllipsisIcon,
+  CircleFilledIcon,
+} from "./Icons";
+
+export function Sidebar() {
+  const projects = useStore((s) => s.projects);
+  const addProject = useStore((s) => s.addProject);
+
+  async function pickProject() {
+    const dir = await open({
+      directory: true,
+      multiple: false,
+      title: "Add Project",
+    });
+    if (typeof dir === "string") await addProject(dir);
+  }
+
+  return (
+    <div className="sidebar">
+      <div className="drag-region" data-tauri-drag-region />
+      <div className="sidebar-scroll">
+        <div className="section-label">Projects</div>
+        {projects.map((p) => (
+          <ProjectBlock key={p.id} project={p} />
+        ))}
+      </div>
+      <div className="add-bar">
+        <button onClick={pickProject}>
+          <FolderPlusIcon size={12} />
+          <span>Add Project</span>
+        </button>
+      </div>
+      <SessionContextMenu />
+    </div>
+  );
+}
+
+function ProjectBlock({ project }: { project: Project }) {
+  const addSession = useStore((s) => s.addSession);
+  const openMenu = useStore((s) => s.openMenu);
+
+  const openProjectMenu = (x: number, y: number) =>
+    openMenu({ x, y, kind: "project", projectId: project.id });
+
+  return (
+    <div className="project-block">
+      <div
+        className="project-head"
+        onContextMenu={(e) => {
+          e.preventDefault();
+          e.stopPropagation();
+          openProjectMenu(e.clientX, e.clientY);
+        }}
+      >
+        <FolderIcon size={11} className="folder-icon" />
+        <span className="name">{project.name}</span>
+        <button
+          className="menu-btn"
+          title="Project actions"
+          onClick={(e) => {
+            e.stopPropagation();
+            const r = e.currentTarget.getBoundingClientRect();
+            openProjectMenu(r.left, r.bottom + 2);
+          }}
+        >
+          <EllipsisIcon size={14} />
+        </button>
+      </div>
+      <div className="session-list">
+        {project.sessions.map((s) => (
+          <SessionRow key={s.id} project={project} session={s} />
+        ))}
+        <button
+          className="new-session"
+          onClick={() => void addSession(project.id)}
+        >
+          <PlusIcon size={12} />
+          <span>New session</span>
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function SessionRow({
+  project,
+  session,
+}: {
+  project: Project;
+  session: Session;
+}) {
+  const selected = useStore((s) => globalSelectedSessionId(s) === session.id);
+  const status = useStore((s) => liveState(s.live, session.id).status);
+  const editing = useStore((s) => s.editingSessionId === session.id);
+  const selectSession = useStore((s) => s.selectSession);
+  const openMenu = useStore((s) => s.openMenu);
+
+  return (
+    <div
+      className={`session-row ${selected ? "selected" : ""}`}
+      onClick={() => {
+        if (!editing) selectSession(project.id, session.id);
+      }}
+      onContextMenu={(e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        openMenu({
+          x: e.clientX,
+          y: e.clientY,
+          kind: "session",
+          projectId: project.id,
+          sessionId: session.id,
+        });
+      }}
+    >
+      <TerminalIcon size={12} className="term-icon" />
+      {editing ? (
+        <RenameInput
+          projectId={project.id}
+          sessionId={session.id}
+          initial={session.name}
+        />
+      ) : (
+        <span className="name">{session.name}</span>
+      )}
+      <StatusAccessory status={status} />
+    </div>
+  );
+}
+
+function RenameInput({
+  projectId,
+  sessionId,
+  initial,
+}: {
+  projectId: string;
+  sessionId: string;
+  initial: string;
+}) {
+  const renameSession = useStore((s) => s.renameSession);
+  const cancelRename = useStore((s) => s.cancelRename);
+  const done = useRef(false);
+
+  const commit = (value: string) => {
+    if (done.current) return;
+    done.current = true;
+    void renameSession(projectId, sessionId, value);
+  };
+
+  return (
+    <input
+      className="session-rename-input"
+      defaultValue={initial}
+      autoFocus
+      spellCheck={false}
+      onClick={(e) => e.stopPropagation()}
+      onFocus={(e) => e.currentTarget.select()}
+      onKeyDown={(e) => {
+        e.stopPropagation();
+        if (e.key === "Enter") commit(e.currentTarget.value);
+        else if (e.key === "Escape") {
+          done.current = true;
+          cancelRename();
+        }
+      }}
+      onBlur={(e) => commit(e.currentTarget.value)}
+    />
+  );
+}
+
+function StatusAccessory({ status }: { status: string }) {
+  if (status === "needsInput") return <span className="pill-needs">needs you</span>;
+  if (status === "done")
+    return <CircleFilledIcon size={11} className="dot done" />;
+  if (status === "running") return <span className="dot running" />;
+  return null;
+}
+
+function SessionContextMenu() {
+  const menu = useStore((s) => s.menu);
+  const projects = useStore((s) => s.projects);
+  const closeMenu = useStore((s) => s.closeMenu);
+  const startRename = useStore((s) => s.startRename);
+  const removeSession = useStore((s) => s.removeSession);
+  const removeProject = useStore((s) => s.removeProject);
+  const openToSide = useStore((s) => s.openToSide);
+
+  useEffect(() => {
+    if (!menu) return;
+    const close = () => closeMenu();
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") closeMenu();
+    };
+    window.addEventListener("click", close);
+    window.addEventListener("resize", close);
+    window.addEventListener("keydown", onKey);
+    return () => {
+      window.removeEventListener("click", close);
+      window.removeEventListener("resize", close);
+      window.removeEventListener("keydown", onKey);
+    };
+  }, [menu, closeMenu]);
+
+  if (!menu) return null;
+
+  if (menu.kind === "project") {
+    const project = projects.find((p) => p.id === menu.projectId);
+    return (
+      <div
+        className="context-menu"
+        style={{ left: menu.x, top: menu.y }}
+        onClick={(e) => e.stopPropagation()}
+      >
+        <button
+          className="danger"
+          onClick={() => {
+            if (
+              project &&
+              confirm(
+                `Remove project "${project.name}" from Conduit?\n\nThis closes its sessions. Your files are not deleted.`,
+              )
+            )
+              void removeProject(menu.projectId);
+            closeMenu();
+          }}
+        >
+          Remove Project
+        </button>
+      </div>
+    );
+  }
+
+  if (!menu.sessionId) return null;
+  const sid = menu.sessionId;
+  return (
+    <div
+      className="context-menu"
+      style={{ left: menu.x, top: menu.y }}
+      onClick={(e) => e.stopPropagation()}
+    >
+      <button onClick={() => startRename(sid)}>Rename</button>
+      <button
+        onClick={() => {
+          openToSide(menu.projectId, { kind: "session", ref: sid });
+          closeMenu();
+        }}
+      >
+        Open to the Side
+      </button>
+      <button
+        onClick={() => {
+          const found = findSession(projects, sid);
+          if (found) void openInVscode(workingDirOf(found.project, found.session));
+          closeMenu();
+        }}
+      >
+        Open in VS Code
+      </button>
+      <button
+        className="danger"
+        onClick={() => {
+          const found = findSession(projects, sid);
+          if (confirm(`Delete session "${found?.session.name ?? "session"}"?`))
+            void removeSession(menu.projectId, sid);
+          closeMenu();
+        }}
+      >
+        Delete
+      </button>
+    </div>
+  );
+}
