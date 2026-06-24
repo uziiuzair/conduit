@@ -246,7 +246,7 @@ function TodosView({ sessionId }: { sessionId: string }) {
   return (
     <div className="panel-scroll">
       {todos.map((t, i) => (
-        <div className="todo" key={i}>
+        <div className={`todo ${t.status}`} key={i}>
           <TodoIcon status={t.status} />
           <span className={`content ${t.status}`}>{t.content}</span>
         </div>

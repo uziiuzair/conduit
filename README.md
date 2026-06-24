@@ -10,13 +10,12 @@ session, and lets you arrange those sessions (and read-only file views) into
 side-by-side editor groups — with a file tree, a branch-lane git graph, and
 per-session to-dos driven by Claude Code hooks.
 
-<!-- TODO: drop a screenshot at docs/screenshot.png and uncomment the line below -->
-<!-- ![Conduit](docs/screenshot.png) -->
+![Conduit](docs/screenshot.png)
 
 ## Why
 
 Running several Claude Code sessions usually means juggling terminal tabs or
-multiplexers. Conduit gives each session a real terminal *and* an IDE-like shell
+multiplexers. Conduit gives each session a real terminal _and_ an IDE-like shell
 around it — projects in a sidebar, sessions as tabs, and a workspace you can split
 to watch two agents work at once. Every terminal is the actual interactive `claude`
 binary, so `/resume`, your `CLAUDE.md`, and the original system prompt all work
@@ -92,22 +91,23 @@ The app is non-sandboxed (it spawns shells/PTYs and `git`), so no special
 entitlements are required. Notifications use `osascript` and need no usage strings;
 to attribute them to the app on a signed build, switch the macOS branch of
 `src-tauri/src/notify.rs` to `tauri-plugin-notification`.
+
 </details>
 
 ## How it works
 
-| Concern | Where |
-|---|---|
-| PTY manager — spawn / write / resize / keep-alive / re-attach | `src-tauri/src/pty.rs` |
-| Project/session store + per-project layout persistence (JSON) | `src-tauri/src/store.rs` |
-| Claude Code hook HTTP listener + installer | `src-tauri/src/hooks.rs` |
-| Git metadata + branch graph data | `src-tauri/src/git.rs` |
-| Read-only filesystem (Files tab + viewer) | `src-tauri/src/fsops.rs` |
-| Notifications | `src-tauri/src/notify.rs` |
-| App entry, commands, window/bundle config | `src-tauri/src/lib.rs`, `src-tauri/tauri.conf.json` |
-| Workspace state + Tauri command bridge | `src/store.ts` |
-| Workspace UI (groups, tabs, tree, viewer, graph) | `src/components/*`, `src/App.tsx` |
-| Theme (palette + ANSI) | `src/theme.css`, `src/components/GitGraph.tsx` |
+| Concern                                                       | Where                                               |
+| ------------------------------------------------------------- | --------------------------------------------------- |
+| PTY manager — spawn / write / resize / keep-alive / re-attach | `src-tauri/src/pty.rs`                              |
+| Project/session store + per-project layout persistence (JSON) | `src-tauri/src/store.rs`                            |
+| Claude Code hook HTTP listener + installer                    | `src-tauri/src/hooks.rs`                            |
+| Git metadata + branch graph data                              | `src-tauri/src/git.rs`                              |
+| Read-only filesystem (Files tab + viewer)                     | `src-tauri/src/fsops.rs`                            |
+| Notifications                                                 | `src-tauri/src/notify.rs`                           |
+| App entry, commands, window/bundle config                     | `src-tauri/src/lib.rs`, `src-tauri/tauri.conf.json` |
+| Workspace state + Tauri command bridge                        | `src/store.ts`                                      |
+| Workspace UI (groups, tabs, tree, viewer, graph)              | `src/components/*`, `src/App.tsx`                   |
+| Theme (palette + ANSI)                                        | `src/theme.css`, `src/components/GitGraph.tsx`      |
 
 **The load-bearing trick:** every session's terminal is mounted once in a flat,
 never-reparented stack and positioned purely by CSS (percentages derived from group
