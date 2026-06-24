@@ -1,6 +1,8 @@
 import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { Prism as SyntaxHighlighter } from "react-syntax-highlighter";
+import { useStore } from "../store";
+import { THEMES } from "../themes";
 
 interface FileContent {
   content: string;
@@ -10,54 +12,6 @@ interface FileContent {
 
 // Beyond this, skip highlighting (Prism gets slow on huge files) → plain text.
 const MAX_HIGHLIGHT_LINES = 5000;
-
-// Conduit warm (Tokyo-Night-ish) Prism theme, matching Theme.swift / theme.css.
-const TERM_FG = "#d2ccc4";
-const conduitPrismTheme: Record<string, React.CSSProperties> = {
-  'code[class*="language-"]': {
-    color: TERM_FG,
-    background: "none",
-    fontFamily: '"SF Mono", SFMono-Regular, Menlo, monospace',
-    fontSize: "12px",
-    lineHeight: "1.5",
-    whiteSpace: "pre",
-    tabSize: 4,
-  },
-  'pre[class*="language-"]': {
-    color: TERM_FG,
-    background: "none",
-    margin: 0,
-  },
-  comment: { color: "#5e574f", fontStyle: "italic" },
-  prolog: { color: "#5e574f" },
-  doctype: { color: "#5e574f" },
-  cdata: { color: "#5e574f" },
-  punctuation: { color: "#968d86" },
-  property: { color: "#ce8a6e" },
-  tag: { color: "#c97a72" },
-  boolean: { color: "#c2a063" },
-  number: { color: "#c2a063" },
-  constant: { color: "#c2a063" },
-  symbol: { color: "#c2a063" },
-  deleted: { color: "#c97a72" },
-  selector: { color: "#88b07c" },
-  "attr-name": { color: "#c2a063" },
-  string: { color: "#88b07c" },
-  char: { color: "#88b07c" },
-  builtin: { color: "#7fa6a0" },
-  inserted: { color: "#88b07c" },
-  operator: { color: "#968d86" },
-  entity: { color: "#7fa6a0" },
-  url: { color: "#7fa6a0" },
-  variable: { color: TERM_FG },
-  atrule: { color: "#b98ba6" },
-  "attr-value": { color: "#88b07c" },
-  keyword: { color: "#b98ba6" },
-  function: { color: "#ce8a6e" },
-  "class-name": { color: "#7fa6a0" },
-  regex: { color: "#c2a063" },
-  important: { color: "#c97a72", fontWeight: "bold" },
-};
 
 // File extension / name → Prism language id.
 const EXT_LANG: Record<string, string> = {
@@ -114,6 +68,7 @@ export function FileViewer({
   style?: React.CSSProperties;
 }) {
   const [data, setData] = useState<FileContent | null>(null);
+  const prismTheme = THEMES[useStore((s) => s.activeThemeId)].prism;
 
   useEffect(() => {
     let alive = true;
@@ -146,7 +101,7 @@ export function FileViewer({
       ) : data.binary || tooBig || !lang ? (
         <SyntaxHighlighter
           language={lang && !tooBig ? lang : "text"}
-          style={conduitPrismTheme}
+          style={prismTheme}
           showLineNumbers={!data.binary}
           customStyle={fvCustomStyle}
           lineNumberStyle={fvLineNumberStyle}
@@ -157,7 +112,7 @@ export function FileViewer({
       ) : (
         <SyntaxHighlighter
           language={lang}
-          style={conduitPrismTheme}
+          style={prismTheme}
           showLineNumbers
           customStyle={fvCustomStyle}
           lineNumberStyle={fvLineNumberStyle}
@@ -181,6 +136,6 @@ const fvCustomStyle: React.CSSProperties = {
 const fvLineNumberStyle: React.CSSProperties = {
   minWidth: "3.2em",
   paddingRight: "1em",
-  color: "#5e574f",
+  color: "var(--text-dim)",
   userSelect: "none",
 };
