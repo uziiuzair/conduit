@@ -25,7 +25,6 @@ export function ClaudeStatusPill() {
   useClaudeAmbient(); // pill is always mounted → drives polling
 
   const status = useStore((s) => s.claudeStatus);
-  const usage = useStore((s) => s.claudeUsage);
   const [open, setOpen] = useState(false);
   const wrapRef = useRef<HTMLDivElement>(null);
 
@@ -45,14 +44,6 @@ export function ClaudeStatusPill() {
 
   const meta = indicatorMeta(status?.indicator);
 
-  // Compact usage figure: plan 5-hour % if live, else today's local token total.
-  let usageLabel = "";
-  if (usage?.plan && usage.plan.length > 0) {
-    usageLabel = Math.round(usage.plan[0].pctUsed * 100) + "%";
-  } else if (usage?.local && usage.local.totalTokens > 0) {
-    usageLabel = fmtTokens(usage.local.totalTokens);
-  }
-
   return (
     <div className="claude-pill-wrap" ref={wrapRef}>
       {open && (
@@ -66,7 +57,6 @@ export function ClaudeStatusPill() {
         onClick={(e) => { e.stopPropagation(); setOpen((o) => !o); }}
       >
         <span className={`claude-dot ${meta.cls}`} />
-        {usageLabel && <span className="claude-pill-usage">{usageLabel}</span>}
       </button>
     </div>
   );
