@@ -19,11 +19,10 @@ function componentDotClass(status: string): string {
   return "unknown";
 }
 
-/** Numeric epoch → "3:41pm" (today) / "Mon" (later). Detects sec vs ms. Never throws. */
-function shortReset(epoch: number | null): string {
-  if (epoch == null || !isFinite(epoch)) return "";
-  const ms = epoch < 1e12 ? epoch * 1000 : epoch; // seconds vs milliseconds
-  const d = new Date(ms);
+/** RFC3339 string → "3:41pm" (today) / "Mon" (later). Never throws. */
+function shortReset(iso: string | null): string {
+  if (!iso) return "";
+  const d = new Date(iso);
   if (isNaN(d.getTime())) return "";
   const now = new Date();
   const sameDay = d.toDateString() === now.toDateString();

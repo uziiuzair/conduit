@@ -75,18 +75,19 @@ Expected: an endpoint path (e.g. `/api/oauth/usage` or similar) and a cluster of
 USAGE_ENDPOINT  = https://api.anthropic.com/api/oauth/usage   (GET, "fetchUtilization", refreshOAuth)
 WINDOW FIELDS   = top-level keys: five_hour, seven_day, seven_day_opus
                   (also present: seven_day_sonnet, seven_day_oauth_apps, overage — ignored)
-PCT FIELD       = <window>.utilization  (NUMBER, 0..1; UI does utilization*100)
-RESET FIELD     = <window>.resets_at    (NUMBER, epoch; UI does new Date(...))
+PCT FIELD       = <window>.utilization  (NUMBER; observed as a PERCENTAGE, e.g. 2.0 = 2%)
+RESET FIELD     = <window>.resets_at    (RFC3339 STRING, e.g. "2026-06-26T14:40:00.997918+00:00")
 AUTH HEADER     = Authorization: Bearer <token>
 ```
 
-Evidence from the binary: `:{used_percentage:R.five_hour.utilization*100,resets_at:R.five_hour…}` and
-`Vs.get("/api/oauth/usage",{timeout:5000,headers:{"Content-Type":"application/json"},refreshOAuth:!0})`.
-
-Note: `resets_at` is numeric epoch (not RFC3339) — Task 4/5/8 carry it as a number, and the
-frontend converts (seconds vs ms detected by magnitude). The endpoint was found, so the plan-limit
-half is live-capable; if a future Claude Code version changes the shape, `parse_plan` returns None →
-`planSource: "unavailable"` and the feature degrades to status + local usage.
+**Correction (verified live, 2026-06-26):** the binary's `utilization*100` / `Number(resets_at)`
+I first read belonged to the response-*header* rate-limit path, NOT the `/api/oauth/usage` body. The
+real body returns `resets_at` as an **RFC3339 string** and `utilization` as a **percentage**. The
+first implementation guessed numeric epoch + 0..1 fraction → `parse_plan` rejected the real payload →
+`planSource: "unavailable"`. Final parser is defensive: tolerates string-or-numeric `resets_at` and
+fraction-or-percent `utilization`. Keychain read works silently because the item's ACL trusts
+`/usr/bin/security` (claude-code writes it via the same CLI). The endpoint is live-capable; on any
+future shape drift `parse_plan` returns None → degrades to status + local usage.
 
 - [ ] **Step 4: Commit the recorded findings**
 

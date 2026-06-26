@@ -40,10 +40,10 @@ pub struct ModelTokens {
 #[serde(rename_all = "camelCase")]
 pub struct PlanWindow {
     pub label: String,
-    /// 0.0..=1.0
+    /// 0.0..=1.0 (normalized fraction)
     pub pct_used: f64,
-    /// Epoch (seconds or ms — the frontend detects scale). None if absent.
-    pub resets_at: Option<f64>,
+    /// RFC3339 timestamp string (the endpoint's format). None if absent.
+    pub resets_at: Option<String>,
 }
 
 // ---- Incoming stats-cache.json mirror ----
@@ -150,41 +150,34 @@ pub async fn fetch_claude_usage(
 
 const USAGE_ENDPOINT: &str = "https://api.anthropic.com/api/oauth/usage";
 
-#[derive(Deserialize)]
-struct PlanWindowRaw {
-    #[serde(default)]
-    utilization: f64, // 0..1
-    #[serde(default)]
-    resets_at: Option<f64>, // epoch number
-}
-
-#[derive(Deserialize)]
-struct PlanRaw {
-    #[serde(default)]
-    five_hour: Option<PlanWindowRaw>,
-    #[serde(default)]
-    seven_day: Option<PlanWindowRaw>,
-    #[serde(default)]
-    seven_day_opus: Option<PlanWindowRaw>,
-}
-
-/// Parse the usage endpoint body into ordered windows. None on shape mismatch
-/// (so the caller degrades to local-only with planSource "unavailable").
+/// Parse the /api/oauth/usage body into ordered windows. Defensive against the
+/// undocumented shape: tolerates `utilization` as a fraction (0..1) OR a
+/// percentage (0..100), and `resets_at` as an RFC3339 string OR a numeric epoch.
+/// Returns None on shape mismatch (caller degrades to local-only / "unavailable").
 pub fn parse_plan(body: &str) -> Option<Vec<PlanWindow>> {
-    let raw: PlanRaw = serde_json::from_str(body).ok()?;
+    let v: serde_json::Value = serde_json::from_str(body).ok()?;
+    let obj = v.as_object()?;
     let mut out = Vec::new();
-    let mut push = |label: &str, w: Option<PlanWindowRaw>| {
-        if let Some(w) = w {
-            out.push(PlanWindow {
-                label: label.into(),
-                pct_used: w.utilization.clamp(0.0, 1.0),
-                resets_at: w.resets_at,
-            });
-        }
-    };
-    push("5-hour window", raw.five_hour);
-    push("Weekly (all)", raw.seven_day);
-    push("Weekly (Opus)", raw.seven_day_opus);
+    for (key, label) in [
+        ("five_hour", "5-hour window"),
+        ("seven_day", "Weekly (all)"),
+        ("seven_day_opus", "Weekly (Opus)"),
+    ] {
+        let Some(w) = obj.get(key) else { continue };
+        let Some(util) = w.get("utilization").and_then(|u| u.as_f64()) else { continue };
+        // utilization may be a 0..1 fraction or a 0..100 percentage.
+        let pct = if util > 1.0 { util / 100.0 } else { util };
+        let resets_at = w.get("resets_at").and_then(|r| {
+            r.as_str()
+                .map(|s| s.to_string())
+                .or_else(|| r.as_f64().map(|n| n.to_string()))
+        });
+        out.push(PlanWindow {
+            label: label.into(),
+            pct_used: pct.clamp(0.0, 1.0),
+            resets_at,
+        });
+    }
     if out.is_empty() {
         None
     } else {
@@ -308,28 +301,36 @@ mod tests {
     }
 
     #[test]
-    fn parses_plan_windows() {
+    fn parses_plan_windows_real_shape() {
+        // Real /api/oauth/usage shape: resets_at is an RFC3339 STRING and
+        // utilization is a PERCENTAGE (captured live, 2026-06-26).
         let body = r#"{
-          "five_hour": {"utilization": 0.68, "resets_at": 1782235260},
-          "seven_day": {"utilization": 0.41, "resets_at": 1782518400},
-          "seven_day_opus": {"utilization": 0.79, "resets_at": 1782518400},
+          "five_hour": {"utilization": 2.0, "resets_at": "2026-06-26T14:40:00.997918+00:00",
+                        "limit_dollars": null, "used_dollars": null, "remaining_dollars": null},
+          "seven_day": {"utilization": 41.0, "resets_at": "2026-06-30T00:00:00+00:00"},
+          "seven_day_opus": {"utilization": 79.0, "resets_at": "2026-06-30T00:00:00+00:00"},
           "overage": {"allowed": true}
         }"#;
         let w = super::parse_plan(body).expect("windows");
         assert_eq!(w.len(), 3);
         assert_eq!(w[0].label, "5-hour window");
-        assert!((w[0].pct_used - 0.68).abs() < 1e-9);
-        assert_eq!(w[0].resets_at, Some(1782235260.0));
+        assert!((w[0].pct_used - 0.02).abs() < 1e-9, "got {}", w[0].pct_used);
+        assert_eq!(w[0].resets_at.as_deref(), Some("2026-06-26T14:40:00.997918+00:00"));
         assert_eq!(w[2].label, "Weekly (Opus)");
+        assert!((w[2].pct_used - 0.79).abs() < 1e-9);
     }
 
     #[test]
-    fn plan_clamps_and_handles_missing_windows() {
-        // Only one window present, utilization out of range → clamped, others skipped.
-        let w = super::parse_plan(r#"{"five_hour": {"utilization": 1.4}}"#).expect("one");
-        assert_eq!(w.len(), 1);
-        assert_eq!(w[0].pct_used, 1.0);
-        assert_eq!(w[0].resets_at, None);
+    fn plan_normalizes_scale_and_handles_missing() {
+        // Fraction scale (<=1.0) passes through unchanged.
+        let frac = super::parse_plan(r#"{"five_hour": {"utilization": 0.68, "resets_at": "x"}}"#)
+            .expect("one");
+        assert_eq!(frac.len(), 1);
+        assert!((frac[0].pct_used - 0.68).abs() < 1e-9);
+        // Percentage over 100 clamps to 1.0; missing resets_at → None.
+        let over = super::parse_plan(r#"{"five_hour": {"utilization": 150.0}}"#).expect("over");
+        assert_eq!(over[0].pct_used, 1.0);
+        assert_eq!(over[0].resets_at, None);
         // No recognizable windows → None.
         assert!(super::parse_plan(r#"{"unrelated": 1}"#).is_none());
     }

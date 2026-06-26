@@ -97,8 +97,8 @@ export interface LocalUsage {
   sessions: number;
   messages: number;
 }
-/** resetsAt is a numeric epoch (seconds or ms — the UI detects scale). */
-export interface PlanWindow { label: string; pctUsed: number; resetsAt: number | null; }
+/** resetsAt is an RFC3339 timestamp string (the endpoint's format). */
+export interface PlanWindow { label: string; pctUsed: number; resetsAt: string | null; }
 export interface ClaudeUsage {
   local: LocalUsage;
   plan: PlanWindow[] | null;
