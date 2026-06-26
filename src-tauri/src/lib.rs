@@ -6,6 +6,7 @@
 
 mod bridge;
 mod claude_status;
+mod claude_usage;
 mod fsops;
 mod git;
 mod hooks;
@@ -337,6 +338,7 @@ pub fn run() {
         .manage(Arc::new(PtyManager::new()))
         .manage(Store::new())
         .manage(Arc::new(HookState::default()))
+        .manage(Arc::new(claude_usage::ClaudeAuth::default()))
         .setup(|app| {
             let hook_state = app.state::<Arc<HookState>>().inner().clone();
             hooks::start(app.handle().clone(), hook_state);
@@ -369,6 +371,7 @@ pub fn run() {
             notify_user,
             open_in_vscode,
             claude_status::fetch_claude_status,
+            claude_usage::fetch_claude_usage,
         ])
         .build(tauri::generate_context!())
         .expect("error while building Conduit")
