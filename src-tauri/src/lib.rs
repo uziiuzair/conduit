@@ -198,6 +198,9 @@ fn claude_title(prompt: &str) -> Option<String> {
     let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
     let mut child = Command::new(&shell)
         .args(["-i", "-l", "-c", "claude -p --model haiku"])
+        // See pty.rs: strip the package-manager-injected `npm_config_prefix` so nvm
+        // initializes and `claude` is on PATH even when Conduit was launched via pnpm.
+        .env_remove("npm_config_prefix")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
