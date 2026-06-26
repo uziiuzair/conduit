@@ -3,7 +3,13 @@ import { useStore } from "../store";
 import { indicatorMeta, fmtTokens } from "./ClaudeStatusPill";
 import type { PlanWindow } from "../store";
 
+// Component names carry parenthetical hosts (e.g. "Claude API (api.anthropic.com)"),
+// so rank by prefix, not exact match.
 const PRIORITY = ["Claude Code", "Claude API", "claude.ai"];
+function priorityRank(name: string): number {
+  const i = PRIORITY.findIndex((p) => name.startsWith(p));
+  return i === -1 ? 99 : i;
+}
 
 function componentDotClass(status: string): string {
   if (status === "operational") return "ok";
@@ -51,11 +57,9 @@ export function ClaudePopover() {
 
   const meta = indicatorMeta(status?.indicator);
 
-  const components = [...(status?.components ?? [])].sort((a, b) => {
-    const ia = PRIORITY.indexOf(a.name);
-    const ib = PRIORITY.indexOf(b.name);
-    return (ia === -1 ? 99 : ia) - (ib === -1 ? 99 : ib);
-  });
+  const components = [...(status?.components ?? [])].sort(
+    (a, b) => priorityRank(a.name) - priorityRank(b.name),
+  );
 
   const onConnect = async () => {
     setConnecting(true);
