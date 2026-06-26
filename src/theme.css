@@ -1404,3 +1404,21 @@ button {
   color: var(--text-mid); margin-bottom: 4px;
 }
 .claude-usage-panel .claude-connect-btn { margin-top: 6px; padding: 5px; font-size: 11px; }
+
+/* ---- Claude service-status warning banner (sidebar top, only when degraded) ---- */
+.claude-warning {
+  display: flex; align-items: center; gap: 6px;
+  margin: 6px 8px 2px; padding: 6px 9px; border-radius: 6px;
+  font-size: 11px; line-height: 1.3; text-decoration: none; color: inherit; cursor: pointer;
+}
+.claude-warning.minor {
+  background: color-mix(in srgb, var(--amber) 18%, transparent);
+  border: 1px solid color-mix(in srgb, var(--amber) 45%, transparent);
+}
+.claude-warning.critical {
+  background: color-mix(in srgb, var(--red) 18%, transparent);
+  border: 1px solid color-mix(in srgb, var(--red) 50%, transparent);
+}
+.claude-warning:hover { filter: brightness(1.12); }
+.claude-warning-icon { flex-shrink: 0; }
+.claude-warning-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
