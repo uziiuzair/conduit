@@ -1366,7 +1366,7 @@ button {
 .claude-pill-usage { opacity: 0.8; font-variant-numeric: tabular-nums; }
 
 .claude-popover {
-  position: absolute; bottom: calc(100% + 6px); right: 0; z-index: 50;
+  position: absolute; bottom: calc(100% + 6px); left: 0; z-index: 1000;
   width: 280px; padding: 10px; border-radius: 8px;
   background: var(--panel-bg); border: 1px solid color-mix(in srgb, var(--accent) 22%, transparent);
   box-shadow: 0 8px 24px rgba(0,0,0,0.35); font-size: 12px;
