@@ -5,6 +5,7 @@
 //! and exposes them to the React frontend as Tauri commands.
 
 mod bridge;
+mod claude_status;
 mod fsops;
 mod git;
 mod hooks;
@@ -367,6 +368,7 @@ pub fn run() {
             read_file,
             notify_user,
             open_in_vscode,
+            claude_status::fetch_claude_status,
         ])
         .build(tauri::generate_context!())
         .expect("error while building Conduit")
