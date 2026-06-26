@@ -1391,3 +1391,16 @@ button {
 }
 .claude-connect-btn:hover { background: color-mix(in srgb, var(--accent) 24%, transparent); }
 .claude-connect-btn:disabled { opacity: 0.6; cursor: default; }
+
+/* ---- Claude usage panel (persistent, above the add-bar) ---- */
+.claude-usage-panel {
+  padding: 8px 12px 10px;
+  border-top: 1px solid color-mix(in srgb, var(--accent) 12%, transparent);
+  font-size: 11.5px;
+  display: flex; flex-direction: column; gap: 2px;
+}
+.claude-usage-head {
+  font-size: 9.5px; text-transform: uppercase; letter-spacing: 0.04em;
+  color: var(--text-mid); margin-bottom: 4px;
+}
+.claude-usage-panel .claude-connect-btn { margin-top: 6px; padding: 5px; font-size: 11px; }
