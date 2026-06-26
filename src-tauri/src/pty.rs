@@ -127,6 +127,12 @@ impl PtyManager {
         cmd.cwd(&working_directory);
         cmd.env("TERM", "xterm-256color");
         cmd.env("COLORTERM", "truecolor");
+        // Launching Conduit via a package manager (e.g. `pnpm tauri dev`) leaks
+        // `npm_config_prefix` into our env; nvm then refuses to initialize in the
+        // login shell ("not compatible with the npm_config_prefix environment
+        // variable") and `claude` falls off PATH. Strip it from the child env so the
+        // shell's nvm works regardless of how Conduit itself was launched.
+        cmd.env_remove("npm_config_prefix");
         if !shell_only {
             cmd.env("CONDUIT_SESSION_ID", &session_id);
             cmd.env("CONDUIT_HOOK_PORT", hook_port.to_string());
