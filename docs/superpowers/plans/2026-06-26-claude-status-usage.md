@@ -69,17 +69,24 @@ Expected: an endpoint path (e.g. `/api/oauth/usage` or similar) and a cluster of
 
 - [ ] **Step 3: Record findings in this plan**
 
-Fill these in from Step 2 (used verbatim by Task 4):
+**RESOLVED (2026-06-26, claude-code 2.1.186 native binary):**
 
 ```
-USAGE_ENDPOINT  = <full https URL, or "UNKNOWN" if not found>
-WINDOW FIELDS   = <e.g. five_hour / seven_day / seven_day_opus objects>
-PCT FIELD       = <e.g. utilization (0..1) or used/limit pair>
-RESET FIELD     = <e.g. resets_at (RFC3339) or seconds-until-reset>
-AUTH HEADER     = Authorization: Bearer <token>   (assume unless bundle shows otherwise)
+USAGE_ENDPOINT  = https://api.anthropic.com/api/oauth/usage   (GET, "fetchUtilization", refreshOAuth)
+WINDOW FIELDS   = top-level keys: five_hour, seven_day, seven_day_opus
+                  (also present: seven_day_sonnet, seven_day_oauth_apps, overage — ignored)
+PCT FIELD       = <window>.utilization  (NUMBER, 0..1; UI does utilization*100)
+RESET FIELD     = <window>.resets_at    (NUMBER, epoch; UI does new Date(...))
+AUTH HEADER     = Authorization: Bearer <token>
 ```
 
-If `USAGE_ENDPOINT = UNKNOWN`: the plan-limit half ships as permanently "unavailable" (Task 4 still builds the connect plumbing and returns `planSource: "unavailable"`), and status + local usage carry the feature. **This is an acceptable outcome** — the design is resilient by construction.
+Evidence from the binary: `:{used_percentage:R.five_hour.utilization*100,resets_at:R.five_hour…}` and
+`Vs.get("/api/oauth/usage",{timeout:5000,headers:{"Content-Type":"application/json"},refreshOAuth:!0})`.
+
+Note: `resets_at` is numeric epoch (not RFC3339) — Task 4/5/8 carry it as a number, and the
+frontend converts (seconds vs ms detected by magnitude). The endpoint was found, so the plan-limit
+half is live-capable; if a future Claude Code version changes the shape, `parse_plan` returns None →
+`planSource: "unavailable"` and the feature degrades to status + local usage.
 
 - [ ] **Step 4: Commit the recorded findings**
 
@@ -566,14 +573,14 @@ Use the `USAGE_ENDPOINT` and field names recorded in Task 1. If Task 1 found `UN
 In `claude_usage.rs`, add a `parse_plan` that maps the Task-1 payload shape into `Vec<PlanWindow>`. Example shape (ADJUST field names to Task 1 findings; this models `utilization` 0..1 + `resets_at`):
 
 ```rust
-const USAGE_ENDPOINT: &str = "<USAGE_ENDPOINT from Task 1, or empty string if UNKNOWN>";
+const USAGE_ENDPOINT: &str = "https://api.anthropic.com/api/oauth/usage";
 
 #[derive(Deserialize)]
 struct PlanWindowRaw {
     #[serde(default)]
-    utilization: f64,
+    utilization: f64,        // 0..1
     #[serde(default)]
-    resets_at: Option<String>,
+    resets_at: Option<f64>,  // epoch number
 }
 
 #[derive(Deserialize)]
