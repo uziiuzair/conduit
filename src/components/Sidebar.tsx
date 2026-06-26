@@ -23,6 +23,8 @@ import {
   CircleFilledIcon,
 } from "./Icons";
 import { ThemeSwitcher } from "./ThemeSwitcher";
+import { ClaudeStatusPill } from "./ClaudeStatusPill";
+import { ClaudeUsagePanel } from "./ClaudeUsagePanel";
 
 async function deleteSession(
   projects: Project[],
@@ -82,11 +84,13 @@ export function Sidebar() {
           <ProjectBlock key={p.id} project={p} />
         ))}
       </div>
+      <ClaudeUsagePanel />
       <div className="add-bar">
         <button onClick={pickProject}>
           <FolderPlusIcon size={12} />
           <span>Add Project</span>
         </button>
+        <ClaudeStatusPill />
         <ThemeSwitcher />
       </div>
       <SessionContextMenu />

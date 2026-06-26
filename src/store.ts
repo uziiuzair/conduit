@@ -79,6 +79,40 @@ export interface ContextMenuState {
 export type TopTab = "files" | "changes" | "todos";
 export type BottomTab = "terminal" | "git";
 
+// ---- Claude ambient (status + usage) — mirror Rust serde camelCase ----
+export interface StatusComponent { name: string; status: string; }
+export interface StatusIncident { name: string; status: string; impact: string; shortlink: string; }
+export interface ClaudeStatus {
+  indicator: "none" | "minor" | "major" | "critical" | "unknown";
+  description: string;
+  components: StatusComponent[];
+  incidents: StatusIncident[];
+  ok: boolean;
+}
+export interface ModelTokens { model: string; tokens: number; }
+export interface LocalUsage {
+  date: string;
+  tokensByModel: ModelTokens[];
+  totalTokens: number;
+  sessions: number;
+  messages: number;
+}
+/** resetsAt is an RFC3339 timestamp string (the endpoint's format). */
+export interface PlanWindow { label: string; pctUsed: number; resetsAt: string | null; }
+export interface ClaudeUsage {
+  local: LocalUsage;
+  plan: PlanWindow[] | null;
+  planSource: "live" | "unavailable" | "disconnected";
+}
+
+const PLAN_CONNECTED_KEY = "conduit.planConnected";
+export function readPlanConnected(): boolean {
+  try { return localStorage.getItem(PLAN_CONNECTED_KEY) === "1"; } catch { return false; }
+}
+function writePlanConnected(v: boolean): void {
+  try { localStorage.setItem(PLAN_CONNECTED_KEY, v ? "1" : "0"); } catch { /* quota — non-fatal */ }
+}
+
 // ---- helpers ----
 function uid(): string {
   try {
@@ -210,6 +244,10 @@ interface AppState {
   themePref: ThemePref;
   activeThemeId: ThemeId;
 
+  claudeStatus: ClaudeStatus | null;
+  claudeUsage: ClaudeUsage | null;
+  planConnected: boolean;
+
   load: () => Promise<void>;
   addProject: (path: string) => Promise<void>;
   removeProject: (id: string) => Promise<void>;
@@ -246,6 +284,10 @@ interface AppState {
   setCompacting: (id: string, compacting: boolean) => void;
   setThemePref: (pref: ThemePref) => void;
   applySystemDark: (dark: boolean) => void;
+
+  refreshClaudeStatus: () => Promise<void>;
+  refreshClaudeUsage: () => Promise<void>;
+  connectPlanUsage: () => Promise<boolean>;
 }
 
 export const useStore = create<AppState>((set, get) => {
@@ -277,6 +319,9 @@ export const useStore = create<AppState>((set, get) => {
     selectedProjectId: null,
     layouts: {},
     live: {},
+    claudeStatus: null,
+    claudeUsage: null,
+    planConnected: readPlanConnected(),
     menu: null,
     editingSessionId: null,
     homeDir: null,
@@ -475,6 +520,34 @@ export const useStore = create<AppState>((set, get) => {
       const id = resolveThemeId(pref, systemPrefersDark());
       applyTheme(id);
       set({ themePref: pref, activeThemeId: id });
+    },
+
+    refreshClaudeStatus: async () => {
+      try {
+        const s = await invoke<ClaudeStatus>("fetch_claude_status");
+        set({ claudeStatus: s });
+      } catch { /* fail-open: keep last-known */ }
+    },
+
+    refreshClaudeUsage: async () => {
+      try {
+        const u = await invoke<ClaudeUsage>("fetch_claude_usage");
+        set({ claudeUsage: u });
+      } catch { /* fail-open: keep last-known */ }
+    },
+
+    connectPlanUsage: async () => {
+      try {
+        const ok = await invoke<boolean>("connect_claude_plan_usage");
+        writePlanConnected(ok);
+        set({ planConnected: ok });
+        if (ok) await get().refreshClaudeUsage();
+        return ok;
+      } catch {
+        writePlanConnected(false);
+        set({ planConnected: false });
+        return false;
+      }
     },
 
     applySystemDark: (dark) => {
