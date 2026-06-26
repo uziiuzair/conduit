@@ -39,6 +39,11 @@ exactly as they do in a normal terminal.
 - **Branch-lane git graph**, a **Changes** view, and a per-session plain terminal.
 - **Live status from Claude Code hooks** — status dots (running / done / needs-you),
   a live to-dos list, and native notifications.
+- **Claude service status + usage** — an ambient sidebar readout: a status dot from
+  [status.claude.com](https://status.claude.com) (click for component & incident detail,
+  with a **warning banner** when something's degraded), plus a usage panel showing today's
+  local token use and — once you connect — your subscription **plan limits** (5-hour &
+  weekly windows).
 - **Auto-named sessions** (a tiny `claude -p` call titles a session from its first
   prompt), **Open in VS Code**, and a warm Tokyo-Night-style theme.
 
@@ -101,6 +106,8 @@ to attribute them to the app on a signed build, switch the macOS branch of
 | PTY manager — spawn / write / resize / keep-alive / re-attach | `src-tauri/src/pty.rs`                              |
 | Project/session store + per-project layout persistence (JSON) | `src-tauri/src/store.rs`                            |
 | Claude Code hook HTTP listener + installer                    | `src-tauri/src/hooks.rs`                            |
+| Claude **service** status (status.claude.com)                 | `src-tauri/src/claude_status.rs`                   |
+| Claude **usage** — local consumption + plan limits            | `src-tauri/src/claude_usage.rs`                    |
 | Git metadata + branch graph data                              | `src-tauri/src/git.rs`                              |
 | Read-only filesystem (Files tab + viewer)                     | `src-tauri/src/fsops.rs`                            |
 | Notifications                                                 | `src-tauri/src/notify.rs`                           |

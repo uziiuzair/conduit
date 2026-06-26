@@ -25,6 +25,7 @@ import {
 import { ThemeSwitcher } from "./ThemeSwitcher";
 import { ClaudeStatusPill } from "./ClaudeStatusPill";
 import { ClaudeUsagePanel } from "./ClaudeUsagePanel";
+import { ClaudeStatusWarning } from "./ClaudeStatusWarning";
 
 async function deleteSession(
   projects: Project[],
@@ -78,6 +79,7 @@ export function Sidebar() {
   return (
     <div className="sidebar">
       <div className="drag-region" data-tauri-drag-region />
+      <ClaudeStatusWarning />
       <div className="sidebar-scroll">
         <div className="section-label">Projects</div>
         {projects.map((p) => (
