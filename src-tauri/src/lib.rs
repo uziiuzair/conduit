@@ -5,6 +5,8 @@
 //! and exposes them to the React frontend as Tauri commands.
 
 mod bridge;
+mod claude_status;
+mod claude_usage;
 mod fsops;
 mod git;
 mod hooks;
@@ -196,6 +198,9 @@ fn claude_title(prompt: &str) -> Option<String> {
     let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
     let mut child = Command::new(&shell)
         .args(["-i", "-l", "-c", "claude -p --model haiku"])
+        // See pty.rs: strip the package-manager-injected `npm_config_prefix` so nvm
+        // initializes and `claude` is on PATH even when Conduit was launched via pnpm.
+        .env_remove("npm_config_prefix")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -336,6 +341,7 @@ pub fn run() {
         .manage(Arc::new(PtyManager::new()))
         .manage(Store::new())
         .manage(Arc::new(HookState::default()))
+        .manage(Arc::new(claude_usage::ClaudeAuth::default()))
         .setup(|app| {
             let hook_state = app.state::<Arc<HookState>>().inner().clone();
             hooks::start(app.handle().clone(), hook_state);
@@ -367,6 +373,9 @@ pub fn run() {
             read_file,
             notify_user,
             open_in_vscode,
+            claude_status::fetch_claude_status,
+            claude_usage::fetch_claude_usage,
+            claude_usage::connect_claude_plan_usage,
         ])
         .build(tauri::generate_context!())
         .expect("error while building Conduit")
