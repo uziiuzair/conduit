@@ -372,6 +372,7 @@ pub fn run() {
             open_in_vscode,
             claude_status::fetch_claude_status,
             claude_usage::fetch_claude_usage,
+            claude_usage::connect_claude_plan_usage,
         ])
         .build(tauri::generate_context!())
         .expect("error while building Conduit")

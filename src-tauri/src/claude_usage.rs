@@ -141,9 +141,135 @@ pub async fn fetch_claude_usage(
     Ok(usage)
 }
 
-/// Placeholder until the plan-limit section lands: no token → "disconnected".
-fn fetch_plan(_token: Option<String>) -> (Option<Vec<PlanWindow>>, String) {
-    (None, "disconnected".into())
+// ---- Plan limits (best-effort) ----
+//
+// Endpoint + payload shape were derived from the claude-code 2.1.186 binary
+// (see docs/superpowers/plans/2026-06-26-claude-status-usage.md, Task 1):
+//   GET https://api.anthropic.com/api/oauth/usage  ("fetchUtilization")
+//   body: { five_hour, seven_day, seven_day_opus, ... } each {utilization 0..1, resets_at <epoch>}
+
+const USAGE_ENDPOINT: &str = "https://api.anthropic.com/api/oauth/usage";
+
+#[derive(Deserialize)]
+struct PlanWindowRaw {
+    #[serde(default)]
+    utilization: f64, // 0..1
+    #[serde(default)]
+    resets_at: Option<f64>, // epoch number
+}
+
+#[derive(Deserialize)]
+struct PlanRaw {
+    #[serde(default)]
+    five_hour: Option<PlanWindowRaw>,
+    #[serde(default)]
+    seven_day: Option<PlanWindowRaw>,
+    #[serde(default)]
+    seven_day_opus: Option<PlanWindowRaw>,
+}
+
+/// Parse the usage endpoint body into ordered windows. None on shape mismatch
+/// (so the caller degrades to local-only with planSource "unavailable").
+pub fn parse_plan(body: &str) -> Option<Vec<PlanWindow>> {
+    let raw: PlanRaw = serde_json::from_str(body).ok()?;
+    let mut out = Vec::new();
+    let mut push = |label: &str, w: Option<PlanWindowRaw>| {
+        if let Some(w) = w {
+            out.push(PlanWindow {
+                label: label.into(),
+                pct_used: w.utilization.clamp(0.0, 1.0),
+                resets_at: w.resets_at,
+            });
+        }
+    };
+    push("5-hour window", raw.five_hour);
+    push("Weekly (all)", raw.seven_day);
+    push("Weekly (Opus)", raw.seven_day_opus);
+    if out.is_empty() {
+        None
+    } else {
+        Some(out)
+    }
+}
+
+/// Call the usage endpoint with the cached token. Returns (windows, planSource).
+fn fetch_plan(token: Option<String>) -> (Option<Vec<PlanWindow>>, String) {
+    let token = match token {
+        Some(t) if !t.is_empty() => t,
+        _ => return (None, "disconnected".into()),
+    };
+    let out = Command::new("curl")
+        .args([
+            "-s",
+            "--max-time",
+            "8",
+            "-H",
+            &format!("Authorization: Bearer {token}"),
+            USAGE_ENDPOINT,
+        ])
+        .output();
+    match out {
+        Ok(o) if o.status.success() => {
+            let body = String::from_utf8_lossy(&o.stdout);
+            match parse_plan(&body) {
+                Some(windows) => (Some(windows), "live".into()),
+                None => (None, "unavailable".into()),
+            }
+        }
+        _ => (None, "unavailable".into()),
+    }
+}
+
+/// Read the Claude Code OAuth access token from the macOS login Keychain.
+/// `-w` prints only the secret (a JSON blob). This triggers the macOS allow
+/// prompt; it runs only on explicit user action (the "Connect plan usage" button).
+fn read_keychain_token() -> Option<String> {
+    let out = Command::new("security")
+        .args(["find-generic-password", "-s", "Claude Code-credentials", "-w"])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let raw = String::from_utf8_lossy(&out.stdout);
+    let trimmed = raw.trim();
+    // The blob is JSON like {"claudeAiOauth":{"accessToken":"...", ...}}.
+    if let Ok(v) = serde_json::from_str::<serde_json::Value>(trimmed) {
+        if let Some(tok) = v
+            .get("claudeAiOauth")
+            .and_then(|o| o.get("accessToken"))
+            .and_then(|t| t.as_str())
+        {
+            return Some(tok.to_string());
+        }
+    }
+    // Fallback: some versions may store the bare token string.
+    if trimmed.starts_with("sk-") || trimmed.starts_with("eyJ") {
+        Some(trimmed.to_string())
+    } else {
+        None
+    }
+}
+
+/// Tauri command: connect plan usage. Reads the Keychain token (macOS prompt),
+/// caches it in memory, and returns whether a live plan fetch then succeeded.
+#[tauri::command]
+pub async fn connect_claude_plan_usage(
+    auth: tauri::State<'_, std::sync::Arc<ClaudeAuth>>,
+) -> Result<bool, String> {
+    let auth = auth.inner().clone();
+    let ok = tauri::async_runtime::spawn_blocking(move || {
+        let token = match read_keychain_token() {
+            Some(t) => t,
+            None => return false,
+        };
+        *auth.token.lock().unwrap_or_else(|e| e.into_inner()) = Some(token.clone());
+        let (plan, _src) = fetch_plan(Some(token));
+        plan.is_some()
+    })
+    .await
+    .map_err(|e| e.to_string())?;
+    Ok(ok)
 }
 
 #[cfg(test)]
@@ -179,5 +305,32 @@ mod tests {
         let u = parse_stats_cache("nope");
         assert_eq!(u.total_tokens, 0);
         assert!(u.tokens_by_model.is_empty());
+    }
+
+    #[test]
+    fn parses_plan_windows() {
+        let body = r#"{
+          "five_hour": {"utilization": 0.68, "resets_at": 1782235260},
+          "seven_day": {"utilization": 0.41, "resets_at": 1782518400},
+          "seven_day_opus": {"utilization": 0.79, "resets_at": 1782518400},
+          "overage": {"allowed": true}
+        }"#;
+        let w = super::parse_plan(body).expect("windows");
+        assert_eq!(w.len(), 3);
+        assert_eq!(w[0].label, "5-hour window");
+        assert!((w[0].pct_used - 0.68).abs() < 1e-9);
+        assert_eq!(w[0].resets_at, Some(1782235260.0));
+        assert_eq!(w[2].label, "Weekly (Opus)");
+    }
+
+    #[test]
+    fn plan_clamps_and_handles_missing_windows() {
+        // Only one window present, utilization out of range → clamped, others skipped.
+        let w = super::parse_plan(r#"{"five_hour": {"utilization": 1.4}}"#).expect("one");
+        assert_eq!(w.len(), 1);
+        assert_eq!(w[0].pct_used, 1.0);
+        assert_eq!(w[0].resets_at, None);
+        // No recognizable windows → None.
+        assert!(super::parse_plan(r#"{"unrelated": 1}"#).is_none());
     }
 }
