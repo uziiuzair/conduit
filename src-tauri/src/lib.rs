@@ -70,6 +70,7 @@ fn pty_spawn(
         shell_only,
         worktree_arg,
         settings_path,
+        crate::agent::AgentId::Claude,
         on_event,
     )
 }
