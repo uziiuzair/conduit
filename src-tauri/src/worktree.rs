@@ -21,11 +21,7 @@ pub fn slug(name: &str, uid: &str) -> String {
         }
     }
     let trimmed = base.trim_matches('-');
-    let base = if trimmed.is_empty() {
-        "session"
-    } else {
-        trimmed
-    };
+    let base = if trimmed.is_empty() { "session" } else { trimmed };
     // uid is always an ASCII UUID, so byte-slicing here can't split a multibyte char.
     let short = &uid[..uid.len().min(6)];
     format!("{base}-{short}")
@@ -148,7 +144,8 @@ mod tests {
     fn fresh_repo(tag: &str) -> std::path::PathBuf {
         static N: AtomicU32 = AtomicU32::new(0);
         let n = N.fetch_add(1, Ordering::SeqCst);
-        let dir = std::env::temp_dir().join(format!("conduit_wt_{tag}_{}_{n}", std::process::id()));
+        let dir = std::env::temp_dir()
+            .join(format!("conduit_wt_{tag}_{}_{n}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         git(&["init", "-q"], &dir);
@@ -164,10 +161,7 @@ mod tests {
     fn is_dirty_reflects_worktree_state() {
         let repo = fresh_repo("dirty");
         let wt = worktree_path(repo.to_str().unwrap(), "feat");
-        git(
-            &["worktree", "add", "-q", &wt, "-b", "worktree-feat"],
-            &repo,
-        );
+        git(&["worktree", "add", "-q", &wt, "-b", "worktree-feat"], &repo);
 
         assert!(!is_dirty(&wt), "fresh worktree should be clean");
         fs::write(std::path::Path::new(&wt).join("new.txt"), "x").unwrap();
@@ -196,33 +190,21 @@ mod tests {
     fn remove_deletes_clean_worktree() {
         let repo = fresh_repo("remove");
         let wt = worktree_path(repo.to_str().unwrap(), "gone");
-        git(
-            &["worktree", "add", "-q", &wt, "-b", "worktree-gone"],
-            &repo,
-        );
+        git(&["worktree", "add", "-q", &wt, "-b", "worktree-gone"], &repo);
         assert!(std::path::Path::new(&wt).exists());
 
         remove(repo.to_str().unwrap(), &wt, false).expect("clean remove should succeed");
-        assert!(
-            !std::path::Path::new(&wt).exists(),
-            "worktree dir should be gone"
-        );
+        assert!(!std::path::Path::new(&wt).exists(), "worktree dir should be gone");
     }
 
     #[test]
     fn remove_force_discards_dirty_worktree() {
         let repo = fresh_repo("force");
         let wt = worktree_path(repo.to_str().unwrap(), "dirty");
-        git(
-            &["worktree", "add", "-q", &wt, "-b", "worktree-dirty"],
-            &repo,
-        );
+        git(&["worktree", "add", "-q", &wt, "-b", "worktree-dirty"], &repo);
         fs::write(std::path::Path::new(&wt).join("new.txt"), "x").unwrap();
 
-        assert!(
-            remove(repo.to_str().unwrap(), &wt, false).is_err(),
-            "dirty remove without force should fail"
-        );
+        assert!(remove(repo.to_str().unwrap(), &wt, false).is_err(), "dirty remove without force should fail");
         remove(repo.to_str().unwrap(), &wt, true).expect("force remove should succeed");
         assert!(!std::path::Path::new(&wt).exists());
     }

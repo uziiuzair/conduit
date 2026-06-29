@@ -24,18 +24,9 @@ use crate::pty::PtyManager;
 #[serde(tag = "type", rename_all = "lowercase")]
 pub enum ClientMsg {
     List,
-    Attach {
-        session_id: String,
-    },
-    Input {
-        session_id: String,
-        data: String,
-    },
-    Resize {
-        session_id: String,
-        cols: u16,
-        rows: u16,
-    },
+    Attach { session_id: String },
+    Input { session_id: String, data: String },
+    Resize { session_id: String, cols: u16, rows: u16 },
 }
 
 /// Parse one client text frame. None on malformed JSON or an unknown `type`.
@@ -113,11 +104,7 @@ fn handle_conn(stream: TcpStream, pty: Arc<PtyManager>) {
                 Some(ClientMsg::Input { session_id, data }) => {
                     let _ = pty.write(&session_id, &data);
                 }
-                Some(ClientMsg::Resize {
-                    session_id,
-                    cols,
-                    rows,
-                }) => {
+                Some(ClientMsg::Resize { session_id, cols, rows }) => {
                     let _ = pty.resize(&session_id, cols, rows);
                 }
                 None => {}
@@ -171,19 +158,14 @@ mod tests {
 
     #[test]
     fn parses_list() {
-        assert_eq!(
-            parse_client_msg(r#"{"type":"list"}"#),
-            Some(ClientMsg::List)
-        );
+        assert_eq!(parse_client_msg(r#"{"type":"list"}"#), Some(ClientMsg::List));
     }
 
     #[test]
     fn parses_attach() {
         assert_eq!(
             parse_client_msg(r#"{"type":"attach","session_id":"s1"}"#),
-            Some(ClientMsg::Attach {
-                session_id: "s1".into()
-            })
+            Some(ClientMsg::Attach { session_id: "s1".into() })
         );
     }
 
@@ -191,10 +173,7 @@ mod tests {
     fn parses_input_raw_string() {
         assert_eq!(
             parse_client_msg(r#"{"type":"input","session_id":"s1","data":"ls\r"}"#),
-            Some(ClientMsg::Input {
-                session_id: "s1".into(),
-                data: "ls\r".into()
-            })
+            Some(ClientMsg::Input { session_id: "s1".into(), data: "ls\r".into() })
         );
     }
 
@@ -202,11 +181,7 @@ mod tests {
     fn parses_resize() {
         assert_eq!(
             parse_client_msg(r#"{"type":"resize","session_id":"s1","cols":80,"rows":24}"#),
-            Some(ClientMsg::Resize {
-                session_id: "s1".into(),
-                cols: 80,
-                rows: 24
-            })
+            Some(ClientMsg::Resize { session_id: "s1".into(), cols: 80, rows: 24 })
         );
     }
 
