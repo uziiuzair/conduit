@@ -51,23 +51,25 @@ the **GA4 Measurement Protocol** (a plain JSON `POST`), which fits the existing
 | Credentials | **Hardcoded constants in source** (accepted: extractable/spoofable) |
 | Anonymity | Strict allowlist; random UUIDv4 `client_id`, never PII-derived |
 
-## ⏸️ Parked decisions (await explicit user go-ahead)
+## ✅ Resolved decisions (was parked; settled after Settings/onboarding landed)
 
-These are isolated to a single seam so the rest is fully implementable now. They
-ship as **clearly-marked seams with safe defaults**; wiring the real sources in
-later is a one-place change.
+Originally isolated to a single seam so the rest was implementable first. Both
+were resolved once the Settings panel + onboarding wizard merged to `main`:
 
-1. **Where `opt_out` (and the persisted `client_id`) live** — the settings-panel
-   agent may own a settings store (e.g. migrate `state.json` to
-   `{projects, settings}`). Until signaled, `client_id` persists in its own
-   minimal file (non-committal) and `is_opted_out()` is a marked stub returning
-   the safe default.
-2. **Consent presentation** — onboarding copy + default ON vs OFF. Until
-   signaled, the engine reads the `opt_out` flag but its UI/source is deferred.
+1. **Where `opt_out` lives** — the settings work persists app settings in the
+   **frontend (localStorage + Zustand)**, not Rust's `state.json`. So `opt_out`
+   follows that pattern: `conduit.telemetryOptOut` localStorage key + Zustand
+   `telemetryOptOut`/`setTelemetryOptOut`, mirroring `defaultAgent`. The frontend
+   owns the consent gate (`useTelemetry(optedOut)` — no ping while opted out), so
+   Rust needs no change; `is_opted_out()` stays as a redundant safe default. The
+   anonymous `client_id` keeps persisting in its own Rust-side file.
+2. **Consent presentation** — **default ON (opt-out)**. Surfaced via a reusable
+   `TelemetryToggle` in **Settings ▸ Privacy** and on the **final onboarding
+   step**, framed positively ("Share anonymous usage statistics").
 
-> While parked, **dev-build suppression guarantees nothing is sent during
-> development** regardless of the default, so a default-on stub is harmless until
-> a release build is intentionally cut with real credentials.
+> **Dev-build suppression still guarantees nothing is sent during development**
+> regardless of the toggle, so the default-on choice is harmless until a release
+> build is cut with real credentials.
 
 ## Architecture
 
