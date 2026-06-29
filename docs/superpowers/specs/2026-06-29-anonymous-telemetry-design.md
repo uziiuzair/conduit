@@ -101,17 +101,22 @@ src-tauri/src/telemetry.rs   (identity + creds + payload + transport)
 - **Endpoint:** `POST https://www.google-analytics.com/mp/collect?measurement_id=<MID>&api_secret=<SECRET>`
 - **Validation/debug endpoint (manual verification):**
   `https://www.google-analytics.com/debug/mp/collect`
-- **Two GA4-idiomatic events:**
-  - `session_start` — at launch and when a new session begins.
-  - `user_engagement` — the heartbeat; `engagement_time_msec` = focused time
+- **Two CUSTOM events:**
+  - `app_open` — at launch and when a new session begins.
+  - `app_heartbeat` — the heartbeat; `engagement_time_msec` = focused time
     since the last ping.
+  - ⚠️ **Names must be non-reserved.** GA4's Measurement Protocol rejects reserved
+    names (`session_start`, `user_engagement`, `first_visit`, …) with
+    `NAME_RESERVED` — verified via `/debug/mp/collect`. DAU/MAU, Sessions, and
+    Realtime are driven by the `session_id` + `engagement_time_msec` **params**,
+    not the event name, so custom names populate all the same reports.
 - **Body shape:**
 
 ```json
 {
   "client_id": "<persistent random uuid v4>",
   "events": [{
-    "name": "user_engagement",
+    "name": "app_heartbeat",
     "params": {
       "session_id": "<per-session id>",
       "engagement_time_msec": "300000",

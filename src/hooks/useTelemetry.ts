@@ -5,7 +5,7 @@ const HEARTBEAT_MS = 5 * 60 * 1000; // ping every 5 min while focused
 const SESSION_TIMEOUT_MS = 30 * 60 * 1000; // new GA4 session after 30 min idle
 
 function send(
-  kind: "session_start" | "user_engagement",
+  kind: "app_open" | "app_heartbeat",
   sessionId: string,
   engagementMsec: number,
 ) {
@@ -34,7 +34,7 @@ export function useTelemetry(optedOut: boolean = false): void {
       const now = Date.now();
       lastActivity.current = now;
       lastPing.current = now;
-      send("session_start", sessionId.current, 1);
+      send("app_open", sessionId.current, 1);
     };
 
     const engage = () => {
@@ -46,7 +46,7 @@ export function useTelemetry(optedOut: boolean = false): void {
       const delta = now - lastPing.current;
       lastPing.current = now;
       lastActivity.current = now;
-      send("user_engagement", sessionId.current, delta);
+      send("app_heartbeat", sessionId.current, delta);
     };
 
     const tick = () => {
