@@ -169,6 +169,18 @@ impl Store {
         Some(session)
     }
 
+    /// The agent for a session id, searching all projects. Defaults to Claude for an
+    /// unknown id (back-compat / shell-only companions that were never persisted).
+    pub fn session_agent(&self, session_id: &str) -> crate::agent::AgentId {
+        let projects = self.projects.lock().unwrap_or_else(|e| e.into_inner());
+        projects
+            .iter()
+            .flat_map(|p| &p.sessions)
+            .find(|s| s.id == session_id)
+            .map(|s| s.agent)
+            .unwrap_or_default()
+    }
+
     pub fn set_layout(&self, project_id: &str, layout: ProjectLayout) {
         let mut projects = self.projects.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(p) = projects.iter_mut().find(|p| p.id == project_id) {
@@ -237,6 +249,18 @@ mod tests {
         let path = s.worktree_path.unwrap();
         assert!(path.starts_with("/repo/.claude/worktrees/"), "got {path}");
         assert!(s.branch.unwrap().starts_with("worktree-"));
+    }
+
+    #[test]
+    fn session_agent_returns_stored_agent_else_claude() {
+        let dir = temp_dir("lookup");
+        let store = Store::for_test(&dir);
+        let p = store.add_project("/repo".into());
+        let s = store
+            .add_session(&p.id, "S".into(), false, crate::agent::AgentId::Codex)
+            .unwrap();
+        assert_eq!(store.session_agent(&s.id), crate::agent::AgentId::Codex);
+        assert_eq!(store.session_agent("missing"), crate::agent::AgentId::Claude);
     }
 
     #[test]
