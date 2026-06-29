@@ -10,6 +10,7 @@ import {
   readStoredPref,
   writeStoredPref,
 } from "./themes";
+import { type AgentId, DEFAULT_AGENT } from "./agents";
 
 // ---- Types (mirror the Rust serde structs, rename_all = "camelCase") ----
 export interface Session {
@@ -18,6 +19,7 @@ export interface Session {
   useWorktree: boolean;
   worktreePath?: string | null;
   branch?: string | null;
+  agent: AgentId;
 }
 
 export type TabKind = "session" | "file";
@@ -251,7 +253,7 @@ interface AppState {
   load: () => Promise<void>;
   addProject: (path: string) => Promise<void>;
   removeProject: (id: string) => Promise<void>;
-  addSession: (projectId: string, opts?: { name?: string; useWorktree?: boolean }) => Promise<void>;
+  addSession: (projectId: string, opts?: { name?: string; useWorktree?: boolean; agent?: AgentId }) => Promise<void>;
   renameSession: (projectId: string, sessionId: string, name: string) => Promise<void>;
   removeSession: (projectId: string, sessionId: string) => Promise<void>;
 
@@ -367,7 +369,8 @@ export const useStore = create<AppState>((set, get) => {
       const project = get().projects.find((p) => p.id === projectId);
       const name = opts?.name?.trim() || `Session ${(project?.sessions.length ?? 0) + 1}`;
       const useWorktree = opts?.useWorktree ?? false;
-      const session = await invoke<Session | null>("add_session", { projectId, name, useWorktree });
+      const agent = opts?.agent ?? DEFAULT_AGENT;
+      const session = await invoke<Session | null>("add_session", { projectId, name, useWorktree, agent });
       if (!session) return;
       set((s) => ({
         projects: s.projects.map((p) =>
