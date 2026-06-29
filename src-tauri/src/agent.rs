@@ -26,6 +26,11 @@ pub trait ProviderAdapter {
     fn env_overrides(&self) -> Vec<(&'static str, &'static str)> {
         Vec::new()
     }
+    /// The lifecycle hooks this adapter installs at session spawn.
+    /// Returns None for agents that have no hooks support yet.
+    fn hooks_profile(&self) -> Option<crate::hooks::HooksProfile> {
+        None
+    }
     /// The agent command that runs after `cd <dir> &&`, including the `|| <bare>`
     /// fallback. `flags` carries already-quoted extra args (e.g. ` --worktree 'x'`).
     /// `projects_dir` is Claude's transcript store (used only by adapters that resume).
@@ -66,6 +71,9 @@ impl ProviderAdapter for ClaudeAdapter {
             format!("claude{flags} --session-id {id} || claude{flags}")
         }
     }
+    fn hooks_profile(&self) -> Option<crate::hooks::HooksProfile> {
+        Some(crate::hooks::claude_profile())
+    }
 }
 
 pub struct GeminiAdapter;
@@ -84,6 +92,23 @@ impl ProviderAdapter for GeminiAdapter {
         _flags: &str,
     ) -> String {
         "gemini || gemini".to_string()
+    }
+    fn hooks_profile(&self) -> Option<crate::hooks::HooksProfile> {
+        use crate::hooks::{HookRow, HooksProfile};
+        Some(HooksProfile {
+            config_rel_path: ".gemini/settings.json",
+            structured_todos: true,
+            rows: vec![
+                HookRow { event: "BeforeTool", matcher: None, verb: "pretool" },
+                HookRow { event: "AfterTool", matcher: Some("write_todos"), verb: "todos" },
+                HookRow { event: "AfterTool", matcher: None, verb: "tooluse" },
+                HookRow { event: "BeforeAgent", matcher: None, verb: "prompt" },
+                HookRow { event: "AfterAgent", matcher: None, verb: "stop" },
+                HookRow { event: "SessionStart", matcher: None, verb: "sessionstart" },
+                HookRow { event: "PreCompress", matcher: None, verb: "precompact" },
+                HookRow { event: "Notification", matcher: None, verb: "notification" },
+            ],
+        })
     }
 }
 
@@ -106,6 +131,21 @@ impl ProviderAdapter for CodexAdapter {
         _flags: &str,
     ) -> String {
         "codex || codex".to_string()
+    }
+    fn hooks_profile(&self) -> Option<crate::hooks::HooksProfile> {
+        use crate::hooks::{HookRow, HooksProfile};
+        Some(HooksProfile {
+            config_rel_path: ".codex/hooks.json",
+            structured_todos: false,
+            rows: vec![
+                HookRow { event: "PreToolUse", matcher: None, verb: "pretool" },
+                HookRow { event: "PostToolUse", matcher: None, verb: "tooluse" },
+                HookRow { event: "UserPromptSubmit", matcher: None, verb: "prompt" },
+                HookRow { event: "Stop", matcher: None, verb: "stop" },
+                HookRow { event: "PreCompact", matcher: None, verb: "precompact" },
+                HookRow { event: "SessionStart", matcher: None, verb: "sessionstart" },
+            ],
+        })
     }
 }
 
@@ -257,6 +297,20 @@ mod tests {
             ClaudeAdapter.env_overrides(),
             vec![("CLAUDE_CODE_ENABLE_TASKS", "0")]
         );
+    }
+
+    #[test]
+    fn codex_profile_has_no_todos_and_uses_codex_path() {
+        let p = ClaudeAdapter.hooks_profile().unwrap();
+        assert_eq!(p.config_rel_path, ".claude/settings.local.json");
+        let cp = CodexAdapter.hooks_profile().unwrap();
+        assert_eq!(cp.config_rel_path, ".codex/hooks.json");
+        assert!(!cp.structured_todos);
+        assert!(cp.rows.iter().all(|r| r.verb != "todos"), "codex has no todos event");
+        let gp = GeminiAdapter.hooks_profile().unwrap();
+        assert_eq!(gp.config_rel_path, ".gemini/settings.json");
+        assert!(gp.structured_todos);
+        assert!(gp.rows.iter().any(|r| r.event == "AfterTool" && r.verb == "tooluse"));
     }
 
     #[test]
