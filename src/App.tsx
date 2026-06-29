@@ -13,6 +13,7 @@ import { type AgentId } from "./agents";
 import { Sidebar } from "./components/Sidebar";
 import { WorkspaceCenter } from "./components/WorkspaceCenter";
 import { RightColumn } from "./components/RightColumn";
+import { Onboarding } from "./components/Onboarding";
 
 interface HookPayload {
   session: string;
@@ -26,6 +27,7 @@ export default function App() {
   const home = useStore((s) => s.homeDir);
   const load = useStore((s) => s.load);
   const loadAgents = useStore((s) => s.loadAgents);
+  const agentSetupComplete = useStore((s) => s.agentSetupComplete);
 
   useEffect(() => {
     void load();
@@ -183,6 +185,7 @@ export default function App() {
       style={{ ["--sidebar-w" as string]: `${sidebarWidth}px` }}
     >
       <Sidebar />
+      {!agentSetupComplete && <Onboarding />}
       <div
         className={`sidebar-resizer ${sidebarDragging ? "dragging" : ""}`}
         onMouseDown={startSidebarResize}
