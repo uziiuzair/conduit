@@ -1443,3 +1443,285 @@ button {
 .agent-tile .df { margin-left: auto; font-size: 8px; color: var(--accent); letter-spacing: 0.04em; }
 .agent-tile .off { margin-left: auto; font-size: 8px; color: var(--text-dim); }
 .dialog-note { font-size: 11px; color: var(--text-dim); margin: 4px 0 8px; }
+
+/* ---- Settings modal ---- */
+.dialog.settings {
+  min-width: 420px;
+  max-width: 520px;
+  width: 100%;
+  padding: 0;
+  gap: 0;
+  overflow: hidden;
+}
+
+.settings-head {
+  display: flex;
+  align-items: center;
+  gap: 0;
+  padding: 10px 14px 0;
+  border-bottom: 1px solid var(--border);
+  background: var(--panel-bg);
+  flex-shrink: 0;
+}
+
+.settings-tabs {
+  flex: 1;
+  display: flex;
+  align-items: flex-end;
+  gap: 2px;
+}
+
+.settings-tab {
+  font-size: 12px;
+  color: var(--text-dim);
+  padding: 6px 10px 8px;
+  border-bottom: 2px solid transparent;
+  cursor: default;
+}
+
+.settings-tab.on {
+  color: var(--text-bright);
+  border-bottom-color: var(--accent);
+}
+
+.settings-close {
+  font-size: 13px;
+  color: var(--text-dim);
+  padding: 4px 6px;
+  border-radius: 4px;
+  margin-bottom: 4px;
+}
+
+.settings-close:hover {
+  color: var(--text-bright);
+  background: var(--selection-bg);
+}
+
+.settings-body {
+  padding: 14px 16px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  overflow-y: auto;
+  max-height: 60vh;
+}
+
+.settings-intro {
+  font-size: 12px;
+  color: var(--text-mid);
+  line-height: 1.5;
+}
+
+/* ---- Agent detection list (shared by Settings + Onboarding) ---- */
+.agent-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.agent-list-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 10px;
+  border-radius: 7px;
+  border: 1px solid var(--border);
+  background: var(--panel-bg);
+  transition: border-color 0.1s;
+}
+
+.agent-list-row.def {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 7%, var(--panel-bg));
+}
+
+.agent-list-row.off {
+  opacity: 0.55;
+}
+
+.agent-radio {
+  width: 16px;
+  height: 16px;
+  flex-shrink: 0;
+  border-radius: 50%;
+  border: 1.5px solid var(--border);
+  background: transparent;
+  padding: 0;
+  cursor: pointer;
+  position: relative;
+  transition: border-color 0.1s;
+}
+
+.agent-list-row.def .agent-radio {
+  border-color: var(--accent);
+  background: var(--accent);
+}
+
+.agent-list-row.def .agent-radio::after {
+  content: "";
+  position: absolute;
+  inset: 3px;
+  border-radius: 50%;
+  background: var(--sidebar-bg);
+}
+
+.agent-radio:disabled {
+  cursor: not-allowed;
+  opacity: 0.4;
+}
+
+.agent-list-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.agent-list-name {
+  font-size: 12px;
+  color: var(--text-bright);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.agent-list-meta {
+  font-size: 11px;
+  color: var(--text-dim);
+  font-family: var(--mono-font);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.agent-tag {
+  font-size: 9.5px;
+  color: var(--accent);
+  letter-spacing: 0.04em;
+  padding: 2px 6px;
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+.agent-stat {
+  font-size: 10px;
+  padding: 2px 7px;
+  border-radius: 4px;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+.agent-stat.ok {
+  color: var(--green);
+  background: color-mix(in srgb, var(--green) 12%, transparent);
+}
+
+.agent-stat.no {
+  color: var(--text-dim);
+  background: var(--selection-bg);
+}
+
+.agent-rescan {
+  margin-top: 6px;
+  align-self: flex-start;
+  font-size: 11px;
+  color: var(--text-mid);
+  padding: 4px 10px;
+  border-radius: 5px;
+  border: 1px solid var(--border);
+}
+
+.agent-rescan:hover {
+  color: var(--text-bright);
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 8%, transparent);
+}
+
+.agent-list-note {
+  font-size: 11px;
+  color: var(--text-dim);
+  padding-top: 4px;
+}
+
+/* ---- Settings gear button (add-bar) ---- */
+.settings-btn {
+  width: 36px;
+  flex: 0 0 36px;
+  padding: 0;
+  border-left: 1px solid var(--border);
+  color: var(--text-mid);
+  font-size: 14px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.settings-btn:hover {
+  color: var(--text-bright);
+  background: var(--hover);
+}
+
+/* ---- Onboarding wizard ---- */
+.dialog.wizard {
+  min-width: 420px;
+  max-width: 520px;
+  width: 100%;
+  padding: 0;
+  gap: 0;
+  overflow: hidden;
+}
+
+.wizard-steps {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 10px 14px 0;
+  border-bottom: 1px solid var(--border);
+  background: var(--panel-bg);
+  flex-shrink: 0;
+}
+
+.wizard-step {
+  font-size: 12px;
+  color: var(--text-dim);
+  padding: 6px 10px 8px;
+  border-bottom: 2px solid transparent;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.wizard-step.cur {
+  color: var(--text-bright);
+  border-bottom-color: var(--accent);
+}
+
+.wizard-step.done {
+  color: var(--green);
+  border-bottom-color: transparent;
+}
+
+.wizard-step.done::before {
+  content: "✓";
+  font-size: 10px;
+}
+
+.wizard-steps .settings-close {
+  margin-left: auto;
+}
+
+.wizard-welcome {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 6px 0 4px;
+}
+
+.wizard-welcome h3 {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--text-bright);
+}
