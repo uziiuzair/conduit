@@ -99,14 +99,46 @@ impl ProviderAdapter for GeminiAdapter {
             config_rel_path: ".gemini/settings.json",
             structured_todos: true,
             rows: vec![
-                HookRow { event: "BeforeTool", matcher: None, verb: "pretool" },
-                HookRow { event: "AfterTool", matcher: Some("write_todos"), verb: "todos" },
-                HookRow { event: "AfterTool", matcher: None, verb: "tooluse" },
-                HookRow { event: "BeforeAgent", matcher: None, verb: "prompt" },
-                HookRow { event: "AfterAgent", matcher: None, verb: "stop" },
-                HookRow { event: "SessionStart", matcher: None, verb: "sessionstart" },
-                HookRow { event: "PreCompress", matcher: None, verb: "precompact" },
-                HookRow { event: "Notification", matcher: None, verb: "notification" },
+                HookRow {
+                    event: "BeforeTool",
+                    matcher: None,
+                    verb: "pretool",
+                },
+                HookRow {
+                    event: "AfterTool",
+                    matcher: Some("write_todos"),
+                    verb: "todos",
+                },
+                HookRow {
+                    event: "AfterTool",
+                    matcher: None,
+                    verb: "tooluse",
+                },
+                HookRow {
+                    event: "BeforeAgent",
+                    matcher: None,
+                    verb: "prompt",
+                },
+                HookRow {
+                    event: "AfterAgent",
+                    matcher: None,
+                    verb: "stop",
+                },
+                HookRow {
+                    event: "SessionStart",
+                    matcher: None,
+                    verb: "sessionstart",
+                },
+                HookRow {
+                    event: "PreCompress",
+                    matcher: None,
+                    verb: "precompact",
+                },
+                HookRow {
+                    event: "Notification",
+                    matcher: None,
+                    verb: "notification",
+                },
             ],
         })
     }
@@ -138,12 +170,36 @@ impl ProviderAdapter for CodexAdapter {
             config_rel_path: ".codex/hooks.json",
             structured_todos: false,
             rows: vec![
-                HookRow { event: "PreToolUse", matcher: None, verb: "pretool" },
-                HookRow { event: "PostToolUse", matcher: None, verb: "tooluse" },
-                HookRow { event: "UserPromptSubmit", matcher: None, verb: "prompt" },
-                HookRow { event: "Stop", matcher: None, verb: "stop" },
-                HookRow { event: "PreCompact", matcher: None, verb: "precompact" },
-                HookRow { event: "SessionStart", matcher: None, verb: "sessionstart" },
+                HookRow {
+                    event: "PreToolUse",
+                    matcher: None,
+                    verb: "pretool",
+                },
+                HookRow {
+                    event: "PostToolUse",
+                    matcher: None,
+                    verb: "tooluse",
+                },
+                HookRow {
+                    event: "UserPromptSubmit",
+                    matcher: None,
+                    verb: "prompt",
+                },
+                HookRow {
+                    event: "Stop",
+                    matcher: None,
+                    verb: "stop",
+                },
+                HookRow {
+                    event: "PreCompact",
+                    matcher: None,
+                    verb: "precompact",
+                },
+                HookRow {
+                    event: "SessionStart",
+                    matcher: None,
+                    verb: "sessionstart",
+                },
             ],
         })
     }
@@ -231,7 +287,11 @@ pub fn detect_agents() -> Vec<AgentInfo> {
 fn probe_path<'a>(stdout: &'a str, binary: &str) -> &'a str {
     stdout
         .lines()
-        .find_map(|l| l.split_once('\t').filter(|(b, _)| *b == binary).map(|(_, p)| p))
+        .find_map(|l| {
+            l.split_once('\t')
+                .filter(|(b, _)| *b == binary)
+                .map(|(_, p)| p)
+        })
         .unwrap_or("")
 }
 
@@ -306,11 +366,17 @@ mod tests {
         let cp = CodexAdapter.hooks_profile().unwrap();
         assert_eq!(cp.config_rel_path, ".codex/hooks.json");
         assert!(!cp.structured_todos);
-        assert!(cp.rows.iter().all(|r| r.verb != "todos"), "codex has no todos event");
+        assert!(
+            cp.rows.iter().all(|r| r.verb != "todos"),
+            "codex has no todos event"
+        );
         let gp = GeminiAdapter.hooks_profile().unwrap();
         assert_eq!(gp.config_rel_path, ".gemini/settings.json");
         assert!(gp.structured_todos);
-        assert!(gp.rows.iter().any(|r| r.event == "AfterTool" && r.verb == "tooluse"));
+        assert!(gp
+            .rows
+            .iter()
+            .any(|r| r.event == "AfterTool" && r.verb == "tooluse"));
     }
 
     #[test]
@@ -318,7 +384,10 @@ mod tests {
         assert_eq!(GeminiAdapter.id(), AgentId::Gemini);
         assert_eq!(GeminiAdapter.binary(), "gemini");
         assert!(!GeminiAdapter.supports_worktree());
-        assert_eq!(GeminiAdapter.build_invocation("sid", None, ""), "gemini || gemini");
+        assert_eq!(
+            GeminiAdapter.build_invocation("sid", None, ""),
+            "gemini || gemini"
+        );
         assert_eq!(adapter_for(AgentId::Gemini).id(), AgentId::Gemini);
     }
 }
