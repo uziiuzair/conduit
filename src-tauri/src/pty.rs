@@ -312,7 +312,7 @@ impl PtyManager {
 /// True if a transcript named `<session_id>.jsonl` exists under any project-slug
 /// subdirectory of `projects_dir`. Matching by the globally-unique UUID filename
 /// means we never reproduce Claude's cwd-slug algorithm (so worktree cwds work too).
-fn transcript_exists(session_id: &str, projects_dir: &Path) -> bool {
+pub(crate) fn transcript_exists(session_id: &str, projects_dir: &Path) -> bool {
     let file = format!("{session_id}.jsonl");
     let Ok(entries) = fs::read_dir(projects_dir) else {
         return false;
@@ -345,7 +345,7 @@ fn claude_invocation(session_id: &str, projects_dir: Option<&Path>, flags: &str)
 }
 
 /// Single-quote a string for safe interpolation into a /bin/sh -c command.
-fn shell_quote(s: &str) -> String {
+pub(crate) fn shell_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
 }
 
