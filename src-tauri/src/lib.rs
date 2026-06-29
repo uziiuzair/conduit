@@ -14,6 +14,7 @@ mod hooks;
 mod notify;
 mod pty;
 mod store;
+mod telemetry;
 mod worktree;
 
 use std::path::Path;
