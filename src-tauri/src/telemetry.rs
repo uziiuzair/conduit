@@ -4,6 +4,21 @@
 //! name, session_id, engagement_time_msec, app_version, and os ever leave the
 //! device. `client_id` is a random UUIDv4, never derived from PII.
 
+// ---- Hardcoded GA4 credentials (empty => telemetry is a no-op) ----
+const GA4_MEASUREMENT_ID: &str = ""; // TODO(user): "G-XXXXXXXXXX"
+const GA4_API_SECRET: &str = ""; // TODO(user): GA4 Admin → Data Streams → Measurement Protocol API secret
+
+fn creds_present() -> bool {
+    !GA4_MEASUREMENT_ID.is_empty() && !GA4_API_SECRET.is_empty()
+}
+
+/// Pure send-policy. Telemetry is sent only in a release build, with creds, when
+/// not opted out and not disabled by env. All inputs are explicit so every
+/// branch is testable (tests run in debug, where the real gate is always off).
+fn should_send_policy(opt_out: bool, is_debug: bool, env_disabled: bool, creds: bool) -> bool {
+    !opt_out && !is_debug && !env_disabled && creds
+}
+
 /// Everything needed to build one Measurement Protocol request. Pure data.
 pub struct PingInput {
     pub client_id: String,
@@ -67,6 +82,27 @@ mod tests {
         let body = build_payload(&sample("session_start"));
         let v: serde_json::Value = serde_json::from_str(&body).unwrap();
         assert_eq!(v["events"][0]["name"], "session_start");
+    }
+
+    #[test]
+    fn policy_allows_only_in_release_with_creds_and_consent() {
+        assert!(should_send_policy(false, false, false, true));
+    }
+    #[test]
+    fn policy_blocks_when_opted_out() {
+        assert!(!should_send_policy(true, false, false, true));
+    }
+    #[test]
+    fn policy_blocks_in_debug_build() {
+        assert!(!should_send_policy(false, true, false, true));
+    }
+    #[test]
+    fn policy_blocks_when_env_disabled() {
+        assert!(!should_send_policy(false, false, true, true));
+    }
+    #[test]
+    fn policy_blocks_without_creds() {
+        assert!(!should_send_policy(false, false, false, false));
     }
 
     #[test]
