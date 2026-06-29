@@ -357,6 +357,7 @@ fn broadcast(subs: &mut Vec<(u64, SyncSender<String>)>, frame: &str) {
 /// (and its `|| <bare>` fallback) is delegated to the adapter; Conduit's own env
 /// (CONDUIT_SESSION_ID/HOOK_PORT) and the worktree/settings flags are applied here.
 /// `worktree`/`settings` are only set by callers when the adapter supports worktrees.
+#[allow(clippy::too_many_arguments)]
 fn build_script(
     adapter: &dyn crate::agent::ProviderAdapter,
     session_id: &str,
