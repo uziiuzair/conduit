@@ -25,6 +25,13 @@ fn should_send_policy(opt_out: bool, is_debug: bool, env_disabled: bool, creds: 
     !opt_out && !is_debug && !env_disabled && creds
 }
 
+/// Whether a dev build should suppress telemetry. Dev builds are silent by
+/// default; `CONDUIT_TELEMETRY_IN_DEV` opts a dev build in for live testing
+/// (e.g. watching GA4 Realtime) without cutting a release build. Pure for tests.
+fn dev_suppressed(is_debug: bool, dev_override: bool) -> bool {
+    is_debug && !dev_override
+}
+
 fn data_dir() -> PathBuf {
     // Mirror store.rs: honor CONDUIT_DATA_DIR_NAME so dev builds stay isolated.
     let dir_name =
@@ -62,7 +69,7 @@ fn get_or_create_client_id() -> String {
 /// Everything needed to build one Measurement Protocol request. Pure data.
 pub struct PingInput {
     pub client_id: String,
-    /// "session_start" | "user_engagement"
+    /// "app_open" | "app_heartbeat" (GA4 custom event name)
     pub event_name: String,
     pub session_id: String,
     pub engagement_msec: u64,
@@ -89,17 +96,21 @@ fn build_payload(input: &PingInput) -> String {
 
 const MP_ENDPOINT: &str = "https://www.google-analytics.com/mp/collect";
 
-/// PARKED (spec, parked decisions #1 & #2): the real opt-out source is owned by
-/// the settings/onboarding work. Until that lands, return the safe default. The
-/// dev-build gate guarantees nothing is sent during development regardless.
+/// Redundant safe default. The opt-out is enforced in the frontend (the
+/// heartbeat hook stops pinging when the user opts out), so this is never the
+/// primary gate — it stays as belt-and-suspenders for the command path.
 fn is_opted_out() -> bool {
     false
 }
 
 fn should_send(opt_out: bool) -> bool {
+    let suppressed = dev_suppressed(
+        cfg!(debug_assertions),
+        std::env::var_os("CONDUIT_TELEMETRY_IN_DEV").is_some(),
+    );
     should_send_policy(
         opt_out,
-        cfg!(debug_assertions),
+        suppressed,
         std::env::var_os("CONDUIT_DISABLE_TELEMETRY").is_some(),
         creds_present(),
     )
@@ -249,6 +260,26 @@ mod tests {
     #[test]
     fn policy_blocks_without_creds() {
         assert!(!should_send_policy(false, false, false, false));
+    }
+
+    #[test]
+    fn dev_suppression_respects_override() {
+        assert!(
+            dev_suppressed(true, false),
+            "dev build, no override → suppressed"
+        );
+        assert!(
+            !dev_suppressed(true, true),
+            "dev build + override → allowed"
+        );
+        assert!(
+            !dev_suppressed(false, false),
+            "release build → never suppressed"
+        );
+        assert!(
+            !dev_suppressed(false, true),
+            "release build → never suppressed"
+        );
     }
 
     #[test]
