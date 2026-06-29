@@ -117,6 +117,9 @@ pub struct HookRow {
 pub struct HooksProfile {
     pub config_rel_path: &'static str,
     pub rows: Vec<HookRow>,
+    /// Whether the agent emits a structured todo list. The capability flag for the
+    /// (deferred) Codex empty-todos-panel gating; not yet consumed.
+    #[allow(dead_code)]
     pub structured_todos: bool,
 }
 
@@ -240,6 +243,9 @@ pub fn install_profile(dir: &str, port: u16, profile: &HooksProfile) {
 /// Write Conduit's hooks into <dir>/.claude/settings.local.json.
 /// Ports HooksInstaller.swift: backs up once, preserves non-hook keys, and is
 /// idempotent (our prior entries are stripped before re-adding).
+/// Production spawns via `install_profile(&claude_profile())`; this Claude-scoped
+/// wrapper is retained for the hooks regression tests.
+#[allow(dead_code)]
 pub fn install(dir: &str, port: u16) {
     install_profile(dir, port, &claude_profile());
 }
