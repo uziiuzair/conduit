@@ -336,7 +336,6 @@ fn claude_projects_dir() -> Option<PathBuf> {
     }
 }
 
-
 /// Single-quote a string for safe interpolation into a /bin/sh -c command.
 pub(crate) fn shell_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))

@@ -55,7 +55,8 @@ pub fn current_branch(dir: &str) -> Option<String> {
 
 pub fn changes(dir: &str) -> Vec<Change> {
     // numstat: added/removed counts per path
-    let mut counts: std::collections::HashMap<String, (i64, i64)> = std::collections::HashMap::new();
+    let mut counts: std::collections::HashMap<String, (i64, i64)> =
+        std::collections::HashMap::new();
     for line in run(&["diff", "--numstat", "HEAD"], dir).lines() {
         let parts: Vec<&str> = line.splitn(3, '\t').collect();
         if parts.len() == 3 {
@@ -75,7 +76,11 @@ pub fn changes(dir: &str) -> Vec<Change> {
         }
         let field = line[..2].trim();
         let path = line[3..].to_string();
-        let letter = field.chars().next().map(|c| c.to_string()).unwrap_or_else(|| "M".into());
+        let letter = field
+            .chars()
+            .next()
+            .map(|c| c.to_string())
+            .unwrap_or_else(|| "M".into());
         let (added, removed) = counts.get(&path).copied().unwrap_or((0, 0));
         out.push(Change {
             status: if letter == "?" { "A".into() } else { letter },

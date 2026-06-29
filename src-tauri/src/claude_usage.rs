@@ -89,7 +89,10 @@ pub fn parse_stats_cache(body: &str) -> LocalUsage {
         let mut models: Vec<ModelTokens> = day
             .tokens_by_model
             .iter()
-            .map(|(m, t)| ModelTokens { model: m.clone(), tokens: *t })
+            .map(|(m, t)| ModelTokens {
+                model: m.clone(),
+                tokens: *t,
+            })
             .collect();
         models.sort_by(|a, b| b.tokens.cmp(&a.tokens));
         out.total_tokens = models.iter().map(|m| m.tokens).sum();
@@ -134,7 +137,11 @@ pub async fn fetch_claude_usage(
     let usage = tauri::async_runtime::spawn_blocking(move || {
         let local = read_local_usage();
         let (plan, plan_source) = fetch_plan(token);
-        ClaudeUsage { local, plan, plan_source }
+        ClaudeUsage {
+            local,
+            plan,
+            plan_source,
+        }
     })
     .await
     .map_err(|e| e.to_string())?;
@@ -164,7 +171,9 @@ pub fn parse_plan(body: &str) -> Option<Vec<PlanWindow>> {
         ("seven_day_opus", "Weekly (Opus)"),
     ] {
         let Some(w) = obj.get(key) else { continue };
-        let Some(util) = w.get("utilization").and_then(|u| u.as_f64()) else { continue };
+        let Some(util) = w.get("utilization").and_then(|u| u.as_f64()) else {
+            continue;
+        };
         // utilization may be a 0..1 fraction or a 0..100 percentage.
         let pct = if util > 1.0 { util / 100.0 } else { util };
         let resets_at = w.get("resets_at").and_then(|r| {
@@ -218,7 +227,12 @@ fn fetch_plan(token: Option<String>) -> (Option<Vec<PlanWindow>>, String) {
 /// prompt; it runs only on explicit user action (the "Connect plan usage" button).
 fn read_keychain_token() -> Option<String> {
     let out = Command::new("security")
-        .args(["find-generic-password", "-s", "Claude Code-credentials", "-w"])
+        .args([
+            "find-generic-password",
+            "-s",
+            "Claude Code-credentials",
+            "-w",
+        ])
         .output()
         .ok()?;
     if !out.status.success() {
@@ -315,7 +329,10 @@ mod tests {
         assert_eq!(w.len(), 3);
         assert_eq!(w[0].label, "5-hour window");
         assert!((w[0].pct_used - 0.02).abs() < 1e-9, "got {}", w[0].pct_used);
-        assert_eq!(w[0].resets_at.as_deref(), Some("2026-06-26T14:40:00.997918+00:00"));
+        assert_eq!(
+            w[0].resets_at.as_deref(),
+            Some("2026-06-26T14:40:00.997918+00:00")
+        );
         assert_eq!(w[2].label, "Weekly (Opus)");
         assert!((w[2].pct_used - 0.79).abs() < 1e-9);
     }
