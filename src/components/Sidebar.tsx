@@ -66,6 +66,12 @@ async function deleteSession(
 export function Sidebar() {
   const projects = useStore((s) => s.projects);
   const addProject = useStore((s) => s.addProject);
+  const selectedAgent = useStore((s) => {
+    const id = globalSelectedSessionId(s);
+    if (!id) return "claude" as const;
+    return findSession(s.projects, id)?.session.agent ?? "claude";
+  });
+  const showClaudeAmbient = selectedAgent === "claude";
 
   async function pickProject() {
     const dir = await open({
@@ -79,20 +85,20 @@ export function Sidebar() {
   return (
     <div className="sidebar">
       <div className="drag-region" data-tauri-drag-region />
-      <ClaudeStatusWarning />
+      {showClaudeAmbient && <ClaudeStatusWarning />}
       <div className="sidebar-scroll">
         <div className="section-label">Projects</div>
         {projects.map((p) => (
           <ProjectBlock key={p.id} project={p} />
         ))}
       </div>
-      <ClaudeUsagePanel />
+      {showClaudeAmbient && <ClaudeUsagePanel />}
       <div className="add-bar">
         <button onClick={pickProject}>
           <FolderPlusIcon size={12} />
           <span>Add Project</span>
         </button>
-        <ClaudeStatusPill />
+        {showClaudeAmbient && <ClaudeStatusPill />}
         <ThemeSwitcher />
       </div>
       <SessionContextMenu />
