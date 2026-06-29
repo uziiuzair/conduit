@@ -5,6 +5,7 @@
 //! device. `client_id` is a random UUIDv4, never derived from PII.
 
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 // ---- Hardcoded GA4 credentials (empty => telemetry is a no-op) ----
 const GA4_MEASUREMENT_ID: &str = ""; // TODO(user): "G-XXXXXXXXXX"
@@ -81,6 +82,78 @@ fn build_payload(input: &PingInput) -> String {
         }]
     })
     .to_string()
+}
+
+const MP_ENDPOINT: &str = "https://www.google-analytics.com/mp/collect";
+
+/// PARKED (spec, parked decisions #1 & #2): the real opt-out source is owned by
+/// the settings/onboarding work. Until that lands, return the safe default. The
+/// dev-build gate guarantees nothing is sent during development regardless.
+fn is_opted_out() -> bool {
+    false
+}
+
+fn should_send(opt_out: bool) -> bool {
+    should_send_policy(
+        opt_out,
+        cfg!(debug_assertions),
+        std::env::var_os("CONDUIT_DISABLE_TELEMETRY").is_some(),
+        creds_present(),
+    )
+}
+
+/// Fire-and-forget POST. Mirrors claude_status.rs: `-s`, time-boxed, all output
+/// and errors ignored. GA4 MP returns 204 with no body on success.
+fn send(body: &str) {
+    let url =
+        format!("{MP_ENDPOINT}?measurement_id={GA4_MEASUREMENT_ID}&api_secret={GA4_API_SECRET}");
+    let _ = Command::new("curl")
+        .args([
+            "-s",
+            "--max-time",
+            "8",
+            "-X",
+            "POST",
+            "-H",
+            "Content-Type: application/json",
+            "-d",
+            body,
+            &url,
+        ])
+        .output();
+}
+
+/// Tauri command: record one anonymous engagement event. Never errors, never
+/// blocks — gating + curl happen off the async runtime. `kind` is
+/// "session_start" for the first event of a session, anything else maps to
+/// "user_engagement".
+#[tauri::command]
+pub async fn telemetry_ping(
+    app: tauri::AppHandle,
+    kind: String,
+    session_id: String,
+    engagement_msec: u64,
+) {
+    if !should_send(is_opted_out()) {
+        return;
+    }
+    let event_name = if kind == "session_start" {
+        "session_start"
+    } else {
+        "user_engagement"
+    }
+    .to_string();
+
+    let input = PingInput {
+        client_id: get_or_create_client_id(),
+        event_name,
+        session_id,
+        engagement_msec,
+        app_version: app.package_info().version.to_string(),
+        os: std::env::consts::OS.to_string(),
+    };
+    let body = build_payload(&input);
+    tauri::async_runtime::spawn_blocking(move || send(&body));
 }
 
 #[cfg(test)]
@@ -160,8 +233,15 @@ mod tests {
     fn payload_never_leaks_forbidden_substrings() {
         let body = build_payload(&sample("user_engagement"));
         for forbidden in [
-            "/Users/", "project", "branch", "prompt", "transcript", "hostname", "password",
-            "secret", "token",
+            "/Users/",
+            "project",
+            "branch",
+            "prompt",
+            "transcript",
+            "hostname",
+            "password",
+            "secret",
+            "token",
         ] {
             assert!(!body.contains(forbidden), "payload leaked: {forbidden}");
         }
