@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { isGitRepo, useStore } from "../store";
-import { AGENTS, DEFAULT_AGENT, agentMeta, type AgentId } from "../agents";
+import { AGENTS, agentMeta, type AgentId } from "../agents";
 import { AgentGlyph } from "./AgentGlyph";
 
 export function NewSessionDialog({
@@ -12,10 +12,11 @@ export function NewSessionDialog({
   onCancel: () => void;
   onCreate: (opts: { name?: string; useWorktree: boolean; agent: AgentId }) => void;
 }) {
+  const defaultAgent = useStore((s) => s.defaultAgent);
   const [name, setName] = useState("");
   const [useWorktree, setUseWorktree] = useState(false);
   const [gitOk, setGitOk] = useState(false);
-  const [agent, setAgent] = useState<AgentId>(DEFAULT_AGENT);
+  const [agent, setAgent] = useState<AgentId>(defaultAgent);
   // Detection is loaded once at startup (store.loadAgents) and cached, so opening
   // this dialog is instant — no per-open login-shell PATH scan.
   const detected = useStore((s) => s.agents);
@@ -32,11 +33,11 @@ export function NewSessionDialog({
   useEffect(() => {
     if (!detected) return;
     const ready = new Set(detected.filter((a) => a.found).map((a) => a.id));
-    if (!ready.has(DEFAULT_AGENT)) {
+    if (!ready.has(defaultAgent)) {
       const first = detected.find((a) => a.found);
       if (first) setAgent(first.id);
     }
-  }, [detected]);
+  }, [detected, defaultAgent]);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => e.key === "Escape" && onCancel();
@@ -73,7 +74,7 @@ export function NewSessionDialog({
               >
                 <AgentGlyph id={a.id} size={20} />
                 <span className="nm">{a.label}</span>
-                {a.id === DEFAULT_AGENT && <span className="df">default</span>}
+                {a.id === defaultAgent && <span className="df">default</span>}
                 {!ready && <span className="off">not installed</span>}
               </button>
             );

@@ -10,7 +10,7 @@ import {
   readStoredPref,
   writeStoredPref,
 } from "./themes";
-import { type AgentId, type AgentInfo, DEFAULT_AGENT } from "./agents";
+import { AGENTS, type AgentId, type AgentInfo, DEFAULT_AGENT } from "./agents";
 
 // ---- Types (mirror the Rust serde structs, rename_all = "camelCase") ----
 export interface Session {
@@ -105,6 +105,13 @@ export interface ClaudeUsage {
   local: LocalUsage;
   plan: PlanWindow[] | null;
   planSource: "live" | "unavailable" | "disconnected";
+}
+
+const DEFAULT_AGENT_KEY = "conduit.defaultAgent";
+const SETUP_DONE_KEY = "conduit.agentSetupComplete";
+function readDefaultAgent(): AgentId {
+  const v = localStorage.getItem(DEFAULT_AGENT_KEY);
+  return AGENTS.some((a) => a.id === v) ? (v as AgentId) : DEFAULT_AGENT;
 }
 
 const PLAN_CONNECTED_KEY = "conduit.planConnected";
@@ -252,6 +259,10 @@ interface AppState {
 
   load: () => Promise<void>;
   agents: AgentInfo[] | null;
+  defaultAgent: AgentId;
+  agentSetupComplete: boolean;
+  setDefaultAgent: (id: AgentId) => void;
+  completeAgentSetup: () => void;
   loadAgents: () => Promise<void>;
   addProject: (path: string) => Promise<void>;
   removeProject: (id: string) => Promise<void>;
@@ -330,6 +341,8 @@ export const useStore = create<AppState>((set, get) => {
     editingSessionId: null,
     homeDir: null,
     agents: null,
+    defaultAgent: readDefaultAgent(),
+    agentSetupComplete: localStorage.getItem(SETUP_DONE_KEY) === "1",
     topTab: "files",
     bottomTab: "terminal",
     themePref: readStoredPref(),
@@ -345,6 +358,15 @@ export const useStore = create<AppState>((set, get) => {
         layouts[p.id] = validateLayout(p.layout ?? defaultLayout(p), p);
       }
       set({ projects, homeDir: home, layouts, selectedProjectId: projects[0]?.id ?? null });
+    },
+
+    setDefaultAgent: (id) => {
+      localStorage.setItem(DEFAULT_AGENT_KEY, id);
+      set({ defaultAgent: id });
+    },
+    completeAgentSetup: () => {
+      localStorage.setItem(SETUP_DONE_KEY, "1");
+      set({ agentSetupComplete: true });
     },
 
     // Detect installed agent binaries ONCE at startup and cache the result, so the
