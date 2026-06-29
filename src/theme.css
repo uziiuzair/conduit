@@ -1433,3 +1433,13 @@ button {
   flex-shrink: 0;
   line-height: 1;
 }
+
+.dialog-label { font-size: 10px; letter-spacing: 0.06em; text-transform: uppercase; color: var(--text-dim); margin: 2px 0 6px; }
+.agent-tiles { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; margin-bottom: 10px; }
+.agent-tile { display: flex; align-items: center; gap: 7px; padding: 8px; border: 1px solid var(--selection-bg); border-radius: 6px; background: var(--panel-bg); color: var(--text-dim); cursor: pointer; text-align: left; }
+.agent-tile.sel { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 10%, transparent); color: var(--text-bright); }
+.agent-tile.disabled { opacity: 0.5; cursor: not-allowed; }
+.agent-tile .nm { font-size: 11px; }
+.agent-tile .df { margin-left: auto; font-size: 8px; color: var(--accent); letter-spacing: 0.04em; }
+.agent-tile .off { margin-left: auto; font-size: 8px; color: var(--text-dim); }
+.dialog-note { font-size: 11px; color: var(--text-dim); margin: 4px 0 8px; }
