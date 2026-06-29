@@ -7,9 +7,12 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-// ---- Hardcoded GA4 credentials (empty => telemetry is a no-op) ----
-const GA4_MEASUREMENT_ID: &str = ""; // TODO(user): "G-XXXXXXXXXX"
-const GA4_API_SECRET: &str = ""; // TODO(user): GA4 Admin → Data Streams → Measurement Protocol API secret
+// ---- Hardcoded GA4 credentials (empty either value => telemetry is a no-op) ----
+// Live GA4 "Web" data stream, used via the Measurement Protocol. Intentionally
+// public: the API secret is write-only to this one stream and revocable anytime
+// in GA4 Admin → Data Streams → Measurement Protocol API secrets (see spec).
+const GA4_MEASUREMENT_ID: &str = "G-RV52PC3JGS";
+const GA4_API_SECRET: &str = "7Zom7RiEScGSM_Zdvql3fA";
 
 fn creds_present() -> bool {
     !GA4_MEASUREMENT_ID.is_empty() && !GA4_API_SECRET.is_empty()
