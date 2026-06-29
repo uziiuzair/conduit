@@ -4,6 +4,7 @@
 //!   PtyManager (TerminalLauncher) · Store (AppStore) · HookState/server (HookServer)
 //! and exposes them to the React frontend as Tauri commands.
 
+mod agent;
 mod bridge;
 mod claude_status;
 mod claude_usage;
@@ -40,23 +41,32 @@ fn pty_spawn(
     on_event: Channel<String>,
     pty: State<Arc<PtyManager>>,
     hook_state: State<Arc<HookState>>,
+    store: State<Store>,
 ) -> Result<(), String> {
     let port = hook_state.port.load(Ordering::SeqCst);
+    let agent = if shell_only {
+        crate::agent::AgentId::Claude // shell companion: agent is irrelevant
+    } else {
+        store.session_agent(&session_id)
+    };
+    let adapter = crate::agent::adapter_for(agent);
 
     let (cwd, worktree_arg, settings_path) = if shell_only {
         (working_directory.clone(), None, None)
-    } else if let Some(slug) = worktree_name.as_deref() {
-        // Worktree session: hooks load via --settings (the worktree won't see the
-        // project's settings.local.json). If Claude already created the worktree on a
-        // previous run, re-enter it directly instead of recreating it.
+    } else if worktree_name.is_some() && adapter.supports_worktree() {
+        let slug = worktree_name.as_deref().unwrap();
         let settings = hooks::write_settings_file(port);
         let wt_path = worktree::worktree_path(&working_directory, slug);
         let exists = Path::new(&wt_path).exists();
-        let (cwd, worktree_arg) = worktree::spawn_target(&working_directory, slug, &wt_path, exists);
+        let (cwd, worktree_arg) =
+            worktree::spawn_target(&working_directory, slug, &wt_path, exists);
         (cwd, worktree_arg, settings)
     } else {
-        // Normal session: install hooks into the project's settings.local.json.
-        hooks::install(&working_directory, port);
+        // Normal session: install Claude hooks ONLY for Claude (other agents get
+        // their own hook wiring in a later phase). Non-Claude → plain cwd, no hooks.
+        if matches!(agent, crate::agent::AgentId::Claude) {
+            hooks::install(&working_directory, port);
+        }
         (working_directory.clone(), None, None)
     };
 
@@ -69,6 +79,7 @@ fn pty_spawn(
         shell_only,
         worktree_arg,
         settings_path,
+        agent,
         on_event,
     )
 }
@@ -79,7 +90,12 @@ fn pty_write(session_id: String, data: String, pty: State<Arc<PtyManager>>) -> R
 }
 
 #[tauri::command]
-fn pty_resize(session_id: String, cols: u16, rows: u16, pty: State<Arc<PtyManager>>) -> Result<(), String> {
+fn pty_resize(
+    session_id: String,
+    cols: u16,
+    rows: u16,
+    pty: State<Arc<PtyManager>>,
+) -> Result<(), String> {
     pty.resize(&session_id, cols, rows)
 }
 
@@ -121,9 +137,10 @@ fn add_session(
     project_id: String,
     name: String,
     use_worktree: bool,
+    agent: crate::agent::AgentId,
     store: State<Store>,
 ) -> Option<Session> {
-    store.add_session(&project_id, name, use_worktree)
+    store.add_session(&project_id, name, use_worktree, agent)
 }
 
 #[tauri::command]
@@ -168,9 +185,18 @@ fn heuristic_name(prompt: &str) -> String {
         .map(str::trim)
         .find(|l| !l.is_empty())
         .unwrap_or("");
-    let mut name: String = first.split_whitespace().take(6).collect::<Vec<_>>().join(" ");
+    let mut name: String = first
+        .split_whitespace()
+        .take(6)
+        .collect::<Vec<_>>()
+        .join(" ");
     if name.chars().count() > 32 {
-        name = name.chars().take(32).collect::<String>().trim_end().to_string();
+        name = name
+            .chars()
+            .take(32)
+            .collect::<String>()
+            .trim_end()
+            .to_string();
     }
     if name.is_empty() {
         "Session".to_string()
@@ -234,9 +260,18 @@ fn sanitize_title(raw: &str) -> String {
         .unwrap_or("")
         .trim_matches(|c| c == '"' || c == '\'' || c == '`')
         .trim();
-    let mut title: String = line.split_whitespace().take(6).collect::<Vec<_>>().join(" ");
+    let mut title: String = line
+        .split_whitespace()
+        .take(6)
+        .collect::<Vec<_>>()
+        .join(" ");
     if title.chars().count() > 40 {
-        title = title.chars().take(40).collect::<String>().trim_end().to_string();
+        title = title
+            .chars()
+            .take(40)
+            .collect::<String>()
+            .trim_end()
+            .to_string();
     }
     title
 }
@@ -294,6 +329,11 @@ fn notify_user(app: tauri::AppHandle, title: String, subtitle: Option<String>, b
     notify::send(&app, &title, subtitle.as_deref(), &body);
 }
 
+#[tauri::command]
+fn detect_agents() -> Vec<crate::agent::AgentInfo> {
+    crate::agent::detect_agents()
+}
+
 /// Open a directory in VS Code. Tries the `code` CLI first (cross-platform), then
 /// falls back to launching by macOS bundle id / app name so it still works when the
 /// `code` shell command isn't installed.
@@ -327,9 +367,11 @@ fn open_in_vscode(dir: String) -> Result<(), String> {
         }
     }
 
-    Err("Couldn't launch VS Code. Install the `code` command (VS Code → Cmd+Shift+P → \
+    Err(
+        "Couldn't launch VS Code. Install the `code` command (VS Code → Cmd+Shift+P → \
          \"Shell Command: Install 'code' command in PATH\") or make sure VS Code is installed."
-        .into())
+            .into(),
+    )
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -359,6 +401,7 @@ pub fn run() {
             add_project,
             remove_project,
             add_session,
+            detect_agents,
             rename_session,
             set_project_layout,
             remove_session,

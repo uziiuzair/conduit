@@ -27,6 +27,11 @@ interface Change {
   removed: number;
 }
 
+// How often to re-read git state so the panel reflects branch switches / commits
+// made in the terminal. Fast local reads (rev-parse/status/log); the terminal and
+// this panel are visible together, so we can't lean on window focus to refresh.
+const GIT_POLL_MS = 2500;
+
 export function RightColumn({
   projects,
   projectId,
@@ -62,13 +67,20 @@ export function RightColumn({
   const [graph, setGraph] = useState<GraphCommit[]>([]);
   const [branch, setBranch] = useState<string | null>(null);
   const [refreshKey, setRefreshKey] = useState(0);
+  // Last branch we observed, so a checkout made in the terminal can be detected
+  // and the file tree reloaded once — without remounting it on every poll tick.
+  const lastBranch = useRef<string | null | undefined>(undefined);
 
-  const refresh = useCallback(() => {
-    setRefreshKey((k) => k + 1);
+  // Re-read git state (branch, changes, graph) WITHOUT remounting the file tree.
+  // Safe to call on a timer — unlike `refresh`, it never bumps `refreshKey`, so
+  // expanded folders survive. The file tree is reloaded only when the branch
+  // actually changes (see below), since that's when the file set can differ.
+  const refreshGit = useCallback(() => {
     if (!workingDirectory) {
       setChanges([]);
       setGraph([]);
       setBranch(null);
+      lastBranch.current = undefined;
       return;
     }
     void invoke<Change[]>("git_changes", { dir: workingDirectory })
@@ -78,13 +90,57 @@ export function RightColumn({
       .then(setGraph)
       .catch(() => setGraph([]));
     void invoke<string | null>("git_branch", { dir: workingDirectory })
-      .then(setBranch)
+      .then((b) => {
+        // Branch changed underfoot (e.g. `git checkout` in the terminal): reload
+        // the tree once so it reflects the new branch. Skip the first read
+        // (undefined sentinel) and dir switches — those remount the tree anyway.
+        if (lastBranch.current !== undefined && lastBranch.current !== b) {
+          setRefreshKey((k) => k + 1);
+        }
+        lastBranch.current = b;
+        setBranch(b);
+      })
       .catch(() => setBranch(null));
   }, [workingDirectory]);
 
+  // Manual refresh button: full reload, including a file-tree remount.
+  const refresh = useCallback(() => {
+    setRefreshKey((k) => k + 1);
+    refreshGit();
+  }, [refreshGit]);
+
+  // Keep git state in sync with branch switches / commits made in the terminal.
+  // The terminal and this panel are on screen at once, so focus-based refresh
+  // never fires — we poll while the window is visible (mirrors useClaudeAmbient).
   useEffect(() => {
-    refresh();
-  }, [refresh]);
+    lastBranch.current = undefined; // new working dir: don't treat first read as a switch
+    refreshGit();
+    if (!workingDirectory) return;
+    let timer: ReturnType<typeof setInterval> | null = null;
+    const start = () => {
+      if (timer == null) timer = setInterval(refreshGit, GIT_POLL_MS);
+    };
+    const stop = () => {
+      if (timer != null) {
+        clearInterval(timer);
+        timer = null;
+      }
+    };
+    const onVisibility = () => {
+      if (document.hidden) {
+        stop();
+      } else {
+        refreshGit();
+        start();
+      }
+    };
+    if (!document.hidden) start();
+    document.addEventListener("visibilitychange", onVisibility);
+    return () => {
+      document.removeEventListener("visibilitychange", onVisibility);
+      stop();
+    };
+  }, [refreshGit, workingDirectory]);
 
   // vertical split (top panel height), persisted
   const [topH, setTopH] = useState<number>(() => {
