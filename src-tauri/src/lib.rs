@@ -41,37 +41,36 @@ fn pty_spawn(
     on_event: Channel<String>,
     pty: State<Arc<PtyManager>>,
     hook_state: State<Arc<HookState>>,
+    store: State<Store>,
 ) -> Result<(), String> {
     let port = hook_state.port.load(Ordering::SeqCst);
+    let agent = if shell_only {
+        crate::agent::AgentId::Claude // shell companion: agent is irrelevant
+    } else {
+        store.session_agent(&session_id)
+    };
+    let adapter = crate::agent::adapter_for(agent);
 
     let (cwd, worktree_arg, settings_path) = if shell_only {
         (working_directory.clone(), None, None)
-    } else if let Some(slug) = worktree_name.as_deref() {
-        // Worktree session: hooks load via --settings (the worktree won't see the
-        // project's settings.local.json). If Claude already created the worktree on a
-        // previous run, re-enter it directly instead of recreating it.
+    } else if worktree_name.is_some() && adapter.supports_worktree() {
+        let slug = worktree_name.as_deref().unwrap();
         let settings = hooks::write_settings_file(port);
         let wt_path = worktree::worktree_path(&working_directory, slug);
         let exists = Path::new(&wt_path).exists();
         let (cwd, worktree_arg) = worktree::spawn_target(&working_directory, slug, &wt_path, exists);
         (cwd, worktree_arg, settings)
     } else {
-        // Normal session: install hooks into the project's settings.local.json.
-        hooks::install(&working_directory, port);
+        // Normal session: install Claude hooks ONLY for Claude (other agents get
+        // their own hook wiring in a later phase). Non-Claude → plain cwd, no hooks.
+        if matches!(agent, crate::agent::AgentId::Claude) {
+            hooks::install(&working_directory, port);
+        }
         (working_directory.clone(), None, None)
     };
 
     pty.spawn(
-        session_id,
-        cwd,
-        cols,
-        rows,
-        port,
-        shell_only,
-        worktree_arg,
-        settings_path,
-        crate::agent::AgentId::Claude,
-        on_event,
+        session_id, cwd, cols, rows, port, shell_only, worktree_arg, settings_path, agent, on_event,
     )
 }
 
