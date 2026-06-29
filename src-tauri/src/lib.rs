@@ -335,6 +335,42 @@ fn detect_agents() -> Vec<crate::agent::AgentInfo> {
     crate::agent::detect_agents()
 }
 
+/// Write or remove an MCP server for a given agent by shelling out to that
+/// agent's own `mcp add`/`mcp remove` CLI (user scope). Mirrors the
+/// login-shell handling used by `detect_agents` and the PTY spawner,
+/// including the `npm_config_prefix` scrub so nvm-managed binaries are found.
+#[tauri::command(async)]
+fn mcp_apply(
+    agent: crate::agent::AgentId,
+    action: String,
+    server: crate::agent::McpServer,
+) -> Result<(), String> {
+    let adapter = crate::agent::adapter_for(agent);
+    let cmd = match action.as_str() {
+        "add" => adapter.mcp_add_command(&server),
+        "remove" => adapter.mcp_remove_command(&server.name),
+        _ => return Err(format!("unknown action {action}")),
+    }
+    .ok_or_else(|| {
+        format!(
+            "{} can't write MCP for transport {}",
+            adapter.binary(),
+            server.transport
+        )
+    })?;
+    let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
+    let out = std::process::Command::new(&shell)
+        .args(["-i", "-l", "-c", &cmd])
+        .env_remove("npm_config_prefix")
+        .output()
+        .map_err(|e| format!("spawn {}: {e}", adapter.binary()))?;
+    if out.status.success() {
+        Ok(())
+    } else {
+        Err(String::from_utf8_lossy(&out.stderr).trim().to_string())
+    }
+}
+
 /// Open a directory in VS Code. Tries the `code` CLI first (cross-platform), then
 /// falls back to launching by macOS bundle id / app name so it still works when the
 /// `code` shell command isn't installed.
@@ -420,6 +456,7 @@ pub fn run() {
             claude_status::fetch_claude_status,
             claude_usage::fetch_claude_usage,
             claude_usage::connect_claude_plan_usage,
+            mcp_apply,
         ])
         .build(tauri::generate_context!())
         .expect("error while building Conduit")
