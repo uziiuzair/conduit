@@ -109,6 +109,11 @@ export interface ClaudeUsage {
 
 const DEFAULT_AGENT_KEY = "conduit.defaultAgent";
 const SETUP_DONE_KEY = "conduit.agentSetupComplete";
+const TELEMETRY_OPTOUT_KEY = "conduit.telemetryOptOut";
+function readTelemetryOptOut(): boolean {
+  // Default: anonymous telemetry ON (opt-out model). Absent key => not opted out.
+  return localStorage.getItem(TELEMETRY_OPTOUT_KEY) === "1";
+}
 function readDefaultAgent(): AgentId {
   const v = localStorage.getItem(DEFAULT_AGENT_KEY);
   return AGENTS.some((a) => a.id === v) ? (v as AgentId) : DEFAULT_AGENT;
@@ -275,6 +280,9 @@ interface AppState {
   agentSetupComplete: boolean;
   setDefaultAgent: (id: AgentId) => void;
   completeAgentSetup: () => void;
+  /** Anonymous-telemetry opt-out (true = do not send). Default false (on). */
+  telemetryOptOut: boolean;
+  setTelemetryOptOut: (v: boolean) => void;
   loadAgents: () => Promise<void>;
 
   // ---- MCP server registry ----
@@ -369,6 +377,7 @@ export const useStore = create<AppState>((set, get) => {
     agents: null,
     defaultAgent: readDefaultAgent(),
     agentSetupComplete: localStorage.getItem(SETUP_DONE_KEY) === "1",
+    telemetryOptOut: readTelemetryOptOut(),
 
     mcpServers: _initMcp.servers,
     mcpEnabled: _initMcp.enabled,
@@ -397,6 +406,10 @@ export const useStore = create<AppState>((set, get) => {
     completeAgentSetup: () => {
       localStorage.setItem(SETUP_DONE_KEY, "1");
       set({ agentSetupComplete: true });
+    },
+    setTelemetryOptOut: (v) => {
+      localStorage.setItem(TELEMETRY_OPTOUT_KEY, v ? "1" : "0");
+      set({ telemetryOptOut: v });
     },
 
     // Detect installed agent binaries ONCE at startup and cache the result, so the
