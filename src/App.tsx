@@ -24,10 +24,12 @@ export default function App() {
   const selectedProjectId = useStore((s) => s.selectedProjectId);
   const home = useStore((s) => s.homeDir);
   const load = useStore((s) => s.load);
+  const loadAgents = useStore((s) => s.loadAgents);
 
   useEffect(() => {
     void load();
-  }, [load]);
+    void loadAgents();
+  }, [load, loadAgents]);
 
   // Suppress the webview's default context menu (Reload / Inspect Element).
   // Our own row menus call preventDefault + stopPropagation, so they're unaffected.

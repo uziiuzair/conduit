@@ -21,3 +21,12 @@ export const DEFAULT_AGENT: AgentId = "claude";
 export function agentMeta(id: AgentId): AgentMeta {
   return AGENTS.find((a) => a.id === id) ?? AGENTS[0];
 }
+
+/** Result of the Rust `detect_agents` PATH scan (mirrors AgentInfo in agent.rs). */
+export interface AgentInfo {
+  id: AgentId;
+  label: string;
+  binary: string;
+  found: boolean;
+  path?: string | null;
+}

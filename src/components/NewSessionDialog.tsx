@@ -1,16 +1,7 @@
 import { useEffect, useState } from "react";
-import { invoke } from "@tauri-apps/api/core";
-import { isGitRepo } from "../store";
+import { isGitRepo, useStore } from "../store";
 import { AGENTS, DEFAULT_AGENT, agentMeta, type AgentId } from "../agents";
 import { AgentGlyph } from "./AgentGlyph";
-
-interface AgentInfo {
-  id: AgentId;
-  label: string;
-  binary: string;
-  found: boolean;
-  path?: string | null;
-}
 
 export function NewSessionDialog({
   projectPath,
@@ -25,25 +16,27 @@ export function NewSessionDialog({
   const [useWorktree, setUseWorktree] = useState(false);
   const [gitOk, setGitOk] = useState(false);
   const [agent, setAgent] = useState<AgentId>(DEFAULT_AGENT);
-  const [detected, setDetected] = useState<AgentInfo[] | null>(null);
+  // Detection is loaded once at startup (store.loadAgents) and cached, so opening
+  // this dialog is instant — no per-open login-shell PATH scan.
+  const detected = useStore((s) => s.agents);
 
   useEffect(() => {
     let alive = true;
     void isGitRepo(projectPath).then((ok) => alive && setGitOk(ok));
-    void invoke<AgentInfo[]>("detect_agents").then((d) => {
-      if (!alive) return;
-      setDetected(d);
-      // Pre-select the default if it's installed, else the first installed agent.
-      const ready = new Set(d.filter((a) => a.found).map((a) => a.id));
-      if (!ready.has(DEFAULT_AGENT)) {
-        const first = d.find((a) => a.found);
-        if (first) setAgent(first.id);
-      }
-    });
     return () => {
       alive = false;
     };
   }, [projectPath]);
+
+  // Pre-select the default if it's installed, else the first installed agent.
+  useEffect(() => {
+    if (!detected) return;
+    const ready = new Set(detected.filter((a) => a.found).map((a) => a.id));
+    if (!ready.has(DEFAULT_AGENT)) {
+      const first = detected.find((a) => a.found);
+      if (first) setAgent(first.id);
+    }
+  }, [detected]);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => e.key === "Escape" && onCancel();
