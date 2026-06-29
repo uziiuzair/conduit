@@ -3,13 +3,14 @@
 use std::path::Path;
 
 /// Which coding-agent CLI a session runs. Persisted on each Session; serializes
-/// as a lowercase string ("claude"/"codex"). Unknown/absent → Claude (back-compat).
+/// as a lowercase string ("claude"/"codex"/"gemini"). Unknown/absent → Claude (back-compat).
 #[derive(serde::Serialize, serde::Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum AgentId {
     #[default]
     Claude,
     Codex,
+    Gemini,
 }
 
 /// Knows how to launch one agent CLI inside Conduit's `sh -c` cold-spawn script.
@@ -67,6 +68,25 @@ impl ProviderAdapter for ClaudeAdapter {
     }
 }
 
+pub struct GeminiAdapter;
+
+impl ProviderAdapter for GeminiAdapter {
+    fn id(&self) -> AgentId {
+        AgentId::Gemini
+    }
+    fn binary(&self) -> &'static str {
+        "gemini"
+    }
+    fn build_invocation(
+        &self,
+        _session_id: &str,
+        _projects_dir: Option<&Path>,
+        _flags: &str,
+    ) -> String {
+        "gemini || gemini".to_string()
+    }
+}
+
 pub struct CodexAdapter;
 
 impl ProviderAdapter for CodexAdapter {
@@ -94,6 +114,7 @@ pub fn adapter_for(agent: AgentId) -> Box<dyn ProviderAdapter> {
     match agent {
         AgentId::Claude => Box::new(ClaudeAdapter),
         AgentId::Codex => Box::new(CodexAdapter),
+        AgentId::Gemini => Box::new(GeminiAdapter),
     }
 }
 
@@ -123,13 +144,18 @@ impl AgentInfo {
 
 /// All known agents, for the UI to label/detect. Order = display order.
 pub fn all_adapters() -> Vec<Box<dyn ProviderAdapter>> {
-    vec![Box::new(ClaudeAdapter), Box::new(CodexAdapter)]
+    vec![
+        Box::new(ClaudeAdapter),
+        Box::new(CodexAdapter),
+        Box::new(GeminiAdapter),
+    ]
 }
 
 fn label_for(id: AgentId) -> &'static str {
     match id {
         AgentId::Claude => "Claude Code",
         AgentId::Codex => "Codex CLI",
+        AgentId::Gemini => "Gemini CLI",
     }
 }
 
@@ -231,5 +257,14 @@ mod tests {
             ClaudeAdapter.env_overrides(),
             vec![("CLAUDE_CODE_ENABLE_TASKS", "0")]
         );
+    }
+
+    #[test]
+    fn gemini_spawns_fresh_and_has_no_worktree() {
+        assert_eq!(GeminiAdapter.id(), AgentId::Gemini);
+        assert_eq!(GeminiAdapter.binary(), "gemini");
+        assert!(!GeminiAdapter.supports_worktree());
+        assert_eq!(GeminiAdapter.build_invocation("sid", None, ""), "gemini || gemini");
+        assert_eq!(adapter_for(AgentId::Gemini).id(), AgentId::Gemini);
     }
 }
