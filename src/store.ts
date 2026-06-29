@@ -10,7 +10,7 @@ import {
   readStoredPref,
   writeStoredPref,
 } from "./themes";
-import { type AgentId, DEFAULT_AGENT } from "./agents";
+import { type AgentId, type AgentInfo, DEFAULT_AGENT } from "./agents";
 
 // ---- Types (mirror the Rust serde structs, rename_all = "camelCase") ----
 export interface Session {
@@ -251,6 +251,8 @@ interface AppState {
   planConnected: boolean;
 
   load: () => Promise<void>;
+  agents: AgentInfo[] | null;
+  loadAgents: () => Promise<void>;
   addProject: (path: string) => Promise<void>;
   removeProject: (id: string) => Promise<void>;
   addSession: (projectId: string, opts?: { name?: string; useWorktree?: boolean; agent?: AgentId }) => Promise<void>;
@@ -327,6 +329,7 @@ export const useStore = create<AppState>((set, get) => {
     menu: null,
     editingSessionId: null,
     homeDir: null,
+    agents: null,
     topTab: "files",
     bottomTab: "terminal",
     themePref: readStoredPref(),
@@ -342,6 +345,16 @@ export const useStore = create<AppState>((set, get) => {
         layouts[p.id] = validateLayout(p.layout ?? defaultLayout(p), p);
       }
       set({ projects, homeDir: home, layouts, selectedProjectId: projects[0]?.id ?? null });
+    },
+
+    // Detect installed agent binaries ONCE at startup and cache the result, so the
+    // New Session dialog never pays the (slow, login-shell) PATH scan on open.
+    loadAgents: async () => {
+      try {
+        set({ agents: await invoke<AgentInfo[]>("detect_agents") });
+      } catch {
+        set({ agents: [] });
+      }
     },
 
     addProject: async (path) => {
