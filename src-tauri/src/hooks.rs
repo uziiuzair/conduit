@@ -143,15 +143,51 @@ pub fn claude_profile() -> HooksProfile {
         config_rel_path: ".claude/settings.local.json",
         structured_todos: true,
         rows: vec![
-            HookRow { event: "PostToolUse", matcher: Some("TodoWrite"), verb: "todos" },
-            HookRow { event: "PostToolUse", matcher: None, verb: "tooluse" },
-            HookRow { event: "UserPromptSubmit", matcher: None, verb: "prompt" },
-            HookRow { event: "Stop", matcher: None, verb: "stop" },
-            HookRow { event: "Notification", matcher: None, verb: "notification" },
-            HookRow { event: "PreToolUse", matcher: None, verb: "pretool" },
-            HookRow { event: "PreCompact", matcher: None, verb: "precompact" },
-            HookRow { event: "SessionStart", matcher: None, verb: "sessionstart" },
-            HookRow { event: "SessionEnd", matcher: None, verb: "sessionend" },
+            HookRow {
+                event: "PostToolUse",
+                matcher: Some("TodoWrite"),
+                verb: "todos",
+            },
+            HookRow {
+                event: "PostToolUse",
+                matcher: None,
+                verb: "tooluse",
+            },
+            HookRow {
+                event: "UserPromptSubmit",
+                matcher: None,
+                verb: "prompt",
+            },
+            HookRow {
+                event: "Stop",
+                matcher: None,
+                verb: "stop",
+            },
+            HookRow {
+                event: "Notification",
+                matcher: None,
+                verb: "notification",
+            },
+            HookRow {
+                event: "PreToolUse",
+                matcher: None,
+                verb: "pretool",
+            },
+            HookRow {
+                event: "PreCompact",
+                matcher: None,
+                verb: "precompact",
+            },
+            HookRow {
+                event: "SessionStart",
+                matcher: None,
+                verb: "sessionstart",
+            },
+            HookRow {
+                event: "SessionEnd",
+                matcher: None,
+                verb: "sessionend",
+            },
         ],
     }
 }
@@ -277,8 +313,10 @@ mod tests {
     fn fresh_test_dir(tag: &str) -> PathBuf {
         static COUNTER: AtomicU32 = AtomicU32::new(0);
         let n = COUNTER.fetch_add(1, Ordering::SeqCst);
-        let dir = std::env::temp_dir()
-            .join(format!("conduit_hooks_test_{tag}_{}_{n}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!(
+            "conduit_hooks_test_{tag}_{}_{n}",
+            std::process::id()
+        ));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).expect("create temp dir");
         dir
@@ -304,7 +342,9 @@ mod tests {
     }
 
     fn hooks_obj(v: &Value) -> &serde_json::Map<String, Value> {
-        v.get("hooks").and_then(|h| h.as_object()).expect("hooks object")
+        v.get("hooks")
+            .and_then(|h| h.as_object())
+            .expect("hooks object")
     }
 
     #[test]
@@ -315,7 +355,10 @@ mod tests {
         let v = read_settings(&dir);
         let hooks = hooks_obj(&v);
         for ev in ["PreToolUse", "PreCompact", "SessionStart", "SessionEnd"] {
-            assert!(hooks.contains_key(ev), "expected hook event {ev} to be installed");
+            assert!(
+                hooks.contains_key(ev),
+                "expected hook event {ev} to be installed"
+            );
         }
     }
 
@@ -328,8 +371,14 @@ mod tests {
         let cmd = hooks_obj(&v)["SessionStart"][0]["hooks"][0]["command"]
             .as_str()
             .expect("SessionStart command string");
-        assert!(cmd.contains("event=sessionstart"), "event tag missing: {cmd}");
-        assert!(cmd.contains("CONDUIT_SESSION_ID"), "session routing missing: {cmd}");
+        assert!(
+            cmd.contains("event=sessionstart"),
+            "event tag missing: {cmd}"
+        );
+        assert!(
+            cmd.contains("CONDUIT_SESSION_ID"),
+            "session routing missing: {cmd}"
+        );
         assert!(cmd.contains("8431"), "fallback port missing: {cmd}");
     }
 
@@ -343,7 +392,10 @@ mod tests {
         let hooks = read_settings(&dir);
         let hooks = hooks_obj(&hooks);
         for ev in ["PostToolUse", "UserPromptSubmit", "Stop", "Notification"] {
-            assert!(hooks.contains_key(ev), "original event {ev} must remain installed");
+            assert!(
+                hooks.contains_key(ev),
+                "original event {ev} must remain installed"
+            );
         }
         // PostToolUse keeps both entries: the TodoWrite matcher and the generic catch-all.
         assert_eq!(
@@ -384,9 +436,17 @@ mod tests {
                 .map(|a| a.iter().filter(|e| is_conduit_entry(e)).count())
                 .unwrap_or(0)
         };
-        assert_eq!(conduit_in("PostToolUse"), 2, "re-install duplicated PostToolUse entries");
+        assert_eq!(
+            conduit_in("PostToolUse"),
+            2,
+            "re-install duplicated PostToolUse entries"
+        );
         assert_eq!(conduit_in("Stop"), 1, "re-install duplicated Stop entry");
-        assert_eq!(conduit_in("SessionStart"), 1, "re-install duplicated SessionStart entry");
+        assert_eq!(
+            conduit_in("SessionStart"),
+            1,
+            "re-install duplicated SessionStart entry"
+        );
     }
 
     #[test]
@@ -404,9 +464,18 @@ mod tests {
 
         let v = read_settings(&dir);
         let stop = v["hooks"]["Stop"].as_array().unwrap();
-        let has = |needle: &str| stop.iter().any(|e| serde_json::to_string(e).unwrap().contains(needle));
-        assert!(has("echo external"), "a third-party Stop hook must survive install");
-        assert!(has("CONDUIT_SESSION_ID"), "Conduit's own Stop hook must be added alongside");
+        let has = |needle: &str| {
+            stop.iter()
+                .any(|e| serde_json::to_string(e).unwrap().contains(needle))
+        };
+        assert!(
+            has("echo external"),
+            "a third-party Stop hook must survive install"
+        );
+        assert!(
+            has("CONDUIT_SESSION_ID"),
+            "Conduit's own Stop hook must be added alongside"
+        );
     }
 
     #[test]
@@ -418,7 +487,10 @@ mod tests {
 
         let backup = settings_path(&dir).with_extension("json.conduit-backup");
         let saved = fs::read_to_string(&backup).expect("backup file should exist");
-        assert!(saved.contains("opus"), "backup should hold the original content");
+        assert!(
+            saved.contains("opus"),
+            "backup should hold the original content"
+        );
         assert!(
             !saved.contains("CONDUIT_SESSION_ID"),
             "backup must be the pre-Conduit file, not a post-install one"
@@ -428,10 +500,19 @@ mod tests {
     #[test]
     fn settings_value_carries_all_events() {
         let v = settings_value(8423);
-        let hooks = v.get("hooks").and_then(|h| h.as_object()).expect("hooks object");
+        let hooks = v
+            .get("hooks")
+            .and_then(|h| h.as_object())
+            .expect("hooks object");
         for ev in [
-            "PostToolUse", "UserPromptSubmit", "Stop", "Notification",
-            "PreToolUse", "PreCompact", "SessionStart", "SessionEnd",
+            "PostToolUse",
+            "UserPromptSubmit",
+            "Stop",
+            "Notification",
+            "PreToolUse",
+            "PreCompact",
+            "SessionStart",
+            "SessionEnd",
         ] {
             assert!(hooks.contains_key(ev), "settings missing event {ev}");
         }
@@ -443,10 +524,23 @@ mod tests {
         install_profile(dir.to_str().unwrap(), 8423, &claude_profile());
         let v = read_settings_at(&dir, ".claude/settings.local.json");
         let hooks = v.get("hooks").and_then(|h| h.as_object()).unwrap();
-        for ev in ["PostToolUse","UserPromptSubmit","Stop","Notification","PreToolUse","PreCompact","SessionStart","SessionEnd"] {
+        for ev in [
+            "PostToolUse",
+            "UserPromptSubmit",
+            "Stop",
+            "Notification",
+            "PreToolUse",
+            "PreCompact",
+            "SessionStart",
+            "SessionEnd",
+        ] {
             assert!(hooks.contains_key(ev), "missing {ev}");
         }
-        assert_eq!(hooks["PostToolUse"].as_array().map(|a| a.len()), Some(2), "TodoWrite matcher + catch-all");
+        assert_eq!(
+            hooks["PostToolUse"].as_array().map(|a| a.len()),
+            Some(2),
+            "TodoWrite matcher + catch-all"
+        );
     }
 
     #[test]
