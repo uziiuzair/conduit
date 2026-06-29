@@ -329,6 +329,11 @@ fn notify_user(app: tauri::AppHandle, title: String, subtitle: Option<String>, b
     notify::send(&app, &title, subtitle.as_deref(), &body);
 }
 
+#[tauri::command]
+fn detect_agents() -> Vec<crate::agent::AgentInfo> {
+    crate::agent::detect_agents()
+}
+
 /// Open a directory in VS Code. Tries the `code` CLI first (cross-platform), then
 /// falls back to launching by macOS bundle id / app name so it still works when the
 /// `code` shell command isn't installed.
@@ -396,6 +401,7 @@ pub fn run() {
             add_project,
             remove_project,
             add_session,
+            detect_agents,
             rename_session,
             set_project_layout,
             remove_session,
