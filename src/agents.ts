@@ -31,3 +31,13 @@ export interface AgentInfo {
   found: boolean;
   path?: string | null;
 }
+
+/** MCP server definition — mirrors the Rust McpServer struct (serde rename_all = "camelCase"). */
+export interface McpServer {
+  name: string;
+  transport: "stdio" | "http";
+  command?: string;
+  args?: string[];
+  url?: string;
+  env?: [string, string][];
+}
