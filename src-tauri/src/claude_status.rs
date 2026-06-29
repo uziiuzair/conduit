@@ -106,10 +106,7 @@ pub fn parse_summary(body: &str) -> ClaudeStatus {
         components: raw
             .components
             .into_iter()
-            .map(|c| StatusComponent {
-                name: c.name,
-                status: c.status,
-            })
+            .map(|c| StatusComponent { name: c.name, status: c.status })
             .collect(),
         incidents: raw
             .incidents
