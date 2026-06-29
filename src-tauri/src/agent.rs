@@ -28,8 +28,12 @@ pub trait ProviderAdapter {
     /// The agent command that runs after `cd <dir> &&`, including the `|| <bare>`
     /// fallback. `flags` carries already-quoted extra args (e.g. ` --worktree 'x'`).
     /// `projects_dir` is Claude's transcript store (used only by adapters that resume).
-    fn build_invocation(&self, session_id: &str, projects_dir: Option<&Path>, flags: &str)
-        -> String;
+    fn build_invocation(
+        &self,
+        session_id: &str,
+        projects_dir: Option<&Path>,
+        flags: &str,
+    ) -> String;
 }
 
 pub struct ClaudeAdapter;
@@ -48,7 +52,12 @@ impl ProviderAdapter for ClaudeAdapter {
         // Disables the Task-tool migration that breaks the TodoWrite hook (see CLAUDE.md).
         vec![("CLAUDE_CODE_ENABLE_TASKS", "0")]
     }
-    fn build_invocation(&self, session_id: &str, projects_dir: Option<&Path>, flags: &str) -> String {
+    fn build_invocation(
+        &self,
+        session_id: &str,
+        projects_dir: Option<&Path>,
+        flags: &str,
+    ) -> String {
         let id = crate::pty::shell_quote(session_id);
         if projects_dir.is_some_and(|d| crate::pty::transcript_exists(session_id, d)) {
             format!("claude{flags} --resume {id} || claude{flags}")

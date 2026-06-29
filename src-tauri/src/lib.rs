@@ -58,7 +58,8 @@ fn pty_spawn(
         let settings = hooks::write_settings_file(port);
         let wt_path = worktree::worktree_path(&working_directory, slug);
         let exists = Path::new(&wt_path).exists();
-        let (cwd, worktree_arg) = worktree::spawn_target(&working_directory, slug, &wt_path, exists);
+        let (cwd, worktree_arg) =
+            worktree::spawn_target(&working_directory, slug, &wt_path, exists);
         (cwd, worktree_arg, settings)
     } else {
         // Normal session: install Claude hooks ONLY for Claude (other agents get
@@ -70,7 +71,16 @@ fn pty_spawn(
     };
 
     pty.spawn(
-        session_id, cwd, cols, rows, port, shell_only, worktree_arg, settings_path, agent, on_event,
+        session_id,
+        cwd,
+        cols,
+        rows,
+        port,
+        shell_only,
+        worktree_arg,
+        settings_path,
+        agent,
+        on_event,
     )
 }
 
@@ -80,7 +90,12 @@ fn pty_write(session_id: String, data: String, pty: State<Arc<PtyManager>>) -> R
 }
 
 #[tauri::command]
-fn pty_resize(session_id: String, cols: u16, rows: u16, pty: State<Arc<PtyManager>>) -> Result<(), String> {
+fn pty_resize(
+    session_id: String,
+    cols: u16,
+    rows: u16,
+    pty: State<Arc<PtyManager>>,
+) -> Result<(), String> {
     pty.resize(&session_id, cols, rows)
 }
 
@@ -170,9 +185,18 @@ fn heuristic_name(prompt: &str) -> String {
         .map(str::trim)
         .find(|l| !l.is_empty())
         .unwrap_or("");
-    let mut name: String = first.split_whitespace().take(6).collect::<Vec<_>>().join(" ");
+    let mut name: String = first
+        .split_whitespace()
+        .take(6)
+        .collect::<Vec<_>>()
+        .join(" ");
     if name.chars().count() > 32 {
-        name = name.chars().take(32).collect::<String>().trim_end().to_string();
+        name = name
+            .chars()
+            .take(32)
+            .collect::<String>()
+            .trim_end()
+            .to_string();
     }
     if name.is_empty() {
         "Session".to_string()
@@ -236,9 +260,18 @@ fn sanitize_title(raw: &str) -> String {
         .unwrap_or("")
         .trim_matches(|c| c == '"' || c == '\'' || c == '`')
         .trim();
-    let mut title: String = line.split_whitespace().take(6).collect::<Vec<_>>().join(" ");
+    let mut title: String = line
+        .split_whitespace()
+        .take(6)
+        .collect::<Vec<_>>()
+        .join(" ");
     if title.chars().count() > 40 {
-        title = title.chars().take(40).collect::<String>().trim_end().to_string();
+        title = title
+            .chars()
+            .take(40)
+            .collect::<String>()
+            .trim_end()
+            .to_string();
     }
     title
 }
@@ -329,9 +362,11 @@ fn open_in_vscode(dir: String) -> Result<(), String> {
         }
     }
 
-    Err("Couldn't launch VS Code. Install the `code` command (VS Code → Cmd+Shift+P → \
+    Err(
+        "Couldn't launch VS Code. Install the `code` command (VS Code → Cmd+Shift+P → \
          \"Shell Command: Install 'code' command in PATH\") or make sure VS Code is installed."
-        .into())
+            .into(),
+    )
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]

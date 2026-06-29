@@ -116,7 +116,10 @@ impl Store {
     }
 
     pub fn list(&self) -> Vec<Project> {
-        self.projects.lock().unwrap_or_else(|e| e.into_inner()).clone()
+        self.projects
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
     }
 
     pub fn add_project(&self, path: String) -> Project {
@@ -143,7 +146,13 @@ impl Store {
         self.save(&projects);
     }
 
-    pub fn add_session(&self, project_id: &str, name: String, use_worktree: bool, agent: crate::agent::AgentId) -> Option<Session> {
+    pub fn add_session(
+        &self,
+        project_id: &str,
+        name: String,
+        use_worktree: bool,
+        agent: crate::agent::AgentId,
+    ) -> Option<Session> {
         let mut projects = self.projects.lock().unwrap_or_else(|e| e.into_inner());
         let project = projects.iter_mut().find(|p| p.id == project_id)?;
         let id = Uuid::new_v4().to_string();
@@ -233,7 +242,14 @@ mod tests {
         let dir = temp_dir("plain");
         let store = Store::for_test(&dir);
         let p = store.add_project("/repo".into());
-        let s = store.add_session(&p.id, "Session 1".into(), false, crate::agent::AgentId::Claude).unwrap();
+        let s = store
+            .add_session(
+                &p.id,
+                "Session 1".into(),
+                false,
+                crate::agent::AgentId::Claude,
+            )
+            .unwrap();
         assert!(!s.use_worktree);
         assert!(s.worktree_path.is_none());
         assert!(s.branch.is_none());
@@ -244,7 +260,14 @@ mod tests {
         let dir = temp_dir("wt");
         let store = Store::for_test(&dir);
         let p = store.add_project("/repo".into());
-        let s = store.add_session(&p.id, "My Feature".into(), true, crate::agent::AgentId::Claude).unwrap();
+        let s = store
+            .add_session(
+                &p.id,
+                "My Feature".into(),
+                true,
+                crate::agent::AgentId::Claude,
+            )
+            .unwrap();
         assert!(s.use_worktree);
         let path = s.worktree_path.unwrap();
         assert!(path.starts_with("/repo/.claude/worktrees/"), "got {path}");
@@ -260,7 +283,10 @@ mod tests {
             .add_session(&p.id, "S".into(), false, crate::agent::AgentId::Codex)
             .unwrap();
         assert_eq!(store.session_agent(&s.id), crate::agent::AgentId::Codex);
-        assert_eq!(store.session_agent("missing"), crate::agent::AgentId::Claude);
+        assert_eq!(
+            store.session_agent("missing"),
+            crate::agent::AgentId::Claude
+        );
     }
 
     #[test]
@@ -269,7 +295,12 @@ mod tests {
         let store = Store::for_test(&dir);
         let p = store.add_project("/repo".into());
         let s = store
-            .add_session(&p.id, "Session 1".into(), false, crate::agent::AgentId::Claude)
+            .add_session(
+                &p.id,
+                "Session 1".into(),
+                false,
+                crate::agent::AgentId::Claude,
+            )
             .unwrap();
         assert_eq!(s.agent, crate::agent::AgentId::Claude);
     }
