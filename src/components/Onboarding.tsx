@@ -2,6 +2,7 @@ import { useState } from "react";
 import { useStore } from "../store";
 import { AgentList } from "./AgentList";
 import { McpMatrix } from "./McpMatrix";
+import { TelemetryToggle } from "./TelemetryToggle";
 
 export function Onboarding() {
   const completeAgentSetup = useStore((s) => s.completeAgentSetup);
@@ -72,6 +73,12 @@ export function Onboarding() {
                 Open a project and hit New session — your default is pre-selected. Change agents
                 and MCP servers anytime in ⚙ Settings.
               </p>
+              <p className="settings-intro">
+                Conduit collects <strong>anonymous</strong> usage stats (app version, OS, a random
+                ID) to gauge how many people use it — never code, prompts, paths, or personal data.
+                You can change this anytime under Settings ▸ Privacy.
+              </p>
+              <TelemetryToggle />
             </div>
           )}
         </div>

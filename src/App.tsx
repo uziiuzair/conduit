@@ -29,9 +29,10 @@ export default function App() {
   const load = useStore((s) => s.load);
   const loadAgents = useStore((s) => s.loadAgents);
   const agentSetupComplete = useStore((s) => s.agentSetupComplete);
+  const telemetryOptOut = useStore((s) => s.telemetryOptOut);
 
-  // Parked: opt-out source is owned by settings/onboarding; pass false for now.
-  useTelemetry(false);
+  // Anonymous engagement heartbeat; no-op while opted out (Settings/onboarding).
+  useTelemetry(telemetryOptOut);
 
   useEffect(() => {
     void load();
