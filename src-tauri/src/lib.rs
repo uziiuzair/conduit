@@ -458,6 +458,7 @@ pub fn run() {
             claude_usage::fetch_claude_usage,
             claude_usage::connect_claude_plan_usage,
             mcp_apply,
+            telemetry::telemetry_ping,
         ])
         .build(tauri::generate_context!())
         .expect("error while building Conduit")
