@@ -4,6 +4,8 @@
 //! name, session_id, engagement_time_msec, app_version, and os ever leave the
 //! device. `client_id` is a random UUIDv4, never derived from PII.
 
+use std::path::{Path, PathBuf};
+
 // ---- Hardcoded GA4 credentials (empty => telemetry is a no-op) ----
 const GA4_MEASUREMENT_ID: &str = ""; // TODO(user): "G-XXXXXXXXXX"
 const GA4_API_SECRET: &str = ""; // TODO(user): GA4 Admin → Data Streams → Measurement Protocol API secret
@@ -17,6 +19,40 @@ fn creds_present() -> bool {
 /// branch is testable (tests run in debug, where the real gate is always off).
 fn should_send_policy(opt_out: bool, is_debug: bool, env_disabled: bool, creds: bool) -> bool {
     !opt_out && !is_debug && !env_disabled && creds
+}
+
+fn data_dir() -> PathBuf {
+    // Mirror store.rs: honor CONDUIT_DATA_DIR_NAME so dev builds stay isolated.
+    let dir_name =
+        std::env::var("CONDUIT_DATA_DIR_NAME").unwrap_or_else(|_| "ConduitTauri".to_string());
+    dirs::data_dir()
+        .unwrap_or_else(std::env::temp_dir)
+        .join(dir_name)
+}
+
+fn client_id_path() -> PathBuf {
+    data_dir().join("telemetry_client_id")
+}
+
+/// Read the persisted anonymous client_id at `path`, creating a random UUIDv4 on
+/// first run. Pure w.r.t. the path argument so it can be tested without env vars.
+fn read_or_create_client_id_at(path: &Path) -> String {
+    if let Ok(existing) = std::fs::read_to_string(path) {
+        let trimmed = existing.trim();
+        if !trimmed.is_empty() {
+            return trimmed.to_string();
+        }
+    }
+    let id = uuid::Uuid::new_v4().to_string();
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let _ = std::fs::write(path, &id);
+    id
+}
+
+fn get_or_create_client_id() -> String {
+    read_or_create_client_id_at(&client_id_path())
 }
 
 /// Everything needed to build one Measurement Protocol request. Pure data.
@@ -82,6 +118,21 @@ mod tests {
         let body = build_payload(&sample("session_start"));
         let v: serde_json::Value = serde_json::from_str(&body).unwrap();
         assert_eq!(v["events"][0]["name"], "session_start");
+    }
+
+    #[test]
+    fn client_id_is_stable_uuid_across_calls() {
+        let dir = std::env::temp_dir().join(format!("conduit-tel-{}", uuid::Uuid::new_v4()));
+        let path = dir.join("telemetry_client_id");
+
+        let first = read_or_create_client_id_at(&path);
+        assert_eq!(first.len(), 36, "expected a UUIDv4 string");
+        assert!(uuid::Uuid::parse_str(&first).is_ok());
+
+        let second = read_or_create_client_id_at(&path);
+        assert_eq!(first, second, "client_id must persist across calls");
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
