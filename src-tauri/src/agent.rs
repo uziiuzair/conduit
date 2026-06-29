@@ -67,17 +67,49 @@ impl ProviderAdapter for ClaudeAdapter {
     }
 }
 
+pub struct CodexAdapter;
+
+impl ProviderAdapter for CodexAdapter {
+    fn id(&self) -> AgentId {
+        AgentId::Codex
+    }
+    fn binary(&self) -> &'static str {
+        "codex"
+    }
+    // Phase 1: launch fresh (Codex doesn't accept a caller-pinned session id);
+    // worktrees and resume are later phases. `_flags` is unused (no worktree flags
+    // are ever passed for an agent whose supports_worktree() is false).
+    fn build_invocation(
+        &self,
+        _session_id: &str,
+        _projects_dir: Option<&Path>,
+        _flags: &str,
+    ) -> String {
+        "codex || codex".to_string()
+    }
+}
+
 /// Resolve the adapter for an agent id.
 pub fn adapter_for(agent: AgentId) -> Box<dyn ProviderAdapter> {
     match agent {
         AgentId::Claude => Box::new(ClaudeAdapter),
-        AgentId::Codex => Box::new(ClaudeAdapter), // TEMP until Task 6 adds CodexAdapter
+        AgentId::Codex => Box::new(CodexAdapter),
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn codex_spawns_fresh_with_fallback() {
+        let cmd = CodexAdapter.build_invocation("sid", None, "");
+        assert_eq!(cmd, "codex || codex");
+        assert_eq!(CodexAdapter.id(), AgentId::Codex);
+        assert_eq!(CodexAdapter.binary(), "codex");
+        assert!(!CodexAdapter.supports_worktree());
+        assert!(CodexAdapter.env_overrides().is_empty());
+    }
 
     #[test]
     fn claude_pins_a_new_session_when_no_transcript() {
