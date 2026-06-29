@@ -97,9 +97,81 @@ pub fn adapter_for(agent: AgentId) -> Box<dyn ProviderAdapter> {
     }
 }
 
+#[derive(serde::Serialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentInfo {
+    pub id: AgentId,
+    pub label: String,
+    pub binary: String,
+    pub found: bool,
+    pub path: Option<String>,
+}
+
+impl AgentInfo {
+    /// Build from the stdout of `command -v <binary>` (empty = not found).
+    pub fn from_probe(id: AgentId, binary: &str, label: &str, probe_stdout: &str) -> Self {
+        let path = probe_stdout.trim();
+        AgentInfo {
+            id,
+            label: label.to_string(),
+            binary: binary.to_string(),
+            found: !path.is_empty(),
+            path: (!path.is_empty()).then(|| path.to_string()),
+        }
+    }
+}
+
+/// All known agents, for the UI to label/detect. Order = display order.
+pub fn all_adapters() -> Vec<Box<dyn ProviderAdapter>> {
+    vec![Box::new(ClaudeAdapter), Box::new(CodexAdapter)]
+}
+
+fn label_for(id: AgentId) -> &'static str {
+    match id {
+        AgentId::Claude => "Claude Code",
+        AgentId::Codex => "Codex CLI",
+    }
+}
+
+/// Scan the user's LOGIN-shell PATH for each agent binary. We run through
+/// `$SHELL -i -l -c 'command -v <bin>'` (and scrub npm_config_prefix) so detection
+/// sees the same PATH the spawned sessions will — nvm/Homebrew/etc. (mirrors pty.rs).
+pub fn detect_agents() -> Vec<AgentInfo> {
+    let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
+    all_adapters()
+        .iter()
+        .map(|a| {
+            let bin = a.binary();
+            let out = std::process::Command::new(&shell)
+                .args(["-i", "-l", "-c", &format!("command -v {bin}")])
+                .env_remove("npm_config_prefix")
+                .output();
+            let stdout = out
+                .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+                .unwrap_or_default();
+            AgentInfo::from_probe(a.id(), bin, label_for(a.id()), &stdout)
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn detect_one_marks_found_when_path_nonempty() {
+        let info = AgentInfo::from_probe(
+            AgentId::Codex,
+            "codex",
+            "Codex CLI",
+            "/opt/homebrew/bin/codex\n",
+        );
+        assert!(info.found);
+        assert_eq!(info.path.as_deref(), Some("/opt/homebrew/bin/codex"));
+        let missing = AgentInfo::from_probe(AgentId::Codex, "codex", "Codex CLI", "");
+        assert!(!missing.found);
+        assert!(missing.path.is_none());
+    }
 
     #[test]
     fn codex_spawns_fresh_with_fallback() {
