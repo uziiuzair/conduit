@@ -14,6 +14,7 @@ import { Sidebar } from "./components/Sidebar";
 import { WorkspaceCenter } from "./components/WorkspaceCenter";
 import { RightColumn } from "./components/RightColumn";
 import { Onboarding } from "./components/Onboarding";
+import { useTelemetry } from "./hooks/useTelemetry";
 
 interface HookPayload {
   session: string;
@@ -28,6 +29,9 @@ export default function App() {
   const load = useStore((s) => s.load);
   const loadAgents = useStore((s) => s.loadAgents);
   const agentSetupComplete = useStore((s) => s.agentSetupComplete);
+
+  // Parked: opt-out source is owned by settings/onboarding; pass false for now.
+  useTelemetry(false);
 
   useEffect(() => {
     void load();
