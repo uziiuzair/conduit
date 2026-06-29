@@ -123,9 +123,10 @@ fn add_session(
     project_id: String,
     name: String,
     use_worktree: bool,
+    agent: crate::agent::AgentId,
     store: State<Store>,
 ) -> Option<Session> {
-    store.add_session(&project_id, name, use_worktree)
+    store.add_session(&project_id, name, use_worktree, agent)
 }
 
 #[tauri::command]
