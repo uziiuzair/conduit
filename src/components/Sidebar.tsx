@@ -17,11 +17,11 @@ import {
 import {
   FolderIcon,
   FolderPlusIcon,
-  TerminalIcon,
   PlusIcon,
   EllipsisIcon,
   CircleFilledIcon,
 } from "./Icons";
+import { AgentGlyph } from "./AgentGlyph";
 import { ThemeSwitcher } from "./ThemeSwitcher";
 import { ClaudeStatusPill } from "./ClaudeStatusPill";
 import { ClaudeUsagePanel } from "./ClaudeUsagePanel";
@@ -191,7 +191,7 @@ function SessionRow({
         });
       }}
     >
-      <TerminalIcon size={12} className="term-icon" />
+      <AgentGlyph id={session.agent} size={14} />
       {editing ? (
         <RenameInput
           projectId={project.id}
