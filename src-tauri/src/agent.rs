@@ -3,13 +3,14 @@
 use std::path::Path;
 
 /// Which coding-agent CLI a session runs. Persisted on each Session; serializes
-/// as a lowercase string ("claude"/"codex"). Unknown/absent → Claude (back-compat).
+/// as a lowercase string ("claude"/"codex"/"gemini"). Unknown/absent → Claude (back-compat).
 #[derive(serde::Serialize, serde::Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum AgentId {
     #[default]
     Claude,
     Codex,
+    Gemini,
 }
 
 /// Knows how to launch one agent CLI inside Conduit's `sh -c` cold-spawn script.
@@ -24,6 +25,11 @@ pub trait ProviderAdapter {
     /// Extra env vars to set on the child process for this agent.
     fn env_overrides(&self) -> Vec<(&'static str, &'static str)> {
         Vec::new()
+    }
+    /// The lifecycle hooks this adapter installs at session spawn.
+    /// Returns None for agents that have no hooks support yet.
+    fn hooks_profile(&self) -> Option<crate::hooks::HooksProfile> {
+        None
     }
     /// The agent command that runs after `cd <dir> &&`, including the `|| <bare>`
     /// fallback. `flags` carries already-quoted extra args (e.g. ` --worktree 'x'`).
@@ -65,6 +71,77 @@ impl ProviderAdapter for ClaudeAdapter {
             format!("claude{flags} --session-id {id} || claude{flags}")
         }
     }
+    fn hooks_profile(&self) -> Option<crate::hooks::HooksProfile> {
+        Some(crate::hooks::claude_profile())
+    }
+}
+
+pub struct GeminiAdapter;
+
+impl ProviderAdapter for GeminiAdapter {
+    fn id(&self) -> AgentId {
+        AgentId::Gemini
+    }
+    fn binary(&self) -> &'static str {
+        "gemini"
+    }
+    fn build_invocation(
+        &self,
+        _session_id: &str,
+        _projects_dir: Option<&Path>,
+        _flags: &str,
+    ) -> String {
+        "gemini || gemini".to_string()
+    }
+    fn hooks_profile(&self) -> Option<crate::hooks::HooksProfile> {
+        use crate::hooks::{HookRow, HooksProfile};
+        Some(HooksProfile {
+            config_rel_path: ".gemini/settings.json",
+            structured_todos: true,
+            rows: vec![
+                HookRow {
+                    event: "BeforeTool",
+                    matcher: None,
+                    verb: "pretool",
+                },
+                HookRow {
+                    event: "AfterTool",
+                    matcher: Some("write_todos"),
+                    verb: "todos",
+                },
+                HookRow {
+                    event: "AfterTool",
+                    matcher: None,
+                    verb: "tooluse",
+                },
+                HookRow {
+                    event: "BeforeAgent",
+                    matcher: None,
+                    verb: "prompt",
+                },
+                HookRow {
+                    event: "AfterAgent",
+                    matcher: None,
+                    verb: "stop",
+                },
+                HookRow {
+                    event: "SessionStart",
+                    matcher: None,
+                    verb: "sessionstart",
+                },
+                HookRow {
+                    event: "PreCompress",
+                    matcher: None,
+                    verb: "precompact",
+                },
+                HookRow {
+                    event: "Notification",
+                    matcher: None,
+                    verb: "notification",
+                },
+            ],
+        })
+    }
 }
 
 pub struct CodexAdapter;
@@ -87,6 +164,45 @@ impl ProviderAdapter for CodexAdapter {
     ) -> String {
         "codex || codex".to_string()
     }
+    fn hooks_profile(&self) -> Option<crate::hooks::HooksProfile> {
+        use crate::hooks::{HookRow, HooksProfile};
+        Some(HooksProfile {
+            config_rel_path: ".codex/hooks.json",
+            structured_todos: false,
+            rows: vec![
+                HookRow {
+                    event: "PreToolUse",
+                    matcher: None,
+                    verb: "pretool",
+                },
+                HookRow {
+                    event: "PostToolUse",
+                    matcher: None,
+                    verb: "tooluse",
+                },
+                HookRow {
+                    event: "UserPromptSubmit",
+                    matcher: None,
+                    verb: "prompt",
+                },
+                HookRow {
+                    event: "Stop",
+                    matcher: None,
+                    verb: "stop",
+                },
+                HookRow {
+                    event: "PreCompact",
+                    matcher: None,
+                    verb: "precompact",
+                },
+                HookRow {
+                    event: "SessionStart",
+                    matcher: None,
+                    verb: "sessionstart",
+                },
+            ],
+        })
+    }
 }
 
 /// Resolve the adapter for an agent id.
@@ -94,6 +210,7 @@ pub fn adapter_for(agent: AgentId) -> Box<dyn ProviderAdapter> {
     match agent {
         AgentId::Claude => Box::new(ClaudeAdapter),
         AgentId::Codex => Box::new(CodexAdapter),
+        AgentId::Gemini => Box::new(GeminiAdapter),
     }
 }
 
@@ -123,13 +240,18 @@ impl AgentInfo {
 
 /// All known agents, for the UI to label/detect. Order = display order.
 pub fn all_adapters() -> Vec<Box<dyn ProviderAdapter>> {
-    vec![Box::new(ClaudeAdapter), Box::new(CodexAdapter)]
+    vec![
+        Box::new(ClaudeAdapter),
+        Box::new(CodexAdapter),
+        Box::new(GeminiAdapter),
+    ]
 }
 
 fn label_for(id: AgentId) -> &'static str {
     match id {
         AgentId::Claude => "Claude Code",
         AgentId::Codex => "Codex CLI",
+        AgentId::Gemini => "Gemini CLI",
     }
 }
 
@@ -165,7 +287,11 @@ pub fn detect_agents() -> Vec<AgentInfo> {
 fn probe_path<'a>(stdout: &'a str, binary: &str) -> &'a str {
     stdout
         .lines()
-        .find_map(|l| l.split_once('\t').filter(|(b, _)| *b == binary).map(|(_, p)| p))
+        .find_map(|l| {
+            l.split_once('\t')
+                .filter(|(b, _)| *b == binary)
+                .map(|(_, p)| p)
+        })
         .unwrap_or("")
 }
 
@@ -231,5 +357,37 @@ mod tests {
             ClaudeAdapter.env_overrides(),
             vec![("CLAUDE_CODE_ENABLE_TASKS", "0")]
         );
+    }
+
+    #[test]
+    fn codex_profile_has_no_todos_and_uses_codex_path() {
+        let p = ClaudeAdapter.hooks_profile().unwrap();
+        assert_eq!(p.config_rel_path, ".claude/settings.local.json");
+        let cp = CodexAdapter.hooks_profile().unwrap();
+        assert_eq!(cp.config_rel_path, ".codex/hooks.json");
+        assert!(!cp.structured_todos);
+        assert!(
+            cp.rows.iter().all(|r| r.verb != "todos"),
+            "codex has no todos event"
+        );
+        let gp = GeminiAdapter.hooks_profile().unwrap();
+        assert_eq!(gp.config_rel_path, ".gemini/settings.json");
+        assert!(gp.structured_todos);
+        assert!(gp
+            .rows
+            .iter()
+            .any(|r| r.event == "AfterTool" && r.verb == "tooluse"));
+    }
+
+    #[test]
+    fn gemini_spawns_fresh_and_has_no_worktree() {
+        assert_eq!(GeminiAdapter.id(), AgentId::Gemini);
+        assert_eq!(GeminiAdapter.binary(), "gemini");
+        assert!(!GeminiAdapter.supports_worktree());
+        assert_eq!(
+            GeminiAdapter.build_invocation("sid", None, ""),
+            "gemini || gemini"
+        );
+        assert_eq!(adapter_for(AgentId::Gemini).id(), AgentId::Gemini);
     }
 }

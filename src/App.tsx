@@ -9,6 +9,7 @@ import {
   type TodoItem,
   type TodoStatus,
 } from "./store";
+import { type AgentId } from "./agents";
 import { Sidebar } from "./components/Sidebar";
 import { WorkspaceCenter } from "./components/WorkspaceCenter";
 import { RightColumn } from "./components/RightColumn";
@@ -62,7 +63,7 @@ export default function App() {
           // live label of what it's doing. TodoWrite is shown in the To-dos panel.
           st.setStatus(session, "running");
           st.setCompacting(session, false);
-          st.setActivity(session, toolActivity(body?.tool_name, body?.tool_input));
+          st.setActivity(session, toolActivity(agentOf(session), body?.tool_name, body?.tool_input));
           break;
         }
         case "precompact":
@@ -229,10 +230,56 @@ async function maybeAutoName(sessionId: string, prompt: unknown) {
 }
 
 // ---- hook helpers ----
-/** Map a Claude Code tool name + input to a short, human "what it's doing now"
- *  label for the sidebar. Returns undefined when there's nothing worth showing. */
-function toolActivity(toolName?: string, toolInput?: any): string | undefined {
+
+/** Look up which agent is running a given session (defaults to "claude" for back-compat). */
+function agentOf(sessionId: string): AgentId {
+  return findSession(useStore.getState().projects, sessionId)?.session.agent ?? "claude";
+}
+
+/** Map a tool name + input to a short, human "what it's doing now" label for the
+ *  sidebar. Agent-aware: each adapter has its own tool vocabulary. Returns undefined
+ *  when there's nothing worth showing (e.g. the tool is surfaced elsewhere). */
+function toolActivity(agent: AgentId, toolName?: string, toolInput?: any): string | undefined {
   if (typeof toolName !== "string" || !toolName) return undefined;
+
+  if (agent === "codex") {
+    switch (toolName) {
+      case "Bash":
+        return "Running a command";
+      case "apply_patch": {
+        const p = toolInput?.path ?? toolInput?.file_path;
+        const f = typeof p === "string" && p ? baseName(p) : undefined;
+        return f ? `Editing ${f}` : "Editing files";
+      }
+      default:
+        return toolName;
+    }
+  }
+
+  if (agent === "gemini") {
+    switch (toolName) {
+      case "run_shell_command":
+        return "Running a command";
+      case "write_file":
+      case "replace": {
+        const p = toolInput?.absolute_path ?? toolInput?.path ?? toolInput?.file_path;
+        const f = typeof p === "string" && p ? baseName(p) : undefined;
+        return f ? `Editing ${f}` : "Editing files";
+      }
+      case "read_file":
+      case "read_many_files":
+        return "Reading files";
+      case "google_web_search":
+      case "web_fetch":
+        return "Browsing the web";
+      case "write_todos":
+        return undefined; // surfaced in the To-dos panel instead
+      default:
+        return toolName;
+    }
+  }
+
+  // claude (and any unknown agent): keep the existing PascalCase switch body unchanged.
   const file = (): string | undefined => {
     const p = toolInput?.file_path ?? toolInput?.path ?? toolInput?.notebook_path;
     return typeof p === "string" && p ? baseName(p) : undefined;
@@ -267,7 +314,9 @@ function toolActivity(toolName?: string, toolInput?: any): string | undefined {
 }
 
 function applyTodos(toolInput: any, sessionId: string) {
-  const raw = toolInput?.todos;
+  // Claude sends { todos: [...] }; Gemini may send { todo_list: [...] } or a bare array.
+  const raw =
+    toolInput?.todos ?? toolInput?.todo_list ?? (Array.isArray(toolInput) ? toolInput : undefined);
   if (!Array.isArray(raw)) return;
   const todos: TodoItem[] = raw
     .filter((it) => typeof it?.content === "string")
