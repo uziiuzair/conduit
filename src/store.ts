@@ -10,7 +10,7 @@ import {
   readStoredPref,
   writeStoredPref,
 } from "./themes";
-import { AGENTS, type AgentId, type AgentInfo, DEFAULT_AGENT } from "./agents";
+import { AGENTS, type AgentId, type AgentInfo, DEFAULT_AGENT, type McpServer } from "./agents";
 
 // ---- Types (mirror the Rust serde structs, rename_all = "camelCase") ----
 export interface Session {
@@ -112,6 +112,18 @@ const SETUP_DONE_KEY = "conduit.agentSetupComplete";
 function readDefaultAgent(): AgentId {
   const v = localStorage.getItem(DEFAULT_AGENT_KEY);
   return AGENTS.some((a) => a.id === v) ? (v as AgentId) : DEFAULT_AGENT;
+}
+
+const MCP_KEY = "conduit.mcp";
+function readMcpState(): { servers: McpServer[]; enabled: Record<string, AgentId[]> } {
+  try {
+    const v = localStorage.getItem(MCP_KEY);
+    if (v) return JSON.parse(v) as { servers: McpServer[]; enabled: Record<string, AgentId[]> };
+  } catch { /* ignore */ }
+  return { servers: [], enabled: {} };
+}
+function persistMcp(servers: McpServer[], enabled: Record<string, AgentId[]>): void {
+  try { localStorage.setItem(MCP_KEY, JSON.stringify({ servers, enabled })); } catch { /* quota — non-fatal */ }
 }
 
 const PLAN_CONNECTED_KEY = "conduit.planConnected";
@@ -264,6 +276,18 @@ interface AppState {
   setDefaultAgent: (id: AgentId) => void;
   completeAgentSetup: () => void;
   loadAgents: () => Promise<void>;
+
+  // ---- MCP server registry ----
+  mcpServers: McpServer[];
+  mcpEnabled: Record<string, AgentId[]>;
+  /** Transient per-cell status (key = `${serverName}:${agentId}`), not persisted. */
+  mcpBusy: Record<string, "pending" | { error: string } | undefined>;
+  /** Returns an error string (e.g. duplicate name) or null on success. */
+  addMcpServer: (s: McpServer) => string | null;
+  /** Removes from all enabled agents (best-effort) then drops from registry. */
+  removeMcpServer: (name: string) => Promise<void>;
+  /** Invokes mcp_apply; sets pending/error per-cell, reverts on failure. */
+  setMcpEnabled: (name: string, agent: AgentId, on: boolean) => Promise<void>;
   addProject: (path: string) => Promise<void>;
   removeProject: (id: string) => Promise<void>;
   addSession: (projectId: string, opts?: { name?: string; useWorktree?: boolean; agent?: AgentId }) => Promise<void>;
@@ -306,6 +330,8 @@ interface AppState {
 }
 
 export const useStore = create<AppState>((set, get) => {
+  const _initMcp = readMcpState();
+
   // Apply a reducer to a project's layout, validate, persist (debounced), commit.
   const applyLayout = (projectId: string, fn: (l: ProjectLayout) => ProjectLayout) => {
     set((s) => {
@@ -343,6 +369,10 @@ export const useStore = create<AppState>((set, get) => {
     agents: null,
     defaultAgent: readDefaultAgent(),
     agentSetupComplete: localStorage.getItem(SETUP_DONE_KEY) === "1",
+
+    mcpServers: _initMcp.servers,
+    mcpEnabled: _initMcp.enabled,
+    mcpBusy: {},
     topTab: "files",
     bottomTab: "terminal",
     themePref: readStoredPref(),
@@ -376,6 +406,52 @@ export const useStore = create<AppState>((set, get) => {
         set({ agents: await invoke<AgentInfo[]>("detect_agents") });
       } catch {
         set({ agents: [] });
+      }
+    },
+
+    addMcpServer: (s) => {
+      if (get().mcpServers.some((x) => x.name === s.name)) {
+        return `"${s.name}" already exists`;
+      }
+      const mcpServers = [...get().mcpServers, s];
+      persistMcp(mcpServers, get().mcpEnabled);
+      set({ mcpServers });
+      return null;
+    },
+
+    removeMcpServer: async (name) => {
+      const enabled = [...(get().mcpEnabled[name] ?? [])];
+      // best-effort: remove from every agent it was applied to
+      await Promise.allSettled(enabled.map((a) => get().setMcpEnabled(name, a, false)));
+      set((s) => {
+        const mcpServers = s.mcpServers.filter((x) => x.name !== name);
+        const mcpEnabled = { ...s.mcpEnabled };
+        delete mcpEnabled[name];
+        const mcpBusy = { ...s.mcpBusy };
+        for (const k of Object.keys(mcpBusy)) {
+          if (k.startsWith(name + ":")) delete mcpBusy[k];
+        }
+        persistMcp(mcpServers, mcpEnabled);
+        return { mcpServers, mcpEnabled, mcpBusy };
+      });
+    },
+
+    setMcpEnabled: async (name, agent, on) => {
+      const server = get().mcpServers.find((s) => s.name === name);
+      if (!server) return;
+      const key = `${name}:${agent}`;
+      set((s) => ({ mcpBusy: { ...s.mcpBusy, [key]: "pending" } }));
+      try {
+        await invoke("mcp_apply", { agent, action: on ? "add" : "remove", server });
+        set((s) => {
+          const cur = new Set(s.mcpEnabled[name] ?? []);
+          on ? cur.add(agent) : cur.delete(agent);
+          const mcpEnabled = { ...s.mcpEnabled, [name]: [...cur] };
+          persistMcp(s.mcpServers, mcpEnabled);
+          return { mcpEnabled, mcpBusy: { ...s.mcpBusy, [key]: undefined } };
+        });
+      } catch (e) {
+        set((s) => ({ mcpBusy: { ...s.mcpBusy, [key]: { error: String(e) } } }));
       }
     },
 
