@@ -1966,11 +1966,29 @@ button {
 }
 
 .mcp-form-select {
-  /* Inherit the dialog-input styles; just ensure consistent height. */
-  cursor: default;
+  /* Strip the native macOS chrome and draw our own chevron so it matches the
+     warm-dark theme instead of the glossy system control. */
+  cursor: pointer;
+  appearance: none;
+  -webkit-appearance: none;
   -webkit-user-select: none;
   user-select: none;
-  -webkit-appearance: auto;
+  padding-right: 26px;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'%3E%3Cpath d='M1 1l4 4 4-4' fill='none' stroke='%239a938c' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 9px center;
+  background-size: 10px 6px;
+}
+
+/* Unified hover/focus + monospace code fields for the add-server form. */
+.mcp-form-input:hover,
+.mcp-form-select:hover,
+.mcp-form-textarea:hover {
+  border-color: var(--text-dim);
+}
+.mcp-form-input.mcp-mono {
+  font-family: var(--mono-font);
+  font-size: 11.5px;
 }
 
 .mcp-form-textarea {

@@ -257,7 +257,7 @@ export function McpMatrix() {
               <div className="mcp-form-field">
                 <label className="mcp-form-label">Command</label>
                 <input
-                  className="dialog-input mcp-form-input"
+                  className="dialog-input mcp-form-input mcp-mono"
                   value={fcmd}
                   onChange={(e) => { setFcmd(e.target.value); setFerr(null); }}
                   placeholder="npx"
@@ -266,7 +266,7 @@ export function McpMatrix() {
               <div className="mcp-form-field">
                 <label className="mcp-form-label">Args</label>
                 <input
-                  className="dialog-input mcp-form-input"
+                  className="dialog-input mcp-form-input mcp-mono"
                   value={fargs}
                   onChange={(e) => setFargs(e.target.value)}
                   placeholder="-y @upstash/context7-mcp"
@@ -277,7 +277,7 @@ export function McpMatrix() {
             <div className="mcp-form-field">
               <label className="mcp-form-label">URL</label>
               <input
-                className="dialog-input mcp-form-input"
+                className="dialog-input mcp-form-input mcp-mono"
                 value={furl}
                 onChange={(e) => { setFurl(e.target.value); setFerr(null); }}
                 placeholder="https://example.com/mcp"
