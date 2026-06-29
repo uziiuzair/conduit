@@ -62,10 +62,9 @@ fn pty_spawn(
             worktree::spawn_target(&working_directory, slug, &wt_path, exists);
         (cwd, worktree_arg, settings)
     } else {
-        // Normal session: install Claude hooks ONLY for Claude (other agents get
-        // their own hook wiring in a later phase). Non-Claude → plain cwd, no hooks.
-        if matches!(agent, crate::agent::AgentId::Claude) {
-            hooks::install(&working_directory, port);
+        // Normal session: install this agent's hook profile (if it has one).
+        if let Some(profile) = adapter.hooks_profile() {
+            hooks::install_profile(&working_directory, port, &profile);
         }
         (working_directory.clone(), None, None)
     };
