@@ -72,6 +72,7 @@ impl PtyManager {
         shell_only: bool,
         worktree_name: Option<String>,
         settings_path: Option<String>,
+        agent: crate::agent::AgentId,
         on_event: Channel<String>,
     ) -> Result<(), String> {
         // Already running → re-attach the live reader to the new channel and force
@@ -101,6 +102,7 @@ impl PtyManager {
 
         let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
 
+        let adapter = crate::agent::adapter_for(agent);
         let inner = if shell_only {
             format!(
                 "cd {dir} 2>/dev/null; exec {shell} -i -l",
@@ -110,8 +112,9 @@ impl PtyManager {
         } else {
             // Cold spawn only: the re-attach fast-path above returns before reaching
             // here, so a live session is never "resumed" out from under itself. The
-            // claude command resumes/pins the session AND applies worktree/settings.
-            claude_script(
+            // agent command resumes/pins the session AND applies worktree/settings.
+            build_script(
+                adapter.as_ref(),
                 &session_id,
                 hook_port,
                 &working_directory,
@@ -136,7 +139,9 @@ impl PtyManager {
         if !shell_only {
             cmd.env("CONDUIT_SESSION_ID", &session_id);
             cmd.env("CONDUIT_HOOK_PORT", hook_port.to_string());
-            cmd.env("CLAUDE_CODE_ENABLE_TASKS", "0");
+            for (k, v) in adapter.env_overrides() {
+                cmd.env(k, v);
+            }
         }
 
         let child = pair
@@ -331,18 +336,6 @@ fn claude_projects_dir() -> Option<PathBuf> {
     }
 }
 
-/// The `claude` invocation for a *cold* spawn. Resume the pinned conversation when
-/// its transcript exists; otherwise start a new session pinned to our id. `flags` is
-/// extra claude args (e.g. `--worktree`/`--settings`) injected onto BOTH the primary
-/// and the fallback `claude`, so a resume/pin failure still launches with them.
-fn claude_invocation(session_id: &str, projects_dir: Option<&Path>, flags: &str) -> String {
-    let id = shell_quote(session_id);
-    if projects_dir.is_some_and(|d| transcript_exists(session_id, d)) {
-        format!("claude{flags} --resume {id} || claude{flags}")
-    } else {
-        format!("claude{flags} --session-id {id} || claude{flags}")
-    }
-}
 
 /// Single-quote a string for safe interpolation into a /bin/sh -c command.
 pub(crate) fn shell_quote(s: &str) -> String {
@@ -361,12 +354,12 @@ fn broadcast(subs: &mut Vec<(u64, SyncSender<String>)>, frame: &str) {
     });
 }
 
-/// Build the `sh -c` script that launches a `claude` session. `worktree` adds
-/// `--worktree <slug>` (Claude creates `<repo>/.claude/worktrees/<slug>` and runs in it);
-/// `settings` adds `--settings <path>` so Conduit's hooks load inside the worktree.
-/// The resume-vs-pin decision (and the `|| claude` fallback) is delegated to
-/// `claude_invocation`, with the worktree/settings flags applied to both claudes.
-fn claude_script(
+/// Build the `sh -c` script that launches one agent session. The agent invocation
+/// (and its `|| <bare>` fallback) is delegated to the adapter; Conduit's own env
+/// (CONDUIT_SESSION_ID/HOOK_PORT) and the worktree/settings flags are applied here.
+/// `worktree`/`settings` are only set by callers when the adapter supports worktrees.
+fn build_script(
+    adapter: &dyn crate::agent::ProviderAdapter,
     session_id: &str,
     port: u16,
     working_directory: &str,
@@ -382,13 +375,13 @@ fn claude_script(
     if let Some(path) = settings {
         flags.push_str(&format!(" --settings {}", shell_quote(path)));
     }
-    let claude = claude_invocation(session_id, projects_dir, &flags);
+    let invocation = adapter.build_invocation(session_id, projects_dir, &flags);
     format!(
-        "export CONDUIT_SESSION_ID={sid} CONDUIT_HOOK_PORT={port} CLAUDE_CODE_ENABLE_TASKS=0; cd {dir} && {claude}; exec {shell} -i -l",
+        "export CONDUIT_SESSION_ID={sid} CONDUIT_HOOK_PORT={port}; cd {dir} && {invocation}; exec {shell} -i -l",
         sid = shell_quote(session_id),
         port = port,
         dir = shell_quote(working_directory),
-        claude = claude,
+        invocation = invocation,
         shell = shell,
     )
 }
@@ -450,27 +443,20 @@ mod tests {
     }
 
     #[test]
-    fn invocation_resumes_when_transcript_exists() {
-        let projects = fresh_projects_dir("resume");
-        plant_transcript(&projects, "-proj", ID);
-        let cmd = claude_invocation(ID, Some(projects.as_path()), "");
-        assert!(cmd.contains(&format!("--resume '{ID}'")), "got: {cmd}");
-        assert!(cmd.ends_with("|| claude"), "missing fallback: {cmd}");
-    }
-
-    #[test]
-    fn invocation_pins_new_session_when_absent() {
-        let projects = fresh_projects_dir("pin");
-        let cmd = claude_invocation(ID, Some(projects.as_path()), "");
-        assert!(cmd.contains(&format!("--session-id '{ID}'")), "got: {cmd}");
-        assert!(cmd.ends_with("|| claude"), "missing fallback: {cmd}");
-    }
-
-    #[test]
-    fn invocation_without_store_is_first_launch() {
-        let cmd = claude_invocation(ID, None, "");
-        assert!(cmd.contains("--session-id"), "got: {cmd}");
-        assert!(!cmd.contains("--resume"), "must not resume without a store: {cmd}");
+    fn build_script_wraps_adapter_invocation_with_conduit_env() {
+        let script = build_script(
+            &crate::agent::ClaudeAdapter,
+            "sid-1",
+            7777,
+            "/repo",
+            "/bin/zsh",
+            None,
+            None,
+            None,
+        );
+        assert!(script.contains("export CONDUIT_SESSION_ID='sid-1' CONDUIT_HOOK_PORT=7777"));
+        assert!(script.contains("claude --session-id 'sid-1' || claude"));
+        assert!(script.contains("cd '/repo' &&"));
     }
 
     #[test]
@@ -505,32 +491,5 @@ mod tests {
         broadcast(&mut subs, "next");
         assert_eq!(rx_fast.recv().unwrap(), "next");
         assert_eq!(subs.len(), 2);
-    }
-
-    #[test]
-    fn invocation_applies_flags_to_both_primary_and_fallback() {
-        let cmd = claude_invocation(ID, None, " --worktree 'w' --settings '/s'");
-        assert_eq!(
-            cmd,
-            format!("claude --worktree 'w' --settings '/s' --session-id '{ID}' || claude --worktree 'w' --settings '/s'")
-        );
-    }
-
-    #[test]
-    fn script_pins_bare_claude_without_worktree() {
-        let s = claude_script("s1", 8423, "/repo", "/bin/zsh", None, None, None);
-        assert!(s.contains("export CONDUIT_SESSION_ID='s1'"));
-        assert!(s.contains("&& claude --session-id 's1' || claude;"), "got: {s}");
-        assert!(!s.contains("--worktree"));
-        assert!(!s.contains("--settings"));
-    }
-
-    #[test]
-    fn script_adds_worktree_and_settings() {
-        let s = claude_script("s1", 8423, "/repo", "/bin/zsh", Some("feat-x"), Some("/d/h.json"), None);
-        assert!(
-            s.contains("claude --worktree 'feat-x' --settings '/d/h.json' --session-id 's1' || claude --worktree 'feat-x' --settings '/d/h.json';"),
-            "got: {s}"
-        );
     }
 }
