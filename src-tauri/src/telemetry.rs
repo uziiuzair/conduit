@@ -126,10 +126,21 @@ fn send(body: &str) {
         .output();
 }
 
+/// Map the frontend's event kind to a GA4 event name. Both are CUSTOM
+/// (non-reserved): GA4's Measurement Protocol rejects reserved names like
+/// `session_start`/`user_engagement`. Session and active-user metrics come from
+/// the `session_id` + `engagement_time_msec` params, not the event name.
+fn event_name_for(kind: &str) -> &'static str {
+    if kind == "app_open" {
+        "app_open"
+    } else {
+        "app_heartbeat"
+    }
+}
+
 /// Tauri command: record one anonymous engagement event. Never errors, never
-/// blocks — gating + curl happen off the async runtime. `kind` is
-/// "session_start" for the first event of a session, anything else maps to
-/// "user_engagement".
+/// blocks — gating + curl happen off the async runtime. `kind` is "app_open"
+/// for the first event of a session, anything else maps to "app_heartbeat".
 #[tauri::command]
 pub async fn telemetry_ping(
     app: tauri::AppHandle,
@@ -140,12 +151,7 @@ pub async fn telemetry_ping(
     if !should_send(is_opted_out()) {
         return;
     }
-    let event_name = if kind == "session_start" {
-        "session_start"
-    } else {
-        "user_engagement"
-    }
-    .to_string();
+    let event_name = event_name_for(&kind).to_string();
 
     let input = PingInput {
         client_id: get_or_create_client_id(),
@@ -176,10 +182,10 @@ mod tests {
 
     #[test]
     fn build_payload_has_exact_shape_and_params() {
-        let body = build_payload(&sample("user_engagement"));
+        let body = build_payload(&sample("app_heartbeat"));
         let v: serde_json::Value = serde_json::from_str(&body).unwrap();
         assert_eq!(v["client_id"], "uuid-123");
-        assert_eq!(v["events"][0]["name"], "user_engagement");
+        assert_eq!(v["events"][0]["name"], "app_heartbeat");
         let params = &v["events"][0]["params"];
         assert_eq!(params["session_id"], "sess-1");
         assert_eq!(params["engagement_time_msec"], "300000");
@@ -191,9 +197,22 @@ mod tests {
 
     #[test]
     fn build_payload_honors_event_name() {
-        let body = build_payload(&sample("session_start"));
+        let body = build_payload(&sample("app_open"));
         let v: serde_json::Value = serde_json::from_str(&body).unwrap();
-        assert_eq!(v["events"][0]["name"], "session_start");
+        assert_eq!(v["events"][0]["name"], "app_open");
+    }
+
+    #[test]
+    fn event_names_are_non_reserved() {
+        // GA4's Measurement Protocol rejects reserved names; guard against it.
+        assert_eq!(event_name_for("app_open"), "app_open");
+        assert_eq!(event_name_for("app_heartbeat"), "app_heartbeat");
+        assert_eq!(event_name_for("anything-else"), "app_heartbeat");
+        for kind in ["app_open", "app_heartbeat", "anything-else"] {
+            let n = event_name_for(kind);
+            assert_ne!(n, "session_start");
+            assert_ne!(n, "user_engagement");
+        }
     }
 
     #[test]
