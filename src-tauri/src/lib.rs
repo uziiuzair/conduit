@@ -329,7 +329,9 @@ fn notify_user(app: tauri::AppHandle, title: String, subtitle: Option<String>, b
     notify::send(&app, &title, subtitle.as_deref(), &body);
 }
 
-#[tauri::command]
+// `(async)` runs this blocking command on a worker thread instead of the main
+// thread, so the login-shell PATH probe never freezes the webview.
+#[tauri::command(async)]
 fn detect_agents() -> Vec<crate::agent::AgentInfo> {
     crate::agent::detect_agents()
 }

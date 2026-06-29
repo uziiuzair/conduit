@@ -133,25 +133,40 @@ fn label_for(id: AgentId) -> &'static str {
     }
 }
 
-/// Scan the user's LOGIN-shell PATH for each agent binary. We run through
-/// `$SHELL -i -l -c 'command -v <bin>'` (and scrub npm_config_prefix) so detection
-/// sees the same PATH the spawned sessions will — nvm/Homebrew/etc. (mirrors pty.rs).
+/// Scan the user's LOGIN-shell PATH for every agent binary in a SINGLE shell
+/// invocation. Shell init (`zsh -i -l` sourcing rc/nvm) dominates the cost — ~0.5s —
+/// so one shell for all binaries is far cheaper than one shell per binary. Scrubs
+/// npm_config_prefix so detection sees the same PATH the spawned sessions will.
 pub fn detect_agents() -> Vec<AgentInfo> {
     let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
-    all_adapters()
+    let adapters = all_adapters();
+    let bins: Vec<&str> = adapters.iter().map(|a| a.binary()).collect();
+    // One shell prints "<binary>\t<resolved-path-or-empty>" for each binary.
+    let script = format!(
+        "for b in {}; do printf '%s\\t%s\\n' \"$b\" \"$(command -v \"$b\" 2>/dev/null)\"; done",
+        bins.join(" ")
+    );
+    let stdout = std::process::Command::new(&shell)
+        .args(["-i", "-l", "-c", &script])
+        .env_remove("npm_config_prefix")
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+        .unwrap_or_default();
+    adapters
         .iter()
         .map(|a| {
             let bin = a.binary();
-            let out = std::process::Command::new(&shell)
-                .args(["-i", "-l", "-c", &format!("command -v {bin}")])
-                .env_remove("npm_config_prefix")
-                .output();
-            let stdout = out
-                .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
-                .unwrap_or_default();
-            AgentInfo::from_probe(a.id(), bin, label_for(a.id()), &stdout)
+            AgentInfo::from_probe(a.id(), bin, label_for(a.id()), probe_path(&stdout, bin))
         })
         .collect()
+}
+
+/// Extract the path the batched probe printed for `binary` ("" when not found).
+fn probe_path<'a>(stdout: &'a str, binary: &str) -> &'a str {
+    stdout
+        .lines()
+        .find_map(|l| l.split_once('\t').filter(|(b, _)| *b == binary).map(|(_, p)| p))
+        .unwrap_or("")
 }
 
 #[cfg(test)]
@@ -171,6 +186,14 @@ mod tests {
         let missing = AgentInfo::from_probe(AgentId::Codex, "codex", "Codex CLI", "");
         assert!(!missing.found);
         assert!(missing.path.is_none());
+    }
+
+    #[test]
+    fn probe_path_extracts_per_binary_path() {
+        let out = "claude\t/usr/bin/claude\ncodex\t\n";
+        assert_eq!(probe_path(out, "claude"), "/usr/bin/claude");
+        assert_eq!(probe_path(out, "codex"), "");
+        assert_eq!(probe_path(out, "missing"), "");
     }
 
     #[test]
