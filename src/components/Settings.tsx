@@ -1,8 +1,9 @@
 import { useEffect, useState } from "react";
 import { AgentList } from "./AgentList";
 import { McpMatrix } from "./McpMatrix";
+import { TelemetryToggle } from "./TelemetryToggle";
 
-type SettingsTab = "agents" | "mcp";
+type SettingsTab = "agents" | "mcp" | "privacy";
 
 export function Settings({ onClose }: { onClose: () => void }) {
   const [tab, setTab] = useState<SettingsTab>("agents");
@@ -43,6 +44,16 @@ export function Settings({ onClose }: { onClose: () => void }) {
             >
               MCP servers
             </span>
+            <span
+              className={`settings-tab${tab === "privacy" ? " on" : ""}`}
+              role="tab"
+              aria-selected={tab === "privacy"}
+              tabIndex={tab === "privacy" ? 0 : -1}
+              onClick={() => setTab("privacy")}
+              onKeyDown={(e) => e.key === "Enter" && setTab("privacy")}
+            >
+              Privacy
+            </span>
           </div>
           <button className="settings-close" onClick={onClose} aria-label="Close">✕</button>
         </div>
@@ -57,6 +68,16 @@ export function Settings({ onClose }: { onClose: () => void }) {
             </>
           )}
           {tab === "mcp" && <McpMatrix />}
+          {tab === "privacy" && (
+            <>
+              <p className="settings-intro">
+                Conduit can send <strong>anonymous</strong> usage statistics — app version, OS,
+                and a random ID — so we can see how many people use it. No code, prompts, file
+                paths, project names, or personal data are ever sent.
+              </p>
+              <TelemetryToggle />
+            </>
+          )}
         </div>
       </div>
     </div>
