@@ -13,6 +13,34 @@ pub enum AgentId {
     Gemini,
 }
 
+/// Descriptor for a single MCP server passed to the CLI command builders.
+#[derive(serde::Deserialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct McpServer {
+    pub name: String,
+    pub transport: String, // "stdio" | "http"
+    #[serde(default)]
+    pub command: String,
+    #[serde(default)]
+    pub args: Vec<String>,
+    #[serde(default)]
+    pub url: String,
+    #[serde(default)]
+    pub env: Vec<(String, String)>, // [(K, V)]
+}
+
+/// Shell-quote a single token: return it bare if it's safe, otherwise single-quote it.
+fn sh_quote(s: &str) -> String {
+    if !s.is_empty()
+        && s.chars()
+            .all(|c| c.is_ascii_alphanumeric() || "-_./:@=".contains(c))
+    {
+        s.to_string()
+    } else {
+        format!("'{}'", s.replace('\'', "'\\''"))
+    }
+}
+
 /// Knows how to launch one agent CLI inside Conduit's `sh -c` cold-spawn script.
 pub trait ProviderAdapter {
     fn id(&self) -> AgentId;
@@ -40,6 +68,16 @@ pub trait ProviderAdapter {
         projects_dir: Option<&Path>,
         flags: &str,
     ) -> String;
+    /// Build the CLI command string to register an MCP server at user scope.
+    /// Returns `None` if this adapter doesn't support the given transport yet.
+    fn mcp_add_command(&self, _s: &McpServer) -> Option<String> {
+        None
+    }
+    /// Build the CLI command string to remove an MCP server at user scope.
+    /// Returns `None` for adapters that don't support MCP management.
+    fn mcp_remove_command(&self, _name: &str) -> Option<String> {
+        None
+    }
 }
 
 pub struct ClaudeAdapter;
@@ -73,6 +111,33 @@ impl ProviderAdapter for ClaudeAdapter {
     }
     fn hooks_profile(&self) -> Option<crate::hooks::HooksProfile> {
         Some(crate::hooks::claude_profile())
+    }
+    fn mcp_add_command(&self, s: &McpServer) -> Option<String> {
+        let env: String = s
+            .env
+            .iter()
+            .map(|(k, v)| format!(" -e {}={}", sh_quote(k), sh_quote(v)))
+            .collect();
+        match s.transport.as_str() {
+            "stdio" => {
+                let args: String = s.args.iter().map(|a| format!(" {}", sh_quote(a))).collect();
+                Some(format!(
+                    "claude mcp add -s user{env} {} -- {}{}",
+                    sh_quote(&s.name),
+                    sh_quote(&s.command),
+                    args
+                ))
+            }
+            "http" => Some(format!(
+                "claude mcp add -s user --transport http {} {}",
+                sh_quote(&s.name),
+                sh_quote(&s.url)
+            )),
+            _ => None,
+        }
+    }
+    fn mcp_remove_command(&self, name: &str) -> Option<String> {
+        Some(format!("claude mcp remove -s user {}", sh_quote(name)))
     }
 }
 
@@ -142,6 +207,33 @@ impl ProviderAdapter for GeminiAdapter {
             ],
         })
     }
+    fn mcp_add_command(&self, s: &McpServer) -> Option<String> {
+        let env: String = s
+            .env
+            .iter()
+            .map(|(k, v)| format!(" -e {}={}", sh_quote(k), sh_quote(v)))
+            .collect();
+        match s.transport.as_str() {
+            "stdio" => {
+                let args: String = s.args.iter().map(|a| format!(" {}", sh_quote(a))).collect();
+                Some(format!(
+                    "gemini mcp add -s user{env} {} {}{}",
+                    sh_quote(&s.name),
+                    sh_quote(&s.command),
+                    args
+                ))
+            }
+            "http" => Some(format!(
+                "gemini mcp add -s user --transport http {} {}",
+                sh_quote(&s.name),
+                sh_quote(&s.url)
+            )),
+            _ => None,
+        }
+    }
+    fn mcp_remove_command(&self, name: &str) -> Option<String> {
+        Some(format!("gemini mcp remove {}", sh_quote(name)))
+    }
 }
 
 pub struct CodexAdapter;
@@ -202,6 +294,33 @@ impl ProviderAdapter for CodexAdapter {
                 },
             ],
         })
+    }
+    fn mcp_add_command(&self, s: &McpServer) -> Option<String> {
+        let env: String = s
+            .env
+            .iter()
+            .map(|(k, v)| format!(" --env {}={}", sh_quote(k), sh_quote(v)))
+            .collect();
+        match s.transport.as_str() {
+            "stdio" => {
+                let args: String = s.args.iter().map(|a| format!(" {}", sh_quote(a))).collect();
+                Some(format!(
+                    "codex mcp add{env} {} -- {}{}",
+                    sh_quote(&s.name),
+                    sh_quote(&s.command),
+                    args
+                ))
+            }
+            "http" => Some(format!(
+                "codex mcp add --transport http {} {}",
+                sh_quote(&s.name),
+                sh_quote(&s.url)
+            )),
+            _ => None,
+        }
+    }
+    fn mcp_remove_command(&self, name: &str) -> Option<String> {
+        Some(format!("codex mcp remove {}", sh_quote(name)))
     }
 }
 
@@ -389,5 +508,36 @@ mod tests {
             "gemini || gemini"
         );
         assert_eq!(adapter_for(AgentId::Gemini).id(), AgentId::Gemini);
+    }
+
+    #[test]
+    fn mcp_command_builders_per_agent() {
+        let s = crate::agent::McpServer {
+            name: "context7".into(),
+            transport: "stdio".into(),
+            command: "npx".into(),
+            args: vec!["-y".into(), "@upstash/context7-mcp".into()],
+            url: String::new(),
+            env: vec![("API_KEY".into(), "x".into())],
+        };
+        // Claude: user scope, env via -e, stdio after `--`
+        assert_eq!(
+            ClaudeAdapter.mcp_add_command(&s).unwrap(),
+            "claude mcp add -s user -e API_KEY=x context7 -- npx -y @upstash/context7-mcp"
+        );
+        assert_eq!(
+            ClaudeAdapter.mcp_remove_command("context7").unwrap(),
+            "claude mcp remove -s user context7"
+        );
+        // Codex: home scope (no -s), env via --env
+        assert_eq!(
+            CodexAdapter.mcp_add_command(&s).unwrap(),
+            "codex mcp add --env API_KEY=x context7 -- npx -y @upstash/context7-mcp"
+        );
+        // Gemini: user scope, env via -e
+        assert!(GeminiAdapter
+            .mcp_add_command(&s)
+            .unwrap()
+            .starts_with("gemini mcp add -s user"));
     }
 }
