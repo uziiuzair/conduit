@@ -22,6 +22,8 @@ pub struct Session {
     pub worktree_path: Option<String>,
     #[serde(default)]
     pub branch: Option<String>,
+    #[serde(default)]
+    pub agent: crate::agent::AgentId,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -141,7 +143,7 @@ impl Store {
         self.save(&projects);
     }
 
-    pub fn add_session(&self, project_id: &str, name: String, use_worktree: bool) -> Option<Session> {
+    pub fn add_session(&self, project_id: &str, name: String, use_worktree: bool, agent: crate::agent::AgentId) -> Option<Session> {
         let mut projects = self.projects.lock().unwrap_or_else(|e| e.into_inner());
         let project = projects.iter_mut().find(|p| p.id == project_id)?;
         let id = Uuid::new_v4().to_string();
@@ -160,6 +162,7 @@ impl Store {
             use_worktree,
             worktree_path,
             branch,
+            agent,
         };
         project.sessions.push(session.clone());
         self.save(&projects);
@@ -218,7 +221,7 @@ mod tests {
         let dir = temp_dir("plain");
         let store = Store::for_test(&dir);
         let p = store.add_project("/repo".into());
-        let s = store.add_session(&p.id, "Session 1".into(), false).unwrap();
+        let s = store.add_session(&p.id, "Session 1".into(), false, crate::agent::AgentId::Claude).unwrap();
         assert!(!s.use_worktree);
         assert!(s.worktree_path.is_none());
         assert!(s.branch.is_none());
@@ -229,10 +232,28 @@ mod tests {
         let dir = temp_dir("wt");
         let store = Store::for_test(&dir);
         let p = store.add_project("/repo".into());
-        let s = store.add_session(&p.id, "My Feature".into(), true).unwrap();
+        let s = store.add_session(&p.id, "My Feature".into(), true, crate::agent::AgentId::Claude).unwrap();
         assert!(s.use_worktree);
         let path = s.worktree_path.unwrap();
         assert!(path.starts_with("/repo/.claude/worktrees/"), "got {path}");
         assert!(s.branch.unwrap().starts_with("worktree-"));
+    }
+
+    #[test]
+    fn add_session_defaults_agent_to_claude() {
+        let dir = temp_dir("agent_default");
+        let store = Store::for_test(&dir);
+        let p = store.add_project("/repo".into());
+        let s = store
+            .add_session(&p.id, "Session 1".into(), false, crate::agent::AgentId::Claude)
+            .unwrap();
+        assert_eq!(s.agent, crate::agent::AgentId::Claude);
+    }
+
+    #[test]
+    fn old_state_json_without_agent_deserializes_as_claude() {
+        let json = r#"{"id":"x","name":"n","useWorktree":false}"#;
+        let s: Session = serde_json::from_str(json).unwrap();
+        assert_eq!(s.agent, crate::agent::AgentId::Claude);
     }
 }
