@@ -40,9 +40,12 @@ fn pty_spawn(
     rows: u16,
     shell_only: bool,
     worktree_name: Option<String>,
+    role: Option<String>,
+    initial_prompt: Option<String>,
     on_event: Channel<String>,
     pty: State<Arc<PtyManager>>,
     hook_state: State<Arc<HookState>>,
+    fleet: State<Arc<crate::fleet::FleetState>>,
     store: State<Arc<Store>>,
 ) -> Result<(), String> {
     let port = hook_state.port.load(Ordering::SeqCst);
@@ -52,6 +55,18 @@ fn pty_spawn(
         store.session_agent(&session_id)
     };
     let adapter = crate::agent::adapter_for(agent);
+
+    // A Conductor session gets the fleet MCP server (scoped to it via --mcp-config)
+    // and the orchestration persona; workers get neither.
+    let (mcp_config_path, system_prompt) = if !shell_only && role.as_deref() == Some("conductor") {
+        let mcp_port = fleet.mcp_port.load(Ordering::SeqCst);
+        (
+            crate::fleet::write_mcp_config(mcp_port, &session_id),
+            Some(crate::fleet::CONDUCTOR_PERSONA.to_string()),
+        )
+    } else {
+        (None, None)
+    };
 
     let (cwd, worktree_arg, settings_path) = if shell_only {
         (working_directory.clone(), None, None)
@@ -80,6 +95,9 @@ fn pty_spawn(
         shell_only,
         worktree_arg,
         settings_path,
+        mcp_config_path,
+        system_prompt,
+        initial_prompt,
         agent,
         on_event,
     )
