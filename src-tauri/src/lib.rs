@@ -16,6 +16,7 @@ mod notify;
 mod pty;
 mod store;
 mod telemetry;
+mod transcript;
 mod worktree;
 
 use std::path::Path;
