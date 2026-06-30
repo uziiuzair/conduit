@@ -306,6 +306,13 @@ interface AppState {
   renameSession: (projectId: string, sessionId: string, name: string) => Promise<void>;
   removeSession: (projectId: string, sessionId: string) => Promise<void>;
 
+  /** A session created by the backend (Conductor fleet_spawn): merge it in + open it. */
+  mergeSpawnedSession: (projectId: string, session: Session, task?: string) => void;
+  /** Pending first prompts for backend-spawned sessions, keyed by session id. */
+  pendingPrompts: Record<string, string>;
+  /** Read + clear a session's pending first prompt (consumed once, at PTY spawn). */
+  takePendingPrompt: (sessionId: string) => string | undefined;
+
   selectProject: (projectId: string) => void;
   selectSession: (projectId: string, sessionId: string) => void;
 
@@ -372,6 +379,7 @@ export const useStore = create<AppState>((set, get) => {
     selectedProjectId: null,
     layouts: {},
     live: {},
+    pendingPrompts: {},
     claudeStatus: null,
     claudeUsage: null,
     planConnected: readPlanConnected(),
@@ -508,6 +516,32 @@ export const useStore = create<AppState>((set, get) => {
         selectedProjectId: projectId,
       }));
       applyLayout(projectId, (l) => rOpenTab(l, { kind: "session", ref: session.id }));
+    },
+
+    mergeSpawnedSession: (projectId, session, task) => {
+      set((s) => ({
+        projects: s.projects.map((p) =>
+          p.id === projectId && !p.sessions.some((x) => x.id === session.id)
+            ? { ...p, sessions: [...p.sessions, session] }
+            : p,
+        ),
+        pendingPrompts: task
+          ? { ...s.pendingPrompts, [session.id]: task }
+          : s.pendingPrompts,
+      }));
+      applyLayout(projectId, (l) => rOpenTab(l, { kind: "session", ref: session.id }));
+    },
+
+    takePendingPrompt: (sessionId) => {
+      const v = get().pendingPrompts[sessionId];
+      if (v !== undefined) {
+        set((s) => {
+          const m = { ...s.pendingPrompts };
+          delete m[sessionId];
+          return { pendingPrompts: m };
+        });
+      }
+      return v;
     },
 
     renameSession: async (projectId, sessionId, name) => {
