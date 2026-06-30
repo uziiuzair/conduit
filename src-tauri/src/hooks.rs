@@ -21,6 +21,8 @@ use serde_json::{json, Value};
 use tauri::{AppHandle, Emitter};
 use tiny_http::{Method, Response, Server};
 
+use crate::hookbus::{HookBus, HookEvent};
+
 /// Holds the port the listener actually bound to, so pty spawns can inject it.
 pub struct HookState {
     pub port: AtomicU16,
@@ -34,8 +36,15 @@ impl Default for HookState {
     }
 }
 
+/// Publish a parsed hook event onto the bus (no-op when unrouted).
+fn forward_to_bus(bus: &HookBus, session: Option<String>, event: String, body: Value) {
+    if let Some(session) = session {
+        bus.publish(HookEvent { session, event, body });
+    }
+}
+
 /// Boot the listener on the first free port in 8423..=8443 (same range as Swift).
-pub fn start(app: AppHandle, state: Arc<HookState>) {
+pub fn start(app: AppHandle, state: Arc<HookState>, bus: Arc<HookBus>) {
     thread::spawn(move || {
         let mut server: Option<Server> = None;
         for candidate in 8423u16..=8443 {
@@ -76,6 +85,9 @@ pub fn start(app: AppHandle, state: Arc<HookState>) {
             if std::env::var("CONDUIT_HOOK_LOG").as_deref() == Ok("1") {
                 eprintln!("[hook] session={session} event={event} body={body}");
             }
+
+            // Fan to the mobile bridge (live status stream) alongside the webview emit.
+            forward_to_bus(&bus, Some(session.clone()), event.clone(), parsed.clone());
 
             let _ = app.emit(
                 "hook",
@@ -314,6 +326,30 @@ mod tests {
     use super::*;
     use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicU32, Ordering};
+
+    #[test]
+    fn publishes_event_to_bus() {
+        let bus = HookBus::default();
+        let (_id, rx) = bus.subscribe();
+        forward_to_bus(
+            &bus,
+            Some("s1".to_string()),
+            "pretool".to_string(),
+            serde_json::json!({ "tool_name": "Bash" }),
+        );
+        let got = rx.recv().unwrap();
+        assert_eq!(got.session, "s1");
+        assert_eq!(got.event, "pretool");
+        assert_eq!(got.body["tool_name"], "Bash");
+    }
+
+    #[test]
+    fn forward_skips_when_no_session() {
+        let bus = HookBus::default();
+        let (_id, rx) = bus.subscribe();
+        forward_to_bus(&bus, None, "stop".to_string(), serde_json::Value::Null);
+        assert!(rx.try_recv().is_err());
+    }
 
     /// A unique, empty temp directory for one test. Removed if a stale copy exists.
     fn fresh_test_dir(tag: &str) -> PathBuf {

@@ -423,9 +423,11 @@ pub fn run() {
         .manage(Store::new())
         .manage(Arc::new(HookState::default()))
         .manage(Arc::new(claude_usage::ClaudeAuth::default()))
+        .manage(Arc::new(hookbus::HookBus::default()))
         .setup(|app| {
             let hook_state = app.state::<Arc<HookState>>().inner().clone();
-            hooks::start(app.handle().clone(), hook_state);
+            let bus = app.state::<Arc<hookbus::HookBus>>().inner().clone();
+            hooks::start(app.handle().clone(), hook_state, bus);
             let pty = app.state::<Arc<PtyManager>>().inner().clone();
             bridge::start(pty, Arc::new(std::sync::atomic::AtomicU16::new(0)));
             Ok(())
