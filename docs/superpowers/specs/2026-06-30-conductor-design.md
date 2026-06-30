@@ -149,3 +149,19 @@ Frontend: `pnpm exec tsc --noEmit` + `pnpm build`, then **launch-and-verify in a
 - Worktree isolation design: `docs/superpowers/specs/2026-06-24-worktree-isolation-design.md`
 - Mobile companion (the existing in-app local-server + per-session fan-out pattern): `docs/superpowers/specs/2026-06-25-conduit-mobile-companion-design.md`
 - MCP: https://modelcontextprotocol.io / Claude Code MCP docs: https://code.claude.com/docs/en/mcp
+
+## Implementation status (2026-06-30)
+
+Implemented per plan `docs/superpowers/plans/2026-06-30-conductor.md` (Tasks 1–17) on `feat/conductor`. Automated gates green: 87 Rust tests, clippy clean, `tsc` clean, `pnpm build` OK.
+
+**Manual smoke (`CONDUIT_DATA_DIR_NAME=ConduitTauri-dev pnpm tauri dev`) — PASSED for the core paths:**
+
+- Conductor created from the New Session dialog, shows the `◆` badge, one-per-project enforced. ✅
+- MCP-over-HTTP transport live (Conductor "Called conduit-fleet" — `fleet_list` / `fleet_spawn` / `fleet_peek`). ✅
+- `fleet_spawn` created a worktree-isolated worker (`worktree-haiku-writer-16236b`, own `.claude/worktrees/…` checkout), and the task arrived as the worker's initial prompt — it wrote `haiku.txt` in its worktree root. ✅
+- Branch isolation held: worker on its own branch, off the Conductor's working branch. ✅
+- `fleet_peek` returned worker progress. ✅
+
+**Not yet exercised in the smoke:** `fleet_stop` (the user-confirmation dialog) and `fleet_send` (typing into a worker). Lightly-tested paths to verify before/at merge.
+
+Scope note: `fleet_stop` v1 kills the worker's process only (worktree + session record are kept); full deletion stays in the existing per-session delete UI.
