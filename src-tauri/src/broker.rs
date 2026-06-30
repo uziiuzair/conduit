@@ -131,8 +131,18 @@ mod tests {
     fn resolve_deny_carries_reason() {
         let b = Broker::default();
         let (id, rx) = b.register("s1".into(), "Bash".into(), json!({}));
-        b.resolve(&id, Decision::Deny { reason: "nope".into() });
-        assert_eq!(rx.recv().unwrap(), Decision::Deny { reason: "nope".into() });
+        b.resolve(
+            &id,
+            Decision::Deny {
+                reason: "nope".into(),
+            },
+        );
+        assert_eq!(
+            rx.recv().unwrap(),
+            Decision::Deny {
+                reason: "nope".into()
+            }
+        );
     }
 
     #[test]
@@ -147,7 +157,12 @@ mod tests {
         let b = Broker::default();
         let (id, rx) = b.register("s1".into(), "Bash".into(), json!({}));
         b.resolve(&id, Decision::Allow);
-        b.resolve(&id, Decision::Deny { reason: "late".into() }); // entry already gone
+        b.resolve(
+            &id,
+            Decision::Deny {
+                reason: "late".into(),
+            },
+        ); // entry already gone
         assert_eq!(rx.recv().unwrap(), Decision::Allow);
     }
 
