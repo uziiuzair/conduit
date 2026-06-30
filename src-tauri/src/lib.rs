@@ -26,7 +26,7 @@ use tauri::{Manager, State};
 
 use hooks::HookState;
 use pty::PtyManager;
-use store::{Project, ProjectLayout, Session, Store};
+use store::{Project, ProjectLayout, Session, SessionRole, Store};
 
 // ---- Terminal / PTY commands -------------------------------------------------
 
@@ -138,9 +138,10 @@ fn add_session(
     name: String,
     use_worktree: bool,
     agent: crate::agent::AgentId,
+    role: Option<SessionRole>,
     store: State<Store>,
 ) -> Option<Session> {
-    store.add_session(&project_id, name, use_worktree, agent)
+    store.add_session(&project_id, name, use_worktree, agent, role.unwrap_or_default())
 }
 
 #[tauri::command]
