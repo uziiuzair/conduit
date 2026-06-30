@@ -428,8 +428,7 @@ pub fn run() {
             let hook_state = app.state::<Arc<HookState>>().inner().clone();
             let bus = app.state::<Arc<hookbus::HookBus>>().inner().clone();
             hooks::start(app.handle().clone(), hook_state, bus);
-            let pty = app.state::<Arc<PtyManager>>().inner().clone();
-            bridge::start(pty, Arc::new(std::sync::atomic::AtomicU16::new(0)));
+            bridge::start(app.handle().clone());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
