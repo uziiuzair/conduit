@@ -138,6 +138,8 @@ spawn (lib.rs pty_spawn)
   (no usable `mcp add --command`, no `mcp remove`), preserving user-authored entries.
 - Compact/notification/todos status verbs for OpenCode (no native events).
 - Worktree isolation and caller-pinned resume for OpenCode.
+- Session auto-naming for OpenCode — its `chat.message` payload carries no prompt text,
+  so OpenCode sessions keep their default `Session N` name.
 
 ## 6. Testing
 
