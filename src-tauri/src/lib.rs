@@ -168,6 +168,23 @@ fn rename_session(project_id: String, session_id: String, name: String, store: S
     store.rename_session(&project_id, &session_id, name);
 }
 
+/// The frontend's reply to a Conductor `fleet_stop` confirmation prompt.
+#[tauri::command]
+fn conductor_confirm_response(
+    request_id: String,
+    approved: bool,
+    fleet: State<Arc<crate::fleet::FleetState>>,
+) {
+    if let Some(tx) = fleet
+        .pending_confirms
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .remove(&request_id)
+    {
+        let _ = tx.send(approved);
+    }
+}
+
 #[tauri::command]
 fn set_project_layout(project_id: String, layout: ProjectLayout, store: State<Arc<Store>>) {
     store.set_layout(&project_id, layout);
@@ -463,6 +480,7 @@ pub fn run() {
             add_session,
             detect_agents,
             rename_session,
+            conductor_confirm_response,
             set_project_layout,
             remove_session,
             suggest_session_name,
