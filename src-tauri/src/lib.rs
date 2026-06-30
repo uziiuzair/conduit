@@ -8,6 +8,7 @@ mod agent;
 mod bridge;
 mod claude_status;
 mod claude_usage;
+mod fleet;
 mod fsops;
 mod git;
 mod hooks;
