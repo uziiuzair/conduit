@@ -5,9 +5,9 @@
 
 use std::collections::HashMap;
 use std::sync::atomic::AtomicU16;
-use std::sync::mpsc::Sender;
+use std::sync::mpsc::{channel, Sender};
 use std::sync::Mutex;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::Serialize;
 use serde_json::Value;
@@ -163,6 +163,44 @@ impl FleetState {
             .unwrap_or_else(|e| e.into_inner())
             .clone()
     }
+}
+
+/// Ask the frontend to confirm stopping `worker`. Blocks the calling (MCP request)
+/// thread until the user answers or a 60s timeout elapses (default-deny). The
+/// frontend replies via the `conductor_confirm_response` command.
+pub fn request_stop_confirmation(
+    app: &tauri::AppHandle,
+    fleet: &FleetState,
+    worker_id: &str,
+    worker_name: &str,
+    branch: &str,
+    dirty: bool,
+) -> bool {
+    use tauri::Emitter;
+    let req_id = uuid::Uuid::new_v4().to_string();
+    let (tx, rx) = channel::<bool>();
+    fleet
+        .pending_confirms
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(req_id.clone(), tx);
+    let _ = app.emit(
+        "conductor-confirm",
+        serde_json::json!({
+            "requestId": req_id,
+            "sessionId": worker_id,
+            "name": worker_name,
+            "branch": branch,
+            "dirty": dirty,
+        }),
+    );
+    let answer = rx.recv_timeout(Duration::from_secs(60)).unwrap_or(false);
+    fleet
+        .pending_confirms
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .remove(&req_id);
+    answer
 }
 
 #[cfg(test)]
