@@ -38,7 +38,9 @@ Design spec: `docs/superpowers/specs/2026-06-30-conductor-design.md`. Read it fi
 
 ### Task 0: Validate MCP-over-HTTP handshake against the real `claude`
 
-**Goal:** Confirm the installed `claude` (2.1.186) `http` MCP transport works with a minimal **plain-JSON** (no SSE) `tiny_http` responder, when attached via `--mcp-config`. This decides the whole MCP server shape. If it fails, the documented fallback is the stdio-helper variant (see "Fallback" below).
+> **SPIKE RESULT (2026-06-30): PASSED — plain-JSON OK, no stdio fallback needed.** Ran against `claude` 2.1.186 with a Python responder on a plain-JSON `--mcp-config` http server. `claude` completed `initialize` → `tools/list` → `tools/call` over POST and reported `pong`. **Two findings baked into Task 13:** (1) `claude` sends `initialize` **twice** (probe + connect) — handlers must be idempotent. (2) `claude` issues a `GET /mcp` (`Accept: text/event-stream`) to open an optional server→client SSE stream; the responder returned **405** and `claude` fell back to POST-only cleanly. So the Rust server MUST answer `GET /mcp` with `405` (don't hang/500). **Do not implement the fallback.**
+
+**Goal:** Confirm the installed `claude` (2.1.186) `http` MCP transport works with a minimal **plain-JSON** (no SSE) `tiny_http` responder, when attached via `--mcp-config`. This decides the whole MCP server shape. If it fails, the documented fallback is the stdio-helper variant (see "Fallback" below). **(Already executed — see SPIKE RESULT above.)**
 
 **Files:**
 - Create (throwaway): `/private/tmp/claude-501/.../scratchpad/mcp_spike.rs` (or any scratch location) and `scratchpad/fleet.json`.
@@ -1041,11 +1043,12 @@ Run: `cargo test --manifest-path src-tauri/Cargo.toml -- fleet_mcp::`
 Expected: FAIL.
 
 - [ ] **Step 3: Implement `fleet_mcp.rs`.** Provide: `result_envelope(id, result) -> String`, `error_envelope(id, code, msg) -> String`, `tool_specs() -> Vec<Value>` (the 5 tools with `inputSchema`), `dispatch_tool(name, args, &Ctx) -> Result<Value, String>` (calls into Task 11 functions), and `start(app, store, pty, fleet)` which:
-  1. binds a `tiny_http::Server` scanning ports `8444..=8464`, stores the chosen port in `fleet.mcp_port`;
+  1. binds a `tiny_http::Server` scanning ports **`8475..=8495`** (clear of Conduit's hooks range `8423..=8443` and its other in-use port `8455` — verified occupied by a running Conduit), stores the chosen port in `fleet.mcp_port`;
   2. loops `incoming_requests()`, and for each request **spawns a thread** (`req` is `Send`) so a slow tool call (e.g. a 60s stop-confirm) never blocks the accept loop;
   3. parses `?conductor=<id>` from the URL via the same approach as `hooks::parse_query` (extract a small shared `query_param(url, key)` helper, or duplicate minimally);
-  4. reads the JSON-RPC body, matches `method`: `initialize` → capabilities `{tools:{}}`; `notifications/initialized` → 200 empty; `tools/list` → `{tools: tool_specs()}`; `tools/call` → `dispatch_tool(params.name, params.arguments, ctx)` wrapped as `{content:[{type:"text", text: <stringified result>}]}` (errors become `{content:[...], isError:true}`);
-  5. responds with `Content-Type: application/json` (mirror the spike).
+  4. **`GET` requests** (claude's optional SSE probe — see SPIKE RESULT) respond `405` with an `Allow: POST` header and no body; do NOT hang or 500;
+  5. for `POST`, reads the JSON-RPC body, matches `method`: `initialize` → `{protocolVersion: <echo client's>, capabilities:{tools:{}}, serverInfo:{name:"conduit-fleet",version:…}}` (**must be idempotent — claude sends it twice**); `notifications/initialized` (and any `notifications/*`) → `202` empty, no JSON-RPC body; `tools/list` → `{tools: tool_specs()}`; `tools/call` → `dispatch_tool(params.name, params.arguments, ctx)` wrapped as `{content:[{type:"text", text: <stringified result>}]}` (errors become `{content:[{type:"text",text:<msg>}], isError:true}`);
+  6. responds with `Content-Type: application/json` (mirror the spike).
 
 ```rust
 pub fn result_envelope(id: Option<serde_json::Value>, result: serde_json::Value) -> String {
