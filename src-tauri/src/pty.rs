@@ -153,6 +153,9 @@ impl PtyManager {
         shell_only: bool,
         worktree_name: Option<String>,
         settings_path: Option<String>,
+        mcp_config_path: Option<String>,
+        system_prompt: Option<String>,
+        initial_prompt: Option<String>,
         agent: crate::agent::AgentId,
         on_event: Channel<String>,
     ) -> Result<(), String> {
@@ -202,9 +205,9 @@ impl PtyManager {
                 &shell,
                 worktree_name.as_deref(),
                 settings_path.as_deref(),
-                None, // mcp_config — threaded in Task 10
-                None, // system_prompt — threaded in Task 10
-                None, // initial_prompt — threaded in Task 10
+                mcp_config_path.as_deref(),
+                system_prompt.as_deref(),
+                initial_prompt.as_deref(),
                 claude_projects_dir().as_deref(),
             )
         };
