@@ -20,6 +20,7 @@ import {
   PlusIcon,
   EllipsisIcon,
   CircleFilledIcon,
+  ChevronRightIcon,
 } from "./Icons";
 import { AgentGlyph } from "./AgentGlyph";
 import { ThemeSwitcher } from "./ThemeSwitcher";
@@ -27,6 +28,31 @@ import { ClaudeStatusPill } from "./ClaudeStatusPill";
 import { ClaudeUsagePanel } from "./ClaudeUsagePanel";
 import { ClaudeStatusWarning } from "./ClaudeStatusWarning";
 import { Settings } from "./Settings";
+
+// Collapsed projects persist as a list of project ids in localStorage — a pure
+// sidebar UI preference, mirroring conduit.sidebarWidth / conduit.topH (no backend
+// state.json schema change). Default for any project not listed is expanded.
+const COLLAPSED_KEY = "conduit.collapsedProjects";
+
+function loadCollapsed(): Set<string> {
+  try {
+    const arr = JSON.parse(localStorage.getItem(COLLAPSED_KEY) ?? "[]");
+    return new Set(Array.isArray(arr) ? arr : []);
+  } catch {
+    return new Set();
+  }
+}
+
+function persistCollapsed(projectId: string, collapsed: boolean): void {
+  const ids = loadCollapsed();
+  if (collapsed) ids.add(projectId);
+  else ids.delete(projectId);
+  try {
+    localStorage.setItem(COLLAPSED_KEY, JSON.stringify([...ids]));
+  } catch {
+    /* quota — non-fatal */
+  }
+}
 
 async function deleteSession(
   projects: Project[],
@@ -114,20 +140,36 @@ function ProjectBlock({ project }: { project: Project }) {
   const addSession = useStore((s) => s.addSession);
   const openMenu = useStore((s) => s.openMenu);
   const [showNew, setShowNew] = useState(false);
+  const [collapsed, setCollapsed] = useState(() => loadCollapsed().has(project.id));
 
   const openProjectMenu = (x: number, y: number) =>
     openMenu({ x, y, kind: "project", projectId: project.id });
 
+  const toggleCollapsed = () =>
+    setCollapsed((c) => {
+      const next = !c;
+      persistCollapsed(project.id, next);
+      return next;
+    });
+
   return (
-    <div className="project-block">
+    <div className={`project-block ${collapsed ? "collapsed" : ""}`}>
       <div
         className="project-head"
+        role="button"
+        aria-expanded={!collapsed}
+        title={collapsed ? "Expand project" : "Collapse project"}
+        onClick={toggleCollapsed}
         onContextMenu={(e) => {
           e.preventDefault();
           e.stopPropagation();
           openProjectMenu(e.clientX, e.clientY);
         }}
       >
+        <ChevronRightIcon
+          size={12}
+          className={`project-chevron ${collapsed ? "" : "expanded"}`}
+        />
         <FolderIcon size={11} className="folder-icon" />
         <span className="name">{project.name}</span>
         <button
@@ -144,10 +186,10 @@ function ProjectBlock({ project }: { project: Project }) {
       </div>
       <div className="session-list">
         {project.sessions.map((s) => (
-          <SessionRow key={s.id} project={project} session={s} />
+          <SessionRow key={s.id} project={project} session={s} collapsed={collapsed} />
         ))}
         <button
-          className="new-session"
+          className={`new-session ${collapsed ? "collapsed-hidden" : ""}`}
           onClick={() => setShowNew(true)}
         >
           <PlusIcon size={12} />
@@ -171,9 +213,11 @@ function ProjectBlock({ project }: { project: Project }) {
 function SessionRow({
   project,
   session,
+  collapsed,
 }: {
   project: Project;
   session: Session;
+  collapsed: boolean;
 }) {
   const selected = useStore((s) => globalSelectedSessionId(s) === session.id);
   const status = useStore((s) => liveState(s.live, session.id).status);
@@ -183,9 +227,16 @@ function SessionRow({
   const selectSession = useStore((s) => s.selectSession);
   const openMenu = useStore((s) => s.openMenu);
 
+  // When the project is collapsed, keep "active work" in view: the selected session
+  // and any row that shows a live status accessory (running / needs-you / compacting /
+  // done). Idle, unselected rows fold away. Same predicate StatusAccessory renders on.
+  const hasAccessory =
+    status === "needsInput" || compacting || status === "running" || status === "done";
+  const hidden = collapsed && !selected && !hasAccessory;
+
   return (
     <div
-      className={`session-row ${selected ? "selected" : ""}`}
+      className={`session-row ${selected ? "selected" : ""} ${hidden ? "collapsed-hidden" : ""}`}
       onClick={() => {
         if (!editing) selectSession(project.id, session.id);
       }}
