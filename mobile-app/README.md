@@ -25,17 +25,32 @@ What works to test right now:
 
 ## Run it
 
+> ⚠️ **Not via App Store Expo Go.** SDK 56 isn't shipped to the App Store / Play Store
+> Expo Go (frozen at SDK 54 since Expo's May 2026 change), so the QR-into-Expo-Go flow
+> does **not** work here. Use a **development build** (needs Xcode, which compiles fine):
+
+**iOS Simulator** (verified: `Build Succeeded`):
 ```bash
 cd mobile-app
-npm install            # already run during scaffold
-npx expo start         # opens the dev server + QR code
+npx expo run:ios
 ```
 
-Then either:
+**Physical iPhone** (development build):
+```bash
+npx expo run:ios --device
+```
+Plug in + unlock the iPhone and tap **Trust**; if signing fails, open `ios/*.xcworkspace`
+in Xcode once and pick a team under Signing & Capabilities; keep phone + Mac on the same
+Wi-Fi (the dev build connects to Metro). A free Apple ID "Personal Team" signature lasts
+**7 days** — re-run to refresh.
 
-- **On your phone:** install **Expo Go** (App Store), open the camera, scan the QR. iOS.
-- **iOS simulator:** press `i` in the Expo terminal (needs Xcode).
-- **Web preview (rough):** press `w`.
+**Web** (rough, instant — `react-native-web` + `react-dom` are installed):
+```bash
+npx expo start   # then press w
+```
+
+First native build runs prebuild + `pod install` + compile (minutes); rebuilds are fast.
+Don't run two Metro instances at once — they fight over port 8081.
 
 ## Checks
 

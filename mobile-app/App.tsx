@@ -1,33 +1,63 @@
+import {
+  DarkTheme,
+  DefaultTheme,
+  NavigationContainer,
+  type Theme,
+} from "@react-navigation/native";
+import { createNativeStackNavigator } from "@react-navigation/native-stack";
 import { StatusBar } from "expo-status-bar";
-import React, { useState } from "react";
-import { View } from "react-native";
-import type { Agent } from "./src/data/types";
+import React from "react";
+import { GestureHandlerRootView } from "react-native-gesture-handler";
+import { SafeAreaProvider } from "react-native-safe-area-context";
+import type { RootStackParamList } from "./src/navigation";
 import { ChatScreen } from "./src/screens/ChatScreen";
 import { ProjectsScreen } from "./src/screens/ProjectsScreen";
 import { ThemeProvider, useTheme } from "./src/theme/ThemeContext";
 
-type Nav = { screen: "projects" } | { screen: "chat"; agent: Agent };
+const Stack = createNativeStackNavigator<RootStackParamList>();
 
-function Root() {
+function Inner() {
   const { palette } = useTheme();
-  const [nav, setNav] = useState<Nav>({ screen: "projects" });
+  const base = palette.appearance === "dark" ? DarkTheme : DefaultTheme;
+  const navTheme: Theme = {
+    ...base,
+    colors: {
+      ...base.colors,
+      background: palette.panelBg,
+      card: palette.sidebarBg,
+      text: palette.textBright,
+      border: palette.border,
+      primary: palette.accent,
+    },
+  };
 
   return (
-    <View style={{ flex: 1, backgroundColor: palette.panelBg }}>
+    <NavigationContainer theme={navTheme}>
       <StatusBar style={palette.appearance === "dark" ? "light" : "dark"} />
-      {nav.screen === "projects" ? (
-        <ProjectsScreen onOpenAgent={(agent) => setNav({ screen: "chat", agent })} />
-      ) : (
-        <ChatScreen agent={nav.agent} onBack={() => setNav({ screen: "projects" })} />
-      )}
-    </View>
+      <Stack.Navigator
+        screenOptions={{
+          headerShown: false,
+          // native iOS edge-swipe-back, extended to the full screen width
+          gestureEnabled: true,
+          fullScreenGestureEnabled: true,
+          contentStyle: { backgroundColor: palette.panelBg },
+        }}
+      >
+        <Stack.Screen name="Projects" component={ProjectsScreen} />
+        <Stack.Screen name="Chat" component={ChatScreen} />
+      </Stack.Navigator>
+    </NavigationContainer>
   );
 }
 
 export default function App() {
   return (
-    <ThemeProvider>
-      <Root />
-    </ThemeProvider>
+    <GestureHandlerRootView style={{ flex: 1 }}>
+      <SafeAreaProvider>
+        <ThemeProvider>
+          <Inner />
+        </ThemeProvider>
+      </SafeAreaProvider>
+    </GestureHandlerRootView>
   );
 }
