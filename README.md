@@ -137,6 +137,17 @@ Tauri v2 (Rust) · React 19 + TypeScript + Vite · `@xterm/xterm` (canvas render
 
 ## Changelog
 
+### 0.3.0 — 2026-06-30
+
+- **Added — the Conductor.** Each project can now have one **Conductor**: a Claude
+  session you talk to in plain language that knows what your whole fleet is doing and
+  orchestrates it for you. It sees every session's live status, to-dos, and branch, can
+  peek at a worker's recent output on demand, and can act — **spawn** a new worker,
+  **send** it input, or **stop** it. Workers the Conductor spawns are always isolated in
+  their own git worktree and branch, so parallel agents never share a working tree.
+  Stopping a worker asks you to confirm first. The Conductor shows a ◆ badge in the
+  sidebar and runs from the New Session dialog's "Conductor" toggle.
+
 ### 0.2.0 — 2026-06-30
 
 - **Added — multiple agent CLIs.** Beyond Claude Code, Conduit now runs **OpenAI
