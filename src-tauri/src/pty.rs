@@ -457,7 +457,6 @@ fn broadcast(subs: &mut Vec<(u64, SyncSender<String>)>, frame: &str) {
 /// (CONDUIT_SESSION_ID/HOOK_PORT) and the worktree/settings flags are applied here.
 /// `worktree`/`settings` are only set by callers when the adapter supports worktrees.
 #[allow(clippy::too_many_arguments)]
-#[allow(clippy::too_many_arguments)]
 fn build_script(
     adapter: &dyn crate::agent::ProviderAdapter,
     session_id: &str,
@@ -605,7 +604,10 @@ mod tests {
         );
         assert!(script.contains("--settings '/cfg/hooks.json'"), "{script}");
         assert!(script.contains("--mcp-config '/cfg/mcp.json'"), "{script}");
-        assert!(script.contains("--append-system-prompt 'Be the conductor.'"), "{script}");
+        assert!(
+            script.contains("--append-system-prompt 'Be the conductor.'"),
+            "{script}"
+        );
     }
 
     #[test]

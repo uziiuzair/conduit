@@ -117,7 +117,10 @@ fn dispatch_tool(name: &str, args: &Value, ctx: &Ctx) -> Result<String, String> 
             Ok(json!(list).to_string())
         }
         "fleet_peek" => {
-            let id = args.get("id").and_then(|v| v.as_str()).ok_or("missing id")?;
+            let id = args
+                .get("id")
+                .and_then(|v| v.as_str())
+                .ok_or("missing id")?;
             ctx.pty
                 .recent_output(id, PEEK_BYTES)
                 .ok_or_else(|| "worker-not-running".to_string())
@@ -167,7 +170,10 @@ fn dispatch_tool(name: &str, args: &Value, ctx: &Ctx) -> Result<String, String> 
             .to_string())
         }
         "fleet_send" => {
-            let id = args.get("id").and_then(|v| v.as_str()).ok_or("missing id")?;
+            let id = args
+                .get("id")
+                .and_then(|v| v.as_str())
+                .ok_or("missing id")?;
             let text = args
                 .get("text")
                 .and_then(|v| v.as_str())
@@ -182,7 +188,10 @@ fn dispatch_tool(name: &str, args: &Value, ctx: &Ctx) -> Result<String, String> 
             Ok("sent".into())
         }
         "fleet_stop" => {
-            let id = args.get("id").and_then(|v| v.as_str()).ok_or("missing id")?;
+            let id = args
+                .get("id")
+                .and_then(|v| v.as_str())
+                .ok_or("missing id")?;
             if id == ctx.conductor_id {
                 return Err("cannot-target-self".into());
             }
@@ -201,8 +210,9 @@ fn dispatch_tool(name: &str, args: &Value, ctx: &Ctx) -> Result<String, String> 
                 .as_deref()
                 .map(crate::worktree::is_dirty)
                 .unwrap_or(false);
-            let approved =
-                fleet::request_stop_confirmation(&ctx.app, &ctx.fleet, id, &sess.name, &branch, dirty);
+            let approved = fleet::request_stop_confirmation(
+                &ctx.app, &ctx.fleet, id, &sess.name, &branch, dirty,
+            );
             if !approved {
                 return Ok("cancelled".into());
             }
@@ -359,7 +369,13 @@ mod tests {
             .into_iter()
             .map(|t| t["name"].as_str().unwrap().to_string())
             .collect();
-        for n in ["fleet_list", "fleet_peek", "fleet_spawn", "fleet_send", "fleet_stop"] {
+        for n in [
+            "fleet_list",
+            "fleet_peek",
+            "fleet_spawn",
+            "fleet_send",
+            "fleet_stop",
+        ] {
             assert!(names.contains(&n.to_string()), "missing {n}");
         }
     }
