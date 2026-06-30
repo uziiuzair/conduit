@@ -123,6 +123,22 @@ pub fn write_mcp_config(mcp_port: u16, conductor_id: &str) -> Option<String> {
     Some(path.to_string_lossy().to_string())
 }
 
+/// Maximum worker sessions the Conductor may have in a project (fan-out cap).
+pub const MAX_WORKERS: usize = 8;
+
+/// Count of worker sessions (excludes the Conductor itself).
+pub fn worker_count(sessions: &[crate::store::Session]) -> usize {
+    sessions
+        .iter()
+        .filter(|s| s.role == crate::store::SessionRole::Worker)
+        .count()
+}
+
+/// Whether another worker may be spawned given the current worker count.
+pub fn under_cap(current: usize) -> bool {
+    current < MAX_WORKERS
+}
+
 /// Shared fleet runtime state: MCP server port, per-session status, and the
 /// pending stop-confirmation channels (request id -> reply sender).
 #[derive(Default)]
@@ -212,5 +228,31 @@ mod tests {
         assert!(CONDUCTOR_PERSONA.contains("fleet_list"));
         assert!(CONDUCTOR_PERSONA.contains("fleet_spawn"));
         assert!(CONDUCTOR_PERSONA.contains("worktree"));
+    }
+
+    #[test]
+    fn worker_count_excludes_conductor() {
+        use crate::store::{Session, SessionRole};
+        let mk = |id: &str, role| Session {
+            id: id.into(),
+            name: id.into(),
+            use_worktree: false,
+            worktree_path: None,
+            branch: None,
+            agent: crate::agent::AgentId::Claude,
+            role,
+        };
+        let sessions = vec![
+            mk("c", SessionRole::Conductor),
+            mk("w1", SessionRole::Worker),
+            mk("w2", SessionRole::Worker),
+        ];
+        assert_eq!(worker_count(&sessions), 2);
+    }
+
+    #[test]
+    fn at_cap_blocks_spawn() {
+        assert!(!under_cap(MAX_WORKERS));
+        assert!(under_cap(MAX_WORKERS - 1));
     }
 }
