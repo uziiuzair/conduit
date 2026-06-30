@@ -20,6 +20,13 @@ interface Props {
   worktreeName?: string;
   /** Plain login shell instead of launching `claude` (the bottom-panel terminal). */
   shellOnly?: boolean;
+  /**
+   * Grab keyboard focus when this terminal becomes visible. The center agent terminal
+   * wants this so switching Claude tabs lands your cursor in Claude. The secondary
+   * right-panel shell opts out (except when the user explicitly opens the Terminal tab)
+   * so it never steals focus from the agent on a session switch. Defaults to true.
+   */
+  focusOnReveal?: boolean;
   /** Positioning applied to the host (e.g. left/width % for the active group's slot). */
   style?: React.CSSProperties;
 }
@@ -37,6 +44,7 @@ export function TerminalView({
   visible,
   worktreeName,
   shellOnly = false,
+  focusOnReveal = true,
   style,
 }: Props) {
   const innerRef = useRef<HTMLDivElement>(null);
@@ -164,7 +172,11 @@ export function TerminalView({
       } else {
         void invoke("pty_resize", { sessionId, cols, rows }).catch(() => {});
       }
-      term.focus();
+      // Only the agent terminal pulls focus on reveal; the right-panel shell opts out
+      // (focusOnReveal=false on a session switch) so it can't steal focus from Claude.
+      // The effect re-subscribes on every `visible` change, so this captures the value
+      // at the moment of reveal.
+      if (focusOnReveal) term.focus();
       // Late fallback: catch layout/font settling after the first frame.
       window.setTimeout(() => scheduleFit(), 120);
     });
