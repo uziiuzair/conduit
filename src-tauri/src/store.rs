@@ -83,6 +83,14 @@ pub struct Store {
     save_path: PathBuf,
 }
 
+/// A read-only view of the project that owns a given Conductor, plus its sessions.
+/// Used by the fleet MCP server to answer `fleet_list` / scope `fleet_spawn`.
+pub struct FleetSnapshot {
+    pub project_id: String,
+    pub project_path: String,
+    pub sessions: Vec<Session>,
+}
+
 impl Store {
     pub fn new() -> Self {
         // Namespace override so a dev/test build can run alongside the installed app
@@ -236,6 +244,19 @@ impl Store {
         }
         self.save(&projects);
     }
+
+    /// Resolve the project that owns `conductor_id` and return its sessions.
+    pub fn fleet_snapshot(&self, conductor_id: &str) -> Option<FleetSnapshot> {
+        let projects = self.projects.lock().unwrap_or_else(|e| e.into_inner());
+        let project = projects
+            .iter()
+            .find(|p| p.sessions.iter().any(|s| s.id == conductor_id))?;
+        Some(FleetSnapshot {
+            project_id: project.id.clone(),
+            project_path: project.path.clone(),
+            sessions: project.sessions.clone(),
+        })
+    }
 }
 
 #[cfg(test)]
@@ -348,6 +369,23 @@ mod tests {
         let json = r#"{"id":"s1","name":"old","useWorktree":false}"#;
         let s: Session = serde_json::from_str(json).expect("deserialize");
         assert_eq!(s.role, SessionRole::Worker, "missing role must default to Worker");
+    }
+
+    #[test]
+    fn fleet_snapshot_returns_project_and_sessions() {
+        let dir = temp_dir("fleet_snap");
+        let store = Store::for_test(&dir);
+        let p = store.add_project("/repo".into());
+        let c = store.add_session(
+            &p.id, "Conductor".into(), false, crate::agent::AgentId::Claude, SessionRole::Conductor,
+        ).unwrap();
+        store.add_session(
+            &p.id, "w1".into(), false, crate::agent::AgentId::Claude, SessionRole::Worker,
+        );
+        let snap = store.fleet_snapshot(&c.id).expect("snapshot for conductor id");
+        assert_eq!(snap.project_path, "/repo");
+        assert_eq!(snap.sessions.len(), 2, "conductor + 1 worker");
+        assert!(store.fleet_snapshot("nope").is_none());
     }
 
     #[test]
