@@ -20,13 +20,19 @@ export class BridgeClient {
   constructor(
     private readonly url: string,
     private readonly handlers: Handlers,
+    private readonly token?: string,
   ) {
     this.connect();
   }
 
   private connect() {
     this.handlers.onState?.("connecting");
-    const ws = new WebSocket(this.url);
+    // Append the dev shared token as a query param when set; the desktop bridge
+    // (CONDUIT_BRIDGE_TOKEN) rejects the handshake without it. No token => loopback.
+    const target = this.token
+      ? `${this.url}${this.url.includes("?") ? "&" : "?"}token=${encodeURIComponent(this.token)}`
+      : this.url;
+    const ws = new WebSocket(target);
     this.ws = ws;
     ws.onopen = () => {
       this.backoff = 500;

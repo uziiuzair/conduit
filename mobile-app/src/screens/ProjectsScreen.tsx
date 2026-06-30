@@ -13,7 +13,7 @@ import { MIN_TOUCH, MONO, TYPE } from "../theme/type";
 export function ProjectsScreen({ navigation }: ProjectsProps) {
   const { palette: p } = useTheme();
   const insets = useSafeAreaInsets();
-  const { projects: liveProjects, connState, url, setUrl } = useLive();
+  const { projects: liveProjects, connState, url, setUrl, token, setToken } = useLive();
   // local copy so swipe Rename/Delete stay optimistic; re-synced on each live update
   const [projects, setProjects] = useState<Project[]>(liveProjects);
   useEffect(() => setProjects(liveProjects), [liveProjects]);
@@ -21,10 +21,18 @@ export function ProjectsScreen({ navigation }: ProjectsProps) {
   const editUrl = () => {
     Alert.prompt(
       "Desktop bridge URL",
-      "ws://127.0.0.1:8455 (dev app only) or :8456 (alongside the installed app)",
+      "ws://127.0.0.1:8455 (dev) or :8456 (alongside installed). From a real phone: ws://<mac-LAN-IP>:<port>",
       (text) => {
         const u = text?.trim();
         if (u) setUrl(u);
+        // then the dev shared token; blank = loopback (no gate)
+        Alert.prompt(
+          "Bridge token",
+          "Blank for loopback. On a real phone: the CONDUIT_BRIDGE_TOKEN you launched the desktop with.",
+          (t) => setToken((t ?? "").trim()),
+          "plain-text",
+          token,
+        );
       },
       "plain-text",
       url,
