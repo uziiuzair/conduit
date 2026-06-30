@@ -63,9 +63,14 @@ fn pty_spawn(
             worktree::spawn_target(&working_directory, slug, &wt_path, exists);
         (cwd, worktree_arg, settings)
     } else {
-        // Normal session: install this agent's hook profile (if it has one).
+        // Normal session: install this agent's status integration. Hook-based agents
+        // (Claude/Codex/Gemini) write a settings/hooks file; OpenCode installs a JS
+        // status plugin instead. An agent has one or the other, never both.
         if let Some(profile) = adapter.hooks_profile() {
             hooks::install_profile(&working_directory, port, &profile);
+        }
+        if let Some(plugin) = adapter.plugin_profile() {
+            hooks::install_plugin(&working_directory, port, &plugin);
         }
         (working_directory.clone(), None, None)
     };
