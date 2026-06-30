@@ -203,6 +203,11 @@ function SessionRow({
       }}
     >
       <AgentGlyph id={session.agent} size={14} />
+      {session.role === "conductor" && (
+        <span className="conductor-chip" title="Conductor — orchestrates this project">
+          ◆
+        </span>
+      )}
       {editing ? (
         <RenameInput
           projectId={project.id}
