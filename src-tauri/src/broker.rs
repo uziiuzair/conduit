@@ -23,6 +23,41 @@ pub struct ApprovalRequest {
     pub input: serde_json::Value,
 }
 
+/// Which sessions currently have at least one bridge client (phone) attached.
+/// Refcounted so multiple viewers / reconnects don't prematurely clear a session.
+/// The broker uses this for "no phone watching → don't intercept" (desktop default
+/// stays the native prompt until you pair).
+#[derive(Default)]
+pub struct Presence {
+    attached: Mutex<HashMap<String, u32>>,
+}
+
+impl Presence {
+    pub fn attach(&self, session: &str) {
+        if let Ok(mut m) = self.attached.lock() {
+            *m.entry(session.to_string()).or_insert(0) += 1;
+        }
+    }
+
+    pub fn detach(&self, session: &str) {
+        if let Ok(mut m) = self.attached.lock() {
+            if let Some(c) = m.get_mut(session) {
+                *c = c.saturating_sub(1);
+                if *c == 0 {
+                    m.remove(session);
+                }
+            }
+        }
+    }
+
+    pub fn is_attached(&self, session: &str) -> bool {
+        self.attached
+            .lock()
+            .map(|m| m.contains_key(session))
+            .unwrap_or(false)
+    }
+}
+
 #[derive(Default)]
 pub struct Broker {
     pending: Mutex<HashMap<String, (ApprovalRequest, SyncSender<Decision>)>>,
@@ -126,5 +161,20 @@ mod tests {
         assert_eq!(s1.len(), 2);
         assert!(s1.iter().all(|r| r.session == "s1"));
         assert_eq!(b.pending_for("s2").len(), 1);
+    }
+
+    #[test]
+    fn presence_tracks_attachment_with_refcount() {
+        let pr = Presence::default();
+        assert!(!pr.is_attached("s1"));
+        pr.attach("s1");
+        pr.attach("s1"); // two viewers
+        assert!(pr.is_attached("s1"));
+        pr.detach("s1");
+        assert!(pr.is_attached("s1"), "still one viewer");
+        pr.detach("s1");
+        assert!(!pr.is_attached("s1"), "last viewer gone");
+        pr.detach("s1"); // underflow is a no-op
+        assert!(!pr.is_attached("s1"));
     }
 }

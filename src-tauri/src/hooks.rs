@@ -16,11 +16,13 @@ use std::path::Path;
 use std::sync::atomic::{AtomicU16, Ordering};
 use std::sync::Arc;
 use std::thread;
+use std::time::Duration;
 
 use serde_json::{json, Value};
 use tauri::{AppHandle, Emitter};
-use tiny_http::{Method, Response, Server};
+use tiny_http::{Method, Request, Response, Server};
 
+use crate::broker::{Broker, Decision, Presence};
 use crate::hookbus::{HookBus, HookEvent};
 
 /// Holds the port the listener actually bound to, so pty spawns can inject it.
@@ -48,7 +50,13 @@ fn forward_to_bus(bus: &HookBus, session: Option<String>, event: String, body: V
 }
 
 /// Boot the listener on the first free port in 8423..=8443 (same range as Swift).
-pub fn start(app: AppHandle, state: Arc<HookState>, bus: Arc<HookBus>) {
+pub fn start(
+    app: AppHandle,
+    state: Arc<HookState>,
+    bus: Arc<HookBus>,
+    broker: Arc<Broker>,
+    presence: Arc<Presence>,
+) {
     thread::spawn(move || {
         let mut server: Option<Server> = None;
         for candidate in 8423u16..=8443 {
@@ -69,8 +77,20 @@ pub fn start(app: AppHandle, state: Arc<HookState>, bus: Arc<HookBus>) {
                 continue;
             }
 
-            // Parse query string: /hook?session=<id>&event=<name>
             let url = request.url().to_string();
+
+            // Approval broker: blocking, handled on its own thread so a pending
+            // approval never stalls the hook loop. The HTTP response IS the
+            // permission decision Claude reads from the hook's stdout.
+            if url.starts_with("/approve") {
+                let broker = broker.clone();
+                let presence = presence.clone();
+                let bus = bus.clone();
+                thread::spawn(move || handle_approve(request, &url, &broker, &presence, &bus));
+                continue;
+            }
+
+            // Parse query string: /hook?session=<id>&event=<name>
             let (session, event) = parse_query(&url);
 
             // Cap the body so a runaway/malicious POST can't exhaust memory.
@@ -103,6 +123,75 @@ pub fn start(app: AppHandle, state: Arc<HookState>, bus: Arc<HookBus>) {
             );
         }
     });
+}
+
+/// Blocking approval handler. With no phone attached to the session it returns no
+/// decision (Claude's normal flow runs — native desktop prompt unchanged). Otherwise
+/// it registers the request, surfaces it to the phone via the bus, and blocks until
+/// answered (or times out → deny with a reason).
+fn handle_approve(
+    mut request: Request,
+    url: &str,
+    broker: &Broker,
+    presence: &Presence,
+    bus: &HookBus,
+) {
+    let (session, _event) = parse_query(url);
+    let mut body = String::new();
+    let _ = request
+        .as_reader()
+        .take(1024 * 1024)
+        .read_to_string(&mut body);
+    let parsed: Value = serde_json::from_str(&body).unwrap_or(Value::Null);
+
+    let Some(session) = session else {
+        let _ = request.respond(Response::from_string("{}"));
+        return;
+    };
+
+    // No phone watching → don't intercept; let Claude's normal flow run.
+    if !presence.is_attached(&session) {
+        let _ = request.respond(Response::from_string("{}"));
+        return;
+    }
+
+    let tool = parsed
+        .get("tool_name")
+        .and_then(|t| t.as_str())
+        .unwrap_or("")
+        .to_string();
+    let input = parsed.get("tool_input").cloned().unwrap_or(Value::Null);
+
+    let (id, rx) = broker.register(session.clone(), tool.clone(), input.clone());
+    forward_to_bus(
+        bus,
+        Some(session),
+        "approval_request".to_string(),
+        json!({ "request_id": id, "tool": tool, "input": input }),
+    );
+    let decision = rx
+        .recv_timeout(Duration::from_secs(300))
+        .unwrap_or(Decision::Deny {
+            reason: "approval timed out".into(),
+        });
+    broker.resolve(&id, decision.clone()); // ensure cleared (no-op if already gone)
+    let _ = request.respond(Response::from_string(approve_response(&decision).to_string()));
+}
+
+/// The `PreToolUse` hook output Claude reads from the hook's stdout.
+fn approve_response(decision: &Decision) -> Value {
+    let mut out = serde_json::Map::new();
+    out.insert("hookEventName".into(), json!("PreToolUse"));
+    match decision {
+        Decision::Allow => {
+            out.insert("permissionDecision".into(), json!("allow"));
+        }
+        Decision::Deny { reason } => {
+            out.insert("permissionDecision".into(), json!("deny"));
+            out.insert("permissionDecisionReason".into(), json!(reason));
+        }
+    }
+    json!({ "hookSpecificOutput": Value::Object(out) })
 }
 
 fn parse_query(url: &str) -> (Option<String>, String) {
@@ -353,6 +442,16 @@ mod tests {
         let (_id, rx) = bus.subscribe();
         forward_to_bus(&bus, None, "stop".to_string(), serde_json::Value::Null);
         assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn approve_response_allow_and_deny_shapes() {
+        let allow = approve_response(&Decision::Allow);
+        assert_eq!(allow["hookSpecificOutput"]["hookEventName"], "PreToolUse");
+        assert_eq!(allow["hookSpecificOutput"]["permissionDecision"], "allow");
+        let deny = approve_response(&Decision::Deny { reason: "nope".into() });
+        assert_eq!(deny["hookSpecificOutput"]["permissionDecision"], "deny");
+        assert_eq!(deny["hookSpecificOutput"]["permissionDecisionReason"], "nope");
     }
 
     /// A unique, empty temp directory for one test. Removed if a stale copy exists.
