@@ -7,6 +7,7 @@
 
 use std::collections::HashSet;
 use std::net::TcpStream;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
@@ -76,6 +77,25 @@ fn status_payload(event: &str, body: &serde_json::Value) -> serde_json::Value {
     json!({ "type": "status", "event": event, "body": body })
 }
 
+/// Build the transcript backfill payload from raw jsonl lines.
+fn history_payload(lines: &[String]) -> serde_json::Value {
+    let items: Vec<serde_json::Value> =
+        lines.iter().flat_map(|l| crate::transcript::parse_line(l)).collect();
+    json!({ "type": "history", "items": items })
+}
+
+/// Read a transcript file fully into trimmed, non-empty lines. Empty on any error.
+fn read_lines(path: &Path) -> Vec<String> {
+    std::fs::read_to_string(path)
+        .map(|s| {
+            s.lines()
+                .filter(|l| !l.trim().is_empty())
+                .map(|l| l.to_string())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 /// Start the loopback bridge on the first free port in 8455..=8475 (distinct from the
 /// hook server's 8423..=8443). Takes the AppHandle so each connection can reach the
 /// managed PtyManager / Store / HookBus (matching hooks::start's pattern).
@@ -113,6 +133,8 @@ fn handle_conn(stream: TcpStream, app: AppHandle) {
 
     // (session_id, subscription id, frame receiver) once attached.
     let mut attached: Option<(String, u64, std::sync::mpsc::Receiver<String>)> = None;
+    // (transcript path, lines already sent) — set on attach, advanced while tailing.
+    let mut transcript: Option<(PathBuf, usize)> = None;
 
     loop {
         // 1. Read a control message if one is ready (times out quickly otherwise).
@@ -137,6 +159,15 @@ fn handle_conn(stream: TcpStream, app: AppHandle) {
                             let _ = ws.send(Message::Text(
                                 json!({ "type": "size", "cols": cols, "rows": rows }).to_string(),
                             ));
+                        }
+                        // Transcript backfill (chat history) + start tailing for appends.
+                        if let Some(dir) = crate::pty::claude_projects_dir() {
+                            if let Some(path) = crate::pty::transcript_path(&session_id, &dir) {
+                                let lines = read_lines(&path);
+                                let _ =
+                                    ws.send(Message::Text(history_payload(&lines).to_string()));
+                                transcript = Some((path, lines.len()));
+                            }
                         }
                         attached = Some((session_id, sub_id, rx));
                     } else {
@@ -206,6 +237,21 @@ fn handle_conn(stream: TcpStream, app: AppHandle) {
             // Not attached: drain-and-discard so the bus buffer can't back up.
             while bus_rx.try_recv().is_ok() {}
         }
+
+        // 4. Tail the transcript for appended lines -> chat items.
+        if let Some((path, cursor)) = transcript.as_mut() {
+            let lines = read_lines(path);
+            if lines.len() > *cursor {
+                for line in &lines[*cursor..] {
+                    for item in crate::transcript::parse_line(line) {
+                        let _ = ws.send(Message::Text(
+                            json!({ "type": "chat", "item": item }).to_string(),
+                        ));
+                    }
+                }
+                *cursor = lines.len();
+            }
+        }
     }
 
     bus.unsubscribe(bus_id);
@@ -243,6 +289,19 @@ mod tests {
         assert_eq!(msg["type"], "status");
         assert_eq!(msg["event"], "pretool");
         assert_eq!(msg["body"]["tool_name"], "Bash");
+    }
+
+    #[test]
+    fn history_payload_flattens_items() {
+        let lines = vec![
+            serde_json::json!({"type":"user","message":{"role":"user","content":"hi"}}).to_string(),
+            serde_json::json!({"type":"assistant","message":{"content":[{"type":"text","text":"yo"}]}})
+                .to_string(),
+        ];
+        let msg = history_payload(&lines);
+        assert_eq!(msg["type"], "history");
+        assert_eq!(msg["items"].as_array().unwrap().len(), 2);
+        assert_eq!(msg["items"][0]["role"], "user");
     }
 
     #[test]
