@@ -202,6 +202,9 @@ impl PtyManager {
                 &shell,
                 worktree_name.as_deref(),
                 settings_path.as_deref(),
+                None, // mcp_config — threaded in Task 10
+                None, // system_prompt — threaded in Task 10
+                None, // initial_prompt — threaded in Task 10
                 claude_projects_dir().as_deref(),
             )
         };
@@ -451,6 +454,7 @@ fn broadcast(subs: &mut Vec<(u64, SyncSender<String>)>, frame: &str) {
 /// (CONDUIT_SESSION_ID/HOOK_PORT) and the worktree/settings flags are applied here.
 /// `worktree`/`settings` are only set by callers when the adapter supports worktrees.
 #[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)]
 fn build_script(
     adapter: &dyn crate::agent::ProviderAdapter,
     session_id: &str,
@@ -459,6 +463,9 @@ fn build_script(
     shell: &str,
     worktree: Option<&str>,
     settings: Option<&str>,
+    mcp_config: Option<&str>,
+    system_prompt: Option<&str>,
+    initial_prompt: Option<&str>,
     projects_dir: Option<&Path>,
 ) -> String {
     let mut flags = String::new();
@@ -468,7 +475,13 @@ fn build_script(
     if let Some(path) = settings {
         flags.push_str(&format!(" --settings {}", shell_quote(path)));
     }
-    let invocation = adapter.build_invocation(session_id, projects_dir, &flags);
+    if let Some(cfg) = mcp_config {
+        flags.push_str(&format!(" --mcp-config {}", shell_quote(cfg)));
+    }
+    if let Some(sp) = system_prompt {
+        flags.push_str(&format!(" --append-system-prompt {}", shell_quote(sp)));
+    }
+    let invocation = adapter.build_invocation(session_id, projects_dir, &flags, initial_prompt);
     format!(
         "export CONDUIT_SESSION_ID={sid} CONDUIT_HOOK_PORT={port}; cd {dir} && {invocation}; exec {shell} -i -l",
         sid = shell_quote(session_id),
@@ -562,10 +575,56 @@ mod tests {
             None,
             None,
             None,
+            None,
+            None,
+            None,
         );
         assert!(script.contains("export CONDUIT_SESSION_ID='sid-1' CONDUIT_HOOK_PORT=7777"));
         assert!(script.contains("claude --session-id 'sid-1' || claude"));
         assert!(script.contains("cd '/repo' &&"));
+    }
+
+    #[test]
+    fn build_script_appends_conductor_flags_and_prompt() {
+        let adapter = crate::agent::adapter_for(crate::agent::AgentId::Claude);
+        let script = build_script(
+            &*adapter,
+            "sid-1",
+            8423,
+            "/repo",
+            "/bin/zsh",
+            None,                      // worktree
+            Some("/cfg/hooks.json"),   // settings
+            Some("/cfg/mcp.json"),     // mcp_config
+            Some("Be the conductor."), // system_prompt
+            None,                      // initial_prompt
+            None,                      // projects_dir
+        );
+        assert!(script.contains("--settings '/cfg/hooks.json'"), "{script}");
+        assert!(script.contains("--mcp-config '/cfg/mcp.json'"), "{script}");
+        assert!(script.contains("--append-system-prompt 'Be the conductor.'"), "{script}");
+    }
+
+    #[test]
+    fn build_script_passes_initial_prompt_positional() {
+        let adapter = crate::agent::adapter_for(crate::agent::AgentId::Claude);
+        let script = build_script(
+            &*adapter,
+            "sid-2",
+            8423,
+            "/repo",
+            "/bin/zsh",
+            None,
+            None,
+            None,
+            None,
+            Some("implement the parser"),
+            None,
+        );
+        assert!(
+            script.contains("'implement the parser'"),
+            "prompt must be a quoted positional: {script}"
+        );
     }
 
     #[test]
