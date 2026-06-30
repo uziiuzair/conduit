@@ -39,7 +39,11 @@ impl Default for HookState {
 /// Publish a parsed hook event onto the bus (no-op when unrouted).
 fn forward_to_bus(bus: &HookBus, session: Option<String>, event: String, body: Value) {
     if let Some(session) = session {
-        bus.publish(HookEvent { session, event, body });
+        bus.publish(HookEvent {
+            session,
+            event,
+            body,
+        });
     }
 }
 
