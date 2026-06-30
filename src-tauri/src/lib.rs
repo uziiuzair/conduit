@@ -42,7 +42,7 @@ fn pty_spawn(
     on_event: Channel<String>,
     pty: State<Arc<PtyManager>>,
     hook_state: State<Arc<HookState>>,
-    store: State<Store>,
+    store: State<Arc<Store>>,
 ) -> Result<(), String> {
     let port = hook_state.port.load(Ordering::SeqCst);
     let agent = if shell_only {
@@ -112,17 +112,17 @@ fn pty_is_running(session_id: String, pty: State<Arc<PtyManager>>) -> bool {
 // ---- Project / session store commands ---------------------------------------
 
 #[tauri::command]
-fn load_projects(store: State<Store>) -> Vec<Project> {
+fn load_projects(store: State<Arc<Store>>) -> Vec<Project> {
     store.list()
 }
 
 #[tauri::command]
-fn add_project(path: String, store: State<Store>) -> Project {
+fn add_project(path: String, store: State<Arc<Store>>) -> Project {
     store.add_project(path)
 }
 
 #[tauri::command]
-fn remove_project(id: String, store: State<Store>, pty: State<Arc<PtyManager>>) {
+fn remove_project(id: String, store: State<Arc<Store>>, pty: State<Arc<PtyManager>>) {
     if let Some(p) = store.list().into_iter().find(|p| p.id == id) {
         for s in p.sessions {
             pty.kill(&s.id);
@@ -139,18 +139,18 @@ fn add_session(
     use_worktree: bool,
     agent: crate::agent::AgentId,
     role: Option<SessionRole>,
-    store: State<Store>,
+    store: State<Arc<Store>>,
 ) -> Option<Session> {
     store.add_session(&project_id, name, use_worktree, agent, role.unwrap_or_default())
 }
 
 #[tauri::command]
-fn rename_session(project_id: String, session_id: String, name: String, store: State<Store>) {
+fn rename_session(project_id: String, session_id: String, name: String, store: State<Arc<Store>>) {
     store.rename_session(&project_id, &session_id, name);
 }
 
 #[tauri::command]
-fn set_project_layout(project_id: String, layout: ProjectLayout, store: State<Store>) {
+fn set_project_layout(project_id: String, layout: ProjectLayout, store: State<Arc<Store>>) {
     store.set_layout(&project_id, layout);
 }
 
@@ -158,7 +158,7 @@ fn set_project_layout(project_id: String, layout: ProjectLayout, store: State<St
 fn remove_session(
     project_id: String,
     session_id: String,
-    store: State<Store>,
+    store: State<Arc<Store>>,
     pty: State<Arc<PtyManager>>,
 ) {
     pty.kill(&session_id);
@@ -420,7 +420,7 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_notification::init())
         .manage(Arc::new(PtyManager::new()))
-        .manage(Store::new())
+        .manage(Arc::new(Store::new()))
         .manage(Arc::new(HookState::default()))
         .manage(Arc::new(claude_usage::ClaudeAuth::default()))
         .setup(|app| {
