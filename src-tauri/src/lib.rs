@@ -10,6 +10,7 @@ mod claude_status;
 mod claude_usage;
 mod fsops;
 mod git;
+mod hookbus;
 mod hooks;
 mod notify;
 mod pty;
