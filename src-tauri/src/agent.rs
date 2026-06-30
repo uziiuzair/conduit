@@ -3,7 +3,7 @@
 use std::path::Path;
 
 /// Which coding-agent CLI a session runs. Persisted on each Session; serializes
-/// as a lowercase string ("claude"/"codex"/"gemini"). Unknown/absent → Claude (back-compat).
+/// as a lowercase string ("claude"/"codex"/"gemini"/"opencode"). Unknown/absent → Claude (back-compat).
 #[derive(serde::Serialize, serde::Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum AgentId {
@@ -11,6 +11,7 @@ pub enum AgentId {
     Claude,
     Codex,
     Gemini,
+    OpenCode,
 }
 
 /// Descriptor for a single MCP server passed to the CLI command builders.
@@ -59,6 +60,12 @@ pub trait ProviderAdapter {
     fn hooks_profile(&self) -> Option<crate::hooks::HooksProfile> {
         None
     }
+    /// The status plugin this adapter installs at spawn. OpenCode has no shell-hook
+    /// config, so it ships a JS plugin instead of a `hooks_profile()`. None for
+    /// hook-based agents (Claude/Codex/Gemini).
+    fn plugin_profile(&self) -> Option<crate::hooks::PluginProfile> {
+        None
+    }
     /// The agent command that runs after `cd <dir> &&`, including the `|| <bare>`
     /// fallback. `flags` carries already-quoted extra args (e.g. ` --worktree 'x'`).
     /// `projects_dir` is Claude's transcript store (used only by adapters that resume).
@@ -67,6 +74,7 @@ pub trait ProviderAdapter {
         session_id: &str,
         projects_dir: Option<&Path>,
         flags: &str,
+        initial_prompt: Option<&str>,
     ) -> String;
     /// Build the CLI command string to register an MCP server at user scope.
     /// Returns `None` if this adapter doesn't support the given transport yet.
@@ -101,12 +109,18 @@ impl ProviderAdapter for ClaudeAdapter {
         session_id: &str,
         projects_dir: Option<&Path>,
         flags: &str,
+        initial_prompt: Option<&str>,
     ) -> String {
         let id = crate::pty::shell_quote(session_id);
+        // An initial prompt rides as a quoted positional so the worker starts working
+        // immediately (used by the Conductor's fleet_spawn). Applied to both branches.
+        let prompt = initial_prompt
+            .map(|p| format!(" {}", crate::pty::shell_quote(p)))
+            .unwrap_or_default();
         if projects_dir.is_some_and(|d| crate::pty::transcript_exists(session_id, d)) {
-            format!("claude{flags} --resume {id} || claude{flags}")
+            format!("claude{flags} --resume {id}{prompt} || claude{flags}{prompt}")
         } else {
-            format!("claude{flags} --session-id {id} || claude{flags}")
+            format!("claude{flags} --session-id {id}{prompt} || claude{flags}{prompt}")
         }
     }
     fn hooks_profile(&self) -> Option<crate::hooks::HooksProfile> {
@@ -155,6 +169,7 @@ impl ProviderAdapter for GeminiAdapter {
         _session_id: &str,
         _projects_dir: Option<&Path>,
         _flags: &str,
+        _initial_prompt: Option<&str>,
     ) -> String {
         "gemini || gemini".to_string()
     }
@@ -253,6 +268,7 @@ impl ProviderAdapter for CodexAdapter {
         _session_id: &str,
         _projects_dir: Option<&Path>,
         _flags: &str,
+        _initial_prompt: Option<&str>,
     ) -> String {
         "codex || codex".to_string()
     }
@@ -324,12 +340,40 @@ impl ProviderAdapter for CodexAdapter {
     }
 }
 
+pub struct OpenCodeAdapter;
+
+impl ProviderAdapter for OpenCodeAdapter {
+    fn id(&self) -> AgentId {
+        AgentId::OpenCode
+    }
+    fn binary(&self) -> &'static str {
+        "opencode"
+    }
+    // Fresh launch like Codex/Gemini: opencode generates its own session ids, so there is
+    // no caller-pinned resume; worktree isolation is out of scope for this tier.
+    fn build_invocation(
+        &self,
+        _session_id: &str,
+        _projects_dir: Option<&Path>,
+        _flags: &str,
+        _initial_prompt: Option<&str>,
+    ) -> String {
+        "opencode || opencode".to_string()
+    }
+    fn plugin_profile(&self) -> Option<crate::hooks::PluginProfile> {
+        Some(crate::hooks::PluginProfile {
+            config_rel_path: ".opencode/plugin/conduit-status.js",
+        })
+    }
+}
+
 /// Resolve the adapter for an agent id.
 pub fn adapter_for(agent: AgentId) -> Box<dyn ProviderAdapter> {
     match agent {
         AgentId::Claude => Box::new(ClaudeAdapter),
         AgentId::Codex => Box::new(CodexAdapter),
         AgentId::Gemini => Box::new(GeminiAdapter),
+        AgentId::OpenCode => Box::new(OpenCodeAdapter),
     }
 }
 
@@ -363,6 +407,7 @@ pub fn all_adapters() -> Vec<Box<dyn ProviderAdapter>> {
         Box::new(ClaudeAdapter),
         Box::new(CodexAdapter),
         Box::new(GeminiAdapter),
+        Box::new(OpenCodeAdapter),
     ]
 }
 
@@ -371,6 +416,7 @@ fn label_for(id: AgentId) -> &'static str {
         AgentId::Claude => "Claude Code",
         AgentId::Codex => "Codex CLI",
         AgentId::Gemini => "Gemini CLI",
+        AgentId::OpenCode => "OpenCode",
     }
 }
 
@@ -443,7 +489,7 @@ mod tests {
 
     #[test]
     fn codex_spawns_fresh_with_fallback() {
-        let cmd = CodexAdapter.build_invocation("sid", None, "");
+        let cmd = CodexAdapter.build_invocation("sid", None, "", None);
         assert_eq!(cmd, "codex || codex");
         assert_eq!(CodexAdapter.id(), AgentId::Codex);
         assert_eq!(CodexAdapter.binary(), "codex");
@@ -454,16 +500,25 @@ mod tests {
     #[test]
     fn claude_pins_a_new_session_when_no_transcript() {
         // projects_dir = None → no transcript → pin a new session id.
-        let cmd = ClaudeAdapter.build_invocation("abc-123", None, "");
+        let cmd = ClaudeAdapter.build_invocation("abc-123", None, "", None);
         assert_eq!(cmd, "claude --session-id 'abc-123' || claude");
     }
 
     #[test]
     fn claude_applies_flags_to_both_primary_and_fallback() {
-        let cmd = ClaudeAdapter.build_invocation("id", None, " --worktree 'wt'");
+        let cmd = ClaudeAdapter.build_invocation("id", None, " --worktree 'wt'", None);
         assert_eq!(
             cmd,
             "claude --worktree 'wt' --session-id 'id' || claude --worktree 'wt'"
+        );
+    }
+
+    #[test]
+    fn claude_appends_initial_prompt_as_quoted_positional() {
+        let cmd = ClaudeAdapter.build_invocation("id", None, "", Some("write a haiku"));
+        assert_eq!(
+            cmd,
+            "claude --session-id 'id' 'write a haiku' || claude 'write a haiku'"
         );
     }
 
@@ -504,10 +559,38 @@ mod tests {
         assert_eq!(GeminiAdapter.binary(), "gemini");
         assert!(!GeminiAdapter.supports_worktree());
         assert_eq!(
-            GeminiAdapter.build_invocation("sid", None, ""),
+            GeminiAdapter.build_invocation("sid", None, "", None),
             "gemini || gemini"
         );
         assert_eq!(adapter_for(AgentId::Gemini).id(), AgentId::Gemini);
+    }
+
+    #[test]
+    fn opencode_metadata_and_plugin_profile() {
+        assert_eq!(OpenCodeAdapter.id(), AgentId::OpenCode);
+        assert_eq!(OpenCodeAdapter.binary(), "opencode");
+        assert!(!OpenCodeAdapter.supports_worktree());
+        assert_eq!(
+            OpenCodeAdapter.build_invocation("sid", None, "", None),
+            "opencode || opencode"
+        );
+        assert!(
+            OpenCodeAdapter.hooks_profile().is_none(),
+            "opencode uses a plugin, not a hooks profile"
+        );
+        let pp = OpenCodeAdapter
+            .plugin_profile()
+            .expect("opencode must supply a plugin profile");
+        assert_eq!(pp.config_rel_path, ".opencode/plugin/conduit-status.js");
+        assert_eq!(adapter_for(AgentId::OpenCode).id(), AgentId::OpenCode);
+        assert!(all_adapters().iter().any(|a| a.id() == AgentId::OpenCode));
+    }
+
+    #[test]
+    fn hook_agents_have_no_plugin_profile() {
+        assert!(ClaudeAdapter.plugin_profile().is_none());
+        assert!(CodexAdapter.plugin_profile().is_none());
+        assert!(GeminiAdapter.plugin_profile().is_none());
     }
 
     #[test]

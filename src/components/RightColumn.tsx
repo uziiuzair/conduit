@@ -44,6 +44,17 @@ export function RightColumn({
   const bottomTab = useStore((s) => s.bottomTab);
   const setBottomTab = useStore((s) => s.setBottomTab);
 
+  // Focus the bottom shell only when the user deliberately opens the Terminal tab —
+  // never when it's merely revealed by switching sessions (that focus belongs to the
+  // agent terminal in the center). Otherwise switching Claude tabs lands the cursor in
+  // this shell. `prevBottomTab` lags one render behind, so this is true on exactly the
+  // render where bottomTab flips to "terminal".
+  const prevBottomTab = useRef(bottomTab);
+  const focusShellOnReveal = bottomTab === "terminal" && prevBottomTab.current !== "terminal";
+  useEffect(() => {
+    prevBottomTab.current = bottomTab;
+  }, [bottomTab]);
+
   const layout = useStore((s) => (projectId ? s.layouts[projectId] : undefined));
   const project = projectId ? projects.find((p) => p.id === projectId) ?? null : null;
 
@@ -240,6 +251,7 @@ export function RightColumn({
               sessionId={`${session.id}::term`}
               workingDirectory={workingDirOf(project, session)}
               visible={activeSessionId === session.id && bottomTab === "terminal"}
+              focusOnReveal={focusShellOnReveal}
               shellOnly
             />
           ))}

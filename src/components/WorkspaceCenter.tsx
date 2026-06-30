@@ -206,6 +206,7 @@ export function WorkspaceCenter({
                     ? baseName(session.worktreePath)
                     : undefined
                 }
+                role={session.role}
                 visible={pl.visible}
                 style={pl.style}
               />

@@ -1,22 +1,26 @@
 import { useEffect, useState } from "react";
-import { isGitRepo, useStore } from "../store";
+import { isGitRepo, useStore, type SessionRole } from "../store";
 import { AGENTS, agentMeta, type AgentId } from "../agents";
 import { AgentGlyph } from "./AgentGlyph";
 
 export function NewSessionDialog({
   projectPath,
+  hasConductor,
   onCancel,
   onCreate,
 }: {
   projectPath: string;
+  hasConductor: boolean;
   onCancel: () => void;
-  onCreate: (opts: { name?: string; useWorktree: boolean; agent: AgentId }) => void;
+  onCreate: (opts: { name?: string; useWorktree: boolean; agent: AgentId; role: SessionRole }) => void;
 }) {
   const defaultAgent = useStore((s) => s.defaultAgent);
   const [name, setName] = useState("");
   const [useWorktree, setUseWorktree] = useState(false);
   const [gitOk, setGitOk] = useState(false);
   const [agent, setAgent] = useState<AgentId>(defaultAgent);
+  // A Conductor is a Claude session in the project root that orchestrates the fleet.
+  const [conductor, setConductor] = useState(false);
   // Detection is loaded once at startup (store.loadAgents) and cached, so opening
   // this dialog is instant — no per-open login-shell PATH scan.
   const detected = useStore((s) => s.agents);
@@ -47,16 +51,42 @@ export function NewSessionDialog({
 
   const isReady = (id: AgentId) => !detected || detected.find((a) => a.id === id)?.found === true;
   const anyReady = !detected || detected.some((a) => a.found);
-  const worktreeAllowed = gitOk && agentMeta(agent).supportsWorktree;
+  // The Conductor never isolates in a worktree (it runs in the project root).
+  const worktreeAllowed = gitOk && agentMeta(agent).supportsWorktree && !conductor;
   const submit = () => {
+    if (conductor) {
+      onCreate({ name: name.trim() || undefined, useWorktree: false, agent: "claude", role: "conductor" });
+      return;
+    }
     if (!isReady(agent)) return;
-    onCreate({ name: name.trim() || undefined, useWorktree: useWorktree && worktreeAllowed, agent });
+    onCreate({ name: name.trim() || undefined, useWorktree: useWorktree && worktreeAllowed, agent, role: "worker" });
   };
 
   return (
     <div className="dialog-overlay" onClick={onCancel}>
       <div className="dialog" role="dialog" aria-modal="true" onClick={(e) => e.stopPropagation()}>
         <div className="dialog-title">New session</div>
+
+        <label
+          className={`dialog-toggle ${hasConductor ? "disabled" : ""}`}
+          title={
+            hasConductor
+              ? "This project already has a Conductor"
+              : "A Claude session that observes and orchestrates this project's sessions"
+          }
+        >
+          <input
+            type="checkbox"
+            checked={conductor}
+            disabled={hasConductor}
+            onChange={(e) => {
+              const on = e.target.checked;
+              setConductor(on);
+              if (on) setAgent("claude");
+            }}
+          />
+          <span>Conductor (orchestrates this project)</span>
+        </label>
 
         <div className="dialog-label">Agent</div>
         <div className="agent-tiles" role="radiogroup" aria-label="Agent">
@@ -68,9 +98,9 @@ export function NewSessionDialog({
                 role="radio"
                 aria-checked={agent === a.id}
                 aria-label={`${a.label}${ready ? "" : " (not installed)"}`}
-                className={`agent-tile ${agent === a.id ? "sel" : ""} ${ready ? "" : "disabled"}`}
-                disabled={!ready}
-                onClick={() => ready && setAgent(a.id)}
+                className={`agent-tile ${agent === a.id ? "sel" : ""} ${ready && !conductor ? "" : "disabled"}`}
+                disabled={!ready || conductor}
+                onClick={() => ready && !conductor && setAgent(a.id)}
               >
                 <AgentGlyph id={a.id} size={20} />
                 <span className="nm">{a.label}</span>
@@ -116,7 +146,11 @@ export function NewSessionDialog({
 
         <div className="dialog-actions">
           <button onClick={onCancel}>Cancel</button>
-          <button className="primary" onClick={submit} disabled={!isReady(agent)}>
+          <button
+            className="primary"
+            onClick={submit}
+            disabled={conductor ? !isReady("claude") : !isReady(agent)}
+          >
             Create
           </button>
         </div>

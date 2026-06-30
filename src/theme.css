@@ -253,8 +253,15 @@ button {
 .project-head {
   display: flex;
   align-items: center;
-  gap: 7px;
+  gap: 6px;
   padding: 4px 7px;
+  border-radius: 5px;
+  cursor: pointer;
+  transition: background 0.12s ease;
+}
+
+.project-head:hover {
+  background: var(--hover);
 }
 
 .project-head .name {
@@ -268,6 +275,22 @@ button {
 
 .project-head .folder-icon {
   color: var(--accent);
+  flex: none;
+}
+
+/* Disclosure twistie: points right when collapsed, rotates down when expanded. */
+.project-chevron {
+  flex: none;
+  color: var(--text-dim);
+  transition: transform 0.16s cubic-bezier(0.4, 0, 0.2, 1), color 0.12s ease;
+}
+
+.project-chevron.expanded {
+  transform: rotate(90deg);
+}
+
+.project-head:hover .project-chevron {
+  color: var(--text-mid);
 }
 
 .menu-btn {
@@ -293,6 +316,10 @@ button {
   border-radius: 5px;
   font-size: 12px;
   color: var(--text-bright);
+  overflow: hidden;
+  max-height: 44px;
+  transition: max-height 0.2s ease, opacity 0.16s ease, padding 0.2s ease,
+    margin 0.2s ease, transform 0.2s ease, background 0.12s ease;
 }
 
 .session-row:hover {
@@ -325,6 +352,25 @@ button {
   padding: 4px 7px;
   font-size: 12px;
   color: var(--accent);
+  overflow: hidden;
+  max-height: 44px;
+  transition: max-height 0.2s ease, opacity 0.16s ease, padding 0.2s ease,
+    margin 0.2s ease, transform 0.2s ease;
+}
+
+/* Folded away while the project is collapsed — clipped to zero height + faded so
+   the expand/collapse reads as one smooth motion (rows stay mounted so both
+   directions animate). Active/selected rows never get this class. */
+.session-row.collapsed-hidden,
+.new-session.collapsed-hidden {
+  max-height: 0;
+  padding-top: 0;
+  padding-bottom: 0;
+  margin-top: 0;
+  margin-bottom: 0;
+  opacity: 0;
+  transform: translateY(-3px);
+  pointer-events: none;
 }
 
 /* inline session rename */
@@ -695,6 +741,11 @@ button {
 @media (prefers-reduced-motion: reduce) {
   .todo .ic.in_progress {
     animation: none;
+  }
+  .project-chevron,
+  .session-row,
+  .new-session {
+    transition: none;
   }
 }
 
@@ -1345,6 +1396,14 @@ button {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  flex-shrink: 0;
+}
+
+/* Conductor session marker in the sidebar row. */
+.conductor-chip {
+  font-size: 9px;
+  line-height: 1;
+  color: var(--accent);
   flex-shrink: 0;
 }
 
