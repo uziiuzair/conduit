@@ -6,17 +6,20 @@
 
 mod agent;
 mod bridge;
+mod broker;
 mod claude_status;
 mod claude_usage;
 mod fleet;
 mod fleet_mcp;
 mod fsops;
 mod git;
+mod hookbus;
 mod hooks;
 mod notify;
 mod pty;
 mod store;
 mod telemetry;
+mod transcript;
 mod worktree;
 
 use std::path::Path;
@@ -472,12 +475,18 @@ pub fn run() {
         .manage(Arc::new(HookState::default()))
         .manage(Arc::new(crate::fleet::FleetState::default()))
         .manage(Arc::new(claude_usage::ClaudeAuth::default()))
+        .manage(Arc::new(hookbus::HookBus::default()))
+        .manage(Arc::new(broker::Broker::default()))
+        .manage(Arc::new(broker::Presence::default()))
         .setup(|app| {
             let fleet = app.state::<Arc<crate::fleet::FleetState>>().inner().clone();
             let hook_state = app.state::<Arc<HookState>>().inner().clone();
-            hooks::start(app.handle().clone(), hook_state, fleet.clone());
+            let bus = app.state::<Arc<hookbus::HookBus>>().inner().clone();
+            let broker = app.state::<Arc<broker::Broker>>().inner().clone();
+            let presence = app.state::<Arc<broker::Presence>>().inner().clone();
+            hooks::start(app.handle().clone(), hook_state, bus, broker, presence, fleet.clone());
+            bridge::start(app.handle().clone());
             let pty = app.state::<Arc<PtyManager>>().inner().clone();
-            bridge::start(pty.clone(), Arc::new(std::sync::atomic::AtomicU16::new(0)));
             let store = app.state::<Arc<Store>>().inner().clone();
             fleet_mcp::start(app.handle().clone(), store, pty, fleet);
             Ok(())
