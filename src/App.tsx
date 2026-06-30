@@ -318,6 +318,35 @@ function toolActivity(agent: AgentId, toolName?: string, toolInput?: any): strin
     }
   }
 
+  if (agent === "opencode") {
+    switch (toolName) {
+      case "bash":
+        return "Running a command";
+      case "edit":
+      case "write":
+      case "patch": {
+        const p = toolInput?.filePath ?? toolInput?.path ?? toolInput?.file_path;
+        const f = typeof p === "string" && p ? baseName(p) : undefined;
+        return f ? `Editing ${f}` : "Editing files";
+      }
+      case "read":
+        return "Reading files";
+      case "grep":
+      case "glob":
+      case "list":
+        return "Searching the code";
+      case "webfetch":
+        return "Browsing the web";
+      case "todowrite":
+      case "todoread":
+        return undefined; // surfaced in the To-dos panel instead (when present)
+      case "task":
+        return "Running a subagent";
+      default:
+        return toolName;
+    }
+  }
+
   // claude (and any unknown agent): keep the existing PascalCase switch body unchanged.
   const file = (): string | undefined => {
     const p = toolInput?.file_path ?? toolInput?.path ?? toolInput?.notebook_path;

@@ -126,6 +126,60 @@ pub struct HooksProfile {
     pub structured_todos: bool,
 }
 
+/// What a plugin-based agent (OpenCode) installs for status: a single JS file written
+/// relative to the working dir. Parallel to `HooksProfile`, which is for shell-hook agents.
+pub struct PluginProfile {
+    pub config_rel_path: &'static str,
+}
+
+/// The OpenCode status-bridge plugin source, with `port` baked in as the env fallback.
+/// OpenCode auto-loads any `.opencode/plugin/*.js`; this one translates OpenCode's plugin
+/// hooks + bus events into Conduit's normalized verbs and POSTs them to the listener in the
+/// same `{ tool_name, tool_input }` shape the curl hooks use. URL is built by concatenation
+/// (no JS template literals) so it embeds cleanly in a Rust raw string.
+pub(crate) fn opencode_plugin_js(port: u16) -> String {
+    const TEMPLATE: &str = r#"// Conduit status bridge — auto-generated; do not edit.
+const PORT = process.env.CONDUIT_HOOK_PORT || "__PORT__";
+const SID = process.env.CONDUIT_SESSION_ID || "unknown";
+const post = (event, body) => {
+  try {
+    fetch("http://127.0.0.1:" + PORT + "/hook?session=" + SID + "&event=" + event, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body || {}),
+    }).catch(() => {});
+  } catch (e) {}
+};
+export const ConduitStatus = async () => ({
+  event: async ({ event }) => {
+    if (event && event.type === "session.created") post("sessionstart", {});
+    else if (event && event.type === "session.idle") post("stop", {});
+  },
+  "chat.message": async () => { post("prompt", {}); },
+  "tool.execute.before": async (input, output) => {
+    post("pretool", {
+      tool_name: input && input.tool,
+      tool_input: (output && output.args) || (input && input.args),
+    });
+  },
+  "tool.execute.after": async (input) => {
+    post("tooluse", { tool_name: input && input.tool, tool_input: input && input.args });
+  },
+});
+"#;
+    TEMPLATE.replace("__PORT__", &port.to_string())
+}
+
+/// Write the OpenCode status plugin into <dir>/<config_rel_path>. Conduit-owned file:
+/// re-install simply overwrites (idempotent). Creates parent dirs as needed.
+pub fn install_plugin(dir: &str, port: u16, profile: &PluginProfile) {
+    let path = Path::new(dir).join(profile.config_rel_path);
+    if let Some(parent) = path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    let _ = fs::write(&path, opencode_plugin_js(port));
+}
+
 /// Group rows by event into the JSON hook entries shape used by install_profile.
 fn entries_for(rows: &[HookRow], port: u16) -> Vec<(&'static str, Vec<Value>)> {
     let mut out: Vec<(&'static str, Vec<Value>)> = Vec::new();
@@ -561,5 +615,48 @@ mod tests {
         assert!(cmd.contains("event=sessionstart"));
         assert!(cmd.contains("CONDUIT_SESSION_ID"));
         assert!(cmd.contains("8431"));
+    }
+
+    #[test]
+    fn install_plugin_writes_conduit_status_js_with_routing() {
+        let dir = fresh_test_dir("ocplugin");
+        let profile = PluginProfile {
+            config_rel_path: ".opencode/plugin/conduit-status.js",
+        };
+        install_plugin(dir.to_str().unwrap(), 8431, &profile);
+
+        let p = dir.join(".opencode/plugin/conduit-status.js");
+        let js = fs::read_to_string(&p).expect("plugin js should be written");
+        assert!(
+            js.contains("CONDUIT_SESSION_ID"),
+            "session routing missing: {js}"
+        );
+        assert!(js.contains("/hook?session="), "hook url missing: {js}");
+        assert!(js.contains("&event="), "event tag missing: {js}");
+        assert!(js.contains("8431"), "fallback port missing: {js}");
+        assert!(js.contains("session.idle"), "stop mapping missing: {js}");
+        assert!(
+            js.contains("tool.execute.before"),
+            "pretool mapping missing: {js}"
+        );
+        assert!(js.contains("chat.message"), "prompt mapping missing: {js}");
+    }
+
+    #[test]
+    fn install_plugin_is_idempotent_overwrite() {
+        let dir = fresh_test_dir("ocplugin_idem");
+        let profile = PluginProfile {
+            config_rel_path: ".opencode/plugin/conduit-status.js",
+        };
+        install_plugin(dir.to_str().unwrap(), 8423, &profile);
+        install_plugin(dir.to_str().unwrap(), 8423, &profile);
+
+        let p = dir.join(".opencode/plugin/conduit-status.js");
+        let js = fs::read_to_string(&p).unwrap();
+        assert_eq!(
+            js.matches("export const ConduitStatus").count(),
+            1,
+            "re-install must overwrite, not duplicate the plugin body"
+        );
     }
 }
