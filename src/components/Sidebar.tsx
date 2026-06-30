@@ -199,6 +199,7 @@ function ProjectBlock({ project }: { project: Project }) {
       {showNew && (
         <NewSessionDialog
           projectPath={project.path}
+          hasConductor={project.sessions.some((s) => s.role === "conductor")}
           onCancel={() => setShowNew(false)}
           onCreate={(opts) => {
             setShowNew(false);
@@ -253,6 +254,11 @@ function SessionRow({
       }}
     >
       <AgentGlyph id={session.agent} size={14} />
+      {session.role === "conductor" && (
+        <span className="conductor-chip" title="Conductor — orchestrates this project">
+          ◆
+        </span>
+      )}
       {editing ? (
         <RenameInput
           projectId={project.id}

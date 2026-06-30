@@ -1399,6 +1399,14 @@ button {
   flex-shrink: 0;
 }
 
+/* Conductor session marker in the sidebar row. */
+.conductor-chip {
+  font-size: 9px;
+  line-height: 1;
+  color: var(--accent);
+  flex-shrink: 0;
+}
+
 /* ---- Claude ambient pill + popover ---- */
 .claude-pill-wrap { position: relative; display: inline-flex; }
 .claude-pill {
