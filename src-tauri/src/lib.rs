@@ -6,6 +6,7 @@
 
 mod agent;
 mod bridge;
+mod broker;
 mod claude_status;
 mod claude_usage;
 mod fsops;
