@@ -9,7 +9,13 @@
     "ios": {
       "supportsTablet": true,
       "bundleIdentifier": "com.uziiuzair.mobile-app",
-      "appleTeamId": "Y4SXF5YHY6"
+      "appleTeamId": "Y4SXF5YHY6",
+      "infoPlist": {
+        "NSLocalNetworkUsageDescription": "Conduit connects to your Mac on the same Wi-Fi to mirror your Claude Code sessions.",
+        "NSAppTransportSecurity": {
+          "NSAllowsLocalNetworking": true
+        }
+      }
     },
     "android": {
       "adaptiveIcon": {

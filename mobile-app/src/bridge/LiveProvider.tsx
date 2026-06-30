@@ -26,6 +26,9 @@ interface LiveValue {
   connState: ConnState;
   url: string;
   setUrl: (u: string) => void;
+  /** dev shared token (CONDUIT_BRIDGE_TOKEN); empty for loopback/simulator */
+  token: string;
+  setToken: (t: string) => void;
   projects: Project[];
   /** live data for the currently-attached session */
   sessionLive: SessionLive;
@@ -49,6 +52,7 @@ function applyPatch(prev: SessionLive, patch: LivePatch): SessionLive {
 
 export function LiveProvider({ children }: { children: React.ReactNode }) {
   const [url, setUrl] = useState(DEFAULT_BRIDGE_URL);
+  const [token, setToken] = useState("");
   const [connState, setConnState] = useState<ConnState>("connecting");
   const [projects, setProjects] = useState<Project[]>([]);
   const [sessionLive, setSessionLive] = useState<SessionLive>(EMPTY_LIVE);
@@ -85,10 +89,10 @@ export function LiveProvider({ children }: { children: React.ReactNode }) {
           // size / output / error are not used by the chat UI
         }
       },
-    });
+    }, token || undefined);
     clientRef.current = client;
     return () => client.close();
-  }, [url]);
+  }, [url, token]);
 
   const attach = useCallback((sessionId: string) => {
     attachedRef.current = sessionId;
@@ -109,8 +113,8 @@ export function LiveProvider({ children }: { children: React.ReactNode }) {
   }, []);
 
   const value = useMemo<LiveValue>(
-    () => ({ connState, url, setUrl, projects, sessionLive, attach, detach, prompt }),
-    [connState, url, projects, sessionLive, attach, detach, prompt],
+    () => ({ connState, url, setUrl, token, setToken, projects, sessionLive, attach, detach, prompt }),
+    [connState, url, token, projects, sessionLive, attach, detach, prompt],
   );
   return <Ctx.Provider value={value}>{children}</Ctx.Provider>;
 }
