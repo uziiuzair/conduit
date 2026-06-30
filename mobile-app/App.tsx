@@ -9,6 +9,7 @@ import { StatusBar } from "expo-status-bar";
 import React from "react";
 import { GestureHandlerRootView } from "react-native-gesture-handler";
 import { SafeAreaProvider } from "react-native-safe-area-context";
+import { LiveProvider } from "./src/bridge/LiveProvider";
 import type { RootStackParamList } from "./src/navigation";
 import { ChatScreen } from "./src/screens/ChatScreen";
 import { ProjectsScreen } from "./src/screens/ProjectsScreen";
@@ -55,7 +56,9 @@ export default function App() {
     <GestureHandlerRootView style={{ flex: 1 }}>
       <SafeAreaProvider>
         <ThemeProvider>
-          <Inner />
+          <LiveProvider>
+            <Inner />
+          </LiveProvider>
         </ThemeProvider>
       </SafeAreaProvider>
     </GestureHandlerRootView>

@@ -1,4 +1,4 @@
-import React, { useMemo, useRef, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import {
   KeyboardAvoidingView,
   Platform,
@@ -10,17 +10,10 @@ import {
   View,
 } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
+import { useLive } from "../bridge/LiveProvider";
 import { NeedsPill, ThemeButton } from "../components/atoms";
-import { CHATS } from "../data/mock";
 import type { ApprovalItem, BubbleItem, EventItem, TodosItem } from "../data/types";
-import {
-  appendAssistantReply,
-  appendPrompt,
-  groupFeed,
-  pendingApproval,
-  resolveApproval,
-  type FeedRow,
-} from "../logic/feed";
+import { groupFeed, type FeedRow } from "../logic/feed";
 import type { ChatProps } from "../navigation";
 import { useTheme } from "../theme/ThemeContext";
 import { MIN_TOUCH, MONO, TYPE } from "../theme/type";
@@ -39,31 +32,32 @@ export function ChatScreen({ route, navigation }: ChatProps) {
   const { agent } = route.params;
   const { palette: p } = useTheme();
   const insets = useSafeAreaInsets();
-  const [feed, setFeed] = useState(() => CHATS[agent.id] ?? []);
+  const { sessionLive, attach, detach, prompt } = useLive();
   const [draft, setDraft] = useState("");
   const scroller = useRef<ScrollView>(null);
 
+  // Attach to this session's live stream (transcript history + tail + status)
+  // while the screen is mounted; detach on leave.
+  useEffect(() => {
+    attach(agent.id);
+    return () => detach();
+  }, [agent.id, attach, detach]);
+
+  const feed = sessionLive.feed;
   const rows = useMemo(() => groupFeed(feed), [feed]);
-  const hasPending = !!pendingApproval(feed);
-  const showNeeds = agent.status === "needsInput" && (agent.pendingApproval ? hasPending : true);
+  const showNeeds = sessionLive.status === "needsInput";
 
   const scrollToEnd = () => requestAnimationFrame(() => scroller.current?.scrollToEnd({ animated: true }));
 
   const send = () => {
-    const next = appendPrompt(feed, draft);
-    if (next === feed) return;
-    setFeed(next);
+    if (!draft.trim()) return;
+    prompt(agent.id, draft); // optimistic echo + write to the live PTY
     setDraft("");
     scrollToEnd();
-    setTimeout(() => {
-      setFeed((f) => appendAssistantReply(f, "Got it — picking that up now."));
-      scrollToEnd();
-    }, 700);
   };
 
-  const decide = (id: string, decision: "allow" | "deny") => {
-    setFeed((f) => resolveApproval(f, id, decision));
-    scrollToEnd();
+  const decide = (_id: string, _decision: "allow" | "deny") => {
+    // approvals arrive via the broker (a later phase); no-op in the read channel
   };
 
   return (
@@ -95,7 +89,13 @@ export function ChatScreen({ route, navigation }: ChatProps) {
         <Text style={{ fontWeight: "600", fontSize: TYPE.headline, color: p.textBright }}>{agent.name}</Text>
         <Text style={{ fontSize: TYPE.footnote, color: p.textMid, fontFamily: MONO }}>{agent.branch}</Text>
         <View style={{ flex: 1 }} />
-        {showNeeds && <NeedsPill />}
+        {showNeeds ? (
+          <NeedsPill />
+        ) : sessionLive.status === "running" && sessionLive.activity ? (
+          <Text style={{ fontSize: TYPE.caption, color: p.textMid, maxWidth: 130 }} numberOfLines={1}>
+            {sessionLive.activity}
+          </Text>
+        ) : null}
         <ThemeButton />
       </View>
 

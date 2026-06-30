@@ -1,10 +1,10 @@
-import React, { useCallback, useState } from "react";
+import React, { useCallback, useEffect, useState } from "react";
 import { Alert, Pressable, RefreshControl, ScrollView, StyleSheet, Text, View } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
+import { useLive } from "../bridge/LiveProvider";
 import { Avatar, NeedsPill, StatusDot, ThemeButton } from "../components/atoms";
 import { SwipeableRow } from "../components/SwipeableRow";
-import { PROJECTS } from "../data/mock";
-import type { Agent } from "../data/types";
+import type { Agent, Project } from "../data/types";
 import { agentBadge, agentSubline, needsCount, statusDot } from "../logic/status";
 import type { ProjectsProps } from "../navigation";
 import { useTheme } from "../theme/ThemeContext";
@@ -13,7 +13,23 @@ import { MIN_TOUCH, MONO, TYPE } from "../theme/type";
 export function ProjectsScreen({ navigation }: ProjectsProps) {
   const { palette: p } = useTheme();
   const insets = useSafeAreaInsets();
-  const [projects, setProjects] = useState(PROJECTS);
+  const { projects: liveProjects, connState, url, setUrl } = useLive();
+  // local copy so swipe Rename/Delete stay optimistic; re-synced on each live update
+  const [projects, setProjects] = useState<Project[]>(liveProjects);
+  useEffect(() => setProjects(liveProjects), [liveProjects]);
+
+  const editUrl = () => {
+    Alert.prompt(
+      "Desktop bridge URL",
+      "ws://127.0.0.1:8455 (dev app only) or :8456 (alongside the installed app)",
+      (text) => {
+        const u = text?.trim();
+        if (u) setUrl(u);
+      },
+      "plain-text",
+      url,
+    );
+  };
   const totalNeeds = projects.reduce((n, proj) => n + needsCount(proj.agents), 0);
 
   // pull-to-refresh (simulated in the shell)
@@ -76,10 +92,27 @@ export function ProjectsScreen({ navigation }: ProjectsProps) {
       >
         <View style={{ flex: 1 }}>
           <Text style={{ fontSize: TYPE.title, fontWeight: "700", color: p.textBright }}>Projects</Text>
-          <View style={{ flexDirection: "row", alignItems: "center", marginTop: 5, gap: 6 }}>
-            <View style={{ width: 7, height: 7, borderRadius: 4, backgroundColor: p.green }} />
-            <Text style={{ fontSize: TYPE.footnote, color: p.textDim }}>paired · this Mac · 12:04</Text>
-          </View>
+          <Pressable
+            onPress={editUrl}
+            hitSlop={8}
+            style={{ flexDirection: "row", alignItems: "center", marginTop: 5, gap: 6 }}
+          >
+            <View
+              style={{
+                width: 7,
+                height: 7,
+                borderRadius: 4,
+                backgroundColor: connState === "open" ? p.green : connState === "connecting" ? p.amber : p.red,
+              }}
+            />
+            <Text style={{ fontSize: TYPE.footnote, color: p.textDim }}>
+              {connState === "open"
+                ? "connected · desktop bridge"
+                : connState === "connecting"
+                  ? "connecting…"
+                  : "disconnected · tap to set URL"}
+            </Text>
+          </Pressable>
         </View>
         <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
           {totalNeeds > 0 && <NeedsPill label={`${totalNeeds} need you`} />}
@@ -93,6 +126,13 @@ export function ProjectsScreen({ navigation }: ProjectsProps) {
           <RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor={p.accent} colors={[p.accent]} />
         }
       >
+        {projects.length === 0 && (
+          <View style={{ padding: 40, alignItems: "center" }}>
+            <Text style={{ color: p.textDim, fontSize: TYPE.subhead, textAlign: "center" }}>
+              {connState === "open" ? "No projects on the desktop yet." : "Waiting for the desktop bridge…"}
+            </Text>
+          </View>
+        )}
         {projects.map((proj) => (
           <View key={proj.id}>
             {/* project section header */}
