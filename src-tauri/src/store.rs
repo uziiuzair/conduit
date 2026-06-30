@@ -181,7 +181,10 @@ impl Store {
         let project = projects.iter_mut().find(|p| p.id == project_id)?;
         // At most one Conductor per project.
         if role == SessionRole::Conductor
-            && project.sessions.iter().any(|s| s.role == SessionRole::Conductor)
+            && project
+                .sessions
+                .iter()
+                .any(|s| s.role == SessionRole::Conductor)
         {
             return None;
         }
@@ -372,7 +375,11 @@ mod tests {
         // A persisted session from before `role` existed must load as Worker.
         let json = r#"{"id":"s1","name":"old","useWorktree":false}"#;
         let s: Session = serde_json::from_str(json).expect("deserialize");
-        assert_eq!(s.role, SessionRole::Worker, "missing role must default to Worker");
+        assert_eq!(
+            s.role,
+            SessionRole::Worker,
+            "missing role must default to Worker"
+        );
     }
 
     #[test]
@@ -380,13 +387,25 @@ mod tests {
         let dir = temp_dir("fleet_snap");
         let store = Store::for_test(&dir);
         let p = store.add_project("/repo".into());
-        let c = store.add_session(
-            &p.id, "Conductor".into(), false, crate::agent::AgentId::Claude, SessionRole::Conductor,
-        ).unwrap();
+        let c = store
+            .add_session(
+                &p.id,
+                "Conductor".into(),
+                false,
+                crate::agent::AgentId::Claude,
+                SessionRole::Conductor,
+            )
+            .unwrap();
         store.add_session(
-            &p.id, "w1".into(), false, crate::agent::AgentId::Claude, SessionRole::Worker,
+            &p.id,
+            "w1".into(),
+            false,
+            crate::agent::AgentId::Claude,
+            SessionRole::Worker,
         );
-        let snap = store.fleet_snapshot(&c.id).expect("snapshot for conductor id");
+        let snap = store
+            .fleet_snapshot(&c.id)
+            .expect("snapshot for conductor id");
         assert_eq!(snap.project_path, "/repo");
         assert_eq!(snap.sessions.len(), 2, "conductor + 1 worker");
         assert!(store.fleet_snapshot("nope").is_none());
@@ -398,15 +417,27 @@ mod tests {
         let store = Store::for_test(&dir);
         let p = store.add_project("/repo".into());
         let c1 = store.add_session(
-            &p.id, "Conductor".into(), false, crate::agent::AgentId::Claude, SessionRole::Conductor,
+            &p.id,
+            "Conductor".into(),
+            false,
+            crate::agent::AgentId::Claude,
+            SessionRole::Conductor,
         );
         assert!(c1.is_some(), "first conductor should be created");
         let c2 = store.add_session(
-            &p.id, "Conductor2".into(), false, crate::agent::AgentId::Claude, SessionRole::Conductor,
+            &p.id,
+            "Conductor2".into(),
+            false,
+            crate::agent::AgentId::Claude,
+            SessionRole::Conductor,
         );
         assert!(c2.is_none(), "second conductor must be rejected");
         let w = store.add_session(
-            &p.id, "w".into(), false, crate::agent::AgentId::Claude, SessionRole::Worker,
+            &p.id,
+            "w".into(),
+            false,
+            crate::agent::AgentId::Claude,
+            SessionRole::Worker,
         );
         assert!(w.is_some(), "workers are unaffected");
     }
@@ -417,10 +448,19 @@ mod tests {
         let store = Store::for_test(&dir);
         let p = store.add_project("/repo".into());
         // use_worktree=true is ignored for a Conductor.
-        let c = store.add_session(
-            &p.id, "Conductor".into(), true, crate::agent::AgentId::Claude, SessionRole::Conductor,
-        ).unwrap();
-        assert!(c.worktree_path.is_none(), "conductor must run in project root");
+        let c = store
+            .add_session(
+                &p.id,
+                "Conductor".into(),
+                true,
+                crate::agent::AgentId::Claude,
+                SessionRole::Conductor,
+            )
+            .unwrap();
+        assert!(
+            c.worktree_path.is_none(),
+            "conductor must run in project root"
+        );
         assert!(c.branch.is_none());
     }
 

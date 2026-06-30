@@ -161,7 +161,13 @@ fn add_session(
     role: Option<SessionRole>,
     store: State<Arc<Store>>,
 ) -> Option<Session> {
-    store.add_session(&project_id, name, use_worktree, agent, role.unwrap_or_default())
+    store.add_session(
+        &project_id,
+        name,
+        use_worktree,
+        agent,
+        role.unwrap_or_default(),
+    )
 }
 
 #[tauri::command]
