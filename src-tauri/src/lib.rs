@@ -423,10 +423,12 @@ pub fn run() {
         .manage(Arc::new(PtyManager::new()))
         .manage(Arc::new(Store::new()))
         .manage(Arc::new(HookState::default()))
+        .manage(Arc::new(crate::fleet::FleetState::default()))
         .manage(Arc::new(claude_usage::ClaudeAuth::default()))
         .setup(|app| {
+            let fleet = app.state::<Arc<crate::fleet::FleetState>>().inner().clone();
             let hook_state = app.state::<Arc<HookState>>().inner().clone();
-            hooks::start(app.handle().clone(), hook_state);
+            hooks::start(app.handle().clone(), hook_state, fleet.clone());
             let pty = app.state::<Arc<PtyManager>>().inner().clone();
             bridge::start(pty, Arc::new(std::sync::atomic::AtomicU16::new(0)));
             Ok(())
