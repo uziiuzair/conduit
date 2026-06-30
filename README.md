@@ -137,6 +137,20 @@ Tauri v2 (Rust) · React 19 + TypeScript + Vite · `@xterm/xterm` (canvas render
 
 ## Changelog
 
+### 0.4.0 — 2026-06-30
+
+- **Added — mobile companion (read + prompt).** A React Native (Expo) app that shows
+  each agent as a **chat feed** rather than a raw terminal mirror: a live project list
+  with per-session running status, full transcript history with live tailing, hook
+  status surfaced inline, Markdown-formatted messages, and a prompt box to talk to a
+  session from your phone. The desktop stays the source of truth — the phone is a thin
+  live view over a WebSocket bridge.
+- **Added — dev LAN access for the companion.** Set `CONDUIT_BRIDGE_TOKEN` and the
+  bridge binds your LAN (reachable from a phone on the same Wi-Fi) **and** requires a
+  matching token on every connection, so transport and auth flip together — the LAN is
+  never open unauthenticated. Left unset, the bridge stays loopback-only (unchanged). A
+  trusted-network dev shortcut ahead of the full QR/X25519 pairing.
+
 ### 0.3.0 — 2026-06-30
 
 - **Added — the Conductor.** Each project can now have one **Conductor**: a Claude
