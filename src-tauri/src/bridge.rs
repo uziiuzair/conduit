@@ -28,9 +28,18 @@ use crate::store::Store;
 #[serde(tag = "type", rename_all = "lowercase")]
 pub enum ClientMsg {
     List,
-    Attach { session_id: String },
-    Input { session_id: String, data: String },
-    Resize { session_id: String, cols: u16, rows: u16 },
+    Attach {
+        session_id: String,
+    },
+    Input {
+        session_id: String,
+        data: String,
+    },
+    Resize {
+        session_id: String,
+        cols: u16,
+        rows: u16,
+    },
 }
 
 /// Parse one client text frame. None on malformed JSON or an unknown `type`.
@@ -44,7 +53,10 @@ const DRAIN_PER_TICK: usize = 256;
 const READ_POLL: Duration = Duration::from_millis(20);
 
 /// Build the `projects` payload: the persisted tree with a `running` flag per session.
-fn projects_payload(projects: &[serde_json::Value], running: &HashSet<String>) -> serde_json::Value {
+fn projects_payload(
+    projects: &[serde_json::Value],
+    running: &HashSet<String>,
+) -> serde_json::Value {
     let with_flags: Vec<serde_json::Value> = projects
         .iter()
         .map(|p| {
@@ -55,9 +67,16 @@ fn projects_payload(projects: &[serde_json::Value], running: &HashSet<String>) -
                 .unwrap_or_default()
                 .into_iter()
                 .map(|mut s| {
-                    let id = s.get("id").and_then(|i| i.as_str()).unwrap_or("").to_string();
+                    let id = s
+                        .get("id")
+                        .and_then(|i| i.as_str())
+                        .unwrap_or("")
+                        .to_string();
                     if let Some(obj) = s.as_object_mut() {
-                        obj.insert("running".into(), serde_json::Value::Bool(running.contains(&id)));
+                        obj.insert(
+                            "running".into(),
+                            serde_json::Value::Bool(running.contains(&id)),
+                        );
                     }
                     s
                 })
@@ -79,8 +98,10 @@ fn status_payload(event: &str, body: &serde_json::Value) -> serde_json::Value {
 
 /// Build the transcript backfill payload from raw jsonl lines.
 fn history_payload(lines: &[String]) -> serde_json::Value {
-    let items: Vec<serde_json::Value> =
-        lines.iter().flat_map(|l| crate::transcript::parse_line(l)).collect();
+    let items: Vec<serde_json::Value> = lines
+        .iter()
+        .flat_map(|l| crate::transcript::parse_line(l))
+        .collect();
     json!({ "type": "history", "items": items })
 }
 
@@ -147,8 +168,9 @@ fn handle_conn(stream: TcpStream, app: AppHandle) {
                         .ok()
                         .and_then(|v| v.as_array().cloned())
                         .unwrap_or_default();
-                    let _ =
-                        ws.send(Message::Text(projects_payload(&projects, &running).to_string()));
+                    let _ = ws.send(Message::Text(
+                        projects_payload(&projects, &running).to_string(),
+                    ));
                 }
                 Some(ClientMsg::Attach { session_id }) => {
                     if let Some((sub_id, rx)) = pty.subscribe(&session_id) {
@@ -164,8 +186,7 @@ fn handle_conn(stream: TcpStream, app: AppHandle) {
                         if let Some(dir) = crate::pty::claude_projects_dir() {
                             if let Some(path) = crate::pty::transcript_path(&session_id, &dir) {
                                 let lines = read_lines(&path);
-                                let _ =
-                                    ws.send(Message::Text(history_payload(&lines).to_string()));
+                                let _ = ws.send(Message::Text(history_payload(&lines).to_string()));
                                 transcript = Some((path, lines.len()));
                             }
                         }
@@ -179,7 +200,11 @@ fn handle_conn(stream: TcpStream, app: AppHandle) {
                 Some(ClientMsg::Input { session_id, data }) => {
                     let _ = pty.write(&session_id, &data);
                 }
-                Some(ClientMsg::Resize { session_id, cols, rows }) => {
+                Some(ClientMsg::Resize {
+                    session_id,
+                    cols,
+                    rows,
+                }) => {
                     let _ = pty.resize(&session_id, cols, rows);
                 }
                 None => {}
@@ -221,7 +246,9 @@ fn handle_conn(stream: TcpStream, app: AppHandle) {
                 match bus_rx.try_recv() {
                     Ok(ev) if &ev.session == sid => {
                         if ws
-                            .send(Message::Text(status_payload(&ev.event, &ev.body).to_string()))
+                            .send(Message::Text(
+                                status_payload(&ev.event, &ev.body).to_string(),
+                            ))
                             .is_err()
                         {
                             bus.unsubscribe(bus_id);
@@ -306,14 +333,19 @@ mod tests {
 
     #[test]
     fn parses_list() {
-        assert_eq!(parse_client_msg(r#"{"type":"list"}"#), Some(ClientMsg::List));
+        assert_eq!(
+            parse_client_msg(r#"{"type":"list"}"#),
+            Some(ClientMsg::List)
+        );
     }
 
     #[test]
     fn parses_attach() {
         assert_eq!(
             parse_client_msg(r#"{"type":"attach","session_id":"s1"}"#),
-            Some(ClientMsg::Attach { session_id: "s1".into() })
+            Some(ClientMsg::Attach {
+                session_id: "s1".into()
+            })
         );
     }
 
@@ -321,7 +353,10 @@ mod tests {
     fn parses_input_raw_string() {
         assert_eq!(
             parse_client_msg(r#"{"type":"input","session_id":"s1","data":"ls\r"}"#),
-            Some(ClientMsg::Input { session_id: "s1".into(), data: "ls\r".into() })
+            Some(ClientMsg::Input {
+                session_id: "s1".into(),
+                data: "ls\r".into()
+            })
         );
     }
 
@@ -329,7 +364,11 @@ mod tests {
     fn parses_resize() {
         assert_eq!(
             parse_client_msg(r#"{"type":"resize","session_id":"s1","cols":80,"rows":24}"#),
-            Some(ClientMsg::Resize { session_id: "s1".into(), cols: 80, rows: 24 })
+            Some(ClientMsg::Resize {
+                session_id: "s1".into(),
+                cols: 80,
+                rows: 24
+            })
         );
     }
 

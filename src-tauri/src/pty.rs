@@ -330,10 +330,13 @@ pub(crate) fn transcript_exists(session_id: &str, projects_dir: &Path) -> bool {
 /// Path to `<session_id>.jsonl` under whichever project-slug dir holds it. None if absent.
 pub(crate) fn transcript_path(session_id: &str, projects_dir: &Path) -> Option<PathBuf> {
     let file = format!("{session_id}.jsonl");
-    fs::read_dir(projects_dir).ok()?.flatten().find_map(|entry| {
-        let p = entry.path().join(&file);
-        p.exists().then_some(p)
-    })
+    fs::read_dir(projects_dir)
+        .ok()?
+        .flatten()
+        .find_map(|entry| {
+            let p = entry.path().join(&file);
+            p.exists().then_some(p)
+        })
 }
 
 /// Resolve Claude's transcript store: `$CLAUDE_CONFIG_DIR/projects` if set,

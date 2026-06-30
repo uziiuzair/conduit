@@ -8,12 +8,22 @@ use serde_json::{json, Value};
 /// mobile-app/src/logic/status.ts `eventKindFor` / labels).
 fn tool_event(name: &str, input: &Value) -> Value {
     let (kind, label, mono) = match name {
-        "Read" => ("read", "read", input.get("file_path").and_then(|v| v.as_str())),
+        "Read" => (
+            "read",
+            "read",
+            input.get("file_path").and_then(|v| v.as_str()),
+        ),
         "Bash" => ("bash", "ran", input.get("command").and_then(|v| v.as_str())),
-        "Edit" | "MultiEdit" | "Write" | "NotebookEdit" => {
-            ("edit", "edited", input.get("file_path").and_then(|v| v.as_str()))
-        }
-        "Grep" | "Glob" => ("search", "searched", input.get("pattern").and_then(|v| v.as_str())),
+        "Edit" | "MultiEdit" | "Write" | "NotebookEdit" => (
+            "edit",
+            "edited",
+            input.get("file_path").and_then(|v| v.as_str()),
+        ),
+        "Grep" | "Glob" => (
+            "search",
+            "searched",
+            input.get("pattern").and_then(|v| v.as_str()),
+        ),
         "WebFetch" | "WebSearch" => ("web", "browsed", input.get("url").and_then(|v| v.as_str())),
         "Task" => ("subagent", "ran a subagent", None),
         _ => ("generic", "used a tool", None),
@@ -44,7 +54,9 @@ pub fn parse_line(line: &str) -> Vec<Value> {
                         Some("text") => {
                             if let Some(t) = block.get("text").and_then(|t| t.as_str()) {
                                 if !t.trim().is_empty() {
-                                    out.push(json!({ "kind": "bubble", "role": "assistant", "text": t }));
+                                    out.push(
+                                        json!({ "kind": "bubble", "role": "assistant", "text": t }),
+                                    );
                                 }
                             }
                         }
@@ -72,7 +84,8 @@ mod tests {
     #[test]
     fn parses_user_text_bubble() {
         let items = parse_line(
-            &json!({"type":"user","message":{"role":"user","content":"add rate limiting"}}).to_string(),
+            &json!({"type":"user","message":{"role":"user","content":"add rate limiting"}})
+                .to_string(),
         );
         assert_eq!(items.len(), 1);
         assert_eq!(items[0]["kind"], "bubble");
