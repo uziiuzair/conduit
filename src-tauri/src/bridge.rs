@@ -1,6 +1,11 @@
-//! Mobile bridge — a loopback WebSocket server that mirrors a session's PTY to a
-//! remote client and forwards its keystrokes back. M1 binds to 127.0.0.1 only (no
-//! pairing, no tunnel) to de-risk live streaming before any mobile/pairing code.
+//! Mobile bridge — a WebSocket server that mirrors a session's PTY to a remote client
+//! and forwards its keystrokes back. Default: 127.0.0.1 only (no pairing, no tunnel) —
+//! the M1 de-risk. Opt-in dev LAN mode: set `CONDUIT_BRIDGE_TOKEN` and the bridge binds
+//! all interfaces (reachable from a phone on the same Wi-Fi) AND requires `?token=` on
+//! every connection. Transport + auth flip together, so the LAN is never open
+//! unauthenticated. This is a dev shortcut to the full QR/X25519 pairing (see the
+//! 2026-06-25 terminal-mirror spec), not a replacement: the token rides plaintext over
+//! the LAN, fine for a trusted dev network only.
 //!
 //! WebSocket (not tiny_http like hooks.rs) because terminal I/O is bidirectional and
 //! latency-sensitive. Thread-per-connection, matching the hooks server's style.
@@ -15,7 +20,9 @@ use std::time::Duration;
 use serde::Deserialize;
 use serde_json::json;
 use tauri::{AppHandle, Manager};
-use tungstenite::{accept, Message};
+use tungstenite::handshake::server::{ErrorResponse, Request, Response};
+use tungstenite::http::StatusCode;
+use tungstenite::{accept, accept_hdr, Message, WebSocket};
 
 use crate::hookbus::HookBus;
 use crate::pty::PtyManager;
@@ -117,15 +124,85 @@ fn read_lines(path: &Path) -> Vec<String> {
         .unwrap_or_default()
 }
 
-/// Start the loopback bridge on the first free port in 8455..=8475 (distinct from the
-/// hook server's 8423..=8443). Takes the AppHandle so each connection can reach the
+/// The shared dev token gating LAN connections, from `CONDUIT_BRIDGE_TOKEN`. Unset or
+/// empty → None (loopback, no gate — today's behavior). Set → Some(token): bind all
+/// interfaces and require `?token=<token>` on connect.
+fn bridge_token() -> Option<String> {
+    std::env::var("CONDUIT_BRIDGE_TOKEN")
+        .ok()
+        .map(|t| t.trim().to_string())
+        .filter(|t| !t.is_empty())
+}
+
+/// Bind address derived from the token: LAN-reachable only when a token guards it.
+fn bridge_host(token: &Option<String>) -> &'static str {
+    if token.is_some() {
+        "0.0.0.0"
+    } else {
+        "127.0.0.1"
+    }
+}
+
+/// Pull the `token` value out of a URL query string (`a=1&token=xyz&b=2` -> `xyz`).
+fn extract_query_token(query: &str) -> Option<String> {
+    query.split('&').find_map(|pair| {
+        let mut it = pair.splitn(2, '=');
+        match (it.next(), it.next()) {
+            (Some("token"), Some(v)) => Some(v.to_string()),
+            _ => None,
+        }
+    })
+}
+
+/// Does the handshake query carry the expected token? (Dev-grade `==`; the real
+/// pairing milestone replaces this with an X25519-derived credential.)
+fn token_ok(query: Option<&str>, expected: &str) -> bool {
+    query
+        .and_then(extract_query_token)
+        .map(|t| t == expected)
+        .unwrap_or(false)
+}
+
+/// Accept a WebSocket, enforcing the token gate during the handshake when one is set.
+/// A bad/missing token is rejected with 401 before the upgrade completes.
+fn accept_ws(stream: TcpStream, token: &Option<String>) -> Option<WebSocket<TcpStream>> {
+    match token {
+        Some(expected) => {
+            let expected = expected.clone();
+            let check = move |req: &Request, resp: Response| -> Result<Response, ErrorResponse> {
+                if token_ok(req.uri().query(), &expected) {
+                    Ok(resp)
+                } else {
+                    let mut err = ErrorResponse::new(Some("invalid bridge token".to_string()));
+                    *err.status_mut() = StatusCode::UNAUTHORIZED;
+                    Err(err)
+                }
+            };
+            accept_hdr(stream, check).ok()
+        }
+        None => accept(stream).ok(),
+    }
+}
+
+/// Start the bridge on the first free port in 8455..=8475 (distinct from the hook
+/// server's 8423..=8443). Loopback by default; LAN + token gate when
+/// `CONDUIT_BRIDGE_TOKEN` is set. Takes the AppHandle so each connection can reach the
 /// managed PtyManager / Store / HookBus (matching hooks::start's pattern).
 pub fn start(app: AppHandle) {
     thread::spawn(move || {
+        let token = bridge_token();
+        let host = bridge_host(&token);
         let mut listener = None;
         for candidate in 8455u16..=8475 {
-            if let Ok(l) = std::net::TcpListener::bind(("127.0.0.1", candidate)) {
-                eprintln!("conduit: mobile bridge on ws://127.0.0.1:{candidate}");
+            if let Ok(l) = std::net::TcpListener::bind((host, candidate)) {
+                if token.is_some() {
+                    eprintln!(
+                        "conduit: mobile bridge on ws://{host}:{candidate} (LAN; token required). \
+                         Phone URL: ws://<this-mac-LAN-IP>:{candidate}  (find it: ipconfig getifaddr en0)"
+                    );
+                } else {
+                    eprintln!("conduit: mobile bridge on ws://127.0.0.1:{candidate}");
+                }
                 listener = Some(l);
                 break;
             }
@@ -137,14 +214,17 @@ pub fn start(app: AppHandle) {
         for stream in listener.incoming() {
             let Ok(stream) = stream else { continue };
             let app = app.clone();
-            thread::spawn(move || handle_conn(stream, app));
+            let token = token.clone();
+            thread::spawn(move || handle_conn(stream, app, token));
         }
     });
 }
 
-fn handle_conn(stream: TcpStream, app: AppHandle) {
-    // Handshake blocking, THEN switch to a short read timeout for the poll loop.
-    let Ok(mut ws) = accept(stream) else { return };
+fn handle_conn(stream: TcpStream, app: AppHandle, token: Option<String>) {
+    // Handshake blocking (token-gated when set), THEN a short read timeout for the loop.
+    let Some(mut ws) = accept_ws(stream, &token) else {
+        return;
+    };
     if ws.get_ref().set_read_timeout(Some(READ_POLL)).is_err() {
         return;
     }
@@ -376,5 +456,30 @@ mod tests {
     fn rejects_garbage_and_unknown_type() {
         assert!(parse_client_msg("not json").is_none());
         assert!(parse_client_msg(r#"{"type":"explode"}"#).is_none());
+    }
+
+    #[test]
+    fn extracts_token_from_query() {
+        assert_eq!(extract_query_token("token=abc123"), Some("abc123".into()));
+        assert_eq!(
+            extract_query_token("foo=1&token=xyz&bar=2"),
+            Some("xyz".into())
+        );
+        assert_eq!(extract_query_token("foo=1&bar=2"), None);
+        assert_eq!(extract_query_token(""), None);
+    }
+
+    #[test]
+    fn token_ok_requires_exact_match() {
+        assert!(token_ok(Some("token=secret"), "secret"));
+        assert!(!token_ok(Some("token=wrong"), "secret"));
+        assert!(!token_ok(Some("nottoken=secret"), "secret"));
+        assert!(!token_ok(None, "secret"));
+    }
+
+    #[test]
+    fn host_is_lan_only_when_token_set() {
+        assert_eq!(bridge_host(&Some("t".to_string())), "0.0.0.0");
+        assert_eq!(bridge_host(&None), "127.0.0.1");
     }
 }
