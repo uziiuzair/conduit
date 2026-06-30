@@ -6,6 +6,7 @@ import {
   findSession,
   globalSelectedSessionId,
   baseName,
+  type Session,
   type TodoItem,
   type TodoStatus,
 } from "./store";
@@ -105,6 +106,36 @@ export default function App() {
     });
     return () => {
       void unlisten.then((f) => f());
+    };
+  }, []);
+
+  // Conductor fleet events emitted by the in-app MCP server.
+  useEffect(() => {
+    const unSpawn = listen<{ projectId: string; session: Session; task?: string }>(
+      "fleet-spawn",
+      ({ payload }) =>
+        useStore
+          .getState()
+          .mergeSpawnedSession(payload.projectId, payload.session, payload.task),
+    );
+    const unConfirm = listen<{ requestId: string; name: string; branch: string; dirty: boolean }>(
+      "conductor-confirm",
+      ({ payload }) => {
+        // Stop kills the worker's running process; its worktree files stay on disk.
+        const where = payload.branch ? ` (${payload.branch})` : "";
+        const msg = payload.dirty
+          ? `The Conductor wants to stop "${payload.name}"${where}.\n\nIt has uncommitted changes — those stay on disk, but its running process will be terminated. Allow?`
+          : `The Conductor wants to stop "${payload.name}"${where}. Its running process will be terminated. Allow?`;
+        const approved = window.confirm(msg);
+        void invoke("conductor_confirm_response", {
+          requestId: payload.requestId,
+          approved,
+        }).catch(() => {});
+      },
+    );
+    return () => {
+      void unSpawn.then((f) => f());
+      void unConfirm.then((f) => f());
     };
   }, []);
 
