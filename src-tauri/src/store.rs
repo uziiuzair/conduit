@@ -11,6 +11,15 @@ use std::sync::Mutex;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+/// Whether a session is a normal worker or the project's orchestrating Conductor.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum SessionRole {
+    #[default]
+    Worker,
+    Conductor,
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct Session {
@@ -24,6 +33,8 @@ pub struct Session {
     pub branch: Option<String>,
     #[serde(default)]
     pub agent: crate::agent::AgentId,
+    #[serde(default)]
+    pub role: SessionRole,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -172,6 +183,7 @@ impl Store {
             worktree_path,
             branch,
             agent,
+            role: SessionRole::Worker,
         };
         project.sessions.push(session.clone());
         self.save(&projects);
@@ -310,5 +322,28 @@ mod tests {
         let json = r#"{"id":"x","name":"n","useWorktree":false}"#;
         let s: Session = serde_json::from_str(json).unwrap();
         assert_eq!(s.agent, crate::agent::AgentId::Claude);
+    }
+
+    #[test]
+    fn session_role_defaults_to_worker_for_old_state() {
+        // A persisted session from before `role` existed must load as Worker.
+        let json = r#"{"id":"s1","name":"old","useWorktree":false}"#;
+        let s: Session = serde_json::from_str(json).expect("deserialize");
+        assert_eq!(s.role, SessionRole::Worker, "missing role must default to Worker");
+    }
+
+    #[test]
+    fn session_role_serializes_camel_lowercase() {
+        let s = Session {
+            id: "c1".into(),
+            name: "cond".into(),
+            use_worktree: false,
+            worktree_path: None,
+            branch: None,
+            agent: crate::agent::AgentId::Claude,
+            role: SessionRole::Conductor,
+        };
+        let v = serde_json::to_string(&s).unwrap();
+        assert!(v.contains(r#""role":"conductor""#), "got {v}");
     }
 }
