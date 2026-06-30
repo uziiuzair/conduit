@@ -426,10 +426,14 @@ pub fn run() {
         .manage(Arc::new(HookState::default()))
         .manage(Arc::new(claude_usage::ClaudeAuth::default()))
         .manage(Arc::new(hookbus::HookBus::default()))
+        .manage(Arc::new(broker::Broker::default()))
+        .manage(Arc::new(broker::Presence::default()))
         .setup(|app| {
             let hook_state = app.state::<Arc<HookState>>().inner().clone();
             let bus = app.state::<Arc<hookbus::HookBus>>().inner().clone();
-            hooks::start(app.handle().clone(), hook_state, bus);
+            let broker = app.state::<Arc<broker::Broker>>().inner().clone();
+            let presence = app.state::<Arc<broker::Presence>>().inner().clone();
+            hooks::start(app.handle().clone(), hook_state, bus, broker, presence);
             bridge::start(app.handle().clone());
             Ok(())
         })
