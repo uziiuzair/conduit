@@ -10,11 +10,13 @@ import {
   View,
 } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
+import Markdown from "react-native-markdown-display";
 import { useLive } from "../bridge/LiveProvider";
 import { NeedsPill, ThemeButton } from "../components/atoms";
 import type { ApprovalItem, BubbleItem, EventItem, TodosItem } from "../data/types";
 import { groupFeed, type FeedRow } from "../logic/feed";
 import type { ChatProps } from "../navigation";
+import type { Palette } from "../theme/palettes";
 import { useTheme } from "../theme/ThemeContext";
 import { MIN_TOUCH, MONO, TYPE } from "../theme/type";
 
@@ -191,32 +193,83 @@ function FeedRowView({
 
 function Bubble({ item }: { item: BubbleItem }) {
   const { palette: p } = useTheme();
-  const me = item.role === "user";
+  if (item.role === "user") {
+    return (
+      <View
+        style={{
+          maxWidth: "84%",
+          alignSelf: "flex-end",
+          backgroundColor: p.accent,
+          borderRadius: 16,
+          borderBottomRightRadius: 5,
+          paddingHorizontal: 14,
+          paddingVertical: 10,
+        }}
+      >
+        <Text style={{ color: p.meText, fontSize: TYPE.callout, lineHeight: 22, fontWeight: "500" }}>
+          {item.text}
+        </Text>
+      </View>
+    );
+  }
+  // assistant — render Markdown (bold/lists/code/tables); wider for long-form content
   return (
     <View
       style={{
-        maxWidth: "84%",
-        alignSelf: me ? "flex-end" : "flex-start",
-        backgroundColor: me ? p.accent : p.selectionBg,
+        maxWidth: "94%",
+        alignSelf: "flex-start",
+        backgroundColor: p.selectionBg,
         borderRadius: 16,
-        borderBottomRightRadius: me ? 5 : 16,
-        borderBottomLeftRadius: me ? 16 : 5,
+        borderBottomLeftRadius: 5,
         paddingHorizontal: 14,
-        paddingVertical: 10,
+        paddingVertical: 4,
       }}
     >
-      <Text
-        style={{
-          color: me ? p.meText : p.textBright,
-          fontSize: TYPE.callout,
-          lineHeight: 22,
-          fontWeight: me ? "500" : "400",
-        }}
-      >
-        {item.text}
-      </Text>
+      <Markdown style={mdStyles(p)}>{item.text}</Markdown>
     </View>
   );
+}
+
+/** Markdown theme matching the active palette (react-native-markdown-display). */
+function mdStyles(p: Palette) {
+  const codeBox = {
+    backgroundColor: p.panelBg,
+    color: p.textBright,
+    fontFamily: MONO,
+    fontSize: TYPE.footnote,
+    padding: 10,
+    borderRadius: 8,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: p.border,
+  };
+  return {
+    body: { color: p.textBright, fontSize: TYPE.callout, lineHeight: 22 },
+    heading1: { color: p.textBright, fontSize: 22, fontWeight: "700" as const, marginTop: 6, marginBottom: 4 },
+    heading2: { color: p.textBright, fontSize: TYPE.headline, fontWeight: "700" as const, marginTop: 6, marginBottom: 3 },
+    heading3: { color: p.textBright, fontSize: TYPE.callout, fontWeight: "700" as const, marginTop: 4, marginBottom: 2 },
+    strong: { fontWeight: "700" as const, color: p.textBright },
+    em: { fontStyle: "italic" as const },
+    link: { color: p.accent },
+    bullet_list: { marginVertical: 2 },
+    ordered_list: { marginVertical: 2 },
+    list_item: { marginVertical: 1 },
+    code_inline: {
+      backgroundColor: p.panelBg,
+      color: p.accent,
+      fontFamily: MONO,
+      fontSize: TYPE.footnote,
+      borderRadius: 4,
+      paddingHorizontal: 4,
+    },
+    code_block: codeBox,
+    fence: codeBox,
+    blockquote: { backgroundColor: p.panelBg, borderLeftColor: p.accent, borderLeftWidth: 3, paddingHorizontal: 10 },
+    table: { borderColor: p.border, borderWidth: StyleSheet.hairlineWidth, borderRadius: 6, marginVertical: 4 },
+    th: { padding: 6, color: p.textBright, fontWeight: "700" as const },
+    td: { padding: 6, color: p.textBright },
+    tr: { borderColor: p.border, borderBottomWidth: StyleSheet.hairlineWidth },
+    hr: { backgroundColor: p.border, height: StyleSheet.hairlineWidth, marginVertical: 6 },
+  };
 }
 
 function EventRail({ events }: { events: EventItem[] }) {
