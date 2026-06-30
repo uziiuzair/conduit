@@ -128,6 +128,23 @@ Tauri v2 (Rust) · React 19 + TypeScript + Vite · `@xterm/xterm` (canvas render
 `portable-pty` · `tiny_http` (hook listener) · `react-syntax-highlighter` ·
 `tauri-plugin-{dialog,notification,window-state}`.
 
+## Changelog
+
+### 0.2.0 — 2026-06-30
+
+- **Added — collapsible projects.** Click a project header in the sidebar to
+  collapse it (a disclosure chevron shows the state). Collapsed projects still keep
+  active work in view — the selected session and any session that's running, needs
+  you, compacting, or done stays visible; idle sessions fold away. Collapse state
+  persists across launches.
+- **Fixed — tab focus lands on the agent.** Switching between Claude sessions now
+  focuses the agent terminal instead of the side-panel shell, so you no longer start
+  typing in the wrong terminal.
+
+### 0.1.0
+
+- Initial Tauri v2 release (rebuilt from the original native macOS SwiftUI app).
+
 ## Contributing
 
 Issues and PRs welcome — see [CONTRIBUTING.md](./CONTRIBUTING.md).
