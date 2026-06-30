@@ -13,6 +13,7 @@
 //! at the new Channel and nudges the winsize to force a full repaint — so reloading
 //! the window reconnects to the running `claude` instead of orphaning it.
 
+use std::collections::VecDeque;
 use std::fs;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -32,6 +33,84 @@ type Subscribers = Arc<Mutex<Vec<(u64, SyncSender<String>)>>>;
 /// Bounded buffer (frames) per remote subscriber before frames start dropping.
 const SUBSCRIBER_BUFFER: usize = 1024;
 
+/// How many recent output bytes to retain per session for `fleet_peek`.
+const OUTPUT_RING_BYTES: usize = 64 * 1024;
+
+/// A bounded byte ring buffer of recent PTY output, shared with the reader thread.
+/// Backs the Conductor's `fleet_peek` (xterm keeps scrollback in the frontend, so
+/// Rust needs its own small tail buffer).
+pub struct RingBuffer {
+    cap: usize,
+    inner: Mutex<VecDeque<u8>>,
+}
+
+impl RingBuffer {
+    pub fn new(cap: usize) -> Self {
+        RingBuffer {
+            cap,
+            inner: Mutex::new(VecDeque::with_capacity(cap)),
+        }
+    }
+
+    pub fn push(&self, bytes: &[u8]) {
+        let mut q = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        q.extend(bytes.iter().copied());
+        while q.len() > self.cap {
+            q.pop_front();
+        }
+    }
+
+    /// Last `max_bytes` of buffered output, lossy-UTF8 and ANSI-stripped.
+    pub fn tail_string(&self, max_bytes: usize) -> String {
+        let q = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        let start = q.len().saturating_sub(max_bytes);
+        let bytes: Vec<u8> = q.iter().skip(start).copied().collect();
+        strip_ansi(&String::from_utf8_lossy(&bytes))
+    }
+}
+
+/// Remove ANSI CSI/OSC escape sequences so peeked output is human/agent-readable.
+pub fn strip_ansi(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\u{1b}' {
+            match chars.peek() {
+                Some('[') => {
+                    // CSI: ESC [ ... <final byte 0x40-0x7E>
+                    chars.next();
+                    while let Some(&n) = chars.peek() {
+                        chars.next();
+                        if ('\u{40}'..='\u{7e}').contains(&n) {
+                            break;
+                        }
+                    }
+                }
+                Some(']') => {
+                    // OSC: ESC ] ... terminated by BEL or ESC \
+                    chars.next();
+                    while let Some(&n) = chars.peek() {
+                        chars.next();
+                        if n == '\u{07}' {
+                            break;
+                        }
+                        if n == '\u{1b}' {
+                            chars.next();
+                            break;
+                        }
+                    }
+                }
+                _ => {
+                    chars.next();
+                }
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
 struct PtySession {
     writer: Box<dyn Write + Send>,
     master: Box<dyn portable_pty::MasterPty + Send>,
@@ -43,6 +122,8 @@ struct PtySession {
     /// newly-attached remote viewer so it matches the desktop instead of resizing the
     /// shared PTY out from under it.
     size: Arc<(AtomicU16, AtomicU16)>,
+    /// Recent raw output, for the Conductor's `fleet_peek`.
+    output: Arc<RingBuffer>,
 }
 
 #[derive(Default)]
@@ -72,6 +153,9 @@ impl PtyManager {
         shell_only: bool,
         worktree_name: Option<String>,
         settings_path: Option<String>,
+        mcp_config_path: Option<String>,
+        system_prompt: Option<String>,
+        initial_prompt: Option<String>,
         agent: crate::agent::AgentId,
         on_event: Channel<String>,
     ) -> Result<(), String> {
@@ -121,6 +205,9 @@ impl PtyManager {
                 &shell,
                 worktree_name.as_deref(),
                 settings_path.as_deref(),
+                mcp_config_path.as_deref(),
+                system_prompt.as_deref(),
+                initial_prompt.as_deref(),
                 claude_projects_dir().as_deref(),
             )
         };
@@ -163,6 +250,8 @@ impl PtyManager {
         let subscribers: Subscribers = Arc::new(Mutex::new(Vec::new()));
         let subs_for_reader = subscribers.clone();
         let sink: Sink = Arc::new(Mutex::new(on_event));
+        let output = Arc::new(RingBuffer::new(OUTPUT_RING_BYTES));
+        let output_for_reader = output.clone();
 
         self.sessions.insert(
             session_id.clone(),
@@ -174,6 +263,7 @@ impl PtyManager {
                 subscribers: subscribers.clone(),
                 next_sub_id: Arc::new(AtomicU64::new(0)),
                 size: Arc::new((AtomicU16::new(cols), AtomicU16::new(rows))),
+                output,
             }),
         );
 
@@ -191,6 +281,7 @@ impl PtyManager {
                 match reader.read(&mut buf) {
                     Ok(0) => break,
                     Ok(n) => {
+                        output_for_reader.push(&buf[..n]);
                         let encoded = engine.encode(&buf[..n]);
                         if let Ok(mut subs) = subs_for_reader.lock() {
                             broadcast(&mut subs, &encoded);
@@ -236,6 +327,14 @@ impl PtyManager {
             .map_err(|e| format!("write: {e}"))?;
         session.writer.flush().map_err(|e| format!("flush: {e}"))?;
         Ok(())
+    }
+
+    /// Recent (ANSI-stripped) terminal output for a session, for `fleet_peek`.
+    /// None if the session isn't running.
+    pub fn recent_output(&self, session_id: &str, max_bytes: usize) -> Option<String> {
+        let entry = self.sessions.get(session_id)?;
+        let session = entry.lock().ok()?;
+        Some(session.output.tail_string(max_bytes))
     }
 
     pub fn resize(&self, session_id: &str, cols: u16, rows: u16) -> Result<(), String> {
@@ -366,6 +465,9 @@ fn build_script(
     shell: &str,
     worktree: Option<&str>,
     settings: Option<&str>,
+    mcp_config: Option<&str>,
+    system_prompt: Option<&str>,
+    initial_prompt: Option<&str>,
     projects_dir: Option<&Path>,
 ) -> String {
     let mut flags = String::new();
@@ -375,7 +477,13 @@ fn build_script(
     if let Some(path) = settings {
         flags.push_str(&format!(" --settings {}", shell_quote(path)));
     }
-    let invocation = adapter.build_invocation(session_id, projects_dir, &flags);
+    if let Some(cfg) = mcp_config {
+        flags.push_str(&format!(" --mcp-config {}", shell_quote(cfg)));
+    }
+    if let Some(sp) = system_prompt {
+        flags.push_str(&format!(" --append-system-prompt {}", shell_quote(sp)));
+    }
+    let invocation = adapter.build_invocation(session_id, projects_dir, &flags, initial_prompt);
     format!(
         "export CONDUIT_SESSION_ID={sid} CONDUIT_HOOK_PORT={port}; cd {dir} && {invocation}; exec {shell} -i -l",
         sid = shell_quote(session_id),
@@ -394,6 +502,22 @@ mod tests {
     use std::sync::atomic::{AtomicU32, Ordering};
 
     const ID: &str = "11111111-2222-3333-4444-555555555555";
+
+    #[test]
+    fn strip_ansi_removes_csi_and_osc_sequences() {
+        let raw = "\x1b[31mhello\x1b[0m \x1b[2Kworld";
+        assert_eq!(strip_ansi(raw), "hello world");
+        // OSC title set, BEL-terminated, is removed too.
+        assert_eq!(strip_ansi("\x1b]0;title\x07done"), "done");
+    }
+
+    #[test]
+    fn ring_buffer_keeps_only_the_tail() {
+        let buf = RingBuffer::new(8);
+        buf.push(b"abcdef");
+        buf.push(b"ghij"); // total 10 -> keep last 8
+        assert_eq!(buf.tail_string(100), "cdefghij");
+    }
 
     /// A unique, empty `.../projects` dir for one test.
     fn fresh_projects_dir(tag: &str) -> PathBuf {
@@ -453,10 +577,59 @@ mod tests {
             None,
             None,
             None,
+            None,
+            None,
+            None,
         );
         assert!(script.contains("export CONDUIT_SESSION_ID='sid-1' CONDUIT_HOOK_PORT=7777"));
         assert!(script.contains("claude --session-id 'sid-1' || claude"));
         assert!(script.contains("cd '/repo' &&"));
+    }
+
+    #[test]
+    fn build_script_appends_conductor_flags_and_prompt() {
+        let adapter = crate::agent::adapter_for(crate::agent::AgentId::Claude);
+        let script = build_script(
+            &*adapter,
+            "sid-1",
+            8423,
+            "/repo",
+            "/bin/zsh",
+            None,                      // worktree
+            Some("/cfg/hooks.json"),   // settings
+            Some("/cfg/mcp.json"),     // mcp_config
+            Some("Be the conductor."), // system_prompt
+            None,                      // initial_prompt
+            None,                      // projects_dir
+        );
+        assert!(script.contains("--settings '/cfg/hooks.json'"), "{script}");
+        assert!(script.contains("--mcp-config '/cfg/mcp.json'"), "{script}");
+        assert!(
+            script.contains("--append-system-prompt 'Be the conductor.'"),
+            "{script}"
+        );
+    }
+
+    #[test]
+    fn build_script_passes_initial_prompt_positional() {
+        let adapter = crate::agent::adapter_for(crate::agent::AgentId::Claude);
+        let script = build_script(
+            &*adapter,
+            "sid-2",
+            8423,
+            "/repo",
+            "/bin/zsh",
+            None,
+            None,
+            None,
+            None,
+            Some("implement the parser"),
+            None,
+        );
+        assert!(
+            script.contains("'implement the parser'"),
+            "prompt must be a quoted positional: {script}"
+        );
     }
 
     #[test]

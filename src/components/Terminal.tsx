@@ -4,6 +4,7 @@ import { FitAddon } from "@xterm/addon-fit";
 import { CanvasAddon } from "@xterm/addon-canvas";
 import { invoke, Channel } from "@tauri-apps/api/core";
 import { currentTerminalTheme, registerTerminal } from "../themes";
+import { useStore, type SessionRole } from "../store";
 
 function b64ToBytes(b64: string): Uint8Array {
   const bin = atob(b64);
@@ -20,6 +21,8 @@ interface Props {
   worktreeName?: string;
   /** Plain login shell instead of launching `claude` (the bottom-panel terminal). */
   shellOnly?: boolean;
+  /** "conductor" attaches the fleet MCP server + persona at spawn; default "worker". */
+  role?: SessionRole;
   /**
    * Grab keyboard focus when this terminal becomes visible. The center agent terminal
    * wants this so switching Claude tabs lands your cursor in Claude. The secondary
@@ -44,6 +47,7 @@ export function TerminalView({
   visible,
   worktreeName,
   shellOnly = false,
+  role,
   focusOnReveal = true,
   style,
 }: Props) {
@@ -167,6 +171,9 @@ export function TerminalView({
           rows,
           shellOnly,
           worktreeName: worktreeName ?? null,
+          role: role ?? "worker",
+          // A backend-spawned worker carries a first prompt; consumed once here.
+          initialPrompt: useStore.getState().takePendingPrompt(sessionId) ?? null,
           onEvent: channel,
         }).catch((e) => term.write(`\r\n[spawn error: ${e}]\r\n`));
       } else {
