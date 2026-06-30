@@ -20,8 +20,15 @@ export function McpMatrix() {
   const removeMcpServer = useStore((s) => s.removeMcpServer);
   const setMcpEnabled   = useStore((s) => s.setMcpEnabled);
 
-  // Only show columns for agents that are actually installed.
-  const cols: AgentId[] = (agents ?? []).filter((a) => a.found).map((a) => a.id);
+  // Only show columns for agents that are installed AND support MCP management.
+  const cols: AgentId[] = (agents ?? [])
+    .filter((a) => a.found && agentMeta(a.id).supportsMcp)
+    .map((a) => a.id);
+
+  // Installed agents Conduit can't manage MCP for yet (e.g. OpenCode) — surfaced as a note.
+  const mcpUnsupported: string[] = (agents ?? [])
+    .filter((a) => a.found && !agentMeta(a.id).supportsMcp)
+    .map((a) => agentMeta(a.id).label);
 
   // Roving tabindex: [rowIdx (1-based data rows), colIdx (0 = name, 1..n = agents, n+1 = remove)]
   const [focusPos, setFocusPos] = useState<[number, number]>([1, 0]);
@@ -122,6 +129,11 @@ export function McpMatrix() {
       <p className="mcp-scope-note">
         Writing user-scope MCP — the agent may still prompt to approve a server on first use.
       </p>
+      {mcpUnsupported.length > 0 && (
+        <p className="mcp-scope-note">
+          MCP management for {mcpUnsupported.join(", ")} is coming soon.
+        </p>
+      )}
 
       {/* ARIA grid */}
       <div role="grid" aria-label="MCP server enable matrix" className="mcp-grid">

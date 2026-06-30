@@ -1,4 +1,4 @@
-export type AgentId = "claude" | "codex" | "gemini";
+export type AgentId = "claude" | "codex" | "gemini" | "opencode";
 
 export interface AgentMeta {
   id: AgentId;
@@ -9,12 +9,15 @@ export interface AgentMeta {
   tint: string;
   /** Whether Conduit's worktree isolation is offered for this agent (Phase 1: Claude only). */
   supportsWorktree: boolean;
+  /** Whether the MCP matrix can manage servers for this agent (OpenCode: not yet — Tier 3). */
+  supportsMcp: boolean;
 }
 
 export const AGENTS: AgentMeta[] = [
-  { id: "claude", label: "Claude Code", letter: "C", tint: "#ce8a6e", supportsWorktree: true },
-  { id: "codex", label: "Codex CLI", letter: "x", tint: "#9aa6b2", supportsWorktree: false },
-  { id: "gemini", label: "Gemini CLI", letter: "G", tint: "#7e9cff", supportsWorktree: false },
+  { id: "claude",   label: "Claude Code", letter: "C", tint: "#ce8a6e", supportsWorktree: true,  supportsMcp: true  },
+  { id: "codex",    label: "Codex CLI",   letter: "x", tint: "#9aa6b2", supportsWorktree: false, supportsMcp: true  },
+  { id: "gemini",   label: "Gemini CLI",  letter: "G", tint: "#7e9cff", supportsWorktree: false, supportsMcp: true  },
+  { id: "opencode", label: "OpenCode",    letter: "o", tint: "#6cc29a", supportsWorktree: false, supportsMcp: false },
 ];
 
 export const DEFAULT_AGENT: AgentId = "claude";
