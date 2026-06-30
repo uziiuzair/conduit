@@ -175,7 +175,9 @@ fn handle_approve(
             reason: "approval timed out".into(),
         });
     broker.resolve(&id, decision.clone()); // ensure cleared (no-op if already gone)
-    let _ = request.respond(Response::from_string(approve_response(&decision).to_string()));
+    let _ = request.respond(Response::from_string(
+        approve_response(&decision).to_string(),
+    ));
 }
 
 /// The `PreToolUse` hook output Claude reads from the hook's stdout.
@@ -449,9 +451,14 @@ mod tests {
         let allow = approve_response(&Decision::Allow);
         assert_eq!(allow["hookSpecificOutput"]["hookEventName"], "PreToolUse");
         assert_eq!(allow["hookSpecificOutput"]["permissionDecision"], "allow");
-        let deny = approve_response(&Decision::Deny { reason: "nope".into() });
+        let deny = approve_response(&Decision::Deny {
+            reason: "nope".into(),
+        });
         assert_eq!(deny["hookSpecificOutput"]["permissionDecision"], "deny");
-        assert_eq!(deny["hookSpecificOutput"]["permissionDecisionReason"], "nope");
+        assert_eq!(
+            deny["hookSpecificOutput"]["permissionDecisionReason"],
+            "nope"
+        );
     }
 
     /// A unique, empty temp directory for one test. Removed if a stale copy exists.
