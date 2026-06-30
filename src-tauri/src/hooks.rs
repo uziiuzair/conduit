@@ -35,7 +35,7 @@ impl Default for HookState {
 }
 
 /// Boot the listener on the first free port in 8423..=8443 (same range as Swift).
-pub fn start(app: AppHandle, state: Arc<HookState>) {
+pub fn start(app: AppHandle, state: Arc<HookState>, fleet: Arc<crate::fleet::FleetState>) {
     thread::spawn(move || {
         let mut server: Option<Server> = None;
         for candidate in 8423u16..=8443 {
@@ -70,6 +70,9 @@ pub fn start(app: AppHandle, state: Arc<HookState>) {
 
             let Some(session) = session else { continue };
             let parsed: Value = serde_json::from_str(&body).unwrap_or(Value::Null);
+
+            // Mirror status into the fleet map so the Conductor can read it (fleet_list).
+            fleet.record(&session, &event, &parsed);
 
             // Dev-only raw capture so we can inspect undocumented payloads
             // (Task*, SessionStart, Subagent*). Enable with CONDUIT_HOOK_LOG=1.
