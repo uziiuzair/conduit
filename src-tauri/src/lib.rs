@@ -9,6 +9,7 @@ mod bridge;
 mod claude_status;
 mod claude_usage;
 mod fleet;
+mod fleet_mcp;
 mod fsops;
 mod git;
 mod hooks;
@@ -465,7 +466,9 @@ pub fn run() {
             let hook_state = app.state::<Arc<HookState>>().inner().clone();
             hooks::start(app.handle().clone(), hook_state, fleet.clone());
             let pty = app.state::<Arc<PtyManager>>().inner().clone();
-            bridge::start(pty, Arc::new(std::sync::atomic::AtomicU16::new(0)));
+            bridge::start(pty.clone(), Arc::new(std::sync::atomic::AtomicU16::new(0)));
+            let store = app.state::<Arc<Store>>().inner().clone();
+            fleet_mcp::start(app.handle().clone(), store, pty, fleet);
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
