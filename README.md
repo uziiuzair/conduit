@@ -143,12 +143,16 @@ Tauri v2 (Rust) · React 19 + TypeScript + Vite · `@xterm/xterm` (canvas render
   Codex**, **Google Gemini**, and **OpenCode** in their own keep-alive terminals. Pick
   a global default agent and override it per session from the New Session dialog; a
   first-run onboarding wizard and a Settings panel detect which agent binaries are on
-  your `PATH`. Live per-session status (running · tool activity · done) works for each
-  agent through its hooks — and, for OpenCode, a Conduit-installed status plugin.
+  your `PATH`. Live per-session status (running · tool activity · done) lights up for
+  every agent.
+- **Added — OpenCode support.** OpenCode joins as a first-class agent. Because it has
+  no shell-hook config like the others, Conduit installs a small status plugin into the
+  project so its tool activity and idle/done status surface in the sidebar just like
+  Claude, Codex, and Gemini. (Managing OpenCode's MCP servers from the matrix is coming
+  in a later release.)
 - **Added — shared MCP server matrix.** Define an MCP server once and toggle it per
   agent (Claude, Codex, Gemini) from Settings; Conduit registers it through each
-  agent's own `mcp` CLI at user scope. (MCP management for OpenCode is coming in a
-  later release.)
+  agent's own `mcp` CLI at user scope.
 - **Added — collapsible projects.** Click a project header in the sidebar to
   collapse it (a disclosure chevron shows the state). Collapsed projects still keep
   active work in view — the selected session and any session that's running, needs
