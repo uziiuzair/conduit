@@ -1,26 +1,70 @@
-import React from "react";
-import { Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
+import React, { useCallback, useState } from "react";
+import { Alert, Pressable, RefreshControl, ScrollView, StyleSheet, Text, View } from "react-native";
+import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { Avatar, NeedsPill, StatusDot, ThemeButton } from "../components/atoms";
+import { SwipeableRow } from "../components/SwipeableRow";
 import { PROJECTS } from "../data/mock";
 import type { Agent } from "../data/types";
 import { agentBadge, agentSubline, needsCount, statusDot } from "../logic/status";
-import { TOP_INSET } from "../theme/layout";
+import type { ProjectsProps } from "../navigation";
 import { useTheme } from "../theme/ThemeContext";
+import { MIN_TOUCH, MONO, TYPE } from "../theme/type";
 
-interface Props {
-  onOpenAgent: (agent: Agent) => void;
-}
-
-export function ProjectsScreen({ onOpenAgent }: Props) {
+export function ProjectsScreen({ navigation }: ProjectsProps) {
   const { palette: p } = useTheme();
-  const totalNeeds = PROJECTS.reduce((n, proj) => n + needsCount(proj.agents), 0);
+  const insets = useSafeAreaInsets();
+  const [projects, setProjects] = useState(PROJECTS);
+  const totalNeeds = projects.reduce((n, proj) => n + needsCount(proj.agents), 0);
+
+  // pull-to-refresh (simulated in the shell)
+  const [refreshing, setRefreshing] = useState(false);
+  const onRefresh = useCallback(() => {
+    setRefreshing(true);
+    setTimeout(() => setRefreshing(false), 900);
+  }, []);
+
+  const renameAgent = (projId: string, agent: Agent) => {
+    Alert.prompt(
+      "Rename session",
+      undefined,
+      (text) => {
+        const name = text?.trim();
+        if (!name) return;
+        setProjects((ps) =>
+          ps.map((pr) =>
+            pr.id !== projId
+              ? pr
+              : { ...pr, agents: pr.agents.map((a) => (a.id === agent.id ? { ...a, name } : a)) },
+          ),
+        );
+      },
+      "plain-text",
+      agent.name,
+    );
+  };
+
+  const deleteAgent = (projId: string, agent: Agent) => {
+    Alert.alert("Delete session", `Remove “${agent.name}” from the list?`, [
+      { text: "Cancel", style: "cancel" },
+      {
+        text: "Delete",
+        style: "destructive",
+        onPress: () =>
+          setProjects((ps) =>
+            ps.map((pr) =>
+              pr.id !== projId ? pr : { ...pr, agents: pr.agents.filter((a) => a.id !== agent.id) },
+            ),
+          ),
+      },
+    ]);
+  };
 
   return (
     <View style={{ flex: 1, backgroundColor: p.panelBg }}>
       {/* header */}
       <View
         style={{
-          paddingTop: TOP_INSET,
+          paddingTop: insets.top + 8,
           paddingHorizontal: 16,
           paddingBottom: 12,
           backgroundColor: p.sidebarBg,
@@ -31,10 +75,10 @@ export function ProjectsScreen({ onOpenAgent }: Props) {
         }}
       >
         <View style={{ flex: 1 }}>
-          <Text style={{ fontSize: 22, fontWeight: "700", color: p.textBright }}>Projects</Text>
-          <View style={{ flexDirection: "row", alignItems: "center", marginTop: 4, gap: 6 }}>
-            <View style={{ width: 6, height: 6, borderRadius: 3, backgroundColor: p.green }} />
-            <Text style={{ fontSize: 11, color: p.textDim }}>paired · this Mac · 12:04</Text>
+          <Text style={{ fontSize: TYPE.title, fontWeight: "700", color: p.textBright }}>Projects</Text>
+          <View style={{ flexDirection: "row", alignItems: "center", marginTop: 5, gap: 6 }}>
+            <View style={{ width: 7, height: 7, borderRadius: 4, backgroundColor: p.green }} />
+            <Text style={{ fontSize: TYPE.footnote, color: p.textDim }}>paired · this Mac · 12:04</Text>
           </View>
         </View>
         <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
@@ -43,8 +87,13 @@ export function ProjectsScreen({ onOpenAgent }: Props) {
         </View>
       </View>
 
-      <ScrollView contentContainerStyle={{ paddingBottom: 32 }}>
-        {PROJECTS.map((proj) => (
+      <ScrollView
+        contentContainerStyle={{ paddingBottom: insets.bottom + 32 }}
+        refreshControl={
+          <RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor={p.accent} colors={[p.accent]} />
+        }
+      >
+        {projects.map((proj) => (
           <View key={proj.id}>
             {/* project section header */}
             <View
@@ -52,13 +101,13 @@ export function ProjectsScreen({ onOpenAgent }: Props) {
                 flexDirection: "row",
                 alignItems: "baseline",
                 paddingHorizontal: 16,
-                paddingTop: 16,
+                paddingTop: 18,
                 paddingBottom: 6,
               }}
             >
               <Text
                 style={{
-                  fontSize: 11,
+                  fontSize: TYPE.footnote,
                   fontWeight: "700",
                   letterSpacing: 0.5,
                   textTransform: "uppercase",
@@ -68,11 +117,17 @@ export function ProjectsScreen({ onOpenAgent }: Props) {
               >
                 {proj.name}
               </Text>
-              <Text style={{ fontSize: 10, color: p.textDim, fontFamily: mono }}>{proj.path}</Text>
+              <Text style={{ fontSize: TYPE.caption, color: p.textDim, fontFamily: MONO }}>{proj.path}</Text>
             </View>
 
             {proj.agents.map((agent) => (
-              <AgentRow key={agent.id} agent={agent} onPress={() => onOpenAgent(agent)} />
+              <SwipeableRow
+                key={agent.id}
+                onRename={() => renameAgent(proj.id, agent)}
+                onDelete={() => deleteAgent(proj.id, agent)}
+              >
+                <AgentRow agent={agent} onPress={() => navigation.navigate("Chat", { agent })} />
+              </SwipeableRow>
             ))}
           </View>
         ))}
@@ -89,11 +144,13 @@ function AgentRow({ agent, onPress }: { agent: Agent; onPress: () => void }) {
   return (
     <Pressable
       onPress={onPress}
+      android_ripple={{ color: p.selectionBg }}
       style={({ pressed }) => ({
         flexDirection: "row",
         alignItems: "center",
-        gap: 11,
-        paddingVertical: 11,
+        gap: 12,
+        minHeight: MIN_TOUCH + 16,
+        paddingVertical: 12,
         paddingRight: 14,
         paddingLeft: isNeeds ? 13 : 16,
         borderTopWidth: StyleSheet.hairlineWidth,
@@ -106,14 +163,14 @@ function AgentRow({ agent, onPress }: { agent: Agent; onPress: () => void }) {
       <Avatar letter={agentBadge(agent.kind)} />
       <View style={{ flex: 1, minWidth: 0 }}>
         <View style={{ flexDirection: "row", alignItems: "center", gap: 7 }}>
-          <Text style={{ fontSize: 13, fontWeight: "600", color: p.textBright }}>{agent.name}</Text>
-          <Text style={{ fontSize: 10.5, color: p.textMid, fontFamily: mono }}>{agent.branch}</Text>
+          <Text style={{ fontSize: TYPE.headline, fontWeight: "600", color: p.textBright }}>{agent.name}</Text>
+          <Text style={{ fontSize: TYPE.footnote, color: p.textMid, fontFamily: MONO }}>{agent.branch}</Text>
         </View>
         <Text
           numberOfLines={1}
           style={{
-            fontSize: 11,
-            marginTop: 2,
+            fontSize: TYPE.footnote,
+            marginTop: 3,
             color: isNeeds ? p.pillNeedsText : p.textMid,
           }}
         >
@@ -121,13 +178,13 @@ function AgentRow({ agent, onPress }: { agent: Agent; onPress: () => void }) {
         </Text>
       </View>
 
-      <View style={{ alignItems: "flex-end", gap: 3 }}>
+      <View style={{ alignItems: "flex-end", gap: 4 }}>
         {isNeeds ? (
           <NeedsPill />
         ) : (
-          <View style={{ flexDirection: "row", alignItems: "center", gap: 6 }}>
+          <View style={{ flexDirection: "row", alignItems: "center", gap: 7 }}>
             {agent.todos && (
-              <Text style={{ fontSize: 10, color: p.textMid, fontFamily: mono }}>
+              <Text style={{ fontSize: TYPE.caption, color: p.textMid, fontFamily: MONO }}>
                 {agent.todos.done}/{agent.todos.total}
               </Text>
             )}
@@ -138,5 +195,3 @@ function AgentRow({ agent, onPress }: { agent: Agent; onPress: () => void }) {
     </Pressable>
   );
 }
-
-const mono = "Menlo";

@@ -9,15 +9,10 @@ import {
   TextInput,
   View,
 } from "react-native";
+import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { NeedsPill, ThemeButton } from "../components/atoms";
 import { CHATS } from "../data/mock";
-import type {
-  Agent,
-  ApprovalItem,
-  BubbleItem,
-  EventItem,
-  TodosItem,
-} from "../data/types";
+import type { ApprovalItem, BubbleItem, EventItem, TodosItem } from "../data/types";
 import {
   appendAssistantReply,
   appendPrompt,
@@ -26,10 +21,9 @@ import {
   resolveApproval,
   type FeedRow,
 } from "../logic/feed";
-import { BOTTOM_INSET, TOP_INSET } from "../theme/layout";
+import type { ChatProps } from "../navigation";
 import { useTheme } from "../theme/ThemeContext";
-
-const mono = "Menlo";
+import { MIN_TOUCH, MONO, TYPE } from "../theme/type";
 
 const EVENT_GLYPH: Record<EventItem["event"], string> = {
   read: "📄",
@@ -41,13 +35,10 @@ const EVENT_GLYPH: Record<EventItem["event"], string> = {
   generic: "•",
 };
 
-interface Props {
-  agent: Agent;
-  onBack: () => void;
-}
-
-export function ChatScreen({ agent, onBack }: Props) {
+export function ChatScreen({ route, navigation }: ChatProps) {
+  const { agent } = route.params;
   const { palette: p } = useTheme();
+  const insets = useSafeAreaInsets();
   const [feed, setFeed] = useState(() => CHATS[agent.id] ?? []);
   const [draft, setDraft] = useState("");
   const scroller = useRef<ScrollView>(null);
@@ -83,22 +74,26 @@ export function ChatScreen({ agent, onBack }: Props) {
       {/* header */}
       <View
         style={{
-          paddingTop: TOP_INSET,
-          paddingHorizontal: 12,
-          paddingBottom: 11,
+          paddingTop: insets.top + 6,
+          paddingHorizontal: 8,
+          paddingBottom: 10,
           backgroundColor: p.sidebarBg,
           borderBottomWidth: StyleSheet.hairlineWidth,
           borderBottomColor: p.border,
           flexDirection: "row",
           alignItems: "center",
-          gap: 6,
+          gap: 4,
         }}
       >
-        <Pressable onPress={onBack} hitSlop={12} style={{ paddingRight: 2 }}>
-          <Text style={{ color: p.textDim, fontSize: 24, lineHeight: 24 }}>‹</Text>
+        <Pressable
+          onPress={() => navigation.goBack()}
+          hitSlop={8}
+          style={{ width: 40, height: MIN_TOUCH, alignItems: "center", justifyContent: "center" }}
+        >
+          <Text style={{ color: p.accent, fontSize: 30, lineHeight: 30 }}>‹</Text>
         </Pressable>
-        <Text style={{ fontWeight: "600", fontSize: 15, color: p.textBright }}>{agent.name}</Text>
-        <Text style={{ fontSize: 11, color: p.textMid, fontFamily: mono }}>{agent.branch}</Text>
+        <Text style={{ fontWeight: "600", fontSize: TYPE.headline, color: p.textBright }}>{agent.name}</Text>
+        <Text style={{ fontSize: TYPE.footnote, color: p.textMid, fontFamily: MONO }}>{agent.branch}</Text>
         <View style={{ flex: 1 }} />
         {showNeeds && <NeedsPill />}
         <ThemeButton />
@@ -108,7 +103,8 @@ export function ChatScreen({ agent, onBack }: Props) {
       <ScrollView
         ref={scroller}
         style={{ flex: 1 }}
-        contentContainerStyle={{ padding: 12, gap: 8 }}
+        contentContainerStyle={{ padding: 12, gap: 9 }}
+        keyboardShouldPersistTaps="handled"
         onContentSizeChange={scrollToEnd}
       >
         {rows.map((row) => (
@@ -120,11 +116,11 @@ export function ChatScreen({ agent, onBack }: Props) {
       <View
         style={{
           flexDirection: "row",
-          alignItems: "center",
+          alignItems: "flex-end",
           gap: 8,
           paddingHorizontal: 12,
           paddingTop: 9,
-          paddingBottom: BOTTOM_INSET,
+          paddingBottom: insets.bottom + 8,
           borderTopWidth: StyleSheet.hairlineWidth,
           borderTopColor: p.border,
           backgroundColor: p.sidebarBg,
@@ -137,30 +133,33 @@ export function ChatScreen({ agent, onBack }: Props) {
           placeholderTextColor={p.textDim}
           onSubmitEditing={send}
           returnKeyType="send"
+          multiline
           style={{
             flex: 1,
+            minHeight: MIN_TOUCH,
+            maxHeight: 120,
             backgroundColor: p.panelBg,
             borderWidth: StyleSheet.hairlineWidth,
             borderColor: p.border,
-            borderRadius: 18,
-            paddingHorizontal: 13,
-            paddingVertical: 9,
+            borderRadius: 20,
+            paddingHorizontal: 15,
+            paddingVertical: 11,
             color: p.textBright,
-            fontSize: 14,
+            fontSize: TYPE.body,
           }}
         />
         <Pressable
           onPress={send}
           style={{
-            width: 34,
-            height: 34,
-            borderRadius: 17,
+            width: MIN_TOUCH,
+            height: MIN_TOUCH,
+            borderRadius: MIN_TOUCH / 2,
             backgroundColor: p.accent,
             alignItems: "center",
             justifyContent: "center",
           }}
         >
-          <Text style={{ color: p.meText, fontSize: 16, fontWeight: "700" }}>↑</Text>
+          <Text style={{ color: p.meText, fontSize: 20, fontWeight: "700" }}>↑</Text>
         </Pressable>
       </View>
     </KeyboardAvoidingView>
@@ -196,17 +195,24 @@ function Bubble({ item }: { item: BubbleItem }) {
   return (
     <View
       style={{
-        maxWidth: "82%",
+        maxWidth: "84%",
         alignSelf: me ? "flex-end" : "flex-start",
         backgroundColor: me ? p.accent : p.selectionBg,
-        borderRadius: 14,
-        borderBottomRightRadius: me ? 4 : 14,
-        borderBottomLeftRadius: me ? 14 : 4,
-        paddingHorizontal: 12,
-        paddingVertical: 9,
+        borderRadius: 16,
+        borderBottomRightRadius: me ? 5 : 16,
+        borderBottomLeftRadius: me ? 16 : 5,
+        paddingHorizontal: 14,
+        paddingVertical: 10,
       }}
     >
-      <Text style={{ color: me ? p.meText : p.textBright, fontSize: 13.5, lineHeight: 19, fontWeight: me ? "500" : "400" }}>
+      <Text
+        style={{
+          color: me ? p.meText : p.textBright,
+          fontSize: TYPE.callout,
+          lineHeight: 22,
+          fontWeight: me ? "500" : "400",
+        }}
+      >
         {item.text}
       </Text>
     </View>
@@ -216,15 +222,15 @@ function Bubble({ item }: { item: BubbleItem }) {
 function EventRail({ events }: { events: EventItem[] }) {
   const { palette: p } = useTheme();
   return (
-    <View style={{ borderLeftWidth: 2, borderLeftColor: p.border, marginLeft: 6, paddingLeft: 11, gap: 6 }}>
+    <View style={{ borderLeftWidth: 2, borderLeftColor: p.border, marginLeft: 6, paddingLeft: 12, gap: 8 }}>
       {events.map((e) => (
-        <View key={e.id} style={{ flexDirection: "row", alignItems: "center", gap: 7 }}>
-          <Text style={{ fontSize: 12 }}>{EVENT_GLYPH[e.event]}</Text>
-          <Text style={{ fontSize: 11.5, color: p.textMid }}>{e.label}</Text>
-          {e.mono && <Text style={{ fontSize: 11.5, color: p.textBright, fontFamily: mono }}>{e.mono}</Text>}
-          {e.ok && <Text style={{ fontSize: 11.5, color: p.green, fontWeight: "600" }}>{e.ok}</Text>}
+        <View key={e.id} style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
+          <Text style={{ fontSize: 14 }}>{EVENT_GLYPH[e.event]}</Text>
+          <Text style={{ fontSize: TYPE.footnote, color: p.textMid }}>{e.label}</Text>
+          {e.mono && <Text style={{ fontSize: TYPE.footnote, color: p.textBright, fontFamily: MONO }}>{e.mono}</Text>}
+          {e.ok && <Text style={{ fontSize: TYPE.footnote, color: p.green, fontWeight: "600" }}>{e.ok}</Text>}
           <View style={{ flex: 1 }} />
-          <Text style={{ color: p.textDim, fontSize: 13 }}>›</Text>
+          <Text style={{ color: p.textDim, fontSize: 15 }}>›</Text>
         </View>
       ))}
     </View>
@@ -243,20 +249,20 @@ function TodosCard({ item }: { item: TodosItem }) {
         backgroundColor: p.sidebarBg,
         borderWidth: StyleSheet.hairlineWidth,
         borderColor: p.border,
-        borderRadius: 10,
-        padding: 11,
-        gap: 5,
+        borderRadius: 12,
+        padding: 13,
+        gap: 7,
       }}
     >
-      <Text style={{ fontSize: 11.5, fontWeight: "700", color: p.textBright }}>
+      <Text style={{ fontSize: TYPE.subhead, fontWeight: "700", color: p.textBright }}>
         To-dos · {item.done}/{item.total}
       </Text>
       {item.items.map((t, i) => (
-        <View key={i} style={{ flexDirection: "row", alignItems: "center", gap: 7 }}>
-          <Text style={{ color: color(t.status), fontSize: 12, width: 14 }}>{icon(t.status)}</Text>
+        <View key={i} style={{ flexDirection: "row", alignItems: "center", gap: 9 }}>
+          <Text style={{ color: color(t.status), fontSize: 15, width: 16 }}>{icon(t.status)}</Text>
           <Text
             style={{
-              fontSize: 11.5,
+              fontSize: TYPE.subhead,
               color: t.status === "pending" ? p.textMid : p.textBright,
               textDecorationLine: t.status === "completed" ? "line-through" : "none",
             }}
@@ -285,19 +291,21 @@ function ApprovalCard({
         style={{
           borderWidth: StyleSheet.hairlineWidth,
           borderColor: p.border,
-          borderRadius: 8,
-          paddingHorizontal: 11,
-          paddingVertical: 8,
+          borderRadius: 10,
+          paddingHorizontal: 12,
+          paddingVertical: 10,
           flexDirection: "row",
           alignItems: "center",
           gap: 8,
         }}
       >
-        <Text style={{ color: allowed ? p.green : p.red, fontWeight: "700" }}>{allowed ? "✓" : "✕"}</Text>
-        <Text style={{ color: p.textMid, fontSize: 11.5 }}>
+        <Text style={{ color: allowed ? p.green : p.red, fontWeight: "700", fontSize: TYPE.callout }}>
+          {allowed ? "✓" : "✕"}
+        </Text>
+        <Text style={{ color: p.textMid, fontSize: TYPE.footnote }}>
           {allowed ? "Approved" : "Denied"} · {item.tool}
         </Text>
-        <Text style={{ color: p.textDim, fontSize: 11, fontFamily: mono, flexShrink: 1 }} numberOfLines={1}>
+        <Text style={{ color: p.textDim, fontSize: TYPE.footnote, fontFamily: MONO, flexShrink: 1 }} numberOfLines={1}>
           {item.input}
         </Text>
       </View>
@@ -311,12 +319,12 @@ function ApprovalCard({
         borderWidth: 1,
         borderColor: p.amber,
         borderLeftWidth: 3,
-        borderRadius: 9,
-        padding: 11,
-        gap: 9,
+        borderRadius: 11,
+        padding: 13,
+        gap: 11,
       }}
     >
-      <Text style={{ color: p.pillNeedsText, fontWeight: "700", fontSize: 12 }}>
+      <Text style={{ color: p.pillNeedsText, fontWeight: "700", fontSize: TYPE.callout }}>
         ⚠︎ Approval needed · {item.tool}
       </Text>
       <View
@@ -324,33 +332,41 @@ function ApprovalCard({
           backgroundColor: p.panelBg,
           borderWidth: StyleSheet.hairlineWidth,
           borderColor: p.border,
-          borderRadius: 6,
-          paddingHorizontal: 9,
-          paddingVertical: 7,
+          borderRadius: 8,
+          paddingHorizontal: 11,
+          paddingVertical: 9,
         }}
       >
-        <Text style={{ color: p.textBright, fontFamily: mono, fontSize: 12 }}>{item.input}</Text>
+        <Text style={{ color: p.textBright, fontFamily: MONO, fontSize: TYPE.subhead }}>{item.input}</Text>
       </View>
-      <View style={{ flexDirection: "row", gap: 8 }}>
+      <View style={{ flexDirection: "row", gap: 10 }}>
         <Pressable
           onPress={() => onDecide(item.id, "deny")}
           style={{
             flex: 1,
+            minHeight: MIN_TOUCH,
             alignItems: "center",
-            paddingVertical: 9,
-            borderRadius: 8,
+            justifyContent: "center",
+            borderRadius: 10,
             backgroundColor: p.selectionBg,
             borderWidth: StyleSheet.hairlineWidth,
             borderColor: p.border,
           }}
         >
-          <Text style={{ color: p.red, fontWeight: "700", fontSize: 13 }}>Deny</Text>
+          <Text style={{ color: p.red, fontWeight: "700", fontSize: TYPE.callout }}>Deny</Text>
         </Pressable>
         <Pressable
           onPress={() => onDecide(item.id, "allow")}
-          style={{ flex: 1, alignItems: "center", paddingVertical: 9, borderRadius: 8, backgroundColor: p.green }}
+          style={{
+            flex: 1,
+            minHeight: MIN_TOUCH,
+            alignItems: "center",
+            justifyContent: "center",
+            borderRadius: 10,
+            backgroundColor: p.green,
+          }}
         >
-          <Text style={{ color: p.onGreen, fontWeight: "700", fontSize: 13 }}>Approve</Text>
+          <Text style={{ color: p.onGreen, fontWeight: "700", fontSize: TYPE.callout }}>Approve</Text>
         </Pressable>
       </View>
     </View>

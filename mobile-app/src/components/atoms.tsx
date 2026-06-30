@@ -3,6 +3,7 @@ import { Pressable, StyleSheet, Text, View } from "react-native";
 import type { DotKind } from "../logic/status";
 import { PALETTES, THEME_ORDER } from "../theme/palettes";
 import { useTheme } from "../theme/ThemeContext";
+import { TYPE } from "../theme/type";
 
 /** Three-swatch control that cycles the Warm schemes; active one is ringed. */
 export function ThemeButton() {
@@ -40,15 +41,15 @@ export function Avatar({ letter }: { letter: string }) {
   return (
     <View
       style={{
-        width: 30,
-        height: 30,
-        borderRadius: 9,
+        width: 36,
+        height: 36,
+        borderRadius: 10,
         backgroundColor: p.selectionBg,
         alignItems: "center",
         justifyContent: "center",
       }}
     >
-      <Text style={{ color: p.accent, fontWeight: "700", fontSize: 14 }}>{letter}</Text>
+      <Text style={{ color: p.accent, fontWeight: "700", fontSize: TYPE.callout }}>{letter}</Text>
     </View>
   );
 }
@@ -60,12 +61,12 @@ export function NeedsPill({ label = "needs you" }: { label?: string }) {
     <View
       style={{
         backgroundColor: p.pillNeedsBg,
-        paddingHorizontal: 8,
-        paddingVertical: 3,
+        paddingHorizontal: 10,
+        paddingVertical: 4,
         borderRadius: 20,
       }}
     >
-      <Text style={{ color: p.pillNeedsText, fontSize: 10, fontWeight: "700" }}>{label}</Text>
+      <Text style={{ color: p.pillNeedsText, fontSize: TYPE.caption, fontWeight: "700" }}>{label}</Text>
     </View>
   );
 }
