@@ -1,12 +1,13 @@
 # Conduit
 
-**Run multiple _real_ Claude Code terminals across your projects — each a live `claude` session — side by side in one window.**
+**Run multiple _real_ coding-agent terminals across your projects — Claude Code, Codex, Gemini, and OpenCode, each a live CLI session — side by side in one window.**
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](./LICENSE)
 [![Built with Tauri](https://img.shields.io/badge/built%20with-Tauri%20v2-24C8DB.svg)](https://tauri.app)
 
-Not a chat UI. Not a TUI. Conduit embeds the genuine `claude` CLI in a real PTY per
-session, and lets you arrange those sessions (and read-only file views) into
+Not a chat UI. Not a TUI. Conduit embeds genuine agent CLIs — Claude Code, Codex,
+Gemini, and OpenCode — in a real PTY per session, and lets you arrange those sessions
+(and read-only file views) into
 side-by-side editor groups — with a file tree, a branch-lane git graph, and
 per-session to-dos driven by Claude Code hooks.
 
@@ -26,9 +27,13 @@ exactly as they do in a normal terminal.
 
 ## Features
 
+- **Multiple agent CLIs** — run **Claude Code**, **OpenAI Codex**, **Google Gemini**,
+  and **OpenCode** side by side. Pick a global default and override it per session; a
+  first-run wizard and a Settings panel detect which agents are on your `PATH`, and
+  live status (running · tool activity · done) lights up for every agent.
 - **Per-project, multi-group workspace** — open sessions and files as tabs, then
   drag a tab to the side (or use _Open to the Side_) to split the center into
-  resizable groups. Watch **multiple live Claude sessions at once**.
+  resizable groups. Watch **multiple live agent sessions at once**.
 - **Real terminals, kept alive** — each session runs the genuine `claude` CLI in a
   PTY. Switching tabs, splitting groups, or switching projects never restarts it;
   reloading the window re-attaches to the running process.
@@ -55,10 +60,11 @@ pnpm tauri dev
 ```
 
 **Requirements:** [Rust](https://rustup.rs) + [Node](https://nodejs.org) (with
-[pnpm](https://pnpm.io)) + the [`claude`](https://docs.claude.com/en/docs/claude-code)
-CLI on your `PATH`, plus `git` and `curl`. On macOS you'll also need the Xcode
-Command Line Tools. (`claude` is resolved through a login+interactive shell, so
-nvm / Homebrew shims load.)
+[pnpm](https://pnpm.io)) + at least one supported agent CLI on your `PATH` —
+[`claude`](https://docs.claude.com/en/docs/claude-code), `codex`, `gemini`, or
+`opencode` (the onboarding wizard detects which are installed) — plus `git` and
+`curl`. On macOS you'll also need the Xcode Command Line Tools. (Agent binaries are
+resolved through a login+interactive shell, so nvm / Homebrew shims load.)
 
 ## Build a distributable
 
@@ -105,7 +111,8 @@ to attribute them to the app on a signed build, switch the macOS branch of
 | ------------------------------------------------------------- | --------------------------------------------------- |
 | PTY manager — spawn / write / resize / keep-alive / re-attach | `src-tauri/src/pty.rs`                              |
 | Project/session store + per-project layout persistence (JSON) | `src-tauri/src/store.rs`                            |
-| Claude Code hook HTTP listener + installer                    | `src-tauri/src/hooks.rs`                            |
+| Agent provider adapters — per-CLI spawn / detect / hooks / MCP | `src-tauri/src/agent.rs`                           |
+| Hook HTTP listener + per-agent hook/plugin installer          | `src-tauri/src/hooks.rs`                            |
 | Claude **service** status (status.claude.com)                 | `src-tauri/src/claude_status.rs`                   |
 | Claude **usage** — local consumption + plan limits            | `src-tauri/src/claude_usage.rs`                    |
 | Git metadata + branch graph data                              | `src-tauri/src/git.rs`                              |
@@ -132,6 +139,16 @@ Tauri v2 (Rust) · React 19 + TypeScript + Vite · `@xterm/xterm` (canvas render
 
 ### 0.2.0 — 2026-06-30
 
+- **Added — multiple agent CLIs.** Beyond Claude Code, Conduit now runs **OpenAI
+  Codex**, **Google Gemini**, and **OpenCode** in their own keep-alive terminals. Pick
+  a global default agent and override it per session from the New Session dialog; a
+  first-run onboarding wizard and a Settings panel detect which agent binaries are on
+  your `PATH`. Live per-session status (running · tool activity · done) works for each
+  agent through its hooks — and, for OpenCode, a Conduit-installed status plugin.
+- **Added — shared MCP server matrix.** Define an MCP server once and toggle it per
+  agent (Claude, Codex, Gemini) from Settings; Conduit registers it through each
+  agent's own `mcp` CLI at user scope. (MCP management for OpenCode is coming in a
+  later release.)
 - **Added — collapsible projects.** Click a project header in the sidebar to
   collapse it (a disclosure chevron shows the state). Collapsed projects still keep
   active work in view — the selected session and any session that's running, needs
