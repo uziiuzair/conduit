@@ -45,3 +45,4 @@ lerna-debug.log*
 
 # Superpowers visual-brainstorming companion (local mockups)
 .superpowers/
+.claude/
