@@ -91,17 +91,21 @@ pub struct FleetSnapshot {
     pub sessions: Vec<Session>,
 }
 
+/// Conduit's data directory, honoring the CONDUIT_DATA_DIR_NAME override so a
+/// dev/test build can run alongside the installed app. Creates it if missing.
+pub fn data_dir() -> PathBuf {
+    let dir_name =
+        std::env::var("CONDUIT_DATA_DIR_NAME").unwrap_or_else(|_| "ConduitTauri".to_string());
+    let base = dirs::data_dir()
+        .unwrap_or_else(std::env::temp_dir)
+        .join(dir_name);
+    let _ = fs::create_dir_all(&base);
+    base
+}
+
 impl Store {
     pub fn new() -> Self {
-        // Namespace override so a dev/test build can run alongside the installed app
-        // without trampling its state.json (set CONDUIT_DATA_DIR_NAME=ConduitTauri-dev).
-        let dir_name =
-            std::env::var("CONDUIT_DATA_DIR_NAME").unwrap_or_else(|_| "ConduitTauri".to_string());
-        let base = dirs::data_dir()
-            .unwrap_or_else(std::env::temp_dir)
-            .join(dir_name);
-        let _ = fs::create_dir_all(&base);
-        let save_path = base.join("state.json");
+        let save_path = data_dir().join("state.json");
 
         let projects = fs::read(&save_path)
             .ok()
