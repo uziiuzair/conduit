@@ -13,6 +13,8 @@ import {
 import { AGENTS, type AgentId, type AgentInfo, DEFAULT_AGENT, type McpServer } from "./agents";
 
 // ---- Types (mirror the Rust serde structs, rename_all = "camelCase") ----
+export type SessionRole = "worker" | "conductor";
+
 export interface Session {
   id: string;
   name: string;
@@ -20,6 +22,8 @@ export interface Session {
   worktreePath?: string | null;
   branch?: string | null;
   agent: AgentId;
+  /** Optional; absent = "worker". The project's orchestrating Conductor is "conductor". */
+  role?: SessionRole;
 }
 
 export type TabKind = "session" | "file";
@@ -298,7 +302,7 @@ interface AppState {
   setMcpEnabled: (name: string, agent: AgentId, on: boolean) => Promise<void>;
   addProject: (path: string) => Promise<void>;
   removeProject: (id: string) => Promise<void>;
-  addSession: (projectId: string, opts?: { name?: string; useWorktree?: boolean; agent?: AgentId }) => Promise<void>;
+  addSession: (projectId: string, opts?: { name?: string; useWorktree?: boolean; agent?: AgentId; role?: SessionRole }) => Promise<void>;
   renameSession: (projectId: string, sessionId: string, name: string) => Promise<void>;
   removeSession: (projectId: string, sessionId: string) => Promise<void>;
 
@@ -494,7 +498,8 @@ export const useStore = create<AppState>((set, get) => {
       const name = opts?.name?.trim() || `Session ${(project?.sessions.length ?? 0) + 1}`;
       const useWorktree = opts?.useWorktree ?? false;
       const agent = opts?.agent ?? DEFAULT_AGENT;
-      const session = await invoke<Session | null>("add_session", { projectId, name, useWorktree, agent });
+      const role = opts?.role ?? "worker";
+      const session = await invoke<Session | null>("add_session", { projectId, name, useWorktree, agent, role });
       if (!session) return;
       set((s) => ({
         projects: s.projects.map((p) =>
