@@ -9,6 +9,8 @@ mod bridge;
 mod broker;
 mod claude_status;
 mod claude_usage;
+mod fleet;
+mod fleet_mcp;
 mod fsops;
 mod git;
 mod hookbus;
@@ -29,7 +31,7 @@ use tauri::{Manager, State};
 
 use hooks::HookState;
 use pty::PtyManager;
-use store::{Project, ProjectLayout, Session, Store};
+use store::{Project, ProjectLayout, Session, SessionRole, Store};
 
 // ---- Terminal / PTY commands -------------------------------------------------
 
@@ -42,10 +44,13 @@ fn pty_spawn(
     rows: u16,
     shell_only: bool,
     worktree_name: Option<String>,
+    role: Option<String>,
+    initial_prompt: Option<String>,
     on_event: Channel<String>,
     pty: State<Arc<PtyManager>>,
     hook_state: State<Arc<HookState>>,
-    store: State<Store>,
+    fleet: State<Arc<crate::fleet::FleetState>>,
+    store: State<Arc<Store>>,
 ) -> Result<(), String> {
     let port = hook_state.port.load(Ordering::SeqCst);
     let agent = if shell_only {
@@ -54,6 +59,18 @@ fn pty_spawn(
         store.session_agent(&session_id)
     };
     let adapter = crate::agent::adapter_for(agent);
+
+    // A Conductor session gets the fleet MCP server (scoped to it via --mcp-config)
+    // and the orchestration persona; workers get neither.
+    let (mcp_config_path, system_prompt) = if !shell_only && role.as_deref() == Some("conductor") {
+        let mcp_port = fleet.mcp_port.load(Ordering::SeqCst);
+        (
+            crate::fleet::write_mcp_config(mcp_port, &session_id),
+            Some(crate::fleet::CONDUCTOR_PERSONA.to_string()),
+        )
+    } else {
+        (None, None)
+    };
 
     let (cwd, worktree_arg, settings_path) = if shell_only {
         (working_directory.clone(), None, None)
@@ -66,9 +83,14 @@ fn pty_spawn(
             worktree::spawn_target(&working_directory, slug, &wt_path, exists);
         (cwd, worktree_arg, settings)
     } else {
-        // Normal session: install this agent's hook profile (if it has one).
+        // Normal session: install this agent's status integration. Hook-based agents
+        // (Claude/Codex/Gemini) write a settings/hooks file; OpenCode installs a JS
+        // status plugin instead. An agent has one or the other, never both.
         if let Some(profile) = adapter.hooks_profile() {
             hooks::install_profile(&working_directory, port, &profile);
+        }
+        if let Some(plugin) = adapter.plugin_profile() {
+            hooks::install_plugin(&working_directory, port, &plugin);
         }
         (working_directory.clone(), None, None)
     };
@@ -82,6 +104,9 @@ fn pty_spawn(
         shell_only,
         worktree_arg,
         settings_path,
+        mcp_config_path,
+        system_prompt,
+        initial_prompt,
         agent,
         on_event,
     )
@@ -115,17 +140,17 @@ fn pty_is_running(session_id: String, pty: State<Arc<PtyManager>>) -> bool {
 // ---- Project / session store commands ---------------------------------------
 
 #[tauri::command]
-fn load_projects(store: State<Store>) -> Vec<Project> {
+fn load_projects(store: State<Arc<Store>>) -> Vec<Project> {
     store.list()
 }
 
 #[tauri::command]
-fn add_project(path: String, store: State<Store>) -> Project {
+fn add_project(path: String, store: State<Arc<Store>>) -> Project {
     store.add_project(path)
 }
 
 #[tauri::command]
-fn remove_project(id: String, store: State<Store>, pty: State<Arc<PtyManager>>) {
+fn remove_project(id: String, store: State<Arc<Store>>, pty: State<Arc<PtyManager>>) {
     if let Some(p) = store.list().into_iter().find(|p| p.id == id) {
         for s in p.sessions {
             pty.kill(&s.id);
@@ -141,18 +166,42 @@ fn add_session(
     name: String,
     use_worktree: bool,
     agent: crate::agent::AgentId,
-    store: State<Store>,
+    role: Option<SessionRole>,
+    store: State<Arc<Store>>,
 ) -> Option<Session> {
-    store.add_session(&project_id, name, use_worktree, agent)
+    store.add_session(
+        &project_id,
+        name,
+        use_worktree,
+        agent,
+        role.unwrap_or_default(),
+    )
 }
 
 #[tauri::command]
-fn rename_session(project_id: String, session_id: String, name: String, store: State<Store>) {
+fn rename_session(project_id: String, session_id: String, name: String, store: State<Arc<Store>>) {
     store.rename_session(&project_id, &session_id, name);
 }
 
+/// The frontend's reply to a Conductor `fleet_stop` confirmation prompt.
 #[tauri::command]
-fn set_project_layout(project_id: String, layout: ProjectLayout, store: State<Store>) {
+fn conductor_confirm_response(
+    request_id: String,
+    approved: bool,
+    fleet: State<Arc<crate::fleet::FleetState>>,
+) {
+    if let Some(tx) = fleet
+        .pending_confirms
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .remove(&request_id)
+    {
+        let _ = tx.send(approved);
+    }
+}
+
+#[tauri::command]
+fn set_project_layout(project_id: String, layout: ProjectLayout, store: State<Arc<Store>>) {
     store.set_layout(&project_id, layout);
 }
 
@@ -160,7 +209,7 @@ fn set_project_layout(project_id: String, layout: ProjectLayout, store: State<St
 fn remove_session(
     project_id: String,
     session_id: String,
-    store: State<Store>,
+    store: State<Arc<Store>>,
     pty: State<Arc<PtyManager>>,
 ) {
     pty.kill(&session_id);
@@ -422,19 +471,24 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_notification::init())
         .manage(Arc::new(PtyManager::new()))
-        .manage(Store::new())
+        .manage(Arc::new(Store::new()))
         .manage(Arc::new(HookState::default()))
+        .manage(Arc::new(crate::fleet::FleetState::default()))
         .manage(Arc::new(claude_usage::ClaudeAuth::default()))
         .manage(Arc::new(hookbus::HookBus::default()))
         .manage(Arc::new(broker::Broker::default()))
         .manage(Arc::new(broker::Presence::default()))
         .setup(|app| {
+            let fleet = app.state::<Arc<crate::fleet::FleetState>>().inner().clone();
             let hook_state = app.state::<Arc<HookState>>().inner().clone();
             let bus = app.state::<Arc<hookbus::HookBus>>().inner().clone();
             let broker = app.state::<Arc<broker::Broker>>().inner().clone();
             let presence = app.state::<Arc<broker::Presence>>().inner().clone();
-            hooks::start(app.handle().clone(), hook_state, bus, broker, presence);
+            hooks::start(app.handle().clone(), hook_state, bus, broker, presence, fleet.clone());
             bridge::start(app.handle().clone());
+            let pty = app.state::<Arc<PtyManager>>().inner().clone();
+            let store = app.state::<Arc<Store>>().inner().clone();
+            fleet_mcp::start(app.handle().clone(), store, pty, fleet);
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -449,6 +503,7 @@ pub fn run() {
             add_session,
             detect_agents,
             rename_session,
+            conductor_confirm_response,
             set_project_layout,
             remove_session,
             suggest_session_name,

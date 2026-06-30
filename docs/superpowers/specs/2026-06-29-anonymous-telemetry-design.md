@@ -138,16 +138,27 @@ from `std::env::consts::OS`.
 hardware/MAC/email/hostname.
 
 **The ONLY fields that ever leave the device:**
-`event name` (`session_start` | `user_engagement`), `session_id`,
+`event name` (`app_open` | `app_heartbeat`), `session_id`,
 `engagement_time_msec`, `app_version`, `os`.
 
 **NEVER sent:** filesystem paths, project/session/branch names, prompts,
-transcript content, username, hostname, machine identifiers. (We do not send IP;
-GA observes it at the socket, uses it for coarse geo, and GA4 does not store it.)
+transcript content, username, hostname, machine identifiers. We don't send IP;
+GA sees it at the socket and discards it (GA4 never stores IP).
 
 The payload is a **typed struct**, so adding any field is a deliberate code edit
 — and a unit test asserts the serialized body contains none of a
 forbidden-substring set.
+
+## Known limitation: no geolocation (accepted)
+
+GA4 **only auto-populates geo (city/country/region) from `gtag.js`, GTM, or the
+Firebase SDK** — the **Measurement Protocol does not**, even though the request
+IP is geo-locatable. There is no native MP workaround (verified against current
+GA4 docs/community). **Decision: accept no geo.** We keep DAU/MAU, Sessions,
+new-vs-returning, Realtime, `app_version`, and `os`; location is simply absent.
+Revisiting would mean either sending a coarse `country` custom param (extra field
++ third-party IP lookup) or switching to `gtag.js` (CSP/remote-script/cookie
+trade-offs we rejected) — neither pursued.
 
 ## Gating / suppression (Rust = authoritative no-op)
 

@@ -11,6 +11,15 @@ use std::sync::Mutex;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+/// Whether a session is a normal worker or the project's orchestrating Conductor.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum SessionRole {
+    #[default]
+    Worker,
+    Conductor,
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct Session {
@@ -24,6 +33,8 @@ pub struct Session {
     pub branch: Option<String>,
     #[serde(default)]
     pub agent: crate::agent::AgentId,
+    #[serde(default)]
+    pub role: SessionRole,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -72,17 +83,29 @@ pub struct Store {
     save_path: PathBuf,
 }
 
+/// A read-only view of the project that owns a given Conductor, plus its sessions.
+/// Used by the fleet MCP server to answer `fleet_list` / scope `fleet_spawn`.
+pub struct FleetSnapshot {
+    pub project_id: String,
+    pub project_path: String,
+    pub sessions: Vec<Session>,
+}
+
+/// Conduit's data directory, honoring the CONDUIT_DATA_DIR_NAME override so a
+/// dev/test build can run alongside the installed app. Creates it if missing.
+pub fn data_dir() -> PathBuf {
+    let dir_name =
+        std::env::var("CONDUIT_DATA_DIR_NAME").unwrap_or_else(|_| "ConduitTauri".to_string());
+    let base = dirs::data_dir()
+        .unwrap_or_else(std::env::temp_dir)
+        .join(dir_name);
+    let _ = fs::create_dir_all(&base);
+    base
+}
+
 impl Store {
     pub fn new() -> Self {
-        // Namespace override so a dev/test build can run alongside the installed app
-        // without trampling its state.json (set CONDUIT_DATA_DIR_NAME=ConduitTauri-dev).
-        let dir_name =
-            std::env::var("CONDUIT_DATA_DIR_NAME").unwrap_or_else(|_| "ConduitTauri".to_string());
-        let base = dirs::data_dir()
-            .unwrap_or_else(std::env::temp_dir)
-            .join(dir_name);
-        let _ = fs::create_dir_all(&base);
-        let save_path = base.join("state.json");
+        let save_path = data_dir().join("state.json");
 
         let projects = fs::read(&save_path)
             .ok()
@@ -152,11 +175,23 @@ impl Store {
         name: String,
         use_worktree: bool,
         agent: crate::agent::AgentId,
+        role: SessionRole,
     ) -> Option<Session> {
         let mut projects = self.projects.lock().unwrap_or_else(|e| e.into_inner());
         let project = projects.iter_mut().find(|p| p.id == project_id)?;
+        // At most one Conductor per project.
+        if role == SessionRole::Conductor
+            && project
+                .sessions
+                .iter()
+                .any(|s| s.role == SessionRole::Conductor)
+        {
+            return None;
+        }
         let id = Uuid::new_v4().to_string();
-        let (worktree_path, branch) = if use_worktree {
+        // The Conductor runs in the project root (it orchestrates, it doesn't edit code),
+        // so it never gets a worktree even if `use_worktree` is passed.
+        let (worktree_path, branch) = if use_worktree && role != SessionRole::Conductor {
             let slug = crate::worktree::slug(&name, &id);
             (
                 Some(crate::worktree::worktree_path(&project.path, &slug)),
@@ -172,6 +207,7 @@ impl Store {
             worktree_path,
             branch,
             agent,
+            role,
         };
         project.sessions.push(session.clone());
         self.save(&projects);
@@ -215,6 +251,19 @@ impl Store {
         }
         self.save(&projects);
     }
+
+    /// Resolve the project that owns `conductor_id` and return its sessions.
+    pub fn fleet_snapshot(&self, conductor_id: &str) -> Option<FleetSnapshot> {
+        let projects = self.projects.lock().unwrap_or_else(|e| e.into_inner());
+        let project = projects
+            .iter()
+            .find(|p| p.sessions.iter().any(|s| s.id == conductor_id))?;
+        Some(FleetSnapshot {
+            project_id: project.id.clone(),
+            project_path: project.path.clone(),
+            sessions: project.sessions.clone(),
+        })
+    }
 }
 
 #[cfg(test)]
@@ -248,6 +297,7 @@ mod tests {
                 "Session 1".into(),
                 false,
                 crate::agent::AgentId::Claude,
+                SessionRole::Worker,
             )
             .unwrap();
         assert!(!s.use_worktree);
@@ -266,6 +316,7 @@ mod tests {
                 "My Feature".into(),
                 true,
                 crate::agent::AgentId::Claude,
+                SessionRole::Worker,
             )
             .unwrap();
         assert!(s.use_worktree);
@@ -280,7 +331,13 @@ mod tests {
         let store = Store::for_test(&dir);
         let p = store.add_project("/repo".into());
         let s = store
-            .add_session(&p.id, "S".into(), false, crate::agent::AgentId::Codex)
+            .add_session(
+                &p.id,
+                "S".into(),
+                false,
+                crate::agent::AgentId::Codex,
+                SessionRole::Worker,
+            )
             .unwrap();
         assert_eq!(store.session_agent(&s.id), crate::agent::AgentId::Codex);
         assert_eq!(
@@ -300,6 +357,7 @@ mod tests {
                 "Session 1".into(),
                 false,
                 crate::agent::AgentId::Claude,
+                SessionRole::Worker,
             )
             .unwrap();
         assert_eq!(s.agent, crate::agent::AgentId::Claude);
@@ -310,5 +368,114 @@ mod tests {
         let json = r#"{"id":"x","name":"n","useWorktree":false}"#;
         let s: Session = serde_json::from_str(json).unwrap();
         assert_eq!(s.agent, crate::agent::AgentId::Claude);
+    }
+
+    #[test]
+    fn session_role_defaults_to_worker_for_old_state() {
+        // A persisted session from before `role` existed must load as Worker.
+        let json = r#"{"id":"s1","name":"old","useWorktree":false}"#;
+        let s: Session = serde_json::from_str(json).expect("deserialize");
+        assert_eq!(
+            s.role,
+            SessionRole::Worker,
+            "missing role must default to Worker"
+        );
+    }
+
+    #[test]
+    fn fleet_snapshot_returns_project_and_sessions() {
+        let dir = temp_dir("fleet_snap");
+        let store = Store::for_test(&dir);
+        let p = store.add_project("/repo".into());
+        let c = store
+            .add_session(
+                &p.id,
+                "Conductor".into(),
+                false,
+                crate::agent::AgentId::Claude,
+                SessionRole::Conductor,
+            )
+            .unwrap();
+        store.add_session(
+            &p.id,
+            "w1".into(),
+            false,
+            crate::agent::AgentId::Claude,
+            SessionRole::Worker,
+        );
+        let snap = store
+            .fleet_snapshot(&c.id)
+            .expect("snapshot for conductor id");
+        assert_eq!(snap.project_path, "/repo");
+        assert_eq!(snap.sessions.len(), 2, "conductor + 1 worker");
+        assert!(store.fleet_snapshot("nope").is_none());
+    }
+
+    #[test]
+    fn add_session_rejects_second_conductor() {
+        let dir = temp_dir("conductor_unique");
+        let store = Store::for_test(&dir);
+        let p = store.add_project("/repo".into());
+        let c1 = store.add_session(
+            &p.id,
+            "Conductor".into(),
+            false,
+            crate::agent::AgentId::Claude,
+            SessionRole::Conductor,
+        );
+        assert!(c1.is_some(), "first conductor should be created");
+        let c2 = store.add_session(
+            &p.id,
+            "Conductor2".into(),
+            false,
+            crate::agent::AgentId::Claude,
+            SessionRole::Conductor,
+        );
+        assert!(c2.is_none(), "second conductor must be rejected");
+        let w = store.add_session(
+            &p.id,
+            "w".into(),
+            false,
+            crate::agent::AgentId::Claude,
+            SessionRole::Worker,
+        );
+        assert!(w.is_some(), "workers are unaffected");
+    }
+
+    #[test]
+    fn conductor_never_gets_a_worktree() {
+        let dir = temp_dir("conductor_no_wt");
+        let store = Store::for_test(&dir);
+        let p = store.add_project("/repo".into());
+        // use_worktree=true is ignored for a Conductor.
+        let c = store
+            .add_session(
+                &p.id,
+                "Conductor".into(),
+                true,
+                crate::agent::AgentId::Claude,
+                SessionRole::Conductor,
+            )
+            .unwrap();
+        assert!(
+            c.worktree_path.is_none(),
+            "conductor must run in project root"
+        );
+        assert!(c.branch.is_none());
+    }
+
+    #[test]
+    fn session_role_serializes_camel_lowercase() {
+        let s = Session {
+            id: "c1".into(),
+            name: "cond".into(),
+            use_worktree: false,
+            worktree_path: None,
+            branch: None,
+            agent: crate::agent::AgentId::Claude,
+            role: SessionRole::Conductor,
+        };
+        let v = serde_json::to_string(&s).unwrap();
+        assert!(v.contains(r#""role":"conductor""#), "got {v}");
     }
 }

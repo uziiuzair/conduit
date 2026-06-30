@@ -13,6 +13,8 @@ import {
 import { AGENTS, type AgentId, type AgentInfo, DEFAULT_AGENT, type McpServer } from "./agents";
 
 // ---- Types (mirror the Rust serde structs, rename_all = "camelCase") ----
+export type SessionRole = "worker" | "conductor";
+
 export interface Session {
   id: string;
   name: string;
@@ -20,6 +22,8 @@ export interface Session {
   worktreePath?: string | null;
   branch?: string | null;
   agent: AgentId;
+  /** Optional; absent = "worker". The project's orchestrating Conductor is "conductor". */
+  role?: SessionRole;
 }
 
 export type TabKind = "session" | "file";
@@ -298,9 +302,16 @@ interface AppState {
   setMcpEnabled: (name: string, agent: AgentId, on: boolean) => Promise<void>;
   addProject: (path: string) => Promise<void>;
   removeProject: (id: string) => Promise<void>;
-  addSession: (projectId: string, opts?: { name?: string; useWorktree?: boolean; agent?: AgentId }) => Promise<void>;
+  addSession: (projectId: string, opts?: { name?: string; useWorktree?: boolean; agent?: AgentId; role?: SessionRole }) => Promise<void>;
   renameSession: (projectId: string, sessionId: string, name: string) => Promise<void>;
   removeSession: (projectId: string, sessionId: string) => Promise<void>;
+
+  /** A session created by the backend (Conductor fleet_spawn): merge it in + open it. */
+  mergeSpawnedSession: (projectId: string, session: Session, task?: string) => void;
+  /** Pending first prompts for backend-spawned sessions, keyed by session id. */
+  pendingPrompts: Record<string, string>;
+  /** Read + clear a session's pending first prompt (consumed once, at PTY spawn). */
+  takePendingPrompt: (sessionId: string) => string | undefined;
 
   selectProject: (projectId: string) => void;
   selectSession: (projectId: string, sessionId: string) => void;
@@ -368,6 +379,7 @@ export const useStore = create<AppState>((set, get) => {
     selectedProjectId: null,
     layouts: {},
     live: {},
+    pendingPrompts: {},
     claudeStatus: null,
     claudeUsage: null,
     planConnected: readPlanConnected(),
@@ -494,7 +506,8 @@ export const useStore = create<AppState>((set, get) => {
       const name = opts?.name?.trim() || `Session ${(project?.sessions.length ?? 0) + 1}`;
       const useWorktree = opts?.useWorktree ?? false;
       const agent = opts?.agent ?? DEFAULT_AGENT;
-      const session = await invoke<Session | null>("add_session", { projectId, name, useWorktree, agent });
+      const role = opts?.role ?? "worker";
+      const session = await invoke<Session | null>("add_session", { projectId, name, useWorktree, agent, role });
       if (!session) return;
       set((s) => ({
         projects: s.projects.map((p) =>
@@ -503,6 +516,32 @@ export const useStore = create<AppState>((set, get) => {
         selectedProjectId: projectId,
       }));
       applyLayout(projectId, (l) => rOpenTab(l, { kind: "session", ref: session.id }));
+    },
+
+    mergeSpawnedSession: (projectId, session, task) => {
+      set((s) => ({
+        projects: s.projects.map((p) =>
+          p.id === projectId && !p.sessions.some((x) => x.id === session.id)
+            ? { ...p, sessions: [...p.sessions, session] }
+            : p,
+        ),
+        pendingPrompts: task
+          ? { ...s.pendingPrompts, [session.id]: task }
+          : s.pendingPrompts,
+      }));
+      applyLayout(projectId, (l) => rOpenTab(l, { kind: "session", ref: session.id }));
+    },
+
+    takePendingPrompt: (sessionId) => {
+      const v = get().pendingPrompts[sessionId];
+      if (v !== undefined) {
+        set((s) => {
+          const m = { ...s.pendingPrompts };
+          delete m[sessionId];
+          return { pendingPrompts: m };
+        });
+      }
+      return v;
     },
 
     renameSession: async (projectId, sessionId, name) => {
