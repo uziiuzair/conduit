@@ -123,8 +123,10 @@ pub fn parse_summary(body: &str) -> ClaudeStatus {
 }
 
 fn curl(url: &str) -> Option<String> {
+    use crate::NoWindow;
     let out = Command::new("curl")
         .args(["-s", "--max-time", "8", url])
+        .no_window()
         .output()
         .ok()?;
     if !out.status.success() {

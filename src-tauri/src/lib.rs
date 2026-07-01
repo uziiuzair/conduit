@@ -33,6 +33,25 @@ use hooks::HookState;
 use pty::PtyManager;
 use store::{Project, ProjectLayout, Session, SessionRole, Store};
 
+/// Suppress the console window Windows flashes when a GUI app spawns a console child
+/// (`where`, `curl`, `git`, `cmd`, ...). Applies CREATE_NO_WINDOW on Windows; a no-op
+/// everywhere else. Not needed for PTY sessions — portable-pty's ConPTY is already
+/// headless. Apply to every `std::process::Command` before `output()`/`status()`/`spawn()`.
+pub(crate) trait NoWindow {
+    fn no_window(&mut self) -> &mut Self;
+}
+
+impl NoWindow for std::process::Command {
+    fn no_window(&mut self) -> &mut Self {
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            self.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+        }
+        self
+    }
+}
+
 // ---- Terminal / PTY commands -------------------------------------------------
 
 #[tauri::command]
@@ -59,6 +78,18 @@ fn pty_spawn(
         store.session_agent(&session_id)
     };
     let adapter = crate::agent::adapter_for(agent);
+
+    // Account selection (Feature 1 interim; Feature 2 replaces this with the persisted
+    // accounts registry resolved via `store.session_account_config_dir`). Point Claude at a
+    // specific config/credentials dir without disturbing the user's default `claude`: set
+    // CONDUIT_CLAUDE_CONFIG_DIR to a `.claude` dir. Never applied to a plain shell companion.
+    let account_config_dir = if shell_only {
+        None
+    } else {
+        std::env::var("CONDUIT_CLAUDE_CONFIG_DIR")
+            .ok()
+            .filter(|s| !s.is_empty())
+    };
 
     // A Conductor session gets the fleet MCP server (scoped to it via --mcp-config)
     // and the orchestration persona; workers get neither.
@@ -107,6 +138,7 @@ fn pty_spawn(
         mcp_config_path,
         system_prompt,
         initial_prompt,
+        account_config_dir,
         agent,
         on_event,
     )
@@ -273,17 +305,38 @@ fn claude_title(prompt: &str) -> Option<String> {
     // the bare Finder/Dock PATH (/usr/bin:/bin:/usr/sbin:/sbin), which doesn't include
     // where `claude` actually lives (~/.nvm, ~/.local, Homebrew, …), so the titler
     // silently fails and every session falls back to the first-words heuristic.
-    let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
-    let mut child = Command::new(&shell)
-        .args(["-i", "-l", "-c", "claude -p --model haiku"])
-        // See pty.rs: strip the package-manager-injected `npm_config_prefix` so nvm
-        // initializes and `claude` is on PATH even when Conduit was launched via pnpm.
+    // Windows runs the titler through cmd.exe (resolves the `claude.cmd` shim via PATHEXT);
+    // other platforms use an interactive login shell so a GUI-launched app inherits the
+    // user's real PATH (nvm/Homebrew). Same reasoning as pty.rs.
+    #[cfg(windows)]
+    let mut builder = {
+        let shell = std::env::var("ComSpec").unwrap_or_else(|_| "cmd.exe".to_string());
+        let mut c = Command::new(shell);
+        c.args(["/C", "claude -p --model haiku"]);
+        c
+    };
+    #[cfg(not(windows))]
+    let mut builder = {
+        let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
+        let mut c = Command::new(shell);
+        c.args(["-i", "-l", "-c", "claude -p --model haiku"]);
+        c
+    };
+    // See pty.rs: strip the package-manager-injected `npm_config_prefix` so nvm
+    // initializes and `claude` is on PATH even when Conduit was launched via pnpm.
+    builder
         .env_remove("npm_config_prefix")
+        .no_window()
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .ok()?;
+        .stderr(Stdio::null());
+    // Title against the same account the sessions use (Feature 1 interim env selector).
+    if let Ok(dir) = std::env::var("CONDUIT_CLAUDE_CONFIG_DIR") {
+        if !dir.is_empty() {
+            builder.env("CLAUDE_CONFIG_DIR", dir);
+        }
+    }
+    let mut child = builder.spawn().ok()?;
 
     if let Some(mut stdin) = child.stdin.take() {
         let _ = stdin.write_all(instruction.as_bytes());
@@ -411,12 +464,28 @@ fn mcp_apply(
             server.transport
         )
     })?;
-    let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
-    let out = std::process::Command::new(&shell)
-        .args(["-i", "-l", "-c", &cmd])
-        .env_remove("npm_config_prefix")
-        .output()
-        .map_err(|e| format!("spawn {}: {e}", adapter.binary()))?;
+    // Windows resolves the agent's `.cmd` shim through cmd.exe; other platforms go through
+    // an interactive login shell for PATH parity with detect_agents / the PTY spawner.
+    #[cfg(windows)]
+    let out = {
+        let shell = std::env::var("ComSpec").unwrap_or_else(|_| "cmd.exe".to_string());
+        std::process::Command::new(shell)
+            .args(["/C", &cmd])
+            .env_remove("npm_config_prefix")
+            .no_window()
+            .output()
+            .map_err(|e| format!("spawn {}: {e}", adapter.binary()))?
+    };
+    #[cfg(not(windows))]
+    let out = {
+        let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
+        std::process::Command::new(shell)
+            .args(["-i", "-l", "-c", &cmd])
+            .env_remove("npm_config_prefix")
+            .no_window()
+            .output()
+            .map_err(|e| format!("spawn {}: {e}", adapter.binary()))?
+    };
     if out.status.success() {
         Ok(())
     } else {
@@ -435,10 +504,24 @@ fn open_in_vscode(dir: String) -> Result<(), String> {
 
     if ran({
         let mut c = Command::new("code");
-        c.arg(&dir);
+        c.arg(&dir).no_window();
         c
     }) {
         return Ok(());
+    }
+
+    #[cfg(windows)]
+    {
+        // `code` is a `.cmd` shim on Windows, which `Command::new("code")` above won't
+        // resolve (std only tries `.exe`); go through cmd.exe so PATHEXT applies.
+        let shell = std::env::var("ComSpec").unwrap_or_else(|_| "cmd.exe".to_string());
+        if ran({
+            let mut c = Command::new(shell);
+            c.args(["/C", "code", &dir]).no_window();
+            c
+        }) {
+            return Ok(());
+        }
     }
 
     #[cfg(target_os = "macos")]
@@ -462,6 +545,40 @@ fn open_in_vscode(dir: String) -> Result<(), String> {
          \"Shell Command: Install 'code' command in PATH\") or make sure VS Code is installed."
             .into(),
     )
+}
+
+/// Open an http(s) URL in the user's default browser. Mirrors `open_in_vscode`'s
+/// shell-out approach (no `tauri-plugin-opener`/`shell` dependency): Windows via cmd's
+/// `start`, macOS via `open`, Linux via `xdg-open`. Only http(s) URLs are ever passed
+/// to the shell.
+#[tauri::command]
+fn open_external(url: String) -> Result<(), String> {
+    use std::process::Command;
+
+    if !(url.starts_with("https://") || url.starts_with("http://")) {
+        return Err("refusing to open a non-http(s) url".into());
+    }
+
+    #[cfg(windows)]
+    let res = {
+        // Use rundll32's URL handler rather than `cmd /C start`: cmd would re-parse query
+        // metacharacters (& | ^ < >) in the URL, truncating it and possibly running part
+        // of it as a command. rundll32 takes the URL as a single argument, no re-parse.
+        Command::new("rundll32")
+            .args(["url.dll,FileProtocolHandler", &url])
+            .no_window()
+            .status()
+    };
+    #[cfg(target_os = "macos")]
+    let res = Command::new("open").arg(&url).status();
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let res = Command::new("xdg-open").arg(&url).status();
+
+    match res {
+        Ok(s) if s.success() => Ok(()),
+        Ok(s) => Err(format!("opener exited with {s}")),
+        Err(e) => Err(format!("failed to launch opener: {e}")),
+    }
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -517,6 +634,7 @@ pub fn run() {
             read_file,
             notify_user,
             open_in_vscode,
+            open_external,
             claude_status::fetch_claude_status,
             claude_usage::fetch_claude_usage,
             claude_usage::connect_claude_plan_usage,
