@@ -33,9 +33,11 @@ pub struct GraphCommit {
 }
 
 fn run(args: &[&str], dir: &str) -> String {
+    use crate::NoWindow;
     Command::new("git")
         .args(args)
         .current_dir(dir)
+        .no_window()
         .output()
         .ok()
         .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())

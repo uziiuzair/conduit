@@ -111,11 +111,13 @@ impl ProviderAdapter for ClaudeAdapter {
         flags: &str,
         initial_prompt: Option<&str>,
     ) -> String {
-        let id = crate::pty::shell_quote(session_id);
+        let id = crate::pty::quote_arg(session_id);
         // An initial prompt rides as a quoted positional so the worker starts working
         // immediately (used by the Conductor's fleet_spawn). Applied to both branches.
+        // `quote_arg` is POSIX single-quoting under `sh -c` and cmd.exe quoting under
+        // `cmd /K`, so this one invocation string serves both platforms.
         let prompt = initial_prompt
-            .map(|p| format!(" {}", crate::pty::shell_quote(p)))
+            .map(|p| format!(" {}", crate::pty::quote_arg(p)))
             .unwrap_or_default();
         if projects_dir.is_some_and(|d| crate::pty::transcript_exists(session_id, d)) {
             format!("claude{flags} --resume {id}{prompt} || claude{flags}{prompt}")
@@ -420,10 +422,38 @@ fn label_for(id: AgentId) -> &'static str {
     }
 }
 
+/// Windows: resolve each agent binary with `where` (the `command -v` analogue). Unlike a
+/// zsh login shell there is no per-call rc/nvm init cost, so one `where` per binary is
+/// cheap; `where` finds the `.cmd`/`.exe` shims via PATHEXT, matching how `cmd.exe`
+/// resolves the agents at spawn. Scrubs npm_config_prefix for PATH parity with sessions.
+#[cfg(windows)]
+pub fn detect_agents() -> Vec<AgentInfo> {
+    all_adapters()
+        .iter()
+        .map(|a| {
+            use crate::NoWindow;
+            let bin = a.binary();
+            let stdout = std::process::Command::new("where")
+                .arg(bin)
+                .env_remove("npm_config_prefix")
+                .no_window()
+                .output()
+                .ok()
+                .filter(|o| o.status.success())
+                .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+                .unwrap_or_default();
+            // `where` prints one match per line; the first is enough to mark it found.
+            let first = stdout.lines().next().unwrap_or("");
+            AgentInfo::from_probe(a.id(), bin, label_for(a.id()), first)
+        })
+        .collect()
+}
+
 /// Scan the user's LOGIN-shell PATH for every agent binary in a SINGLE shell
 /// invocation. Shell init (`zsh -i -l` sourcing rc/nvm) dominates the cost — ~0.5s —
 /// so one shell for all binaries is far cheaper than one shell per binary. Scrubs
 /// npm_config_prefix so detection sees the same PATH the spawned sessions will.
+#[cfg(not(windows))]
 pub fn detect_agents() -> Vec<AgentInfo> {
     let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
     let adapters = all_adapters();
@@ -449,6 +479,8 @@ pub fn detect_agents() -> Vec<AgentInfo> {
 }
 
 /// Extract the path the batched probe printed for `binary` ("" when not found).
+/// (Only the POSIX `detect_agents` uses this; Windows resolves per-binary via `where`.)
+#[cfg_attr(windows, allow(dead_code))]
 fn probe_path<'a>(stdout: &'a str, binary: &str) -> &'a str {
     stdout
         .lines()
@@ -501,25 +533,35 @@ mod tests {
     fn claude_pins_a_new_session_when_no_transcript() {
         // projects_dir = None → no transcript → pin a new session id.
         let cmd = ClaudeAdapter.build_invocation("abc-123", None, "", None);
-        assert_eq!(cmd, "claude --session-id 'abc-123' || claude");
+        // Quoting is OS-aware (POSIX single-quote vs cmd bare/double-quote).
+        #[cfg(not(windows))]
+        let expected = "claude --session-id 'abc-123' || claude";
+        #[cfg(windows)]
+        let expected = "claude --session-id abc-123 || claude";
+        assert_eq!(cmd, expected);
     }
 
     #[test]
     fn claude_applies_flags_to_both_primary_and_fallback() {
         let cmd = ClaudeAdapter.build_invocation("id", None, " --worktree 'wt'", None);
-        assert_eq!(
-            cmd,
-            "claude --worktree 'wt' --session-id 'id' || claude --worktree 'wt'"
-        );
+        // The flags arg is pre-quoted by the caller; only the session id is quoted here,
+        // and that quoting is OS-aware.
+        #[cfg(not(windows))]
+        let expected = "claude --worktree 'wt' --session-id 'id' || claude --worktree 'wt'";
+        #[cfg(windows)]
+        let expected = "claude --worktree 'wt' --session-id id || claude --worktree 'wt'";
+        assert_eq!(cmd, expected);
     }
 
     #[test]
     fn claude_appends_initial_prompt_as_quoted_positional() {
         let cmd = ClaudeAdapter.build_invocation("id", None, "", Some("write a haiku"));
-        assert_eq!(
-            cmd,
-            "claude --session-id 'id' 'write a haiku' || claude 'write a haiku'"
-        );
+        // The spaced prompt is quoted as a single positional; quoting is OS-aware.
+        #[cfg(not(windows))]
+        let expected = "claude --session-id 'id' 'write a haiku' || claude 'write a haiku'";
+        #[cfg(windows)]
+        let expected = "claude --session-id id \"write a haiku\" || claude \"write a haiku\"";
+        assert_eq!(cmd, expected);
     }
 
     #[test]

@@ -63,8 +63,11 @@ pnpm tauri dev
 [pnpm](https://pnpm.io)) + at least one supported agent CLI on your `PATH` —
 [`claude`](https://docs.claude.com/en/docs/claude-code), `codex`, `gemini`, or
 `opencode` (the onboarding wizard detects which are installed) — plus `git` and
-`curl`. On macOS you'll also need the Xcode Command Line Tools. (Agent binaries are
-resolved through a login+interactive shell, so nvm / Homebrew shims load.)
+`curl`. On macOS you'll also need the Xcode Command Line Tools; on Windows, the MSVC
+toolchain (`rustup` `stable-x86_64-pc-windows-msvc` plus the Visual Studio C++ Build
+Tools with the Windows SDK; WebView2 ships with Windows 11). Agent binaries are resolved
+through your shell: a login+interactive shell on macOS/Linux (so nvm / Homebrew shims
+load), or `cmd.exe` on Windows (so the `.cmd` shims resolve via `PATHEXT`).
 
 ## Build a distributable
 
@@ -104,6 +107,42 @@ to attribute them to the app on a signed build, switch the macOS branch of
 `src-tauri/src/notify.rs` to `tauri-plugin-notification`.
 
 </details>
+
+### Windows
+
+One-time toolchain setup (via [winget](https://learn.microsoft.com/windows/package-manager/)):
+
+```powershell
+winget install Rustlang.Rustup
+winget install Microsoft.VisualStudio.2022.BuildTools --override "--quiet --wait --add Microsoft.VisualStudio.Workload.VCTools --includeRecommended"
+rustup default stable-x86_64-pc-windows-msvc
+```
+
+The default `app` bundle target is macOS-only, so pass `--bundles nsis` (a Windows `.exe`
+setup) or `msi`:
+
+```powershell
+pnpm tauri build --bundles nsis   # into src-tauri/target/release/bundle/nsis/Conduit_<ver>_x64-setup.exe
+```
+
+This is an **unsigned** local build, so SmartScreen may warn on first run ("More info"
+then "Run anyway"). Sessions spawn through `cmd.exe`, so the agent CLIs (`claude.cmd`
+and friends) just need to be on your `PATH`.
+
+**Choosing a Claude account (Windows/all platforms).** By default sessions use your
+default `claude` config directory (`%USERPROFILE%\.claude`). To run them against a
+different account's config directory without disturbing your normal `claude`, set
+`CONDUIT_CLAUDE_CONFIG_DIR` to that account's `.claude` folder. Conduit exports it as
+`CLAUDE_CONFIG_DIR` to each spawned session, so the session authenticates as that
+account:
+
+```powershell
+setx CONDUIT_CLAUDE_CONFIG_DIR "C:\path\to\that-account\.claude"
+```
+
+(Note: with `CLAUDE_CONFIG_DIR`, claude reads its `.claude.json` from inside that folder,
+so a session may start with a fresh in-app config the first time; the account, quota, and
+model access are the chosen account's.)
 
 ## How it works
 

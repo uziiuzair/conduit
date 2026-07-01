@@ -128,13 +128,15 @@ struct PtySession {
 
 #[derive(Default)]
 pub struct PtyManager {
-    sessions: DashMap<String, Mutex<PtySession>>,
+    // Arc so the per-session reader thread can hold a clone and remove its own entry
+    // when the child exits on its own (otherwise the dead session leaks forever).
+    sessions: Arc<DashMap<String, Mutex<PtySession>>>,
 }
 
 impl PtyManager {
     pub fn new() -> Self {
         Self {
-            sessions: DashMap::new(),
+            sessions: Arc::new(DashMap::new()),
         }
     }
 
@@ -156,6 +158,7 @@ impl PtyManager {
         mcp_config_path: Option<String>,
         system_prompt: Option<String>,
         initial_prompt: Option<String>,
+        account_config_dir: Option<String>,
         agent: crate::agent::AgentId,
         on_event: Channel<String>,
     ) -> Result<(), String> {
@@ -184,36 +187,75 @@ impl PtyManager {
             })
             .map_err(|e| format!("openpty: {e}"))?;
 
-        let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
-
         let adapter = crate::agent::adapter_for(agent);
-        let inner = if shell_only {
-            format!(
-                "cd {dir} 2>/dev/null; exec {shell} -i -l",
-                dir = shell_quote(&working_directory),
-                shell = shell,
-            )
-        } else {
-            // Cold spawn only: the re-attach fast-path above returns before reaching
-            // here, so a live session is never "resumed" out from under itself. The
-            // agent command resumes/pins the session AND applies worktree/settings.
-            build_script(
-                adapter.as_ref(),
-                &session_id,
-                hook_port,
-                &working_directory,
-                &shell,
-                worktree_name.as_deref(),
-                settings_path.as_deref(),
-                mcp_config_path.as_deref(),
-                system_prompt.as_deref(),
-                initial_prompt.as_deref(),
-                claude_projects_dir().as_deref(),
-            )
+
+        // Resolve --resume / transcript_exists against the SELECTED account's transcript
+        // store (Feature 2 lever), not Conduit's own default env. Falls back to the
+        // process-env CLAUDE_CONFIG_DIR / ~/.claude when no account is pinned.
+        let projects_dir = account_config_dir
+            .as_ref()
+            .map(|d| PathBuf::from(d).join("projects"))
+            .or_else(claude_projects_dir);
+
+        // Cold spawn only: the re-attach fast-path above returns before reaching here, so
+        // a live session is never "resumed" out from under itself. The agent command
+        // resumes/pins the session AND applies worktree/settings.
+        //
+        // Windows: route through cmd.exe -- it resolves the agents' `.cmd` shims via
+        // PATHEXT, and `/K` runs our command then keeps the shell interactive (the
+        // analogue of the POSIX `exec zsh -i -l` keep-alive). cwd and env are applied
+        // natively by CommandBuilder below, so the inner command is just the agent
+        // invocation (no `cd`, no `export`), which sidesteps cmd's command-line quoting.
+        #[cfg(windows)]
+        let mut cmd = {
+            let shell = std::env::var("ComSpec").unwrap_or_else(|_| "cmd.exe".to_string());
+            let mut cmd = CommandBuilder::new(shell);
+            if !shell_only {
+                let inner = build_script_win(
+                    adapter.as_ref(),
+                    &session_id,
+                    worktree_name.as_deref(),
+                    settings_path.as_deref(),
+                    mcp_config_path.as_deref(),
+                    system_prompt.as_deref(),
+                    initial_prompt.as_deref(),
+                    projects_dir.as_deref(),
+                );
+                cmd.args(["/K", inner.as_str()]);
+            }
+            // shell_only: a bare `cmd.exe` in the cwd is already an interactive shell.
+            cmd
         };
 
-        let mut cmd = CommandBuilder::new(&shell);
-        cmd.args(["-i", "-l", "-c", inner.as_str()]);
+        #[cfg(not(windows))]
+        let mut cmd = {
+            let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
+            let inner = if shell_only {
+                format!(
+                    "cd {dir} 2>/dev/null; exec {shell} -i -l",
+                    dir = shell_quote(&working_directory),
+                    shell = shell,
+                )
+            } else {
+                build_script(
+                    adapter.as_ref(),
+                    &session_id,
+                    hook_port,
+                    &working_directory,
+                    &shell,
+                    worktree_name.as_deref(),
+                    settings_path.as_deref(),
+                    mcp_config_path.as_deref(),
+                    system_prompt.as_deref(),
+                    initial_prompt.as_deref(),
+                    projects_dir.as_deref(),
+                )
+            };
+            let mut cmd = CommandBuilder::new(&shell);
+            cmd.args(["-i", "-l", "-c", inner.as_str()]);
+            cmd
+        };
+
         cmd.cwd(&working_directory);
         cmd.env("TERM", "xterm-256color");
         cmd.env("COLORTERM", "truecolor");
@@ -229,15 +271,19 @@ impl PtyManager {
             for (k, v) in adapter.env_overrides() {
                 cmd.env(k, v);
             }
+            // Point the agent at a specific account's config/credentials dir. On Windows
+            // this selects a Claude account without disturbing the user's default
+            // `claude` (Feature 1/2). Existence-guarded so a stale path falls back to the
+            // inherited env rather than breaking the spawn.
+            if let Some(dir) = account_config_dir.as_deref() {
+                if Path::new(dir).exists() {
+                    cmd.env("CLAUDE_CONFIG_DIR", dir);
+                }
+            }
         }
 
-        let child = pair
-            .slave
-            .spawn_command(cmd)
-            .map_err(|e| format!("spawn: {e}"))?;
-
-        drop(pair.slave); // so the reader gets EOF when the child exits
-
+        // Take the reader/writer from the master BEFORE spawning the child, so a failure
+        // here can't orphan an already-spawned process tree.
         let mut reader = pair
             .master
             .try_clone_reader()
@@ -246,6 +292,13 @@ impl PtyManager {
             .master
             .take_writer()
             .map_err(|e| format!("take writer: {e}"))?;
+
+        let child = pair
+            .slave
+            .spawn_command(cmd)
+            .map_err(|e| format!("spawn: {e}"))?;
+
+        drop(pair.slave); // so the reader gets EOF when the child exits
 
         let subscribers: Subscribers = Arc::new(Mutex::new(Vec::new()));
         let subs_for_reader = subscribers.clone();
@@ -267,6 +320,14 @@ impl PtyManager {
             }),
         );
 
+        // The reader self-reaps its map entry when the child exits on its own (below), so
+        // hand it a clone of the session map and this id. Windows-only: macOS keeps its
+        // current behavior so active native development is not disturbed.
+        #[cfg(windows)]
+        let sessions_for_reader = self.sessions.clone();
+        #[cfg(windows)]
+        let sid_for_reader = session_id.clone();
+
         // Reader thread: blocking reads → base64 → current sink. Send errors are
         // ignored (the channel may be briefly absent during a reload); only a read
         // EOF/error ends the thread.
@@ -277,9 +338,15 @@ impl PtyManager {
             // re-attached, never killed) — a safety net against a forever-looping
             // thread. Resets on any successful send, so reload gaps don't trip it.
             let mut consecutive_fails: u32 = 0;
+            // Whether the loop ended because the child actually exited (EOF/error) vs the
+            // orphaned-sink safety break (process may still be alive — must NOT reap then).
+            let mut child_exited = false;
             loop {
                 match reader.read(&mut buf) {
-                    Ok(0) => break,
+                    Ok(0) => {
+                        child_exited = true;
+                        break;
+                    }
                     Ok(n) => {
                         output_for_reader.push(&buf[..n]);
                         let encoded = engine.encode(&buf[..n]);
@@ -299,7 +366,10 @@ impl PtyManager {
                             }
                         }
                     }
-                    Err(_) => break,
+                    Err(_) => {
+                        child_exited = true;
+                        break;
+                    }
                 }
             }
             let notice = "\r\n\u{1b}[90m[process exited]\u{1b}[0m\r\n";
@@ -310,6 +380,20 @@ impl PtyManager {
             if let Ok(s) = sink.lock() {
                 let _ = s.send(enc_notice);
             }
+            // Free the dead session's handles/buffers and let a re-spawn of this id
+            // cold-start instead of re-attaching a dead PTY. Only on a real child exit
+            // (not the orphaned-sink safety break, where the process may still be alive).
+            // Windows-only so macOS behavior is untouched (see the clones above).
+            #[cfg(windows)]
+            if child_exited {
+                if let Some((_, m)) = sessions_for_reader.remove(&sid_for_reader) {
+                    if let Ok(mut s) = m.lock() {
+                        let _ = s.child.wait();
+                    }
+                }
+            }
+            #[cfg(not(windows))]
+            let _ = child_exited; // reap is Windows-only; consume here to avoid a warning
         });
 
         Ok(())
@@ -399,6 +483,17 @@ impl PtyManager {
     pub fn kill(&self, session_id: &str) {
         if let Some((_, m)) = self.sessions.remove(session_id) {
             if let Ok(mut session) = m.lock() {
+                // Windows: child.kill() is TerminateProcess on cmd.exe only, which orphans
+                // the real tree (cmd.exe -> node(agent) -> MCP servers / git / dev servers).
+                // Kill the whole tree by PID first, while cmd.exe is still alive to be found.
+                #[cfg(windows)]
+                if let Some(pid) = session.child.process_id() {
+                    use crate::NoWindow;
+                    let _ = std::process::Command::new("taskkill")
+                        .args(["/T", "/F", "/PID", &pid.to_string()])
+                        .no_window()
+                        .status();
+                }
                 let _ = session.child.kill();
                 let _ = session.child.wait(); // reap so we don't leave a zombie
             }
@@ -448,8 +543,42 @@ pub(crate) fn claude_projects_dir() -> Option<PathBuf> {
 }
 
 /// Single-quote a string for safe interpolation into a /bin/sh -c command.
+/// (Windows spawns route through cmd.exe and use `win_quote`, so this is unused there.)
+#[cfg_attr(windows, allow(dead_code))]
 pub(crate) fn shell_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
+}
+
+/// Quote a single token for a cmd.exe command line. Bare when it's a "simple" token
+/// (alphanumerics, path/flag punctuation -- covers UUIDs, flags, and space-free paths);
+/// otherwise wrapped in double quotes (cmd's only quoting), doubling any embedded quote.
+/// Note: a compound command passed as a single `cmd /K` argument that contains embedded
+/// double quotes is not fully robust under cmd's re-parse; normal (quote-free) sessions
+/// are the supported path -- see `build_script_win`.
+#[cfg(windows)]
+pub(crate) fn win_quote(s: &str) -> String {
+    let simple = !s.is_empty()
+        && s.chars()
+            .all(|c| c.is_ascii_alphanumeric() || "-_./:@=\\".contains(c));
+    if simple {
+        s.to_string()
+    } else {
+        format!("\"{}\"", s.replace('"', "\"\""))
+    }
+}
+
+/// OS-appropriate argument quoting for the agent invocation string: POSIX single-quoting
+/// under a `sh -c` login shell, cmd.exe quoting under `cmd /K`. Used by the provider
+/// adapters so one `build_invocation` implementation serves both platforms.
+pub(crate) fn quote_arg(s: &str) -> String {
+    #[cfg(windows)]
+    {
+        win_quote(s)
+    }
+    #[cfg(not(windows))]
+    {
+        shell_quote(s)
+    }
 }
 
 /// Per-subscriber buffered fan-out. Sends one base64 frame to every subscriber.
@@ -468,6 +597,7 @@ fn broadcast(subs: &mut Vec<(u64, SyncSender<String>)>, frame: &str) {
 /// (and its `|| <bare>` fallback) is delegated to the adapter; Conduit's own env
 /// (CONDUIT_SESSION_ID/HOOK_PORT) and the worktree/settings flags are applied here.
 /// `worktree`/`settings` are only set by callers when the adapter supports worktrees.
+#[cfg(not(windows))]
 #[allow(clippy::too_many_arguments)]
 fn build_script(
     adapter: &dyn crate::agent::ProviderAdapter,
@@ -504,6 +634,40 @@ fn build_script(
         invocation = invocation,
         shell = shell,
     )
+}
+
+/// Windows counterpart of `build_script`: returns just the agent invocation (with its
+/// worktree/settings flags) to hand to `cmd.exe /K`. The working directory and Conduit's
+/// own env (CONDUIT_SESSION_ID/HOOK_PORT) are applied natively by `CommandBuilder`
+/// (`cmd.cwd()` / `cmd.env()`), so -- unlike the POSIX script -- there is no `cd`,
+/// `export`, or trailing `exec`, which keeps the command free of cmd-quoting hazards for
+/// the common (flag-free) session. Flags are cmd-quoted via `quote_arg`.
+#[cfg(windows)]
+#[allow(clippy::too_many_arguments)]
+fn build_script_win(
+    adapter: &dyn crate::agent::ProviderAdapter,
+    session_id: &str,
+    worktree: Option<&str>,
+    settings: Option<&str>,
+    mcp_config: Option<&str>,
+    system_prompt: Option<&str>,
+    initial_prompt: Option<&str>,
+    projects_dir: Option<&Path>,
+) -> String {
+    let mut flags = String::new();
+    if let Some(name) = worktree {
+        flags.push_str(&format!(" --worktree {}", quote_arg(name)));
+    }
+    if let Some(path) = settings {
+        flags.push_str(&format!(" --settings {}", quote_arg(path)));
+    }
+    if let Some(cfg) = mcp_config {
+        flags.push_str(&format!(" --mcp-config {}", quote_arg(cfg)));
+    }
+    if let Some(sp) = system_prompt {
+        flags.push_str(&format!(" --append-system-prompt {}", quote_arg(sp)));
+    }
+    adapter.build_invocation(session_id, projects_dir, &flags, initial_prompt)
 }
 
 #[cfg(test)]
@@ -578,6 +742,7 @@ mod tests {
         assert!(!transcript_exists(ID, &missing));
     }
 
+    #[cfg(not(windows))]
     #[test]
     fn build_script_wraps_adapter_invocation_with_conduit_env() {
         let script = build_script(
@@ -598,6 +763,7 @@ mod tests {
         assert!(script.contains("cd '/repo' &&"));
     }
 
+    #[cfg(not(windows))]
     #[test]
     fn build_script_appends_conductor_flags_and_prompt() {
         let adapter = crate::agent::adapter_for(crate::agent::AgentId::Claude);
@@ -622,6 +788,7 @@ mod tests {
         );
     }
 
+    #[cfg(not(windows))]
     #[test]
     fn build_script_passes_initial_prompt_positional() {
         let adapter = crate::agent::adapter_for(crate::agent::AgentId::Claude);
@@ -676,5 +843,60 @@ mod tests {
         broadcast(&mut subs, "next");
         assert_eq!(rx_fast.recv().unwrap(), "next");
         assert_eq!(subs.len(), 2);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn win_quote_bare_vs_quoted() {
+        // UUIDs / flags / space-free paths stay bare (cmd needs no quoting).
+        assert_eq!(win_quote(ID), ID);
+        assert_eq!(win_quote("--session-id"), "--session-id");
+        assert_eq!(win_quote(r"C:\Users\me\.claude"), r"C:\Users\me\.claude");
+        // Spaces force double-quoting; embedded quotes are doubled.
+        assert_eq!(win_quote("hello world"), "\"hello world\"");
+        assert_eq!(win_quote(r"C:\a b\h.json"), "\"C:\\a b\\h.json\"");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn build_script_win_is_bare_invocation_for_normal_session() {
+        // No cd / export / exec: cwd + CONDUIT env are applied natively by CommandBuilder,
+        // so a normal session's command line is quote-free.
+        let script = build_script_win(
+            &crate::agent::ClaudeAdapter,
+            ID,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
+        assert_eq!(script, format!("claude --session-id {ID} || claude"));
+        assert!(!script.contains("cd "));
+        assert!(!script.contains("export "));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn build_script_win_quotes_spaced_flags() {
+        let script = build_script_win(
+            &*crate::agent::adapter_for(crate::agent::AgentId::Claude),
+            "sid-1",
+            None,
+            Some(r"C:\cfg dir\hooks.json"),
+            None,
+            Some("Be the conductor."),
+            None,
+            None,
+        );
+        assert!(
+            script.contains("--settings \"C:\\cfg dir\\hooks.json\""),
+            "{script}"
+        );
+        assert!(
+            script.contains("--append-system-prompt \"Be the conductor.\""),
+            "{script}"
+        );
     }
 }
