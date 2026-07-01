@@ -128,13 +128,15 @@ struct PtySession {
 
 #[derive(Default)]
 pub struct PtyManager {
-    sessions: DashMap<String, Mutex<PtySession>>,
+    // Arc so the per-session reader thread can hold a clone and remove its own entry
+    // when the child exits on its own (otherwise the dead session leaks forever).
+    sessions: Arc<DashMap<String, Mutex<PtySession>>>,
 }
 
 impl PtyManager {
     pub fn new() -> Self {
         Self {
-            sessions: DashMap::new(),
+            sessions: Arc::new(DashMap::new()),
         }
     }
 
@@ -280,13 +282,8 @@ impl PtyManager {
             }
         }
 
-        let child = pair
-            .slave
-            .spawn_command(cmd)
-            .map_err(|e| format!("spawn: {e}"))?;
-
-        drop(pair.slave); // so the reader gets EOF when the child exits
-
+        // Take the reader/writer from the master BEFORE spawning the child, so a failure
+        // here can't orphan an already-spawned process tree.
         let mut reader = pair
             .master
             .try_clone_reader()
@@ -295,6 +292,13 @@ impl PtyManager {
             .master
             .take_writer()
             .map_err(|e| format!("take writer: {e}"))?;
+
+        let child = pair
+            .slave
+            .spawn_command(cmd)
+            .map_err(|e| format!("spawn: {e}"))?;
+
+        drop(pair.slave); // so the reader gets EOF when the child exits
 
         let subscribers: Subscribers = Arc::new(Mutex::new(Vec::new()));
         let subs_for_reader = subscribers.clone();
@@ -316,6 +320,14 @@ impl PtyManager {
             }),
         );
 
+        // The reader self-reaps its map entry when the child exits on its own (below), so
+        // hand it a clone of the session map and this id. Windows-only: macOS keeps its
+        // current behavior so active native development is not disturbed.
+        #[cfg(windows)]
+        let sessions_for_reader = self.sessions.clone();
+        #[cfg(windows)]
+        let sid_for_reader = session_id.clone();
+
         // Reader thread: blocking reads → base64 → current sink. Send errors are
         // ignored (the channel may be briefly absent during a reload); only a read
         // EOF/error ends the thread.
@@ -326,9 +338,15 @@ impl PtyManager {
             // re-attached, never killed) — a safety net against a forever-looping
             // thread. Resets on any successful send, so reload gaps don't trip it.
             let mut consecutive_fails: u32 = 0;
+            // Whether the loop ended because the child actually exited (EOF/error) vs the
+            // orphaned-sink safety break (process may still be alive — must NOT reap then).
+            let mut child_exited = false;
             loop {
                 match reader.read(&mut buf) {
-                    Ok(0) => break,
+                    Ok(0) => {
+                        child_exited = true;
+                        break;
+                    }
                     Ok(n) => {
                         output_for_reader.push(&buf[..n]);
                         let encoded = engine.encode(&buf[..n]);
@@ -348,7 +366,10 @@ impl PtyManager {
                             }
                         }
                     }
-                    Err(_) => break,
+                    Err(_) => {
+                        child_exited = true;
+                        break;
+                    }
                 }
             }
             let notice = "\r\n\u{1b}[90m[process exited]\u{1b}[0m\r\n";
@@ -359,6 +380,20 @@ impl PtyManager {
             if let Ok(s) = sink.lock() {
                 let _ = s.send(enc_notice);
             }
+            // Free the dead session's handles/buffers and let a re-spawn of this id
+            // cold-start instead of re-attaching a dead PTY. Only on a real child exit
+            // (not the orphaned-sink safety break, where the process may still be alive).
+            // Windows-only so macOS behavior is untouched (see the clones above).
+            #[cfg(windows)]
+            if child_exited {
+                if let Some((_, m)) = sessions_for_reader.remove(&sid_for_reader) {
+                    if let Ok(mut s) = m.lock() {
+                        let _ = s.child.wait();
+                    }
+                }
+            }
+            #[cfg(not(windows))]
+            let _ = child_exited; // reap is Windows-only; consume here to avoid a warning
         });
 
         Ok(())
@@ -448,6 +483,17 @@ impl PtyManager {
     pub fn kill(&self, session_id: &str) {
         if let Some((_, m)) = self.sessions.remove(session_id) {
             if let Ok(mut session) = m.lock() {
+                // Windows: child.kill() is TerminateProcess on cmd.exe only, which orphans
+                // the real tree (cmd.exe -> node(agent) -> MCP servers / git / dev servers).
+                // Kill the whole tree by PID first, while cmd.exe is still alive to be found.
+                #[cfg(windows)]
+                if let Some(pid) = session.child.process_id() {
+                    use crate::NoWindow;
+                    let _ = std::process::Command::new("taskkill")
+                        .args(["/T", "/F", "/PID", &pid.to_string()])
+                        .no_window()
+                        .status();
+                }
                 let _ = session.child.kill();
                 let _ = session.child.wait(); // reap so we don't leave a zombie
             }
