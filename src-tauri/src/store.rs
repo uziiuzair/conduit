@@ -78,8 +78,33 @@ pub struct Project {
     pub layout: Option<ProjectLayout>,
 }
 
+/// A registered Claude account: a `.claude` config dir that holds its own credentials.
+/// Selecting it for a session exports its `config_dir` as CLAUDE_CONFIG_DIR at spawn.
+#[derive(Serialize, Deserialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct Account {
+    pub id: String,
+    pub label: String,
+    pub config_dir: String,
+}
+
+/// Root of state.json. Was a bare `Vec<Project>`; promoted to an object so the account
+/// registry persists alongside projects. Legacy array files migrate on load.
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct PersistState {
+    #[serde(default)]
+    pub projects: Vec<Project>,
+    #[serde(default)]
+    pub accounts: Vec<Account>,
+    #[serde(default)]
+    pub default_account: Option<String>,
+}
+
 pub struct Store {
     projects: Mutex<Vec<Project>>,
+    accounts: Mutex<Vec<Account>>,
+    default_account: Mutex<Option<String>>,
     save_path: PathBuf,
 }
 
@@ -107,13 +132,27 @@ impl Store {
     pub fn new() -> Self {
         let save_path = data_dir().join("state.json");
 
-        let projects = fs::read(&save_path)
+        // Load the new object shape; fall back to the legacy bare `Vec<Project>` array and
+        // wrap it (rewritten to the object shape on the next save). An array can't
+        // deserialize into a struct and vice-versa, so the two branches are unambiguous.
+        let state = fs::read(&save_path)
             .ok()
-            .and_then(|data| serde_json::from_slice::<Vec<Project>>(&data).ok())
+            .and_then(|data| {
+                serde_json::from_slice::<PersistState>(&data).ok().or_else(|| {
+                    serde_json::from_slice::<Vec<Project>>(&data)
+                        .ok()
+                        .map(|projects| PersistState {
+                            projects,
+                            ..Default::default()
+                        })
+                })
+            })
             .unwrap_or_default();
 
         Store {
-            projects: Mutex::new(projects),
+            projects: Mutex::new(state.projects),
+            accounts: Mutex::new(state.accounts),
+            default_account: Mutex::new(state.default_account),
             save_path,
         }
     }
@@ -121,7 +160,22 @@ impl Store {
     fn save(&self, projects: &[Project]) {
         // Atomic write: serialize, write a temp file, then rename over the target so
         // a crash mid-write can't corrupt state.json. Errors are surfaced to stderr.
-        let data = match serde_json::to_vec_pretty(projects) {
+        // Assemble the full persisted object (projects + account registry); the caller
+        // already holds the projects lock, so lock only the other two mutexes here.
+        let state = PersistState {
+            projects: projects.to_vec(),
+            accounts: self
+                .accounts
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone(),
+            default_account: self
+                .default_account
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone(),
+        };
+        let data = match serde_json::to_vec_pretty(&state) {
             Ok(d) => d,
             Err(e) => {
                 eprintln!("conduit: failed to serialize state: {e}");
@@ -295,6 +349,8 @@ mod tests {
         fn for_test(dir: &std::path::Path) -> Self {
             Store {
                 projects: Mutex::new(Vec::new()),
+                accounts: Mutex::new(Vec::new()),
+                default_account: Mutex::new(None),
                 save_path: dir.join("state.json"),
             }
         }
