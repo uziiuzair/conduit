@@ -35,6 +35,10 @@ pub struct Session {
     pub agent: crate::agent::AgentId,
     #[serde(default)]
     pub role: SessionRole,
+    /// Which registered Claude account this session runs under. None => inherit the global
+    /// default account (or Conduit's own env when no default is set).
+    #[serde(default)]
+    pub account_id: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -126,6 +130,42 @@ pub fn data_dir() -> PathBuf {
         .join(dir_name);
     let _ = fs::create_dir_all(&base);
     base
+}
+
+/// Push a discovery candidate for `dir` if it is an existing directory not already
+/// registered or listed. Used by `Store::discover_accounts`.
+fn push_candidate(out: &mut Vec<Account>, registered: &[String], label: &str, dir: PathBuf) {
+    if !dir.is_dir() {
+        return;
+    }
+    let config_dir = dir.to_string_lossy().into_owned();
+    if registered.iter().any(|r| r == &config_dir) || out.iter().any(|a| a.config_dir == config_dir)
+    {
+        return;
+    }
+    out.push(Account {
+        id: Uuid::new_v4().to_string(),
+        label: label.to_string(),
+        config_dir,
+    });
+}
+
+/// Turn a split-profile folder name (".claude-personal", "claude-work", ...) into a short
+/// human label ("Personal", "Work"). Falls back to "Account".
+fn pretty_label(profile: &str) -> String {
+    let s = profile
+        .trim_start_matches('.')
+        .trim_start_matches("claude-")
+        .trim_start_matches("claude")
+        .trim_matches(|c| c == '-' || c == '_');
+    if s.is_empty() {
+        return "Account".to_string();
+    }
+    let mut chars = s.chars();
+    match chars.next() {
+        Some(f) => f.to_uppercase().collect::<String>() + chars.as_str(),
+        None => "Account".to_string(),
+    }
 }
 
 impl Store {
@@ -283,6 +323,7 @@ impl Store {
             branch,
             agent,
             role,
+            account_id: None,
         };
         project.sessions.push(session.clone());
         self.save(&projects);
@@ -299,6 +340,173 @@ impl Store {
             .find(|s| s.id == session_id)
             .map(|s| s.agent)
             .unwrap_or_default()
+    }
+
+    // ---- Account registry (Feature 2: Claude account switching) ----------------
+
+    /// Re-serialize the full state to disk after an account/default change. Callers must
+    /// NOT hold the accounts / default_account locks (save() re-locks them).
+    fn persist(&self) {
+        let projects = self.projects.lock().unwrap_or_else(|e| e.into_inner());
+        self.save(&projects);
+    }
+
+    /// Resolve a session's Claude account config dir: the session's own `account_id`, else
+    /// the global default account, mapped to that account's `config_dir`. None means the
+    /// child inherits Conduit's own env (unconfigured / single-account behavior).
+    pub fn session_account_config_dir(&self, session_id: &str) -> Option<String> {
+        let account_id = {
+            let projects = self.projects.lock().unwrap_or_else(|e| e.into_inner());
+            projects
+                .iter()
+                .flat_map(|p| &p.sessions)
+                .find(|s| s.id == session_id)
+                .and_then(|s| s.account_id.clone())
+        }
+        .or_else(|| {
+            self.default_account
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone()
+        })?;
+        let accounts = self.accounts.lock().unwrap_or_else(|e| e.into_inner());
+        accounts
+            .iter()
+            .find(|a| a.id == account_id)
+            .map(|a| a.config_dir.clone())
+    }
+
+    pub fn list_accounts(&self) -> Vec<Account> {
+        self.accounts
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+
+    pub fn default_account(&self) -> Option<String> {
+        self.default_account
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+
+    /// Register an account. Errors on an empty / missing / duplicate config dir; else the
+    /// new Account. The `.claude` dir need not be authenticated -- an empty one just drops
+    /// the user into `claude`'s normal login flow inside the session.
+    pub fn add_account(&self, label: String, config_dir: String) -> Result<Account, String> {
+        let config_dir = config_dir.trim().to_string();
+        if config_dir.is_empty() {
+            return Err("A config directory is required.".into());
+        }
+        if !std::path::Path::new(&config_dir).is_dir() {
+            return Err(format!("Directory does not exist: {config_dir}"));
+        }
+        let account = {
+            let mut accounts = self.accounts.lock().unwrap_or_else(|e| e.into_inner());
+            if accounts.iter().any(|a| a.config_dir == config_dir) {
+                return Err("That config directory is already registered.".into());
+            }
+            let label = label.trim();
+            let account = Account {
+                id: Uuid::new_v4().to_string(),
+                label: if label.is_empty() {
+                    config_dir.clone()
+                } else {
+                    label.to_string()
+                },
+                config_dir,
+            };
+            accounts.push(account.clone());
+            account
+        };
+        self.persist();
+        Ok(account)
+    }
+
+    /// Remove an account: drop it, clear it as the default if set, and null out any session
+    /// that referenced it so no dangling id survives.
+    pub fn remove_account(&self, account_id: &str) {
+        {
+            let mut accounts = self.accounts.lock().unwrap_or_else(|e| e.into_inner());
+            accounts.retain(|a| a.id != account_id);
+        }
+        {
+            let mut def = self.default_account.lock().unwrap_or_else(|e| e.into_inner());
+            if def.as_deref() == Some(account_id) {
+                *def = None;
+            }
+        }
+        let mut projects = self.projects.lock().unwrap_or_else(|e| e.into_inner());
+        for p in projects.iter_mut() {
+            for s in p.sessions.iter_mut() {
+                if s.account_id.as_deref() == Some(account_id) {
+                    s.account_id = None;
+                }
+            }
+        }
+        self.save(&projects);
+    }
+
+    pub fn set_default_account(&self, account_id: Option<String>) {
+        {
+            let mut def = self.default_account.lock().unwrap_or_else(|e| e.into_inner());
+            *def = account_id;
+        }
+        self.persist();
+    }
+
+    pub fn set_session_account(&self, session_id: &str, account_id: Option<String>) {
+        let mut projects = self.projects.lock().unwrap_or_else(|e| e.into_inner());
+        for p in projects.iter_mut() {
+            if let Some(s) = p.sessions.iter_mut().find(|s| s.id == session_id) {
+                s.account_id = account_id;
+                break;
+            }
+        }
+        self.save(&projects);
+    }
+
+    /// Auto-detect candidate Claude account dirs to prefill the accounts manager (does not
+    /// register them): the canonical `~/.claude`, plus any `<profile>/.claude` one level
+    /// under a `~/.claude-split*` folder (the pattern the personal-profile launcher uses).
+    /// Skips already-registered dirs. No network, no credential reads.
+    pub fn discover_accounts(&self) -> Vec<Account> {
+        let home = match dirs::home_dir() {
+            Some(h) => h,
+            None => return Vec::new(),
+        };
+        let registered: Vec<String> = self
+            .accounts
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .map(|a| a.config_dir.clone())
+            .collect();
+        let mut out: Vec<Account> = Vec::new();
+        push_candidate(&mut out, &registered, "Default", home.join(".claude"));
+        if let Ok(entries) = fs::read_dir(&home) {
+            for entry in entries.flatten() {
+                let split = entry.path();
+                let name = entry.file_name().to_string_lossy().into_owned();
+                if split.is_dir() && name.starts_with(".claude-split") {
+                    if let Ok(subs) = fs::read_dir(&split) {
+                        for sub in subs.flatten() {
+                            let profile = sub.path();
+                            if profile.is_dir() {
+                                let stem = sub.file_name().to_string_lossy().into_owned();
+                                push_candidate(
+                                    &mut out,
+                                    &registered,
+                                    &pretty_label(&stem),
+                                    profile.join(".claude"),
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        out
     }
 
     pub fn set_layout(&self, project_id: &str, layout: ProjectLayout) {
@@ -453,6 +661,60 @@ mod tests {
     }
 
     #[test]
+    fn old_state_json_without_account_deserializes_as_none() {
+        let json = r#"{"id":"x","name":"n","useWorktree":false}"#;
+        let s: Session = serde_json::from_str(json).unwrap();
+        assert_eq!(s.account_id, None);
+    }
+
+    #[test]
+    fn session_account_config_dir_resolves_session_then_default() {
+        let dir = temp_dir("acct");
+        let store = Store::for_test(&dir);
+        // add_account validates the dir exists, so create two real dirs to register.
+        let work_dir = dir.join("work-dot-claude");
+        let personal_dir = dir.join("personal-dot-claude");
+        fs::create_dir_all(&work_dir).unwrap();
+        fs::create_dir_all(&personal_dir).unwrap();
+        let work = store
+            .add_account("Work".into(), work_dir.to_string_lossy().into_owned())
+            .unwrap();
+        let personal = store
+            .add_account("Personal".into(), personal_dir.to_string_lossy().into_owned())
+            .unwrap();
+
+        let p = store.add_project("/repo".into());
+        let s = store
+            .add_session(
+                &p.id,
+                "s".into(),
+                false,
+                crate::agent::AgentId::Claude,
+                SessionRole::Worker,
+            )
+            .unwrap();
+
+        // No default and no session account -> None (inherit env).
+        assert_eq!(store.session_account_config_dir(&s.id), None);
+        // The global default applies.
+        store.set_default_account(Some(work.id.clone()));
+        assert_eq!(
+            store.session_account_config_dir(&s.id),
+            Some(work_dir.to_string_lossy().into_owned())
+        );
+        // A session-specific account overrides the default.
+        store.set_session_account(&s.id, Some(personal.id.clone()));
+        assert_eq!(
+            store.session_account_config_dir(&s.id),
+            Some(personal_dir.to_string_lossy().into_owned())
+        );
+        // A duplicate config dir is rejected.
+        assert!(store
+            .add_account("Dup".into(), work_dir.to_string_lossy().into_owned())
+            .is_err());
+    }
+
+    #[test]
     fn session_role_defaults_to_worker_for_old_state() {
         // A persisted session from before `role` existed must load as Worker.
         let json = r#"{"id":"s1","name":"old","useWorktree":false}"#;
@@ -556,6 +818,7 @@ mod tests {
             branch: None,
             agent: crate::agent::AgentId::Claude,
             role: SessionRole::Conductor,
+            account_id: None,
         };
         let v = serde_json::to_string(&s).unwrap();
         assert!(v.contains(r#""role":"conductor""#), "got {v}");

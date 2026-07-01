@@ -79,16 +79,18 @@ fn pty_spawn(
     };
     let adapter = crate::agent::adapter_for(agent);
 
-    // Account selection (Feature 1 interim; Feature 2 replaces this with the persisted
-    // accounts registry resolved via `store.session_account_config_dir`). Point Claude at a
-    // specific config/credentials dir without disturbing the user's default `claude`: set
-    // CONDUIT_CLAUDE_CONFIG_DIR to a `.claude` dir. Never applied to a plain shell companion.
+    // Account selection: the session's registered Claude account (its own, else the global
+    // default), resolved from the store; falls back to the CONDUIT_CLAUDE_CONFIG_DIR env
+    // override. Points Claude at a specific config/credentials dir without disturbing the
+    // user's default `claude`. Never applied to a plain shell companion.
     let account_config_dir = if shell_only {
         None
     } else {
-        std::env::var("CONDUIT_CLAUDE_CONFIG_DIR")
-            .ok()
-            .filter(|s| !s.is_empty())
+        store.session_account_config_dir(&session_id).or_else(|| {
+            std::env::var("CONDUIT_CLAUDE_CONFIG_DIR")
+                .ok()
+                .filter(|s| !s.is_empty())
+        })
     };
 
     // A Conductor session gets the fleet MCP server (scoped to it via --mcp-config)
@@ -235,6 +237,48 @@ fn conductor_confirm_response(
 #[tauri::command]
 fn set_project_layout(project_id: String, layout: ProjectLayout, store: State<Arc<Store>>) {
     store.set_layout(&project_id, layout);
+}
+
+// ---- Claude account registry (Feature 2: account switching) ------------------
+
+#[tauri::command]
+fn list_accounts(store: State<Arc<Store>>) -> Vec<crate::store::Account> {
+    store.list_accounts()
+}
+
+#[tauri::command]
+fn get_default_account(store: State<Arc<Store>>) -> Option<String> {
+    store.default_account()
+}
+
+/// Auto-detected candidate accounts (not yet registered), for the "Detect" button.
+#[tauri::command]
+fn discover_accounts(store: State<Arc<Store>>) -> Vec<crate::store::Account> {
+    store.discover_accounts()
+}
+
+#[tauri::command]
+fn add_account(
+    label: String,
+    config_dir: String,
+    store: State<Arc<Store>>,
+) -> Result<crate::store::Account, String> {
+    store.add_account(label, config_dir)
+}
+
+#[tauri::command]
+fn remove_account(account_id: String, store: State<Arc<Store>>) {
+    store.remove_account(&account_id);
+}
+
+#[tauri::command]
+fn set_default_account(account_id: Option<String>, store: State<Arc<Store>>) {
+    store.set_default_account(account_id);
+}
+
+#[tauri::command]
+fn set_session_account(session_id: String, account_id: Option<String>, store: State<Arc<Store>>) {
+    store.set_session_account(&session_id, account_id);
 }
 
 #[tauri::command]
@@ -622,6 +666,13 @@ pub fn run() {
             rename_session,
             conductor_confirm_response,
             set_project_layout,
+            list_accounts,
+            get_default_account,
+            discover_accounts,
+            add_account,
+            remove_account,
+            set_default_account,
+            set_session_account,
             remove_session,
             suggest_session_name,
             git_branch,
