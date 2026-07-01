@@ -24,6 +24,15 @@ export interface Session {
   agent: AgentId;
   /** Optional; absent = "worker". The project's orchestrating Conductor is "conductor". */
   role?: SessionRole;
+  /** Registered Claude account id; absent = inherit the global default account. */
+  accountId?: string | null;
+}
+
+/** A registered Claude account (mirrors the Rust serde struct, camelCase). */
+export interface Account {
+  id: string;
+  label: string;
+  configDir: string;
 }
 
 export type TabKind = "session" | "file";
@@ -289,6 +298,16 @@ interface AppState {
   setTelemetryOptOut: (v: boolean) => void;
   loadAgents: () => Promise<void>;
 
+  // ---- Claude account registry (Feature 2) ----
+  accounts: Account[];
+  defaultAccount: string | null;
+  loadAccounts: () => Promise<void>;
+  discoverAccounts: () => Promise<Account[]>;
+  /** Returns an error string (duplicate / missing dir) or null on success. */
+  addAccount: (label: string, configDir: string) => Promise<string | null>;
+  removeAccount: (id: string) => Promise<void>;
+  setDefaultAccount: (id: string | null) => Promise<void>;
+
   // ---- MCP server registry ----
   mcpServers: McpServer[];
   mcpEnabled: Record<string, AgentId[]>;
@@ -388,6 +407,8 @@ export const useStore = create<AppState>((set, get) => {
     homeDir: null,
     agents: null,
     defaultAgent: readDefaultAgent(),
+    accounts: [],
+    defaultAccount: null,
     agentSetupComplete: localStorage.getItem(SETUP_DONE_KEY) === "1",
     telemetryOptOut: readTelemetryOptOut(),
 
@@ -400,20 +421,61 @@ export const useStore = create<AppState>((set, get) => {
     activeThemeId: resolveThemeId(readStoredPref(), systemPrefersDark()),
 
     load: async () => {
-      const [projects, home] = await Promise.all([
+      const [projects, home, accounts, defaultAccount] = await Promise.all([
         invoke<Project[]>("load_projects"),
         getHomeDir().catch(() => null),
+        invoke<Account[]>("list_accounts").catch(() => [] as Account[]),
+        invoke<string | null>("get_default_account").catch(() => null),
       ]);
       const layouts: Record<string, ProjectLayout> = {};
       for (const p of projects) {
         layouts[p.id] = validateLayout(p.layout ?? defaultLayout(p), p);
       }
-      set({ projects, homeDir: home, layouts, selectedProjectId: projects[0]?.id ?? null });
+      set({
+        projects,
+        homeDir: home,
+        layouts,
+        selectedProjectId: projects[0]?.id ?? null,
+        accounts,
+        defaultAccount,
+      });
     },
 
     setDefaultAgent: (id) => {
       localStorage.setItem(DEFAULT_AGENT_KEY, id);
       set({ defaultAgent: id });
+    },
+
+    loadAccounts: async () => {
+      const [accounts, defaultAccount] = await Promise.all([
+        invoke<Account[]>("list_accounts").catch(() => [] as Account[]),
+        invoke<string | null>("get_default_account").catch(() => null),
+      ]);
+      set({ accounts, defaultAccount });
+    },
+    discoverAccounts: async () => {
+      try {
+        return await invoke<Account[]>("discover_accounts");
+      } catch {
+        return [];
+      }
+    },
+    addAccount: async (label, configDir) => {
+      try {
+        await invoke<Account>("add_account", { label, configDir });
+      } catch (e) {
+        return String(e);
+      }
+      await get().loadAccounts();
+      return null;
+    },
+    removeAccount: async (id) => {
+      await invoke("remove_account", { accountId: id }).catch(() => {});
+      await get().loadAccounts();
+    },
+    setDefaultAccount: async (id) => {
+      await invoke("set_default_account", { accountId: id }).catch(() => {});
+      set({ defaultAccount: id });
     },
     completeAgentSetup: () => {
       localStorage.setItem(SETUP_DONE_KEY, "1");
