@@ -133,6 +133,27 @@ impl Store {
             eprintln!("conduit: failed to write state: {e}");
             return;
         }
+        // Rename over the target. On Windows a transient lock (AV scan / Search indexer /
+        // sync client) can make this fail with ERROR_SHARING_VIOLATION even though a POSIX
+        // rename-over-open never does; retry briefly before giving up. macOS/Linux keep the
+        // single-rename path so their behavior is unchanged.
+        #[cfg(windows)]
+        {
+            for attempt in 0..10 {
+                match fs::rename(&tmp, &self.save_path) {
+                    Ok(()) => return,
+                    Err(e) => {
+                        if attempt == 9 {
+                            let _ = fs::remove_file(&tmp);
+                            eprintln!("conduit: failed to persist state after retries: {e}");
+                        } else {
+                            std::thread::sleep(std::time::Duration::from_millis(20));
+                        }
+                    }
+                }
+            }
+        }
+        #[cfg(not(windows))]
         if let Err(e) = fs::rename(&tmp, &self.save_path) {
             eprintln!("conduit: failed to persist state: {e}");
         }
