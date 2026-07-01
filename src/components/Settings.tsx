@@ -2,8 +2,9 @@ import { useEffect, useState } from "react";
 import { AgentList } from "./AgentList";
 import { McpMatrix } from "./McpMatrix";
 import { TelemetryToggle } from "./TelemetryToggle";
+import { AboutPanel } from "./AboutPanel";
 
-type SettingsTab = "agents" | "mcp" | "privacy";
+type SettingsTab = "agents" | "mcp" | "privacy" | "about";
 
 export function Settings({ onClose }: { onClose: () => void }) {
   const [tab, setTab] = useState<SettingsTab>("agents");
@@ -54,6 +55,16 @@ export function Settings({ onClose }: { onClose: () => void }) {
             >
               Privacy
             </span>
+            <span
+              className={`settings-tab${tab === "about" ? " on" : ""}`}
+              role="tab"
+              aria-selected={tab === "about"}
+              tabIndex={tab === "about" ? 0 : -1}
+              onClick={() => setTab("about")}
+              onKeyDown={(e) => e.key === "Enter" && setTab("about")}
+            >
+              About
+            </span>
           </div>
           <button className="settings-close" onClick={onClose} aria-label="Close">✕</button>
         </div>
@@ -78,6 +89,7 @@ export function Settings({ onClose }: { onClose: () => void }) {
               <TelemetryToggle />
             </>
           )}
+          {tab === "about" && <AboutPanel />}
         </div>
       </div>
     </div>
