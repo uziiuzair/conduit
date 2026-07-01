@@ -1621,6 +1621,46 @@ button {
   font-variant-numeric: tabular-nums;
 }
 
+/* ---- Accounts manager ---- */
+.account-list {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.account-actions {
+  display: flex;
+  gap: 8px;
+}
+.account-remove {
+  flex-shrink: 0;
+  font-size: 11px;
+  color: var(--text-dim);
+  background: transparent;
+  border: 1px solid color-mix(in srgb, var(--text-dim) 40%, transparent);
+  border-radius: 6px;
+  padding: 3px 8px;
+  cursor: pointer;
+}
+.account-remove:hover {
+  color: var(--text-bright);
+  border-color: var(--text-mid);
+}
+.account-error {
+  font-size: 12px;
+  color: #e06c75;
+}
+.account-candidates {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.account-candidates-title {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-dim);
+}
+
 /* ---- Agent detection list (shared by Settings + Onboarding) ---- */
 .agent-list {
   display: flex;

@@ -3,8 +3,9 @@ import { AgentList } from "./AgentList";
 import { McpMatrix } from "./McpMatrix";
 import { TelemetryToggle } from "./TelemetryToggle";
 import { AboutPanel } from "./AboutPanel";
+import { AccountList } from "./AccountList";
 
-type SettingsTab = "agents" | "mcp" | "privacy" | "about";
+type SettingsTab = "agents" | "accounts" | "mcp" | "privacy" | "about";
 
 export function Settings({ onClose }: { onClose: () => void }) {
   const [tab, setTab] = useState<SettingsTab>("agents");
@@ -34,6 +35,16 @@ export function Settings({ onClose }: { onClose: () => void }) {
               onKeyDown={(e) => e.key === "Enter" && setTab("agents")}
             >
               Agents
+            </span>
+            <span
+              className={`settings-tab${tab === "accounts" ? " on" : ""}`}
+              role="tab"
+              aria-selected={tab === "accounts"}
+              tabIndex={tab === "accounts" ? 0 : -1}
+              onClick={() => setTab("accounts")}
+              onKeyDown={(e) => e.key === "Enter" && setTab("accounts")}
+            >
+              Accounts
             </span>
             <span
               className={`settings-tab${tab === "mcp" ? " on" : ""}`}
@@ -78,6 +89,7 @@ export function Settings({ onClose }: { onClose: () => void }) {
               <AgentList />
             </>
           )}
+          {tab === "accounts" && <AccountList />}
           {tab === "mcp" && <McpMatrix />}
           {tab === "privacy" && (
             <>
