@@ -525,6 +525,37 @@ fn open_in_vscode(dir: String) -> Result<(), String> {
     )
 }
 
+/// Open an http(s) URL in the user's default browser. Mirrors `open_in_vscode`'s
+/// shell-out approach (no `tauri-plugin-opener`/`shell` dependency): Windows via cmd's
+/// `start`, macOS via `open`, Linux via `xdg-open`. Only http(s) URLs are ever passed
+/// to the shell.
+#[tauri::command]
+fn open_external(url: String) -> Result<(), String> {
+    use std::process::Command;
+
+    if !(url.starts_with("https://") || url.starts_with("http://")) {
+        return Err("refusing to open a non-http(s) url".into());
+    }
+
+    #[cfg(windows)]
+    let res = {
+        let shell = std::env::var("ComSpec").unwrap_or_else(|_| "cmd.exe".to_string());
+        // The empty "" is `start`'s window-title arg; without it a quoted URL is treated
+        // as the title and nothing opens.
+        Command::new(shell).args(["/C", "start", "", &url]).status()
+    };
+    #[cfg(target_os = "macos")]
+    let res = Command::new("open").arg(&url).status();
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let res = Command::new("xdg-open").arg(&url).status();
+
+    match res {
+        Ok(s) if s.success() => Ok(()),
+        Ok(s) => Err(format!("opener exited with {s}")),
+        Err(e) => Err(format!("failed to launch opener: {e}")),
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -578,6 +609,7 @@ pub fn run() {
             read_file,
             notify_user,
             open_in_vscode,
+            open_external,
             claude_status::fetch_claude_status,
             claude_usage::fetch_claude_usage,
             claude_usage::connect_claude_plan_usage,
