@@ -33,6 +33,25 @@ use hooks::HookState;
 use pty::PtyManager;
 use store::{Project, ProjectLayout, Session, SessionRole, Store};
 
+/// Suppress the console window Windows flashes when a GUI app spawns a console child
+/// (`where`, `curl`, `git`, `cmd`, ...). Applies CREATE_NO_WINDOW on Windows; a no-op
+/// everywhere else. Not needed for PTY sessions — portable-pty's ConPTY is already
+/// headless. Apply to every `std::process::Command` before `output()`/`status()`/`spawn()`.
+pub(crate) trait NoWindow {
+    fn no_window(&mut self) -> &mut Self;
+}
+
+impl NoWindow for std::process::Command {
+    fn no_window(&mut self) -> &mut Self {
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            self.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+        }
+        self
+    }
+}
+
 // ---- Terminal / PTY commands -------------------------------------------------
 
 #[tauri::command]
@@ -307,6 +326,7 @@ fn claude_title(prompt: &str) -> Option<String> {
     // initializes and `claude` is on PATH even when Conduit was launched via pnpm.
     builder
         .env_remove("npm_config_prefix")
+        .no_window()
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
@@ -452,6 +472,7 @@ fn mcp_apply(
         std::process::Command::new(shell)
             .args(["/C", &cmd])
             .env_remove("npm_config_prefix")
+            .no_window()
             .output()
             .map_err(|e| format!("spawn {}: {e}", adapter.binary()))?
     };
@@ -461,6 +482,7 @@ fn mcp_apply(
         std::process::Command::new(shell)
             .args(["-i", "-l", "-c", &cmd])
             .env_remove("npm_config_prefix")
+            .no_window()
             .output()
             .map_err(|e| format!("spawn {}: {e}", adapter.binary()))?
     };
@@ -482,7 +504,7 @@ fn open_in_vscode(dir: String) -> Result<(), String> {
 
     if ran({
         let mut c = Command::new("code");
-        c.arg(&dir);
+        c.arg(&dir).no_window();
         c
     }) {
         return Ok(());
@@ -495,7 +517,7 @@ fn open_in_vscode(dir: String) -> Result<(), String> {
         let shell = std::env::var("ComSpec").unwrap_or_else(|_| "cmd.exe".to_string());
         if ran({
             let mut c = Command::new(shell);
-            c.args(["/C", "code", &dir]);
+            c.args(["/C", "code", &dir]).no_window();
             c
         }) {
             return Ok(());
@@ -539,10 +561,13 @@ fn open_external(url: String) -> Result<(), String> {
 
     #[cfg(windows)]
     let res = {
-        let shell = std::env::var("ComSpec").unwrap_or_else(|_| "cmd.exe".to_string());
-        // The empty "" is `start`'s window-title arg; without it a quoted URL is treated
-        // as the title and nothing opens.
-        Command::new(shell).args(["/C", "start", "", &url]).status()
+        // Use rundll32's URL handler rather than `cmd /C start`: cmd would re-parse query
+        // metacharacters (& | ^ < >) in the URL, truncating it and possibly running part
+        // of it as a command. rundll32 takes the URL as a single argument, no re-parse.
+        Command::new("rundll32")
+            .args(["url.dll,FileProtocolHandler", &url])
+            .no_window()
+            .status()
     };
     #[cfg(target_os = "macos")]
     let res = Command::new("open").arg(&url).status();

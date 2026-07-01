@@ -431,10 +431,12 @@ pub fn detect_agents() -> Vec<AgentInfo> {
     all_adapters()
         .iter()
         .map(|a| {
+            use crate::NoWindow;
             let bin = a.binary();
             let stdout = std::process::Command::new("where")
                 .arg(bin)
                 .env_remove("npm_config_prefix")
+                .no_window()
                 .output()
                 .ok()
                 .filter(|o| o.status.success())

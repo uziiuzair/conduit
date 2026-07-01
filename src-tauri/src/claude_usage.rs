@@ -191,6 +191,7 @@ fn fetch_plan(token: Option<String>) -> (Option<Vec<PlanWindow>>, String) {
         Some(t) if !t.is_empty() => t,
         _ => return (None, "disconnected".into()),
     };
+    use crate::NoWindow;
     let out = Command::new("curl")
         .args([
             "-s",
@@ -200,6 +201,7 @@ fn fetch_plan(token: Option<String>) -> (Option<Vec<PlanWindow>>, String) {
             &format!("Authorization: Bearer {token}"),
             USAGE_ENDPOINT,
         ])
+        .no_window()
         .output();
     match out {
         Ok(o) if o.status.success() => {
