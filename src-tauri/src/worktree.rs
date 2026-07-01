@@ -5,6 +5,8 @@
 use std::path::Path;
 use std::process::Command;
 
+use crate::NoWindow;
+
 /// A filesystem/branch-safe slug: lowercase ASCII alnum with single hyphens, plus a
 /// short uid suffix so two sessions with the same name don't collide. Matches the
 /// `<slug>` Claude turns into `.claude/worktrees/<slug>` and branch `worktree-<slug>`.
@@ -67,6 +69,7 @@ pub fn is_dirty(worktree_path: &str) -> bool {
     match Command::new("git")
         .args(["status", "--porcelain"])
         .current_dir(worktree_path)
+        .no_window()
         .output()
     {
         Ok(o) if o.status.success() => !o.stdout.is_empty(),
@@ -86,6 +89,7 @@ pub fn remove(repo_path: &str, worktree_path: &str, force: bool) -> Result<(), S
     let out = Command::new("git")
         .args(&args)
         .current_dir(repo_path)
+        .no_window()
         .output()
         .map_err(|e| format!("git worktree remove: {e}"))?;
     if out.status.success() {

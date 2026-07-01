@@ -121,7 +121,9 @@ fn should_send(opt_out: bool) -> bool {
 fn send(body: &str) {
     let url =
         format!("{MP_ENDPOINT}?measurement_id={GA4_MEASUREMENT_ID}&api_secret={GA4_API_SECRET}");
+    use crate::NoWindow;
     let _ = Command::new("curl")
+        .no_window()
         .args([
             "-s",
             "--max-time",
