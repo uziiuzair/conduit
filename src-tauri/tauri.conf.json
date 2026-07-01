@@ -28,8 +28,10 @@
   "bundle": {
     "active": true,
     "targets": ["app"],
+    "publisher": "Ooozzy",
+    "homepage": "https://ooozzy.com",
     "category": "DeveloperTool",
-    "copyright": "© 2026 Conduit",
+    "copyright": "© 2026 Ooozzy (Uzair Hayat)",
     "shortDescription": "Run multiple real Claude Code terminals across projects.",
     "longDescription": "Conduit is a native-feeling desktop app for running multiple real `claude` CLI sessions across your projects — each in a live terminal, with a file tree, git graph, and per-session to-dos driven by Claude Code hooks.",
     "icon": [
