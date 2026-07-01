@@ -321,7 +321,12 @@ mod tests {
             .unwrap();
         assert!(s.use_worktree);
         let path = s.worktree_path.unwrap();
-        assert!(path.starts_with("/repo/.claude/worktrees/"), "got {path}");
+        // Normalize separators so this holds on Windows (`\`) too; the path is built with
+        // `Path::join` (native separator).
+        assert!(
+            path.replace('\\', "/").starts_with("/repo/.claude/worktrees/"),
+            "got {path}"
+        );
         assert!(s.branch.unwrap().starts_with("worktree-"));
     }
 

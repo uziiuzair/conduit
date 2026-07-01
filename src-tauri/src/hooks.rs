@@ -439,12 +439,30 @@ pub fn write_settings_file(port: u16) -> Option<String> {
 /// A command hook that pipes the event JSON (stdin) to Conduit's server, tagged
 /// with this session via env vars resolved at run time.
 fn command(event: &str, port: u16) -> Value {
-    let url = format!(
-        "http://127.0.0.1:${{CONDUIT_HOOK_PORT:-{port}}}/hook?session=${{CONDUIT_SESSION_ID:-unknown}}&event={event}"
-    );
-    let cmd = format!(
-        "curl -s -m 2 -X POST -H \"Content-Type: application/json\" --data-binary @- \"{url}\" >/dev/null 2>&1 || true"
-    );
+    // On Windows, claude runs hook commands via cmd.exe, which cannot parse POSIX
+    // `${VAR:-default}` / `>/dev/null` / `|| true`. Emit a cmd-native equivalent: bake the
+    // live port (install_profile rewrites this file with the current port on every spawn),
+    // expand the session via `%CONDUIT_SESSION_ID%`, redirect to NUL, and swallow errors
+    // with `|| ver >NUL` (cmd's `|| true`). The literal substring CONDUIT_SESSION_ID keeps
+    // `is_conduit_entry` idempotency matching. Elsewhere keep the POSIX form.
+    #[cfg(windows)]
+    let cmd = {
+        let url = format!(
+            "http://127.0.0.1:{port}/hook?session=%CONDUIT_SESSION_ID%&event={event}"
+        );
+        format!(
+            "curl -s -m 2 -X POST -H \"Content-Type: application/json\" --data-binary @- \"{url}\" >NUL 2>&1 || ver >NUL"
+        )
+    };
+    #[cfg(not(windows))]
+    let cmd = {
+        let url = format!(
+            "http://127.0.0.1:${{CONDUIT_HOOK_PORT:-{port}}}/hook?session=${{CONDUIT_SESSION_ID:-unknown}}&event={event}"
+        );
+        format!(
+            "curl -s -m 2 -X POST -H \"Content-Type: application/json\" --data-binary @- \"{url}\" >/dev/null 2>&1 || true"
+        )
+    };
     json!({ "type": "command", "command": cmd })
 }
 

@@ -116,8 +116,10 @@ mod tests {
 
     #[test]
     fn worktree_path_is_deterministic() {
+        // Normalize separators so the assertion holds on Windows (`\`) too -- the path is
+        // built with `Path::join`, which is native-separator by design.
         assert_eq!(
-            worktree_path("/repo", "feature-x"),
+            worktree_path("/repo", "feature-x").replace('\\', "/"),
             "/repo/.claude/worktrees/feature-x"
         );
     }
