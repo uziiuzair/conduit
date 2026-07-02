@@ -5,8 +5,16 @@ import { TelemetryToggle } from "./TelemetryToggle";
 import { AboutPanel } from "./AboutPanel";
 import { AccountList } from "./AccountList";
 import { TrustPanel } from "./TrustPanel";
+import { OpenCodePanel } from "./OpenCodePanel";
 
-export type SettingsTab = "agents" | "accounts" | "mcp" | "security" | "privacy" | "about";
+export type SettingsTab =
+  | "agents"
+  | "accounts"
+  | "mcp"
+  | "localmodels"
+  | "security"
+  | "privacy"
+  | "about";
 
 export function Settings({
   onClose,
@@ -64,6 +72,16 @@ export function Settings({
               MCP servers
             </span>
             <span
+              className={`settings-tab${tab === "localmodels" ? " on" : ""}`}
+              role="tab"
+              aria-selected={tab === "localmodels"}
+              tabIndex={tab === "localmodels" ? 0 : -1}
+              onClick={() => setTab("localmodels")}
+              onKeyDown={(e) => e.key === "Enter" && setTab("localmodels")}
+            >
+              Local models
+            </span>
+            <span
               className={`settings-tab${tab === "security" ? " on" : ""}`}
               role="tab"
               aria-selected={tab === "security"}
@@ -108,6 +126,16 @@ export function Settings({
           )}
           {tab === "accounts" && <AccountList />}
           {tab === "mcp" && <McpMatrix />}
+          {tab === "localmodels" && (
+            <>
+              <p className="settings-intro">
+                Got a local GPU? Route OpenCode sessions to Ollama, LM Studio, vLLM, llama.cpp,
+                OpenWebUI, or any OpenAI-compatible endpoint — and pick the model and context
+                right here.
+              </p>
+              <OpenCodePanel />
+            </>
+          )}
           {tab === "security" && (
             <>
               <p className="settings-intro">

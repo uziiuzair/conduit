@@ -15,6 +15,7 @@ mod fsops;
 mod git;
 mod hookbus;
 mod hooks;
+mod local_llm;
 mod menu;
 mod notify;
 mod pty;
@@ -111,6 +112,20 @@ fn pty_spawn(
     let suppress_remote =
         !shell_only && store.is_private_mode() && store.is_session_siloed(&session_id);
 
+    // Feature 3: route an OpenCode session to the configured local/self-hosted provider.
+    // None (feature off / not an OpenCode session / settings incomplete) spawns untouched.
+    // Pinning (`enabled_providers: ["conduit"]`) applies globally by user choice, or is
+    // forced for a local-only (siloed) session under private mode — the "guaranteed local
+    // model" half of the Feature 4 silo.
+    let opencode = if !shell_only && agent == crate::agent::AgentId::OpenCode {
+        let settings = store.opencode_settings();
+        let pin = settings.pin_local
+            || (store.is_private_mode() && store.is_session_local_only(&session_id));
+        crate::agent::build_opencode_config(&settings, store.opencode_key().as_deref(), pin)
+    } else {
+        None
+    };
+
     let (cwd, worktree_arg, settings_path) = if shell_only {
         (working_directory.clone(), None, None)
     } else if worktree_name.is_some() && adapter.supports_worktree() {
@@ -149,6 +164,7 @@ fn pty_spawn(
         account_config_dir,
         agent,
         suppress_remote,
+        opencode,
         on_event,
     )
 }
@@ -320,6 +336,36 @@ fn set_session_trust(
 #[tauri::command]
 fn scan_sensitivity(text: String) -> Vec<crate::store::SensitivityHit> {
     crate::store::scan_sensitivity(&text)
+}
+
+// ---- OpenCode local provider (Feature 3: local GPU / self-hosted endpoint) -----
+
+#[tauri::command]
+fn get_opencode_settings(store: State<Arc<Store>>) -> crate::store::OpenCodeSettings {
+    store.opencode_settings()
+}
+
+#[tauri::command]
+fn set_opencode_settings(settings: crate::store::OpenCodeSettings, store: State<Arc<Store>>) {
+    store.set_opencode_settings(settings);
+}
+
+/// Hold the endpoint API key in memory for this app run. An empty/blank key clears it.
+/// Deliberately NOT persisted anywhere; it reaches an `opencode` child only via its env.
+#[tauri::command]
+fn set_opencode_key(key: String, store: State<Arc<Store>>) {
+    store.set_opencode_key(Some(key));
+}
+
+#[tauri::command]
+fn clear_opencode_key(store: State<Arc<Store>>) {
+    store.set_opencode_key(None);
+}
+
+/// Whether a key is currently held (the UI shows set/not-set, never the key itself).
+#[tauri::command]
+fn opencode_key_set(store: State<Arc<Store>>) -> bool {
+    store.opencode_key().is_some()
 }
 
 #[tauri::command]
@@ -762,6 +808,13 @@ pub fn run() {
             set_trust_settings,
             set_session_trust,
             scan_sensitivity,
+            get_opencode_settings,
+            set_opencode_settings,
+            set_opencode_key,
+            clear_opencode_key,
+            opencode_key_set,
+            local_llm::detect_local_providers,
+            local_llm::list_local_models,
             remove_session,
             suggest_session_name,
             git_branch,
