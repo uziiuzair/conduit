@@ -248,6 +248,20 @@ export function currentTerminalTheme(): ITheme {
   return THEMES[currentId].terminal;
 }
 
+// ---- Monaco theme bridge ----
+// Registered lazily by monaco/setup.ts initMonaco so themes.ts never imports monaco
+// (avoids a themes.ts -> monaco cycle at boot). Null until Monaco is loaded.
+let monacoThemeSetter: ((id: ThemeId) => void) | null = null;
+
+export function registerMonacoThemeSetter(fn: (id: ThemeId) => void): void {
+  monacoThemeSetter = fn;
+}
+
+/** The currently-applied theme id (used by initMonaco to set Monaco's theme at boot). */
+export function currentThemeId(): ThemeId {
+  return currentId;
+}
+
 // ---- the one mutation that recolors the whole app ----
 export function applyTheme(id: ThemeId): void {
   const theme = THEMES[id];
@@ -261,4 +275,6 @@ export function applyTheme(id: ThemeId): void {
     term.options.theme = theme.terminal;
     term.refresh(0, term.rows - 1);
   }
+  // Recolor the Monaco editors too — one global setTheme, guarded until Monaco loads.
+  monacoThemeSetter?.(id);
 }
