@@ -3,44 +3,59 @@ import { useStore } from "../store";
 
 const REPO_RELEASES = "https://github.com/uziiuzair/conduit/releases/latest";
 
+function openReleaseNotes() {
+  void invoke("open_external", { url: REPO_RELEASES }).catch(() => {});
+}
+
 /**
- * Non-blocking "update available / downloading" banner. Rendered as a plain
- * overlay sibling in App — never wraps the terminal stack (that would kill live
- * PTYs). Installing relaunches Conduit, which the copy states explicitly.
+ * Non-blocking "update available / downloading / failed" banner. Rendered as a
+ * plain fixed-position overlay sibling in App — never wraps the terminal stack
+ * (that would kill live PTYs). Installing relaunches Conduit, which the copy
+ * states explicitly.
  */
 export function UpdateNotice() {
   const info = useStore((s) => s.updateInfo);
   const phase = useStore((s) => s.updatePhase);
   const progress = useStore((s) => s.updateProgress);
+  const error = useStore((s) => s.updateError);
   const install = useStore((s) => s.installUpdate);
   const dismiss = useStore((s) => s.dismissUpdate);
 
-  // Only show when there's an available update (or it's mid-download).
-  if (!info || (phase !== "available" && phase !== "downloading")) return null;
+  // Show only when there's a pending update to act on: available, mid-download,
+  // or a failed install the user can retry.
+  if (!info || (phase !== "available" && phase !== "downloading" && phase !== "error")) {
+    return null;
+  }
 
   const downloading = phase === "downloading";
+  const errored = phase === "error";
   const pct = Math.round(progress * 100);
 
   return (
-    <div className="update-notice" role="dialog" aria-live="polite">
+    <div className="update-notice" role="status" aria-label="Software update">
       <div className="update-notice-body">
         <div className="update-notice-title">
-          Conduit {info.version} is available
+          {errored
+            ? `Couldn't update to Conduit ${info.version}`
+            : `Conduit ${info.version} is available`}
         </div>
         <div className="update-notice-sub">
-          Installing restarts Conduit and ends running agent sessions.{" "}
-          <span
-            className="update-notice-link"
-            role="link"
-            tabIndex={0}
-            onClick={() => void invoke("open_external", { url: REPO_RELEASES }).catch(() => {})}
-            onKeyDown={(e) =>
-              e.key === "Enter" &&
-              void invoke("open_external", { url: REPO_RELEASES }).catch(() => {})
-            }
-          >
-            Release notes
-          </span>
+          {errored ? (
+            <>Update failed{error ? `: ${error}` : ""}. You can try again.</>
+          ) : (
+            <>
+              Installing restarts Conduit and ends running agent sessions.{" "}
+              <span
+                className="update-notice-link"
+                role="link"
+                tabIndex={0}
+                onClick={openReleaseNotes}
+                onKeyDown={(e) => e.key === "Enter" && openReleaseNotes()}
+              >
+                Release notes
+              </span>
+            </>
+          )}
         </div>
       </div>
       {downloading ? (
@@ -53,7 +68,7 @@ export function UpdateNotice() {
             Later
           </button>
           <button className="update-notice-install" onClick={() => void install()}>
-            Install &amp; Relaunch
+            {errored ? "Retry" : "Install & Relaunch"}
           </button>
         </div>
       )}

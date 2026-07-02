@@ -22,6 +22,7 @@ export function useUpdater(): void {
 
     const start = () => {
       if (interval != null) return;
+      tick(); // check immediately on (re)start, mirroring useClaudeAmbient
       interval = setInterval(tick, CHECK_INTERVAL_MS);
     };
     const stop = () => {
@@ -36,12 +37,13 @@ export function useUpdater(): void {
       else start();
     };
 
+    // Defer the first check so startup isn't blocked; then poll while visible,
+    // paused while hidden. No check ever fires while the window is hidden.
     launchTimer = setTimeout(() => {
-      tick();
       if (!document.hidden) start();
     }, LAUNCH_DELAY_MS);
-
     document.addEventListener("visibilitychange", onVisibility);
+
     return () => {
       document.removeEventListener("visibilitychange", onVisibility);
       if (launchTimer != null) clearTimeout(launchTimer);

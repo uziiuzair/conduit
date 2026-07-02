@@ -2205,10 +2205,10 @@ button {
   width: 340px;
   padding: 14px 16px;
   border-radius: 10px;
-  background: var(--panel, #1a1b26);
-  border: 1px solid var(--border, #2a2c3a);
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
-  color: var(--text, #c0caf5);
+  background: var(--sidebar-bg);
+  border: 1px solid var(--border);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
+  color: var(--text-bright);
 }
 .update-notice-title {
   font-weight: 600;
@@ -2217,11 +2217,11 @@ button {
 .update-notice-sub {
   margin-top: 4px;
   font-size: 12px;
-  opacity: 0.8;
+  color: var(--text-mid);
   line-height: 1.4;
 }
 .update-notice-link {
-  color: var(--accent, #7aa2f7);
+  color: var(--accent);
   cursor: pointer;
   text-decoration: underline;
 }
@@ -2237,26 +2237,26 @@ button {
   padding: 6px 12px;
   border-radius: 6px;
   cursor: pointer;
-  border: 1px solid var(--border, #2a2c3a);
+  border: 1px solid var(--border);
   background: transparent;
-  color: var(--text, #c0caf5);
+  color: var(--text-bright);
 }
 .update-notice-install {
-  background: var(--accent, #7aa2f7);
-  border-color: var(--accent, #7aa2f7);
-  color: #0b0d16;
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--panel-bg);
   font-weight: 600;
 }
 .update-notice-progress {
   margin-top: 12px;
   height: 6px;
   border-radius: 3px;
-  background: var(--border, #2a2c3a);
+  background: var(--border);
   overflow: hidden;
 }
 .update-notice-progress-fill {
   height: 100%;
-  background: var(--accent, #7aa2f7);
+  background: var(--accent);
   transition: width 0.15s ease;
 }
 
@@ -2270,9 +2270,9 @@ button {
   padding: 4px 10px;
   border-radius: 6px;
   cursor: pointer;
-  border: 1px solid var(--border, #2a2c3a);
+  border: 1px solid var(--border);
   background: transparent;
-  color: var(--text, #c0caf5);
+  color: var(--text-bright);
 }
 .about-check-btn:disabled {
   opacity: 0.5;
@@ -2280,5 +2280,5 @@ button {
 }
 .about-update-status {
   font-size: 12px;
-  opacity: 0.75;
+  color: var(--text-mid);
 }
