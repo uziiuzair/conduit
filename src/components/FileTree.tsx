@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type MouseEvent } from "react";
+import { useEffect, useRef, useState, type DragEvent, type MouseEvent } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { ask } from "@tauri-apps/plugin-dialog";
 import { useStore, activeGroup, baseName, parentDir } from "../store";
@@ -30,6 +30,11 @@ interface TreeCtx {
   cancelCreate: () => void;
   commitRename: (from: string, name: string) => void;
   cancelRename: () => void;
+  dropTarget: string | null;
+  onRowDragStart: (e: DragEvent, path: string) => void;
+  onRowDragEnd: () => void;
+  onRowDragOver: (e: DragEvent, targetDir: string) => void;
+  onRowDrop: (e: DragEvent, targetDir: string) => void;
 }
 
 export function FileTree({
@@ -53,6 +58,10 @@ export function FileTree({
   const [menu, setMenu] = useState<Menu>(null);
   const [pending, setPending] = useState<Pending>(null);
   const [renaming, setRenaming] = useState<string | null>(null);
+  // Drag source is a ref (no re-render needed to read it); drop target is state
+  // (drives the `.drop-target` highlight on the hovered row).
+  const dragPathRef = useRef<string | null>(null);
+  const [dropTarget, setDropTarget] = useState<string | null>(null);
 
   // Show "Loading…" only when the root itself changes — NOT on a dirVersion bump.
   useEffect(() => {
@@ -152,6 +161,46 @@ export function FileTree({
     setMenu({ x: e.clientX, y: e.clientY, entry });
   };
 
+  // A drop into `targetDir` is refused when it would be a no-op (already there),
+  // drop a folder onto itself, or drop a folder into its own descendant.
+  const isValidDropTarget = (dragPath: string | null, targetDir: string): boolean => {
+    if (!dragPath) return false;
+    if (targetDir === parentDir(dragPath)) return false;
+    if (targetDir === dragPath || targetDir.startsWith(dragPath + "/")) return false;
+    return true;
+  };
+
+  const onRowDragStart = (e: DragEvent, path: string) => {
+    dragPathRef.current = path;
+    e.dataTransfer.effectAllowed = "move";
+    e.dataTransfer.setData("text/plain", path);
+  };
+
+  const onRowDragEnd = () => {
+    dragPathRef.current = null;
+    setDropTarget(null);
+  };
+
+  // Shared by every row AND the root container (called with targetDir = rootDir).
+  // Always stops propagation so a row "owns" its hover position — an invalid row
+  // must not fall through to the root's own (possibly valid) target.
+  const onRowDragOver = (e: DragEvent, targetDir: string) => {
+    e.stopPropagation();
+    if (!isValidDropTarget(dragPathRef.current, targetDir)) return;
+    e.preventDefault();
+    setDropTarget(targetDir);
+  };
+
+  const onRowDrop = (e: DragEvent, targetDir: string) => {
+    e.preventDefault();
+    e.stopPropagation();
+    const dragPath = dragPathRef.current;
+    dragPathRef.current = null;
+    setDropTarget(null);
+    if (!isValidDropTarget(dragPath, targetDir)) return;
+    void renamePath(projectId, dragPath as string, joinPath(targetDir, baseName(dragPath as string)));
+  };
+
   const ctx: TreeCtx = {
     activePath,
     expanded,
@@ -164,10 +213,20 @@ export function FileTree({
     cancelCreate: () => setPending(null),
     commitRename,
     cancelRename: () => setRenaming(null),
+    dropTarget,
+    onRowDragStart,
+    onRowDragEnd,
+    onRowDragOver,
+    onRowDrop,
   };
 
   return (
-    <div className="file-tree" onContextMenu={(e) => onContext(e, null)}>
+    <div
+      className="file-tree"
+      onContextMenu={(e) => onContext(e, null)}
+      onDragOver={(e) => onRowDragOver(e, rootDir)}
+      onDrop={(e) => onRowDrop(e, rootDir)}
+    >
       {entries === null ? (
         <p className="placeholder">Loading…</p>
       ) : entries.length === 0 && pending?.parentDir !== rootDir ? (
@@ -247,11 +306,21 @@ function TreeEntry({
     );
   }
 
+  // Drop onto a folder lands inside it; drop onto a file lands beside it (its parent).
+  const dropTargetDir = entry.isDir ? entry.path : parentDir(entry.path);
+
   return (
     <>
       <div
-        className={`tree-row ${!entry.isDir && ctx.activePath === entry.path ? "active" : ""}`}
+        className={`tree-row ${!entry.isDir && ctx.activePath === entry.path ? "active" : ""} ${
+          entry.isDir && ctx.dropTarget === entry.path ? "drop-target" : ""
+        }`}
         style={{ paddingLeft: 8 + depth * 13 }}
+        draggable
+        onDragStart={(e) => ctx.onRowDragStart(e, entry.path)}
+        onDragEnd={ctx.onRowDragEnd}
+        onDragOver={(e) => ctx.onRowDragOver(e, dropTargetDir)}
+        onDrop={(e) => ctx.onRowDrop(e, dropTargetDir)}
         onClick={rowClick}
         onContextMenu={(e) => ctx.onContext(e, entry)}
         title={entry.name}
