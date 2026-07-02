@@ -76,14 +76,6 @@ export const ChevronRightIcon = ({ size = 12, className }: P) =>
 export const CloseIcon = ({ size = 12, className }: P) =>
   svg(size, className, <path d="M6 6l12 12M18 6l-12 12" />);
 
-export const SplitIcon = ({ size = 12, className }: P) =>
-  svg(size, className, (
-    <>
-      <rect x="3" y="4" width="18" height="16" rx="2" />
-      <path d="M12 4v16" />
-    </>
-  ));
-
 export const ClockIcon = ({ size = 12, className }: P) =>
   svg(size, className, (
     <>
