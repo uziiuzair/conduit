@@ -1858,6 +1858,95 @@ button {
   color: var(--text);
 }
 
+/* ---- OpenCode local-provider panel (Settings -> Local models) ---- */
+.oc-section {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  border-top: 1px solid var(--border);
+  padding-top: 12px;
+}
+.oc-section .section-label {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+.oc-detect {
+  font-size: 11px;
+  padding: 2px 10px;
+}
+.oc-presets {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.oc-preset {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  padding: 4px 10px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--text-mid);
+  cursor: pointer;
+}
+.oc-preset.on {
+  border-color: var(--accent, #7aa2f7);
+  color: var(--text-bright);
+  background: color-mix(in srgb, var(--accent, #7aa2f7) 12%, transparent);
+}
+.oc-preset-detail {
+  color: var(--text-mid);
+  font-size: 10px;
+}
+.oc-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: color-mix(in srgb, var(--text-mid) 40%, transparent);
+}
+.oc-dot.up {
+  background: #4fbf6f;
+}
+.oc-row {
+  display: flex;
+  align-items: flex-end;
+  gap: 8px;
+}
+.oc-field {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  flex: 1;
+}
+.oc-field > span {
+  font-size: 11px;
+  color: var(--text-mid);
+}
+.oc-field input {
+  font-size: 12px;
+  padding: 6px 8px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: var(--bg-elevated, var(--bg));
+  color: var(--text);
+  font-family: var(--font-mono, monospace);
+}
+.oc-field.oc-num {
+  flex: 0 0 110px;
+}
+.oc-model-select {
+  width: 100%;
+  font-size: 12px;
+  padding: 6px 8px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: var(--bg-elevated, var(--bg));
+  color: var(--text);
+}
+
 /* ---- About panel ---- */
 .about-panel {
   display: flex;
