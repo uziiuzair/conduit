@@ -336,3 +336,20 @@ the read-contract fixes.
   project's testing-reality rule — Phase 2 specifically against a live `claude` agent editing an
   open file. Dev runs use `CONDUIT_DATA_DIR_NAME=ConduitTauri-dev` to avoid clobbering the
   installed app's state.
+
+## 16. Post-spike change requests (2026-07-02)
+
+The Phase 0 spike passed (offline packaged load, Monarch highlighting parity, live theme
+switching, `editor.worker` loads with Wi-Fi off). Three refinements, folded into implementation:
+
+1. **Top padding** — Monaco `padding: { top: 12, bottom: 6 }` in the editor pane so line 1 clears
+   the breadcrumb divider.
+2. **Interactive language selector** — **supersedes** the passive breadcrumb label in §9: the
+   breadcrumb language becomes a clickable, VSCode-like dropdown (searchable list of Monaco
+   languages) that applies `setModelLanguage` to the current file. Session-scoped override;
+   `languageFor()` still sets the initial language. Default placement: right-aligned in the top
+   breadcrumb (can move to a bottom status bar if preferred).
+3. **Open-from-tree** — already in scope (Task 7); confirmed the `FileTree` click → `openFile`
+   wiring exists (`onOpen={(p) => openFile(projectId, p)}`).
+
+**Locked:** slim `editor.api` import (full-`monaco-editor` fallback not needed).
