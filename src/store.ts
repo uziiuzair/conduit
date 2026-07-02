@@ -407,6 +407,16 @@ interface AppState {
   setGroupWeights: (projectId: string, weights: number[]) => void;
   openFile: (projectId: string, path: string) => void;
 
+  // ---- Phase 3: file-tree CRUD (all non-persisted) ----
+  /** dirPath -> bump counter; a FileTree entry re-lists when its counter changes. */
+  dirVersion: Record<string, number>;
+  /** Increment the counter for one directory so only that folder re-lists. */
+  bumpDir: (dirPath: string) => void;
+  /** Rename/move on disk; blocks a dirty open buffer; reconciles a clean open tab. */
+  renamePath: (projectId: string, from: string, to: string) => Promise<void>;
+  /** Permanent delete on disk; blocks a dirty open buffer; closes a clean open tab. */
+  deletePath: (projectId: string, path: string) => Promise<void>;
+
   // ---- editor buffer state (Monaco) — NON-PERSISTED ----
   /** absPath -> dirty; reactive mirror of registry.dirtyOf (delete key when false). */
   dirty: Record<string, boolean>;
@@ -466,6 +476,7 @@ export const useStore = create<AppState>((set, get) => {
     selectedProjectId: null,
     layouts: {},
     live: {},
+    dirVersion: {},
     pendingPrompts: {},
     dirty: {},
     conflict: {},
@@ -770,6 +781,71 @@ export const useStore = create<AppState>((set, get) => {
       if (!already) registry.acquire(path);
     },
 
+    bumpDir: (dirPath) =>
+      set((s) => ({
+        dirVersion: { ...s.dirVersion, [dirPath]: (s.dirVersion[dirPath] ?? 0) + 1 },
+      })),
+
+    renamePath: async (projectId, from, to) => {
+      // Block: a dirty open buffer must be saved or discarded first.
+      if (get().dirty[from]) {
+        void invoke("notify_user", {
+          title: "Conduit",
+          body: "Save or discard changes before renaming this file.",
+        }).catch(() => {});
+        return;
+      }
+      try {
+        await invoke("rename_path", { from, to });
+      } catch (e) {
+        void invoke("notify_user", { title: "Conduit", body: String(e) }).catch(() => {});
+        return;
+      }
+      // If `from` is a (clean) open file tab: close old + release its model, open new.
+      const layout = get().layouts[projectId];
+      const g = layout?.groups.find((gr) =>
+        gr.tabs.some((t) => t.kind === "file" && t.ref === from),
+      );
+      if (g) {
+        get().closeTab(projectId, g.id, from);
+        registry.release(from);
+        registry.disposeIfUnreferenced(from);
+        get().openFile(projectId, to);
+      }
+      // Re-list only the affected folder(s).
+      get().bumpDir(parentDir(from));
+      const toParent = parentDir(to);
+      if (toParent !== parentDir(from)) get().bumpDir(toParent);
+    },
+
+    deletePath: async (projectId, path) => {
+      // Block: a dirty open buffer must be saved or discarded first.
+      if (get().dirty[path]) {
+        void invoke("notify_user", {
+          title: "Conduit",
+          body: "Save or discard changes before deleting this file.",
+        }).catch(() => {});
+        return;
+      }
+      try {
+        await invoke("delete_path", { path });
+      } catch (e) {
+        void invoke("notify_user", { title: "Conduit", body: String(e) }).catch(() => {});
+        return;
+      }
+      // Close a clean open tab for the deleted file + release its model.
+      const layout = get().layouts[projectId];
+      const g = layout?.groups.find((gr) =>
+        gr.tabs.some((t) => t.kind === "file" && t.ref === path),
+      );
+      if (g) {
+        get().closeTab(projectId, g.id, path);
+        registry.release(path);
+        registry.disposeIfUnreferenced(path);
+      }
+      get().bumpDir(parentDir(path));
+    },
+
     setDirty: (path, dirty) =>
       set((s) => {
         const next = { ...s.dirty };
@@ -986,6 +1062,13 @@ export function prettyPath(path: string, home: string | null): string {
 export function baseName(path: string): string {
   const parts = path.replace(/\/+$/, "").split("/");
   return parts[parts.length - 1] || path;
+}
+
+/** Parent directory of an absolute path (no trailing slash). Root stays "/". */
+export function parentDir(path: string): string {
+  const p = path.replace(/\/+$/, "");
+  const i = p.lastIndexOf("/");
+  return i <= 0 ? "/" : p.slice(0, i);
 }
 
 /** Open a directory in VS Code (Rust handles the launch + fallbacks). */
