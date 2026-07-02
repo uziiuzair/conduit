@@ -20,6 +20,7 @@ mod pty;
 mod store;
 mod telemetry;
 mod transcript;
+mod updates;
 mod worktree;
 
 use std::path::Path;
@@ -691,6 +692,7 @@ pub fn run() {
             claude_usage::connect_claude_plan_usage,
             mcp_apply,
             telemetry::telemetry_ping,
+            updates::update_should_notify,
         ])
         .build(tauri::generate_context!())
         .expect("error while building Conduit")
