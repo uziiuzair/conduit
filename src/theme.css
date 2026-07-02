@@ -1041,6 +1041,59 @@ button {
   color: var(--term-fg);
 }
 
+/* ---- Code editor pane (Monaco) ---- */
+.code-pane {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  background: var(--panel-bg);
+}
+.code-pane.hidden {
+  visibility: hidden;
+  z-index: 0;
+}
+.code-pane.visible {
+  visibility: visible;
+  z-index: 1;
+}
+.code-breadcrumb {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 3px 12px;
+  font-size: 11px;
+  color: var(--text-mid);
+  border-bottom: 1px solid var(--border);
+}
+.code-crumb-name {
+  color: var(--text-bright);
+}
+.code-crumb-lang {
+  color: var(--text-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  font-size: 10px;
+}
+.code-banner {
+  flex: 0 0 auto;
+  padding: 4px 12px;
+  font-size: 11px;
+  color: var(--amber);
+  background: var(--pill-needs-bg);
+}
+.code-banner.error {
+  color: var(--red);
+}
+.code-host {
+  flex: 1 1 auto;
+  min-height: 0;
+}
+.code-host.empty {
+  display: none;
+}
+
 /* ---- Right column (split panels) ---- */
 .right-col {
   width: var(--right-w, 340px);
