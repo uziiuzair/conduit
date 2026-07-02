@@ -246,6 +246,24 @@ pub fn write_file(path: &str, content: &str) -> Result<FileStat, String> {
     })
 }
 
+/// Stat a path for the file watcher. Infallible: any error (missing file,
+/// permission denied, broken symlink) reports exists=false with zeroed fields.
+/// std::fs only — polled ~1500ms (visibility-gated) by useFileWatch.
+pub fn stat_file(path: &str) -> FileStat {
+    match fs::metadata(path) {
+        Ok(meta) => FileStat {
+            mtime_ms: mtime_ms_of(&meta),
+            size: meta.len(),
+            exists: true,
+        },
+        Err(_) => FileStat {
+            mtime_ms: 0.0,
+            size: 0,
+            exists: false,
+        },
+    }
+}
+
 // ---- Mutating ops (std::fs only; guarded, no clobber) -----------------------
 
 /// Create an empty file. Errors if the target already exists (no clobber).
@@ -406,6 +424,24 @@ mod tests {
         let res = write_file(p.to_str().unwrap(), "data");
         assert!(res.is_err());
         fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn stat_file_reports_existing_and_missing() {
+        // Real file: exists=true, size == bytes written, mtime_ms populated.
+        let p = std::env::temp_dir().join(format!("conduit-stat-{}.txt", std::process::id()));
+        std::fs::write(&p, b"hello").unwrap();
+        let s = stat_file(p.to_str().unwrap());
+        assert!(s.exists);
+        assert_eq!(s.size, 5);
+        assert!(s.mtime_ms > 0.0);
+
+        // Missing path: exists=false with zeroed fields.
+        std::fs::remove_file(&p).unwrap();
+        let gone = stat_file(p.to_str().unwrap());
+        assert!(!gone.exists);
+        assert_eq!(gone.size, 0);
+        assert_eq!(gone.mtime_ms, 0.0);
     }
 }
 
