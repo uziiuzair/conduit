@@ -1,4 +1,4 @@
-export type AgentId = "claude" | "codex" | "gemini" | "opencode";
+export type AgentId = "claude" | "codex" | "gemini" | "opencode" | "antigravity";
 
 export interface AgentMeta {
   id: AgentId;
@@ -18,6 +18,7 @@ export const AGENTS: AgentMeta[] = [
   { id: "codex",    label: "Codex CLI",   letter: "x", tint: "#9aa6b2", supportsWorktree: false, supportsMcp: true  },
   { id: "gemini",   label: "Gemini CLI",  letter: "G", tint: "#7e9cff", supportsWorktree: false, supportsMcp: true  },
   { id: "opencode", label: "OpenCode",    letter: "o", tint: "#6cc29a", supportsWorktree: false, supportsMcp: false },
+  { id: "antigravity", label: "Antigravity", letter: "A", tint: "#a78bfa", supportsWorktree: false, supportsMcp: false },
 ];
 
 export const DEFAULT_AGENT: AgentId = "claude";

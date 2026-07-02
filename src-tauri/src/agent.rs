@@ -12,6 +12,7 @@ pub enum AgentId {
     Codex,
     Gemini,
     OpenCode,
+    Antigravity,
 }
 
 /// Descriptor for a single MCP server passed to the CLI command builders.
@@ -369,6 +370,31 @@ impl ProviderAdapter for OpenCodeAdapter {
     }
 }
 
+pub struct AntigravityAdapter;
+
+impl ProviderAdapter for AntigravityAdapter {
+    fn id(&self) -> AgentId {
+        AgentId::Antigravity
+    }
+    fn binary(&self) -> &'static str {
+        "agy"
+    }
+    // The Antigravity CLI (`agy`) is Google's headless terminal agent that signs in with a
+    // Google account (i.e. a Gemini subscription), unlike the API-key `gemini` CLI. Fresh
+    // launch like Gemini/OpenCode, no caller-pinned resume. Hooks and MCP are left to the
+    // trait defaults (None) until `agy`'s integration surface is verified, so its sessions
+    // run as plain terminals for now.
+    fn build_invocation(
+        &self,
+        _session_id: &str,
+        _projects_dir: Option<&Path>,
+        _flags: &str,
+        _initial_prompt: Option<&str>,
+    ) -> String {
+        "agy || agy".to_string()
+    }
+}
+
 /// Resolve the adapter for an agent id.
 pub fn adapter_for(agent: AgentId) -> Box<dyn ProviderAdapter> {
     match agent {
@@ -376,6 +402,7 @@ pub fn adapter_for(agent: AgentId) -> Box<dyn ProviderAdapter> {
         AgentId::Codex => Box::new(CodexAdapter),
         AgentId::Gemini => Box::new(GeminiAdapter),
         AgentId::OpenCode => Box::new(OpenCodeAdapter),
+        AgentId::Antigravity => Box::new(AntigravityAdapter),
     }
 }
 
@@ -410,6 +437,7 @@ pub fn all_adapters() -> Vec<Box<dyn ProviderAdapter>> {
         Box::new(CodexAdapter),
         Box::new(GeminiAdapter),
         Box::new(OpenCodeAdapter),
+        Box::new(AntigravityAdapter),
     ]
 }
 
@@ -419,6 +447,7 @@ fn label_for(id: AgentId) -> &'static str {
         AgentId::Codex => "Codex CLI",
         AgentId::Gemini => "Gemini CLI",
         AgentId::OpenCode => "OpenCode",
+        AgentId::Antigravity => "Antigravity (agy)",
     }
 }
 
