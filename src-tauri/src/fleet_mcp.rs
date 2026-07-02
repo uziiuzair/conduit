@@ -111,6 +111,11 @@ fn dispatch_tool(name: &str, args: &Value, ctx: &Ctx) -> Result<String, String> 
                         "todosTotal": st.todos_total,
                         "todosDone": st.todos_done,
                         "updatedAt": st.updated_at,
+                        // Trust labels (Feature 4): a siloed session is listed so the
+                        // orchestrator knows it exists to route work to, but its output is
+                        // never peekable (see fleet_peek). Both fields are inert off private mode.
+                        "clearance": s.clearance,
+                        "siloed": s.silo,
                     })
                 })
                 .collect();
@@ -121,6 +126,24 @@ fn dispatch_tool(name: &str, args: &Value, ctx: &Ctx) -> Result<String, String> 
                 .get("id")
                 .and_then(|v| v.as_str())
                 .ok_or("missing id")?;
+            // Trust-boundary READ gate (the primary silo). Under private mode the orchestrator
+            // may not read a siloed session (or one above its clearance). Prevent-by-construction:
+            // because the Conductor never receives the bytes, it cannot forward them into a cloud
+            // worker -- the guarantee never relies on the soft persona rule.
+            if ctx.store.is_private_mode() {
+                if let Some(snap) = ctx.store.fleet_snapshot(&ctx.conductor_id) {
+                    let caller = snap.sessions.iter().find(|s| s.id == ctx.conductor_id);
+                    let target = snap.sessions.iter().find(|s| s.id == id);
+                    if let (Some(c), Some(t)) = (caller, target) {
+                        if !crate::store::can_read(c, t) {
+                            return Err(
+                                "access-denied: this session is siloed or above your clearance"
+                                    .into(),
+                            );
+                        }
+                    }
+                }
+            }
             ctx.pty
                 .recent_output(id, PEEK_BYTES)
                 .ok_or_else(|| "worker-not-running".to_string())
@@ -180,6 +203,22 @@ fn dispatch_tool(name: &str, args: &Value, ctx: &Ctx) -> Result<String, String> 
                 .ok_or("missing text")?;
             if id == ctx.conductor_id {
                 return Err("cannot-target-self".into());
+            }
+            // Trust-boundary INJECT gate. Phase 1 only reasserts the self-block; Phase 3 will
+            // extend can_inject with channel/clearance rules. Kept here as the single enforcement
+            // point so injection policy has one home.
+            if ctx.store.is_private_mode() {
+                if let Some(snap) = ctx.store.fleet_snapshot(&ctx.conductor_id) {
+                    let caller = snap.sessions.iter().find(|s| s.id == ctx.conductor_id);
+                    let target = snap.sessions.iter().find(|s| s.id == id);
+                    if let (Some(c), Some(t)) = (caller, target) {
+                        if !crate::store::can_inject(c, t) {
+                            return Err(
+                                "access-denied: injection blocked by the sharing policy".into()
+                            );
+                        }
+                    }
+                }
             }
             // Trailing CR submits the prompt, as if typed by a human.
             ctx.pty
