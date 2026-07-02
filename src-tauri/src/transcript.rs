@@ -5,7 +5,7 @@
 use serde_json::{json, Value};
 
 /// Map a Claude tool name to the RN timeline event kind + verb (mirror of
-/// mobile-app/src/logic/status.ts `eventKindFor` / labels).
+/// mobile/src/logic/status.ts `eventKindFor` / labels).
 fn tool_event(name: &str, input: &Value) -> Value {
     let (kind, label, mono) = match name {
         "Read" => (
