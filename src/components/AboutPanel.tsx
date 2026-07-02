@@ -41,7 +41,7 @@ export function AboutPanel() {
     if (phase === "checking") return "Checking…";
     if (phase === "downloading") return "Downloading…";
     if (phase === "available" && info) return `Update available: ${info.version}`;
-    if (phase === "error") return error ? `Check failed: ${error}` : "Check failed";
+    if (phase === "error") return error ? `Update failed: ${error}` : "Update failed";
     return version ? "You're up to date." : "";
   };
 
