@@ -11,6 +11,8 @@ import {
   writeStoredPref,
 } from "./themes";
 import { AGENTS, type AgentId, type AgentInfo, DEFAULT_AGENT, type McpServer } from "./agents";
+import { ask } from "@tauri-apps/plugin-dialog";
+import * as registry from "./monaco/registry";
 
 // ---- Types (mirror the Rust serde structs, rename_all = "camelCase") ----
 export type SessionRole = "worker" | "conductor";
@@ -40,6 +42,25 @@ export type TabKind = "session" | "file";
 export interface WsTab {
   kind: TabKind;
   ref: string; // sessionId (session) | absolute file path (file)
+}
+
+/** Mirror of fsops::FileContent (serde camelCase). read_file resolves (never rejects);
+ *  inspect error/binary/readOnly before creating an editable model. */
+export interface FileContent {
+  content: string;
+  truncated: boolean;
+  binary: boolean;
+  readOnly: boolean;
+  size: number;
+  mtimeMs: number;
+  error: string | null;
+}
+
+/** Mirror of fsops::FileStat — returned by write_file (and Phase 2 stat_file). */
+export interface FileStat {
+  mtimeMs: number;
+  size: number;
+  exists: boolean;
 }
 
 export interface EditorGroup {
@@ -349,6 +370,16 @@ interface AppState {
   setGroupWeights: (projectId: string, weights: number[]) => void;
   openFile: (projectId: string, path: string) => void;
 
+  // ---- editor buffer state (Monaco) — NON-PERSISTED ----
+  /** absPath -> dirty; reactive mirror of registry.dirtyOf (delete key when false). */
+  dirty: Record<string, boolean>;
+  /** absPath -> external change (populated in Phase 2 by useFileWatch). */
+  conflict: Record<string, { mtimeMs: number; size: number } | "deleted">;
+  setDirty: (path: string, dirty: boolean) => void;
+  clearConflict: (path: string) => void;
+  saveFile: (path: string) => Promise<void>;
+  requestCloseTab: (projectId: string, groupId: string, ref: string) => Promise<void>;
+
   setTopTab: (t: TopTab) => void;
   setBottomTab: (t: BottomTab) => void;
   openMenu: (menu: ContextMenuState) => void;
@@ -399,6 +430,8 @@ export const useStore = create<AppState>((set, get) => {
     layouts: {},
     live: {},
     pendingPrompts: {},
+    dirty: {},
+    conflict: {},
     claudeStatus: null,
     claudeUsage: null,
     planConnected: readPlanConnected(),
@@ -430,6 +463,14 @@ export const useStore = create<AppState>((set, get) => {
       const layouts: Record<string, ProjectLayout> = {};
       for (const p of projects) {
         layouts[p.id] = validateLayout(p.layout ?? defaultLayout(p), p);
+      }
+      // Balance close/removeProject release: acquire a model ref for every restored file tab.
+      for (const p of projects) {
+        for (const g of layouts[p.id].groups) {
+          for (const t of g.tabs) {
+            if (t.kind === "file") registry.acquire(t.ref);
+          }
+        }
       }
       set({
         projects,
@@ -552,13 +593,30 @@ export const useStore = create<AppState>((set, get) => {
     },
 
     removeProject: async (id) => {
+      const s = get();
+      const layout = s.layouts[id];
+      const fileTabs = layout
+        ? layout.groups.flatMap((g) => g.tabs.filter((t) => t.kind === "file").map((t) => t.ref))
+        : [];
+      if (fileTabs.some((ref) => s.dirty[ref])) {
+        const ok = await ask("This project has unsaved file changes. Remove it and discard them?", {
+          title: "Conduit",
+          kind: "warning",
+        });
+        if (!ok) return;
+      }
       await invoke("remove_project", { id });
-      set((s) => {
-        const layouts = { ...s.layouts };
+      for (const ref of fileTabs) {
+        s.setDirty(ref, false);
+        registry.release(ref);
+        registry.disposeIfUnreferenced(ref);
+      }
+      set((st) => {
+        const layouts = { ...st.layouts };
         delete layouts[id];
-        const projects = s.projects.filter((p) => p.id !== id);
+        const projects = st.projects.filter((p) => p.id !== id);
         const selectedProjectId =
-          s.selectedProjectId === id ? projects[0]?.id ?? null : s.selectedProjectId;
+          st.selectedProjectId === id ? projects[0]?.id ?? null : st.selectedProjectId;
         return { projects, layouts, selectedProjectId };
       });
     },
@@ -663,8 +721,69 @@ export const useStore = create<AppState>((set, get) => {
       applyLayout(projectId, (l) => rOpenToSide(l, tab));
       if (tab.kind === "session") clearNeeds(tab.ref);
     },
-    openFile: (projectId, path) =>
-      applyLayout(projectId, (l) => rOpenTab(l, { kind: "file", ref: path })),
+    openFile: (projectId, path) => {
+      const l = get().layouts[projectId];
+      // Only a genuinely new tab bumps the ref (rOpenTab just re-activates an existing one).
+      const already = !!l && l.groups.some((g) => g.tabs.some((t) => t.ref === path));
+      applyLayout(projectId, (l2) => rOpenTab(l2, { kind: "file", ref: path }));
+      if (!already) registry.acquire(path);
+    },
+
+    setDirty: (path, dirty) =>
+      set((s) => {
+        const next = { ...s.dirty };
+        if (dirty) next[path] = true;
+        else delete next[path];
+        return { dirty: next };
+      }),
+
+    clearConflict: (path) =>
+      set((s) => {
+        if (!(path in s.conflict)) return {};
+        const next = { ...s.conflict };
+        delete next[path];
+        return { conflict: next };
+      }),
+
+    saveFile: async (path) => {
+      const entry = registry.model(path);
+      // Hard guard: no model, read-only buffer, or unrevealed => never write.
+      if (!entry || entry.readOnly || !entry.model) return;
+      const value = entry.model.getValue();
+      registry.saving.add(path);
+      try {
+        const stat = await invoke<FileStat>("write_file", { path, content: value });
+        registry.setSaved(path, { mtimeMs: stat.mtimeMs, size: stat.size });
+        get().setDirty(path, false);
+        get().clearConflict(path);
+      } catch (e) {
+        void invoke("notify_user", { title: "Conduit", body: `Save failed: ${String(e)}` }).catch(
+          () => {},
+        );
+      } finally {
+        registry.saving.delete(path);
+      }
+    },
+
+    requestCloseTab: async (projectId, groupId, ref) => {
+      const s = get();
+      const group = s.layouts[projectId]?.groups.find((g) => g.id === groupId);
+      const tab = group?.tabs.find((t) => t.ref === ref);
+      const isFile = tab?.kind === "file";
+      if (isFile && s.dirty[ref]) {
+        const ok = await ask(`Discard unsaved changes to ${baseName(ref)}?`, {
+          title: "Conduit",
+          kind: "warning",
+        });
+        if (!ok) return;
+      }
+      s.closeTab(projectId, groupId, ref);
+      if (isFile) {
+        s.setDirty(ref, false);
+        registry.release(ref);
+        registry.disposeIfUnreferenced(ref);
+      }
+    },
 
     closeTab: (projectId, groupId, ref) =>
       applyLayout(projectId, (l) => {
