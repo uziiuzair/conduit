@@ -1,21 +1,27 @@
 import { useEffect, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/core";
+import { open } from "@tauri-apps/plugin-dialog";
 import {
   useStore,
   findSession,
   globalSelectedSessionId,
+  activeGroup,
   baseName,
   type Session,
   type TodoItem,
   type TodoStatus,
 } from "./store";
 import { type AgentId } from "./agents";
+import { type ThemePref } from "./themes";
+import { getLastFocusedEditor } from "./monaco/setup";
 import { Sidebar } from "./components/Sidebar";
 import { WorkspaceCenter } from "./components/WorkspaceCenter";
 import { RightColumn } from "./components/RightColumn";
 import { Onboarding } from "./components/Onboarding";
+import { Settings } from "./components/Settings";
 import { useTelemetry } from "./hooks/useTelemetry";
+import { useFileWatch } from "./hooks/useFileWatch";
 
 interface HookPayload {
   session: string;
@@ -31,9 +37,17 @@ export default function App() {
   const loadAgents = useStore((s) => s.loadAgents);
   const agentSetupComplete = useStore((s) => s.agentSetupComplete);
   const telemetryOptOut = useStore((s) => s.telemetryOptOut);
+  const sidebarCollapsed = useStore((s) => s.sidebarCollapsed);
+  const rightCollapsed = useStore((s) => s.rightCollapsed);
+  const showSettings = useStore((s) => s.showSettings);
+  const settingsTab = useStore((s) => s.settingsTab);
+  const setShowSettings = useStore((s) => s.setShowSettings);
 
   // Anonymous engagement heartbeat; no-op while opted out (Settings/onboarding).
   useTelemetry(telemetryOptOut);
+
+  // Single app-level poll: silently reload clean open files an agent edits on disk.
+  useFileWatch();
 
   useEffect(() => {
     void load();
@@ -100,6 +114,70 @@ export default function App() {
             st.setStatus(session, "needsInput");
             doNotify(session, body?.message ?? "needs your input");
           }
+          break;
+        }
+      }
+    });
+    return () => {
+      void unlisten.then((f) => f());
+    };
+  }, []);
+
+  // Native menu clicks relayed by Rust as a "menu" event whose payload is the item id.
+  useEffect(() => {
+    const unlisten = listen<string>("menu", ({ payload }) => {
+      const st = useStore.getState();
+      switch (payload) {
+        case "settings":
+          st.setShowSettings(true);
+          break;
+        case "about":
+          st.setSettingsTab("about");
+          st.setShowSettings(true);
+          break;
+        case "toggle-sidebar":
+          st.toggleSidebar();
+          break;
+        case "toggle-right":
+          st.toggleRight();
+          break;
+        case "save": {
+          const layout = st.selectedProjectId ? st.layouts[st.selectedProjectId] : undefined;
+          const g = activeGroup(layout);
+          const tab = g?.tabs.find((t) => t.ref === g.activeRef);
+          if (tab?.kind === "file") void st.saveFile(tab.ref);
+          break;
+        }
+        case "close-tab": {
+          const layout = st.selectedProjectId ? st.layouts[st.selectedProjectId] : undefined;
+          const g = activeGroup(layout);
+          if (st.selectedProjectId && g && g.activeRef)
+            void st.requestCloseTab(st.selectedProjectId, g.id, g.activeRef);
+          break;
+        }
+        case "new-session":
+          if (st.selectedProjectId) void st.addSession(st.selectedProjectId);
+          break;
+        case "open-project":
+          void (async () => {
+            const dir = await open({ directory: true, multiple: false, title: "Add Project" });
+            if (typeof dir === "string") await st.addProject(dir);
+          })();
+          break;
+        case "find": {
+          const ed = getLastFocusedEditor();
+          if (ed) {
+            ed.focus();
+            ed.getAction("actions.find")?.run();
+          }
+          break;
+        }
+        case "theme:auto":
+        case "theme:warm-light":
+        case "theme:warm-dim":
+        case "theme:warm-near-black": {
+          const pref = payload.slice("theme:".length);
+          st.setThemePref(pref as ThemePref);
           break;
         }
       }
@@ -220,12 +298,14 @@ export default function App() {
       className="app-root"
       style={{ ["--sidebar-w" as string]: `${sidebarWidth}px` }}
     >
-      <Sidebar />
+      {!sidebarCollapsed && <Sidebar />}
       {!agentSetupComplete && <Onboarding />}
-      <div
-        className={`sidebar-resizer ${sidebarDragging ? "dragging" : ""}`}
-        onMouseDown={startSidebarResize}
-      />
+      {!sidebarCollapsed && (
+        <div
+          className={`sidebar-resizer ${sidebarDragging ? "dragging" : ""}`}
+          onMouseDown={startSidebarResize}
+        />
+      )}
       <div
         className="detail"
         style={{ ["--right-w" as string]: `${rightWidth}px` }}
@@ -235,12 +315,23 @@ export default function App() {
           projectId={selectedProjectId}
           home={home}
         />
-        <div
-          className={`resizer ${dragging ? "dragging" : ""}`}
-          onMouseDown={startResize}
-        />
-        <RightColumn projects={projects} projectId={selectedProjectId} />
+        {!rightCollapsed && (
+          <div
+            className={`resizer ${dragging ? "dragging" : ""}`}
+            onMouseDown={startResize}
+          />
+        )}
+        {/* RightColumn hosts a keep-alive shell TerminalView — never conditionally
+            unmount it (kills the PTY). display:contents makes this wrapper
+            layout-transparent when expanded, and display:none hides it (still
+            mounted) when collapsed. */}
+        <div style={rightCollapsed ? { display: "none" } : { display: "contents" }}>
+          <RightColumn projects={projects} projectId={selectedProjectId} />
+        </div>
       </div>
+      {showSettings && (
+        <Settings onClose={() => setShowSettings(false)} initialTab={settingsTab} />
+      )}
     </div>
   );
 }
