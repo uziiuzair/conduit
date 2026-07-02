@@ -2,6 +2,7 @@
 
 use std::fs;
 use std::io::{Read, Write};
+use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::Serialize;
@@ -245,6 +246,49 @@ pub fn write_file(path: &str, content: &str) -> Result<FileStat, String> {
     })
 }
 
+// ---- Mutating ops (std::fs only; guarded, no clobber) -----------------------
+
+/// Create an empty file. Errors if the target already exists (no clobber).
+pub fn create_file(path: &str) -> Result<(), String> {
+    if Path::new(path).exists() {
+        return Err(format!("already exists: {path}"));
+    }
+    // create_new also closes the check-then-create race window.
+    fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+        .map(|_| ())
+        .map_err(|e| format!("could not create file: {e}"))
+}
+
+/// Create a single directory level (parent must already exist). Errors if it exists.
+pub fn create_dir(path: &str) -> Result<(), String> {
+    if Path::new(path).exists() {
+        return Err(format!("already exists: {path}"));
+    }
+    fs::create_dir(path).map_err(|e| format!("could not create folder: {e}"))
+}
+
+/// Rename/move a file or directory. Errors if the destination already exists.
+pub fn rename_path(from: &str, to: &str) -> Result<(), String> {
+    if Path::new(to).exists() {
+        return Err(format!("destination already exists: {to}"));
+    }
+    fs::rename(from, to).map_err(|e| format!("could not rename: {e}"))
+}
+
+/// Permanently delete a file (or a directory and its contents). No trash.
+/// Uses symlink_metadata so a symlink is unlinked, never followed/recursed.
+pub fn delete_path(path: &str) -> Result<(), String> {
+    let md = fs::symlink_metadata(path).map_err(|e| format!("could not stat: {e}"))?;
+    if md.is_dir() {
+        fs::remove_dir_all(path).map_err(|e| format!("could not delete folder: {e}"))
+    } else {
+        fs::remove_file(path).map_err(|e| format!("could not delete: {e}"))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -362,5 +406,95 @@ mod tests {
         let res = write_file(p.to_str().unwrap(), "data");
         assert!(res.is_err());
         fs::remove_dir_all(&dir).ok();
+    }
+}
+
+#[cfg(test)]
+mod crud_tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    /// Fresh unique scratch dir under the OS temp dir (mirrors `tests::unique_temp_dir`;
+    /// no external crate needed).
+    fn tmpdir() -> PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir =
+            std::env::temp_dir().join(format!("conduit-fsops-crud-{}-{nanos}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn s(p: &Path) -> String {
+        p.to_string_lossy().into_owned()
+    }
+
+    #[test]
+    fn create_file_makes_file_and_rejects_existing() {
+        let d = tmpdir();
+        let p = d.join("a.txt");
+        assert!(create_file(&s(&p)).is_ok());
+        assert!(p.is_file());
+        // no clobber: a second create must fail and must not touch existing bytes
+        fs::write(&p, b"keep").unwrap();
+        assert!(create_file(&s(&p)).is_err());
+        assert_eq!(fs::read(&p).unwrap(), b"keep");
+        fs::remove_dir_all(&d).ok();
+    }
+
+    #[test]
+    fn create_dir_single_level_and_rejects_existing() {
+        let d = tmpdir();
+        let sub = d.join("nested");
+        assert!(create_dir(&s(&sub)).is_ok());
+        assert!(sub.is_dir());
+        assert!(create_dir(&s(&sub)).is_err()); // already exists
+                                                // single level only — a missing intermediate parent must fail (NOT create_dir_all)
+        let deep = d.join("x").join("y");
+        assert!(create_dir(&s(&deep)).is_err());
+        fs::remove_dir_all(&d).ok();
+    }
+
+    #[test]
+    fn rename_moves_files_and_dirs_and_rejects_existing_dest() {
+        let d = tmpdir();
+        let a = d.join("a.txt");
+        let b = d.join("b.txt");
+        fs::write(&a, b"hi").unwrap();
+        assert!(rename_path(&s(&a), &s(&b)).is_ok());
+        assert!(!a.exists() && b.is_file());
+        // dest exists -> refuse; source preserved, dest untouched
+        let c = d.join("c.txt");
+        fs::write(&c, b"c").unwrap();
+        assert!(rename_path(&s(&c), &s(&b)).is_err());
+        assert!(c.is_file());
+        assert_eq!(fs::read(&b).unwrap(), b"hi");
+        // also works for directories
+        let dir1 = d.join("dir1");
+        fs::create_dir(&dir1).unwrap();
+        let dir2 = d.join("dir2");
+        assert!(rename_path(&s(&dir1), &s(&dir2)).is_ok());
+        assert!(dir2.is_dir() && !dir1.exists());
+        fs::remove_dir_all(&d).ok();
+    }
+
+    #[test]
+    fn delete_removes_files_and_dirs_recursively() {
+        let d = tmpdir();
+        let f = d.join("f.txt");
+        fs::write(&f, b"x").unwrap();
+        assert!(delete_path(&s(&f)).is_ok());
+        assert!(!f.exists());
+        // directories are removed recursively
+        let sub = d.join("sub");
+        fs::create_dir(&sub).unwrap();
+        fs::write(sub.join("inner.txt"), b"y").unwrap();
+        assert!(delete_path(&s(&sub)).is_ok());
+        assert!(!sub.exists());
+        // a missing path is an error
+        assert!(delete_path(&s(&d.join("nope"))).is_err());
+        fs::remove_dir_all(&d).ok();
     }
 }
