@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type DragEvent, type MouseEvent } from "react";
+import { useEffect, useLayoutEffect, useRef, useState, type DragEvent, type MouseEvent } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { ask } from "@tauri-apps/plugin-dialog";
 import { useStore, activeGroup, baseName, parentDir } from "../store";
@@ -430,8 +430,27 @@ function FileTreeMenu({
   const entry = menu.entry;
   // Folder -> create inside it; file -> create as sibling; empty area -> root.
   const parent = !entry ? rootDir : entry.isDir ? entry.path : parentDir(entry.path);
+  // The file tree sits at the right edge, so a rightward/downward menu would spill
+  // off-screen. Measure after mount and flip toward the cursor / clamp into view
+  // before paint (useLayoutEffect runs before the browser paints, so no flash).
+  const ref = useRef<HTMLDivElement>(null);
+  useLayoutEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    const r = el.getBoundingClientRect();
+    const pad = 6;
+    let left = menu.x;
+    if (left + r.width > window.innerWidth - pad) left = menu.x - r.width;
+    left = Math.max(pad, Math.min(left, window.innerWidth - r.width - pad));
+    let top = menu.y;
+    if (top + r.height > window.innerHeight - pad) top = menu.y - r.height;
+    top = Math.max(pad, Math.min(top, window.innerHeight - r.height - pad));
+    el.style.left = `${left}px`;
+    el.style.top = `${top}px`;
+  }, [menu.x, menu.y]);
   return (
     <div
+      ref={ref}
       className="context-menu"
       style={{ left: menu.x, top: menu.y }}
       onClick={(e) => e.stopPropagation()}
