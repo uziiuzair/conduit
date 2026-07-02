@@ -32,6 +32,9 @@ pub struct LocalModel {
     pub context: Option<u64>,
     /// Extra hint for the picker ("30.5B · Q4_K_M"). Empty when unknown.
     pub detail: String,
+    /// Whether the model supports tool calling (Ollama reports capabilities; None =
+    /// unknown). An agentic coder is near-useless without tools, so auto-pick ranks by it.
+    pub tools: Option<bool>,
 }
 
 /// GET a URL with a short timeout; optional Bearer auth. None on any failure.
@@ -108,10 +111,15 @@ fn parse_ollama_tags(body: &str) -> Vec<LocalModel> {
                     .join(" · ")
                 })
                 .unwrap_or_default();
+            let tools = m.get("capabilities").and_then(|c| c.as_array()).map(|caps| {
+                caps.iter()
+                    .any(|c| c.as_str().is_some_and(|s| s.eq_ignore_ascii_case("tools")))
+            });
             Some(LocalModel {
                 id,
                 context,
                 detail,
+                tools,
             })
         })
         .collect()
@@ -133,6 +141,7 @@ fn parse_openai_models(body: &str) -> Vec<LocalModel> {
                 id: m.get("id")?.as_str()?.to_string(),
                 context: m.get("max_model_len").and_then(|c| c.as_u64()), // vLLM reports this
                 detail: String::new(),
+                tools: None, // the OpenAI list shape doesn't carry capabilities
             })
         })
         .collect()
@@ -269,15 +278,20 @@ mod tests {
         // Shape captured live from Ollama 0.30.10 /api/tags.
         let body = r#"{"models":[
             {"name":"qwen3:30b-a3b","model":"qwen3:30b-a3b",
-             "details":{"parameter_size":"30.5B","quantization_level":"Q4_K_M","context_length":262144}},
-            {"name":"bare-model"}]}"#;
+             "details":{"parameter_size":"30.5B","quantization_level":"Q4_K_M","context_length":262144},
+             "capabilities":["completion","tools","thinking"]},
+            {"name":"bare-model"},
+            {"name":"no-tools","capabilities":["completion"]}]}"#;
         let models = parse_ollama_tags(body);
-        assert_eq!(models.len(), 2);
+        assert_eq!(models.len(), 3);
         assert_eq!(models[0].id, "qwen3:30b-a3b");
         assert_eq!(models[0].context, Some(262144));
         assert_eq!(models[0].detail, "30.5B · Q4_K_M");
+        assert_eq!(models[0].tools, Some(true));
         assert_eq!(models[1].id, "bare-model");
         assert_eq!(models[1].context, None);
+        assert_eq!(models[1].tools, None, "no capabilities field -> unknown");
+        assert_eq!(models[2].tools, Some(false));
         assert!(parse_ollama_tags("Not Found").is_empty());
         assert!(parse_ollama_tags(r#"{"ok":true}"#).is_empty());
     }
