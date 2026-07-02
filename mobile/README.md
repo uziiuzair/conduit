@@ -31,7 +31,7 @@ What works to test right now:
 
 **iOS Simulator** (verified: `Build Succeeded`):
 ```bash
-cd mobile-app
+cd mobile
 npx expo run:ios
 ```
 
