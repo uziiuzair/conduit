@@ -271,13 +271,30 @@ impl PtyManager {
             for (k, v) in adapter.env_overrides() {
                 cmd.env(k, v);
             }
-            // Point the agent at a specific account's config/credentials dir. On Windows
-            // this selects a Claude account without disturbing the user's default
-            // `claude` (Feature 1/2). Existence-guarded so a stale path falls back to the
-            // inherited env rather than breaking the spawn.
+            // Select a Claude account (Feature 1/2) without disturbing the user's default
+            // `claude`. A `.claude` account set up via a HOME-redirect launcher (e.g. a
+            // `claude-personal` shim) keeps its `.claude.json` -- the record of the
+            // logged-in account, onboarding, and trust state -- at the PROFILE ROOT, not
+            // inside `.claude`. CLAUDE_CONFIG_DIR only redirects the `.claude` dir, so an
+            // interactive session finds the credentials but re-prompts login/onboarding.
+            // Redirect HOME/USERPROFILE to the profile root instead (exactly what the
+            // launcher does) so the full account state is read. Fall back to
+            // CLAUDE_CONFIG_DIR for a non-`.claude` custom directory. Existence-guarded.
             if let Some(dir) = account_config_dir.as_deref() {
-                if Path::new(dir).exists() {
-                    cmd.env("CLAUDE_CONFIG_DIR", dir);
+                let p = Path::new(dir);
+                if p.exists() {
+                    let root = (p.file_name().and_then(|f| f.to_str()) == Some(".claude"))
+                        .then(|| p.parent().and_then(|r| r.to_str()))
+                        .flatten();
+                    match root {
+                        Some(root) => {
+                            cmd.env("USERPROFILE", root);
+                            cmd.env("HOME", root);
+                        }
+                        None => {
+                            cmd.env("CLAUDE_CONFIG_DIR", dir);
+                        }
+                    }
                 }
             }
         }
