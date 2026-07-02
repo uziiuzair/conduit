@@ -15,6 +15,7 @@ mod fsops;
 mod git;
 mod hookbus;
 mod hooks;
+mod menu;
 mod notify;
 mod pty;
 mod store;
@@ -655,6 +656,13 @@ pub fn run() {
             let pty = app.state::<Arc<PtyManager>>().inner().clone();
             let store = app.state::<Arc<Store>>().inner().clone();
             fleet_mcp::start(app.handle().clone(), store, pty, fleet);
+
+            // Native menu bar. Custom items forward to the frontend as a single "menu"
+            // event (payload = item id); Quit kills PTYs before exiting (see menu.rs).
+            let menu = menu::build(app.handle())?;
+            app.set_menu(menu)?;
+            app.on_menu_event(|app, event| menu::on_event(app, event.id().as_ref()));
+
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
