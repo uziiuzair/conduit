@@ -798,11 +798,18 @@ export const useStore = create<AppState>((set, get) => {
     },
 
     checkForUpdates: async (opts) => {
+      // Don't interfere with an install already in progress.
+      if (get().updatePhase === "downloading") return;
       const manual = opts?.manual ?? false;
-      set({ updatePhase: "checking", updateError: null });
+      // Only show the transient "checking" state when there's no live banner to
+      // disturb — otherwise a background poll would flicker an "available" notice.
+      const showChecking =
+        manual || get().updatePhase === "idle" || get().updatePhase === "error";
+      if (showChecking) set({ updatePhase: "checking", updateError: null });
       try {
         const update = await check();
         if (!update) {
+          void pendingUpdate?.close();
           pendingUpdate = null;
           set({ updateInfo: null, updatePhase: "idle" });
           return;
@@ -815,8 +822,11 @@ export const useStore = create<AppState>((set, get) => {
               remoteVersion: update.version,
               skippedVersion: skipped,
             });
+        // Release any previously-held handle (Update is a Rust-side Resource).
+        if (pendingUpdate && pendingUpdate !== update) void pendingUpdate.close();
+        pendingUpdate = null;
         if (!shouldNotify) {
-          pendingUpdate = update;
+          void update.close();
           set({ updateInfo: null, updatePhase: "idle" });
           return;
         }
@@ -831,10 +841,13 @@ export const useStore = create<AppState>((set, get) => {
           updatePhase: "available",
         });
       } catch (e) {
-        // Network/offline/no-manifest: fail quiet on background checks; the manual
-        // path surfaces the error so the About panel can show it.
-        pendingUpdate = null;
-        set({ updatePhase: "error", updateError: String(e) });
+        // Fail open. A background check that errors leaves any existing pending
+        // update untouched and stays quiet; only a manual check surfaces the error.
+        if (manual) {
+          set({ updatePhase: "error", updateError: String(e) });
+        } else if (get().updatePhase === "checking") {
+          set({ updatePhase: "idle" });
+        }
       }
     },
 
@@ -869,6 +882,8 @@ export const useStore = create<AppState>((set, get) => {
     dismissUpdate: () => {
       const v = get().updateInfo?.version;
       if (v) localStorage.setItem(SKIPPED_VERSION_KEY, v);
+      void pendingUpdate?.close();
+      pendingUpdate = null;
       set({ updateInfo: null, updatePhase: "idle" });
     },
 
