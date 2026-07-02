@@ -271,6 +271,7 @@ function SessionRow({
           {session.branch}
         </span>
       )}
+      {!editing && <TrustChip session={session} />}
       <StatusAccessory status={status} activity={activity} compacting={compacting} />
     </div>
   );
@@ -316,6 +317,36 @@ function RenameInput({
   );
 }
 
+/** Trust-boundary badge (Feature 4). Only shown while private mode is on, since the marking is
+ *  inert otherwise: a lock for a siloed (confidential, unreadable-by-others) session, or a small
+ *  clearance tag. */
+function TrustChip({ session }: { session: Session }) {
+  const privateMode = useStore((s) => s.privateMode);
+  if (!privateMode) return null;
+  if (session.silo)
+    return (
+      <span
+        className="trust-chip silo"
+        title="Siloed — confidential; other agents cannot read this session and it is not streamed to a paired phone"
+      >
+        🔒
+      </span>
+    );
+  if (session.clearance === "confidential")
+    return (
+      <span className="trust-chip conf" title="Confidential clearance">
+        conf
+      </span>
+    );
+  if (session.clearance === "internal")
+    return (
+      <span className="trust-chip internal" title="Internal clearance">
+        int
+      </span>
+    );
+  return null;
+}
+
 function StatusAccessory({
   status,
   activity,
@@ -348,6 +379,8 @@ function SessionContextMenu() {
   const removeSession = useStore((s) => s.removeSession);
   const removeProject = useStore((s) => s.removeProject);
   const openToSide = useStore((s) => s.openToSide);
+  const setSessionTrust = useStore((s) => s.setSessionTrust);
+  const privateMode = useStore((s) => s.privateMode);
 
   useEffect(() => {
     if (!menu) return;
@@ -396,6 +429,32 @@ function SessionContextMenu() {
 
   if (!menu.sessionId) return null;
   const sid = menu.sessionId;
+  const menuSession = findSession(projects, sid)?.session;
+  const siloed = !!menuSession?.silo;
+  const toggleSensitive = () => {
+    if (menuSession) {
+      void setSessionTrust(
+        sid,
+        siloed
+          ? { clearance: "public", silo: false, localOnly: false, channels: [], modelTier: null, seedMemory: null }
+          : {
+              clearance: "confidential",
+              silo: true,
+              localOnly: true,
+              channels: menuSession.channels ?? [],
+              modelTier: menuSession.modelTier ?? null,
+              seedMemory: menuSession.seedMemory ?? null,
+            },
+      );
+      if (!privateMode && !siloed) {
+        void invoke("notify_user", {
+          title: "Conduit",
+          body: "Marked sensitive. Enable Private mode (Settings → Security) for the silo to take effect.",
+        }).catch(() => {});
+      }
+    }
+    closeMenu();
+  };
   return (
     <div
       className="context-menu"
@@ -410,6 +469,9 @@ function SessionContextMenu() {
         }}
       >
         Open to the Side
+      </button>
+      <button onClick={toggleSensitive} title="Silo this session: no other agent can read it">
+        {siloed ? "Clear sensitive mark" : "Mark sensitive (silo)"}
       </button>
       <button
         onClick={() => {

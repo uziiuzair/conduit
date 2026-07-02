@@ -106,6 +106,11 @@ fn pty_spawn(
         (None, None)
     };
 
+    // Feature 4 silo: a siloed session (under private mode) must not stream its output to any
+    // remote (mobile-bridge) viewer. Resolved here so the PTY reader can gate its fan-out.
+    let suppress_remote =
+        !shell_only && store.is_private_mode() && store.is_session_siloed(&session_id);
+
     let (cwd, worktree_arg, settings_path) = if shell_only {
         (working_directory.clone(), None, None)
     } else if worktree_name.is_some() && adapter.supports_worktree() {
@@ -143,6 +148,7 @@ fn pty_spawn(
         initial_prompt,
         account_config_dir,
         agent,
+        suppress_remote,
         on_event,
     )
 }
@@ -280,6 +286,40 @@ fn set_default_account(account_id: Option<String>, store: State<Arc<Store>>) {
 #[tauri::command]
 fn set_session_account(session_id: String, account_id: Option<String>, store: State<Arc<Store>>) {
     store.set_session_account(&session_id, account_id);
+}
+
+// ---- Trust boundaries (Feature 4: multi-agent silo / controlled sharing) ------
+
+#[tauri::command]
+fn get_trust_settings(store: State<Arc<Store>>) -> crate::store::TrustSettings {
+    store.trust_settings()
+}
+
+#[tauri::command]
+fn set_trust_settings(settings: crate::store::TrustSettings, store: State<Arc<Store>>) {
+    store.set_trust_settings(settings);
+}
+
+/// Set a session's trust (clearance / silo / local_only / channels / tier / seed). If the
+/// session is running, also flip its remote-stream suppression live, so marking it sensitive
+/// stops any paired phone from receiving further output immediately.
+#[tauri::command]
+fn set_session_trust(
+    session_id: String,
+    trust: crate::store::SessionTrust,
+    store: State<Arc<Store>>,
+    pty: State<Arc<PtyManager>>,
+) {
+    let siloed = trust.silo;
+    store.set_session_trust(&session_id, trust);
+    pty.set_remote_suppressed(&session_id, store.is_private_mode() && siloed);
+}
+
+/// Scan text for secret / credential markers, entirely in-process (never sent to any cloud
+/// agent). Assists — but does not replace — the manual "mark sensitive" decision.
+#[tauri::command]
+fn scan_sensitivity(text: String) -> Vec<crate::store::SensitivityHit> {
+    crate::store::scan_sensitivity(&text)
 }
 
 #[tauri::command]
@@ -676,7 +716,14 @@ pub fn run() {
             let bus = app.state::<Arc<hookbus::HookBus>>().inner().clone();
             let broker = app.state::<Arc<broker::Broker>>().inner().clone();
             let presence = app.state::<Arc<broker::Presence>>().inner().clone();
-            hooks::start(app.handle().clone(), hook_state, bus, broker, presence, fleet.clone());
+            hooks::start(
+                app.handle().clone(),
+                hook_state,
+                bus,
+                broker,
+                presence,
+                fleet.clone(),
+            );
             bridge::start(app.handle().clone());
             let pty = app.state::<Arc<PtyManager>>().inner().clone();
             let store = app.state::<Arc<Store>>().inner().clone();
@@ -711,6 +758,10 @@ pub fn run() {
             remove_account,
             set_default_account,
             set_session_account,
+            get_trust_settings,
+            set_trust_settings,
+            set_session_trust,
+            scan_sensitivity,
             remove_session,
             suggest_session_name,
             git_branch,

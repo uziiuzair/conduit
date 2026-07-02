@@ -4,8 +4,9 @@ import { McpMatrix } from "./McpMatrix";
 import { TelemetryToggle } from "./TelemetryToggle";
 import { AboutPanel } from "./AboutPanel";
 import { AccountList } from "./AccountList";
+import { TrustPanel } from "./TrustPanel";
 
-export type SettingsTab = "agents" | "accounts" | "mcp" | "privacy" | "about";
+export type SettingsTab = "agents" | "accounts" | "mcp" | "security" | "privacy" | "about";
 
 export function Settings({
   onClose,
@@ -63,6 +64,16 @@ export function Settings({
               MCP servers
             </span>
             <span
+              className={`settings-tab${tab === "security" ? " on" : ""}`}
+              role="tab"
+              aria-selected={tab === "security"}
+              tabIndex={tab === "security" ? 0 : -1}
+              onClick={() => setTab("security")}
+              onKeyDown={(e) => e.key === "Enter" && setTab("security")}
+            >
+              Security
+            </span>
+            <span
               className={`settings-tab${tab === "privacy" ? " on" : ""}`}
               role="tab"
               aria-selected={tab === "privacy"}
@@ -97,6 +108,16 @@ export function Settings({
           )}
           {tab === "accounts" && <AccountList />}
           {tab === "mcp" && <McpMatrix />}
+          {tab === "security" && (
+            <>
+              <p className="settings-intro">
+                Multi-agent trust boundaries. Turn on private mode to run sensitive work in a
+                local silo that no other agent can read. Off by default; when off, every agent
+                behaves normally.
+              </p>
+              <TrustPanel />
+            </>
+          )}
           {tab === "privacy" && (
             <>
               <p className="settings-intro">
