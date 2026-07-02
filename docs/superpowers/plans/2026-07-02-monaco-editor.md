@@ -12,6 +12,18 @@
 
 ---
 
+## Post-spike change requests (2026-07-02)
+
+After the Phase 0 spike was confirmed working, three adjustments were requested. Folded into the phases noted:
+
+1. **Editor top padding** (Task 6). The first line sits too close to the breadcrumb divider. Set Monaco editor `padding: { top: 12, bottom: 6 }` in `CodeEditorPane` so content clears the breadcrumb.
+2. **Interactive language selector** (Task 6) — **SUPERSEDES** the passive breadcrumb label in spec §9. The language indicator in the editor breadcrumb becomes a clickable, VSCode-like control: clicking it opens a searchable dropdown of all registered Monaco languages (`monaco.languages.getLanguages()`); selecting one calls `monaco.editor.setModelLanguage(model, id)` for the current file and updates the label. Placement: right-aligned in the top breadcrumb, with a caret. The override is session-scoped (not persisted); `languageFor()` still sets the initial language.
+3. **Open file from the tree** (Task 7, already in scope). `FileTree.tsx` already wires `onOpen={(p) => openFile(projectId, p)}`, which opens a `kind:"file"` tab. Task 7 makes that tab render the editable `CodeEditorPane` instead of the read-only `FileViewer`, so tree selection opens the file in the editor.
+
+**Phase 0 outcome:** spike passed — editor renders, Monarch highlighting parity, live theme switching, `editor.worker` loads offline in the packaged build. The **slim `editor.api` import is the locked choice**; the full-`monaco-editor` fallback was not needed.
+
+---
+
 ## Shared Contracts (LAW — every task uses these exact names/types)
 
 These signatures were pinned before drafting so no phase diverges. If a task below appears to
