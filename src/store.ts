@@ -362,12 +362,6 @@ interface AppState {
   closeTab: (projectId: string, groupId: string, ref: string) => void;
   setActiveTab: (projectId: string, groupId: string, ref: string) => void;
   setActiveGroup: (projectId: string, groupId: string) => void;
-  moveTabToGroup: (
-    projectId: string,
-    fromGroupId: string,
-    ref: string,
-    toGroupId: string,
-  ) => void;
   moveTab: (
     projectId: string,
     fromGroupId: string,
@@ -822,22 +816,6 @@ export const useStore = create<AppState>((set, get) => {
     setActiveGroup: (projectId, groupId) =>
       applyLayout(projectId, (l) => {
         l.activeGroupId = groupId;
-        return l;
-      }),
-
-    moveTabToGroup: (projectId, fromGroupId, ref, toGroupId) =>
-      applyLayout(projectId, (l) => {
-        if (fromGroupId === toGroupId) return l;
-        const from = l.groups.find((g) => g.id === fromGroupId);
-        const to = l.groups.find((g) => g.id === toGroupId);
-        if (!from || !to) return l;
-        const tab = from.tabs.find((t) => t.ref === ref);
-        if (!tab) return l;
-        from.tabs = from.tabs.filter((t) => t.ref !== ref);
-        if (from.activeRef === ref) from.activeRef = from.tabs[from.tabs.length - 1]?.ref ?? null;
-        if (!to.tabs.some((t) => t.ref === ref)) to.tabs.push(tab);
-        to.activeRef = ref;
-        l.activeGroupId = toGroupId;
         return l;
       }),
 

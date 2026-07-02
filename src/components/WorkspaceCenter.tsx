@@ -1,4 +1,4 @@
-import { useRef, useState } from "react";
+import { Fragment, useEffect, useRef, useState } from "react";
 import {
   useStore,
   activeGroup,
@@ -12,7 +12,11 @@ import {
 } from "../store";
 import { TerminalView } from "./Terminal";
 import { CodeEditorPane } from "./CodeEditorPane";
-import { TerminalIcon, FileIcon, CodeIcon, CloseIcon, SplitIcon } from "./Icons";
+import { TerminalIcon, FileIcon, CodeIcon, CloseIcon } from "./Icons";
+
+/** Payload carried by a native tab drag (shared between WorkspaceCenter and GroupTabStrip). */
+type TabDrag = { fromGroupId: string; tab: WsTab };
+type PaneZone = "left" | "center" | "right";
 
 const MIN_WEIGHT = 0.14;
 
@@ -39,15 +43,15 @@ export function WorkspaceCenter({
 }) {
   const layout = useStore((s) => (projectId ? s.layouts[projectId] : undefined));
   const setGroupWeights = useStore((s) => s.setGroupWeights);
-  const moveTabToGroup = useStore((s) => s.moveTabToGroup);
-  const openToSide = useStore((s) => s.openToSide);
+  const moveTab = useStore((s) => s.moveTab);
+  const splitTab = useStore((s) => s.splitTab);
   const wsRef = useRef<HTMLDivElement>(null);
 
   // drag-to-split / move-between-groups
-  const dragData = useRef<{ fromGroupId: string; tab: WsTab } | null>(null);
+  const dragData = useRef<TabDrag | null>(null);
   const [dragging, setDragging] = useState(false);
-  const [dropGroupId, setDropGroupId] = useState<string | null>(null);
-  const [dropSplit, setDropSplit] = useState(false);
+  // directional pane overlay: which group + region the cursor is currently over
+  const [dropZone, setDropZone] = useState<{ groupId: string; zone: PaneZone } | null>(null);
 
   const onTabDragStart = (fromGroupId: string, tab: WsTab) => {
     dragData.current = { fromGroupId, tab };
@@ -56,8 +60,7 @@ export function WorkspaceCenter({
   const onTabDragEnd = () => {
     dragData.current = null;
     setDragging(false);
-    setDropGroupId(null);
-    setDropSplit(false);
+    setDropZone(null);
   };
 
   const activeProject = projectId ? projects.find((p) => p.id === projectId) ?? null : null;
@@ -137,24 +140,9 @@ export function WorkspaceCenter({
           layout.groups.map((g, i) =>
             g.tabs.length > 0 ? (
               <div
-                className={`group-chrome ${dropGroupId === g.id ? "drop-target" : ""}`}
+                className="group-chrome"
                 key={g.id}
                 style={{ left: `${geom[i].left}%`, width: `${geom[i].width}%` }}
-                onDragOver={(e) => {
-                  if (dragData.current) {
-                    e.preventDefault();
-                    setDropGroupId(g.id);
-                  }
-                }}
-                onDragLeave={() => setDropGroupId((cur) => (cur === g.id ? null : cur))}
-                onDrop={(e) => {
-                  e.preventDefault();
-                  const d = dragData.current;
-                  if (d && d.fromGroupId !== g.id) {
-                    moveTabToGroup(projectId!, d.fromGroupId, d.tab.ref, g.id);
-                  }
-                  onTabDragEnd();
-                }}
               >
                 <GroupTabStrip
                   projectId={projectId!}
@@ -163,6 +151,8 @@ export function WorkspaceCenter({
                   home={home}
                   isActiveGroup={ag?.id === g.id}
                   soloGroup={soloGroup}
+                  dragging={dragging}
+                  dragRef={dragData}
                   onTabDragStart={onTabDragStart}
                   onTabDragEnd={onTabDragEnd}
                 />
@@ -214,27 +204,52 @@ export function WorkspaceCenter({
                 />
               );
             })}
-        </div>
 
-        {/* Right-edge drop zone: drag a tab here to split it into a new group. */}
-        {dragging && (
-          <div
-            className={`split-dropzone ${dropSplit ? "active" : ""}`}
-            onDragOver={(e) => {
-              e.preventDefault();
-              setDropSplit(true);
-            }}
-            onDragLeave={() => setDropSplit(false)}
-            onDrop={(e) => {
-              e.preventDefault();
-              const d = dragData.current;
-              if (d && projectId) openToSide(projectId, d.tab);
-              onTabDragEnd();
-            }}
-          >
-            <span>Split</span>
-          </div>
-        )}
+          {/* Directional drop overlay — a separate absolutely-positioned sibling layer that
+              only exists mid-drag. It NEVER wraps/reparents the panes above (keep-alive).
+              left/right thirds split into a new column; the center moves into the group. */}
+          {dragging &&
+            layout &&
+            projectId &&
+            layout.groups.map((g, gi) => (
+              <div
+                className="pane-dropzones"
+                key={"pdz-" + g.id}
+                style={{ left: `${geom[gi].left}%`, width: `${geom[gi].width}%` }}
+              >
+                {(["left", "center", "right"] as PaneZone[]).map((zone) => (
+                  <div
+                    key={zone}
+                    className={`pane-dropzone ${zone} ${
+                      dropZone?.groupId === g.id && dropZone.zone === zone ? "active" : ""
+                    }`}
+                    onDragOver={(e) => {
+                      if (!dragData.current) return;
+                      e.preventDefault();
+                      setDropZone({ groupId: g.id, zone });
+                    }}
+                    onDragLeave={() =>
+                      setDropZone((cur) =>
+                        cur && cur.groupId === g.id && cur.zone === zone ? null : cur,
+                      )
+                    }
+                    onDrop={(e) => {
+                      e.preventDefault();
+                      const d = dragData.current;
+                      if (d) {
+                        if (zone === "center") {
+                          moveTab(projectId, d.fromGroupId, d.tab.ref, g.id, g.tabs.length);
+                        } else {
+                          splitTab(projectId, d.tab.ref, g.id, zone);
+                        }
+                      }
+                      onTabDragEnd();
+                    }}
+                  />
+                ))}
+              </div>
+            ))}
+        </div>
 
         {nothingVisible && <EmptyState />}
       </div>
@@ -249,6 +264,8 @@ function GroupTabStrip({
   home,
   isActiveGroup,
   soloGroup,
+  dragging,
+  dragRef,
   onTabDragStart,
   onTabDragEnd,
 }: {
@@ -258,6 +275,8 @@ function GroupTabStrip({
   home: string | null;
   isActiveGroup: boolean;
   soloGroup: boolean;
+  dragging: boolean;
+  dragRef: React.RefObject<TabDrag | null>;
   onTabDragStart: (fromGroupId: string, tab: WsTab) => void;
   onTabDragEnd: () => void;
 }) {
@@ -265,7 +284,21 @@ function GroupTabStrip({
   const setActiveGroup = useStore((s) => s.setActiveGroup);
   const requestCloseTab = useStore((s) => s.requestCloseTab);
   const dirty = useStore((s) => s.dirty);
-  const openToSide = useStore((s) => s.openToSide);
+  const moveTab = useStore((s) => s.moveTab);
+
+  // Insertion caret for tab reorder / move-into-strip: index in [0, tabs.length].
+  const [caretIndex, setCaretIndex] = useState<number | null>(null);
+  // Drop of the dragged tab into THIS strip at the caret position.
+  const commitDrop = () => {
+    const d = dragRef.current;
+    if (d) moveTab(projectId, d.fromGroupId, d.tab.ref, group.id, caretIndex ?? group.tabs.length);
+    setCaretIndex(null);
+    onTabDragEnd();
+  };
+  // Clear a stale caret once the drag ends anywhere.
+  useEffect(() => {
+    if (!dragging) setCaretIndex(null);
+  }, [dragging]);
 
   const activeTab = group.tabs.find((t) => t.ref === group.activeRef) ?? null;
   const activeSession =
@@ -283,52 +316,72 @@ function GroupTabStrip({
     <div
       className={`tab-strip ${isActiveGroup ? "active-group" : ""}`}
       onMouseDown={() => setActiveGroup(projectId, group.id)}
+      onDragOver={(e) => {
+        // Allow drops anywhere on the strip (incl. padding); tabs/fill set the caret index.
+        if (dragRef.current) e.preventDefault();
+      }}
+      onDragLeave={(e) => {
+        // Only clear when the pointer truly leaves the strip (not on child→child moves).
+        if (!e.currentTarget.contains(e.relatedTarget as Node | null)) setCaretIndex(null);
+      }}
+      onDrop={(e) => {
+        e.preventDefault();
+        commitDrop();
+      }}
     >
-      {group.tabs.map((t) => (
-        <div
-          key={t.ref}
-          className={`tab ${group.activeRef === t.ref ? "active" : ""}`}
-          draggable
-          onDragStart={(e) => {
-            e.dataTransfer.effectAllowed = "move";
-            e.dataTransfer.setData("text/plain", t.ref);
-            onTabDragStart(group.id, t);
-          }}
-          onDragEnd={onTabDragEnd}
-          onClick={() => setActiveTab(projectId, group.id, t.ref)}
-        >
-          {t.kind === "session" ? (
-            <TerminalIcon size={11} />
-          ) : (
-            <FileIcon size={11} />
-          )}
-          <span className="tab-label">{label(t)}</span>
-          {t.kind === "file" && dirty[t.ref] && (
-            <span className="tab-dirty" title="Unsaved changes" />
-          )}
-          <button
-            className="tab-split"
-            title="Open to the side"
-            onClick={(e) => {
-              e.stopPropagation();
-              openToSide(projectId, t);
+      {group.tabs.map((t, i) => (
+        <Fragment key={t.ref}>
+          {caretIndex === i && <span className="tab-caret" />}
+          <div
+            className={`tab ${group.activeRef === t.ref ? "active" : ""}`}
+            draggable
+            onDragStart={(e) => {
+              e.dataTransfer.effectAllowed = "move";
+              e.dataTransfer.setData("text/plain", t.ref);
+              onTabDragStart(group.id, t);
             }}
-          >
-            <SplitIcon size={10} />
-          </button>
-          <button
-            className="tab-close"
-            title="Close tab"
-            onClick={(e) => {
-              e.stopPropagation();
-              void requestCloseTab(projectId, group.id, t.ref);
+            onDragEnd={onTabDragEnd}
+            onDragOver={(e) => {
+              if (!dragRef.current) return;
+              e.preventDefault();
+              // Insert before this tab if the cursor is left of its horizontal midpoint.
+              const rect = e.currentTarget.getBoundingClientRect();
+              setCaretIndex(e.clientX < rect.left + rect.width / 2 ? i : i + 1);
             }}
+            onClick={() => setActiveTab(projectId, group.id, t.ref)}
           >
-            <CloseIcon size={10} />
-          </button>
-        </div>
+            {t.kind === "session" ? (
+              <TerminalIcon size={11} />
+            ) : (
+              <FileIcon size={11} />
+            )}
+            <span className="tab-label">{label(t)}</span>
+            {t.kind === "file" && dirty[t.ref] && (
+              <span className="tab-dirty" title="Unsaved changes" />
+            )}
+            <button
+              className="tab-close"
+              title="Close tab"
+              onClick={(e) => {
+                e.stopPropagation();
+                void requestCloseTab(projectId, group.id, t.ref);
+              }}
+            >
+              <CloseIcon size={10} />
+            </button>
+          </div>
+        </Fragment>
       ))}
-      <div className="tab-strip-fill" data-tauri-drag-region />
+      {caretIndex === group.tabs.length && <span className="tab-caret" />}
+      <div
+        className="tab-strip-fill"
+        data-tauri-drag-region
+        onDragOver={(e) => {
+          if (!dragRef.current) return;
+          e.preventDefault();
+          setCaretIndex(group.tabs.length);
+        }}
+      />
       {wd && soloGroup && <span className="cwd">{prettyPath(wd, home)}</span>}
       {wd &&
         (soloGroup ? (
