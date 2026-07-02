@@ -478,6 +478,11 @@ fn write_file(path: String, content: String) -> Result<fsops::FileStat, String> 
 }
 
 #[tauri::command]
+fn stat_file(path: String) -> fsops::FileStat {
+    fsops::stat_file(&path)
+}
+
+#[tauri::command]
 fn create_file(path: String) -> Result<(), String> {
     fsops::create_file(&path)
 }
@@ -717,6 +722,7 @@ pub fn run() {
             list_dir,
             read_file,
             write_file,
+            stat_file,
             create_file,
             create_dir,
             rename_path,
