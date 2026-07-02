@@ -51,8 +51,22 @@ body {
   color: var(--text-bright);
   -webkit-font-smoothing: antialiased;
   overflow: hidden;
+  /* WKWebView ignores unprefixed user-select, so this disables selection app-wide.
+     Re-enabled just below on the surfaces where selection is functional. */
+  -webkit-user-select: none;
   user-select: none;
   cursor: default;
+}
+
+/* Keep selection where it's actually useful: form fields, the Monaco editor, and
+   the terminal (xterm draws its own selection, but native stays on for copy). */
+input,
+textarea,
+[contenteditable="true"],
+.monaco-editor,
+.xterm {
+  -webkit-user-select: text;
+  user-select: text;
 }
 
 button {
