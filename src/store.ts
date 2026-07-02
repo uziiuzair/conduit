@@ -424,6 +424,7 @@ interface AppState {
   conflict: Record<string, { mtimeMs: number; size: number } | "deleted">;
   setDirty: (path: string, dirty: boolean) => void;
   clearConflict: (path: string) => void;
+  setConflict: (path: string, c: { mtimeMs: number; size: number } | "deleted") => void;
   saveFile: (path: string) => Promise<void>;
   requestCloseTab: (projectId: string, groupId: string, ref: string) => Promise<void>;
 
@@ -861,6 +862,9 @@ export const useStore = create<AppState>((set, get) => {
         delete next[path];
         return { conflict: next };
       }),
+
+    setConflict: (path, c) =>
+      set((s) => ({ conflict: { ...s.conflict, [path]: c } })),
 
     saveFile: async (path) => {
       const entry = registry.model(path);
