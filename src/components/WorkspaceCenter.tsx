@@ -11,7 +11,7 @@ import {
   type WsTab,
 } from "../store";
 import { TerminalView } from "./Terminal";
-import { FileViewer } from "./FileViewer";
+import { CodeEditorPane } from "./CodeEditorPane";
 import { TerminalIcon, FileIcon, CodeIcon, CloseIcon, SplitIcon } from "./Icons";
 
 const MIN_WEIGHT = 0.14;
@@ -84,18 +84,6 @@ export function WorkspaceCenter({
       style: { left: `${geom[gi].left}%`, width: `${geom[gi].width}%` } as React.CSSProperties,
     };
   };
-
-  // File tabs of the active project, with group placement.
-  const activeFiles: { ref: string; gi: number; visible: boolean }[] = [];
-  if (layout) {
-    layout.groups.forEach((g, gi) => {
-      g.tabs.forEach((t) => {
-        if (t.kind === "file") {
-          activeFiles.push({ ref: t.ref, gi, visible: g.activeRef === t.ref });
-        }
-      });
-    });
-  }
 
   const nothingVisible = !layout || layout.groups.every((g) => g.tabs.length === 0);
   const soloGroup = (layout?.groups.length ?? 0) <= 1;
@@ -212,14 +200,20 @@ export function WorkspaceCenter({
               />
             );
           })}
-          {activeFiles.map((f) => (
-            <FileViewer
-              key={projectId + "::" + f.ref}
-              path={f.ref}
-              visible={f.visible}
-              style={{ left: `${geom[f.gi].left}%`, width: `${geom[f.gi].width}%` }}
-            />
-          ))}
+          {layout &&
+            projectId &&
+            layout.groups.map((g, gi) => {
+              const activeTab = g.tabs.find((t) => t.ref === g.activeRef);
+              return (
+                <CodeEditorPane
+                  key={projectId + "::grp::" + g.id}
+                  projectId={projectId}
+                  groupId={g.id}
+                  visible={!!activeTab && activeTab.kind === "file"}
+                  style={{ left: `${geom[gi].left}%`, width: `${geom[gi].width}%` }}
+                />
+              );
+            })}
         </div>
 
         {/* Right-edge drop zone: drag a tab here to split it into a new group. */}
@@ -269,7 +263,8 @@ function GroupTabStrip({
 }) {
   const setActiveTab = useStore((s) => s.setActiveTab);
   const setActiveGroup = useStore((s) => s.setActiveGroup);
-  const closeTab = useStore((s) => s.closeTab);
+  const requestCloseTab = useStore((s) => s.requestCloseTab);
+  const dirty = useStore((s) => s.dirty);
   const openToSide = useStore((s) => s.openToSide);
 
   const activeTab = group.tabs.find((t) => t.ref === group.activeRef) ?? null;
@@ -308,6 +303,9 @@ function GroupTabStrip({
             <FileIcon size={11} />
           )}
           <span className="tab-label">{label(t)}</span>
+          {t.kind === "file" && dirty[t.ref] && (
+            <span className="tab-dirty" title="Unsaved changes" />
+          )}
           <button
             className="tab-split"
             title="Open to the side"
@@ -323,7 +321,7 @@ function GroupTabStrip({
             title="Close tab"
             onClick={(e) => {
               e.stopPropagation();
-              closeTab(projectId, group.id, t.ref);
+              void requestCloseTab(projectId, group.id, t.ref);
             }}
           >
             <CloseIcon size={10} />

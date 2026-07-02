@@ -947,6 +947,18 @@ button {
   background: var(--selection-bg);
 }
 
+/* VS Code-style dirty dot: occupies the close-button slot until you hover. */
+.tab-dirty {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--text-mid);
+  flex-shrink: 0;
+}
+.tab:hover .tab-dirty {
+  display: none;
+}
+
 /* compact icon-only button (per-group VS Code when split) */
 .icon-btn {
   display: flex;
