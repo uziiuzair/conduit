@@ -477,6 +477,26 @@ fn write_file(path: String, content: String) -> Result<fsops::FileStat, String> 
     fsops::write_file(&path, &content)
 }
 
+#[tauri::command]
+fn create_file(path: String) -> Result<(), String> {
+    fsops::create_file(&path)
+}
+
+#[tauri::command]
+fn create_dir(path: String) -> Result<(), String> {
+    fsops::create_dir(&path)
+}
+
+#[tauri::command]
+fn rename_path(from: String, to: String) -> Result<(), String> {
+    fsops::rename_path(&from, &to)
+}
+
+#[tauri::command]
+fn delete_path(path: String) -> Result<(), String> {
+    fsops::delete_path(&path)
+}
+
 // ---- Notifications -----------------------------------------------------------
 
 #[tauri::command]
@@ -697,6 +717,10 @@ pub fn run() {
             list_dir,
             read_file,
             write_file,
+            create_file,
+            create_dir,
+            rename_path,
+            delete_path,
             notify_user,
             open_in_vscode,
             open_external,
