@@ -87,6 +87,14 @@ pub trait ProviderAdapter {
     fn mcp_remove_command(&self, _name: &str) -> Option<String> {
         None
     }
+    /// The OS-appropriate shell command that installs this agent's CLI, for Conduit's one-click
+    /// in-app install (Settings → Agents / onboarding). `None` => no known auto-installer, so the
+    /// UI shows a manual hint instead. The command is non-interactive and needs no elevation; it
+    /// is run via the platform install shell (see `install_agent` in lib.rs). Note that install
+    /// != ready: every agent still requires sign-in on first launch inside its session.
+    fn install_command(&self) -> Option<String> {
+        None
+    }
 }
 
 pub struct ClaudeAdapter;
@@ -97,6 +105,9 @@ impl ProviderAdapter for ClaudeAdapter {
     }
     fn binary(&self) -> &'static str {
         "claude"
+    }
+    fn install_command(&self) -> Option<String> {
+        Some("npm install -g @anthropic-ai/claude-code".into())
     }
     fn supports_worktree(&self) -> bool {
         true
@@ -166,6 +177,9 @@ impl ProviderAdapter for GeminiAdapter {
     }
     fn binary(&self) -> &'static str {
         "gemini"
+    }
+    fn install_command(&self) -> Option<String> {
+        Some("npm install -g @google/gemini-cli".into())
     }
     fn build_invocation(
         &self,
@@ -263,6 +277,9 @@ impl ProviderAdapter for CodexAdapter {
     fn binary(&self) -> &'static str {
         "codex"
     }
+    fn install_command(&self) -> Option<String> {
+        Some("npm install -g @openai/codex".into())
+    }
     // Phase 1: launch fresh (Codex doesn't accept a caller-pinned session id);
     // worktrees and resume are later phases. `_flags` is unused (no worktree flags
     // are ever passed for an agent whose supports_worktree() is false).
@@ -352,6 +369,9 @@ impl ProviderAdapter for OpenCodeAdapter {
     fn binary(&self) -> &'static str {
         "opencode"
     }
+    fn install_command(&self) -> Option<String> {
+        Some("npm install -g opencode-ai@latest".into())
+    }
     // Fresh launch like Codex/Gemini: opencode generates its own session ids, so there is
     // no caller-pinned resume; worktree isolation is out of scope for this tier.
     fn build_invocation(
@@ -378,6 +398,19 @@ impl ProviderAdapter for AntigravityAdapter {
     }
     fn binary(&self) -> &'static str {
         "agy"
+    }
+    // Antigravity has no official npm package; install is the vendor's script. Run on explicit
+    // user action only (Conduit surfaces the exact command in the UI). Post-install, `agy`
+    // forces an interactive Google Sign-In on first launch -- which happens in the PTY session.
+    fn install_command(&self) -> Option<String> {
+        #[cfg(windows)]
+        {
+            Some("irm https://antigravity.google/cli/install.ps1 | iex".into())
+        }
+        #[cfg(not(windows))]
+        {
+            Some("curl -fsSL https://antigravity.google/cli/install.sh | bash".into())
+        }
     }
     // The Antigravity CLI (`agy`) is Google's headless terminal agent that signs in with a
     // Google account (i.e. a Gemini subscription), unlike the API-key `gemini` CLI. Fresh
@@ -414,11 +447,20 @@ pub struct AgentInfo {
     pub binary: String,
     pub found: bool,
     pub path: Option<String>,
+    /// The one-click install command for this agent, or None when there's no known installer.
+    /// The UI offers an "Install" button only for a not-found agent that has one.
+    pub install_command: Option<String>,
 }
 
 impl AgentInfo {
     /// Build from the stdout of `command -v <binary>` (empty = not found).
-    pub fn from_probe(id: AgentId, binary: &str, label: &str, probe_stdout: &str) -> Self {
+    pub fn from_probe(
+        id: AgentId,
+        binary: &str,
+        label: &str,
+        probe_stdout: &str,
+        install_command: Option<String>,
+    ) -> Self {
         let path = probe_stdout.trim();
         AgentInfo {
             id,
@@ -426,6 +468,7 @@ impl AgentInfo {
             binary: binary.to_string(),
             found: !path.is_empty(),
             path: (!path.is_empty()).then(|| path.to_string()),
+            install_command,
         }
     }
 }
@@ -473,7 +516,7 @@ pub fn detect_agents() -> Vec<AgentInfo> {
                 .unwrap_or_default();
             // `where` prints one match per line; the first is enough to mark it found.
             let first = stdout.lines().next().unwrap_or("");
-            AgentInfo::from_probe(a.id(), bin, label_for(a.id()), first)
+            AgentInfo::from_probe(a.id(), bin, label_for(a.id()), first, a.install_command())
         })
         .collect()
 }
@@ -502,7 +545,13 @@ pub fn detect_agents() -> Vec<AgentInfo> {
         .iter()
         .map(|a| {
             let bin = a.binary();
-            AgentInfo::from_probe(a.id(), bin, label_for(a.id()), probe_path(&stdout, bin))
+            AgentInfo::from_probe(
+                a.id(),
+                bin,
+                label_for(a.id()),
+                probe_path(&stdout, bin),
+                a.install_command(),
+            )
         })
         .collect()
 }
@@ -532,10 +581,11 @@ mod tests {
             "codex",
             "Codex CLI",
             "/opt/homebrew/bin/codex\n",
+            None,
         );
         assert!(info.found);
         assert_eq!(info.path.as_deref(), Some("/opt/homebrew/bin/codex"));
-        let missing = AgentInfo::from_probe(AgentId::Codex, "codex", "Codex CLI", "");
+        let missing = AgentInfo::from_probe(AgentId::Codex, "codex", "Codex CLI", "", None);
         assert!(!missing.found);
         assert!(missing.path.is_none());
     }
@@ -662,6 +712,40 @@ mod tests {
         assert!(ClaudeAdapter.plugin_profile().is_none());
         assert!(CodexAdapter.plugin_profile().is_none());
         assert!(GeminiAdapter.plugin_profile().is_none());
+    }
+
+    #[test]
+    fn adapters_report_install_commands() {
+        assert_eq!(
+            ClaudeAdapter.install_command().as_deref(),
+            Some("npm install -g @anthropic-ai/claude-code")
+        );
+        assert_eq!(
+            CodexAdapter.install_command().as_deref(),
+            Some("npm install -g @openai/codex")
+        );
+        assert_eq!(
+            GeminiAdapter.install_command().as_deref(),
+            Some("npm install -g @google/gemini-cli")
+        );
+        assert_eq!(
+            OpenCodeAdapter.install_command().as_deref(),
+            Some("npm install -g opencode-ai@latest")
+        );
+        // Antigravity uses the vendor script (OS-specific); assert it offers one and flows
+        // through detect into AgentInfo.
+        assert!(AntigravityAdapter.install_command().is_some());
+        let info = AgentInfo::from_probe(
+            AgentId::OpenCode,
+            "opencode",
+            "OpenCode",
+            "",
+            OpenCodeAdapter.install_command(),
+        );
+        assert_eq!(
+            info.install_command.as_deref(),
+            Some("npm install -g opencode-ai@latest")
+        );
     }
 
     #[test]
