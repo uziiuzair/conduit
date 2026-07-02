@@ -57,7 +57,12 @@ export function useFileWatch(): void {
           const store = useStore.getState();
 
           if (!stat.exists) {
-            if (store.conflict[path] !== "deleted") store.setConflict(path, "deleted");
+            // Skip re-flagging once the baseline is already the {0,0} deleted sentinel
+            // (set by CodeEditorPane's "Keep buffer" action) — otherwise every tick
+            // after Keep-buffer would immediately re-raise the same deleted banner.
+            if (base.mtimeMs !== 0 || base.size !== 0) {
+              if (store.conflict[path] !== "deleted") store.setConflict(path, "deleted");
+            }
             continue;
           }
           if (stat.mtimeMs === base.mtimeMs && stat.size === base.size) continue;
