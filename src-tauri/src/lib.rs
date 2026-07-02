@@ -471,6 +471,11 @@ fn read_file(path: String) -> fsops::FileContent {
     fsops::read_file(&path)
 }
 
+#[tauri::command]
+fn write_file(path: String, content: String) -> Result<fsops::FileStat, String> {
+    fsops::write_file(&path, &content)
+}
+
 // ---- Notifications -----------------------------------------------------------
 
 #[tauri::command]
@@ -683,6 +688,7 @@ pub fn run() {
             worktree_remove,
             list_dir,
             read_file,
+            write_file,
             notify_user,
             open_in_vscode,
             open_external,

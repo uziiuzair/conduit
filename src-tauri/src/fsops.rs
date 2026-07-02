@@ -1,7 +1,7 @@
 //! Read-only filesystem access for the Files tab + file viewer. Never writes.
 
 use std::fs;
-use std::io::Read;
+use std::io::{Read, Write};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::Serialize;
@@ -171,6 +171,80 @@ fn err_content(msg: String) -> FileContent {
     }
 }
 
+// ---- write contract (atomic, std-only) ------------------------------------
+
+/// Size + mtime of a path. Shared by `write_file` (returns it, `exists:true`) and the
+/// Phase 2 `stat_file`. `mtime_ms`/`size` are 0 and `exists:false` when the path is gone.
+#[derive(Serialize, Clone, Copy)]
+#[serde(rename_all = "camelCase")]
+pub struct FileStat {
+    pub mtime_ms: f64,
+    pub size: u64,
+    pub exists: bool,
+}
+
+/// Atomically overwrite `path` with `content`. std::fs only. Rejects a missing parent dir
+/// (a save must never conjure directories). Writes a sibling temp, fsyncs it, reapplies the
+/// target's Unix mode, then `fs::rename`s it into place (atomic same-fs replace). Returns
+/// the post-rename stat.
+pub fn write_file(path: &str, content: &str) -> Result<FileStat, String> {
+    let target = std::path::Path::new(path);
+    let parent = target
+        .parent()
+        .ok_or_else(|| "path has no parent directory".to_string())?;
+    if !parent.is_dir() {
+        return Err(format!(
+            "parent directory does not exist: {}",
+            parent.display()
+        ));
+    }
+    let name = target
+        .file_name()
+        .and_then(|n| n.to_str())
+        .ok_or_else(|| "invalid file name".to_string())?;
+
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let tmp = parent.join(format!(
+        ".{name}.conduit-tmp-{}-{nanos}",
+        std::process::id()
+    ));
+
+    // Write + flush + fsync the temp so a crash can't leave a half-written target.
+    {
+        let mut f = fs::File::create(&tmp).map_err(|e| format!("create temp failed: {e}"))?;
+        f.write_all(content.as_bytes())
+            .map_err(|e| format!("write temp failed: {e}"))?;
+        f.sync_all()
+            .map_err(|e| format!("fsync temp failed: {e}"))?;
+    }
+
+    // Reapply the existing file's mode (a fresh temp is 0600 and would strip +x off scripts).
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if let Ok(meta) = fs::metadata(target) {
+            let _ =
+                fs::set_permissions(&tmp, fs::Permissions::from_mode(meta.permissions().mode()));
+        }
+    }
+
+    // Atomic replace. Clean up the temp on failure so we don't litter.
+    if let Err(e) = fs::rename(&tmp, target) {
+        let _ = fs::remove_file(&tmp);
+        return Err(format!("atomic rename failed: {e}"));
+    }
+
+    let meta = fs::metadata(target).map_err(|e| format!("post-write stat failed: {e}"))?;
+    Ok(FileStat {
+        mtime_ms: mtime_ms_of(&meta),
+        size: meta.len(),
+        exists: true,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -253,5 +327,40 @@ mod tests {
         let fc = read_file("/no/such/conduit/path/file-xyz.txt");
         assert!(fc.error.is_some());
         assert_eq!(fc.content, "");
+    }
+
+    #[test]
+    fn write_file_atomic_replace() {
+        let dir = unique_temp_dir("write-replace");
+        let p = dir.join("note.txt");
+        fs::write(&p, b"old contents").unwrap();
+        let stat = write_file(p.to_str().unwrap(), "new contents").expect("write ok");
+        assert!(stat.exists);
+        assert_eq!(stat.size, "new contents".len() as u64);
+        assert_eq!(fs::read_to_string(&p).unwrap(), "new contents");
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_file_preserves_unix_mode() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = unique_temp_dir("write-mode");
+        let p = dir.join("script.sh");
+        fs::write(&p, b"#!/bin/sh\necho hi\n").unwrap();
+        fs::set_permissions(&p, fs::Permissions::from_mode(0o755)).unwrap();
+        write_file(p.to_str().unwrap(), "#!/bin/sh\necho bye\n").expect("write ok");
+        let mode = fs::metadata(&p).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o755);
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn write_file_rejects_missing_parent() {
+        let dir = unique_temp_dir("write-missing");
+        let p = dir.join("ghost-dir").join("file.txt");
+        let res = write_file(p.to_str().unwrap(), "data");
+        assert!(res.is_err());
+        fs::remove_dir_all(&dir).ok();
     }
 }
