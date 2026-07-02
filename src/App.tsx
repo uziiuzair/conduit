@@ -21,6 +21,7 @@ import { RightColumn } from "./components/RightColumn";
 import { Onboarding } from "./components/Onboarding";
 import { Settings } from "./components/Settings";
 import { useTelemetry } from "./hooks/useTelemetry";
+import { useFileWatch } from "./hooks/useFileWatch";
 
 interface HookPayload {
   session: string;
@@ -44,6 +45,9 @@ export default function App() {
 
   // Anonymous engagement heartbeat; no-op while opted out (Settings/onboarding).
   useTelemetry(telemetryOptOut);
+
+  // Single app-level poll: silently reload clean open files an agent edits on disk.
+  useFileWatch();
 
   useEffect(() => {
     void load();
