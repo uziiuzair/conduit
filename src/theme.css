@@ -2259,3 +2259,26 @@ button {
   background: var(--accent, #7aa2f7);
   transition: width 0.15s ease;
 }
+
+.about-updates {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.about-check-btn {
+  font-size: 12px;
+  padding: 4px 10px;
+  border-radius: 6px;
+  cursor: pointer;
+  border: 1px solid var(--border, #2a2c3a);
+  background: transparent;
+  color: var(--text, #c0caf5);
+}
+.about-check-btn:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+.about-update-status {
+  font-size: 12px;
+  opacity: 0.75;
+}
