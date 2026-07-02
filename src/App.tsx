@@ -19,6 +19,7 @@ import { Sidebar } from "./components/Sidebar";
 import { WorkspaceCenter } from "./components/WorkspaceCenter";
 import { RightColumn } from "./components/RightColumn";
 import { Onboarding } from "./components/Onboarding";
+import { Settings } from "./components/Settings";
 import { useTelemetry } from "./hooks/useTelemetry";
 
 interface HookPayload {
@@ -35,6 +36,11 @@ export default function App() {
   const loadAgents = useStore((s) => s.loadAgents);
   const agentSetupComplete = useStore((s) => s.agentSetupComplete);
   const telemetryOptOut = useStore((s) => s.telemetryOptOut);
+  const sidebarCollapsed = useStore((s) => s.sidebarCollapsed);
+  const rightCollapsed = useStore((s) => s.rightCollapsed);
+  const showSettings = useStore((s) => s.showSettings);
+  const settingsTab = useStore((s) => s.settingsTab);
+  const setShowSettings = useStore((s) => s.setShowSettings);
 
   // Anonymous engagement heartbeat; no-op while opted out (Settings/onboarding).
   useTelemetry(telemetryOptOut);
@@ -119,16 +125,17 @@ export default function App() {
       const st = useStore.getState();
       switch (payload) {
         case "settings":
-          // wired in a follow-up task
+          st.setShowSettings(true);
           break;
         case "about":
-          // wired in a follow-up task
+          st.setSettingsTab("about");
+          st.setShowSettings(true);
           break;
         case "toggle-sidebar":
-          // wired in a follow-up task
+          st.toggleSidebar();
           break;
         case "toggle-right":
-          // wired in a follow-up task
+          st.toggleRight();
           break;
         case "save": {
           const layout = st.selectedProjectId ? st.layouts[st.selectedProjectId] : undefined;
@@ -287,12 +294,14 @@ export default function App() {
       className="app-root"
       style={{ ["--sidebar-w" as string]: `${sidebarWidth}px` }}
     >
-      <Sidebar />
+      {!sidebarCollapsed && <Sidebar />}
       {!agentSetupComplete && <Onboarding />}
-      <div
-        className={`sidebar-resizer ${sidebarDragging ? "dragging" : ""}`}
-        onMouseDown={startSidebarResize}
-      />
+      {!sidebarCollapsed && (
+        <div
+          className={`sidebar-resizer ${sidebarDragging ? "dragging" : ""}`}
+          onMouseDown={startSidebarResize}
+        />
+      )}
       <div
         className="detail"
         style={{ ["--right-w" as string]: `${rightWidth}px` }}
@@ -302,12 +311,23 @@ export default function App() {
           projectId={selectedProjectId}
           home={home}
         />
-        <div
-          className={`resizer ${dragging ? "dragging" : ""}`}
-          onMouseDown={startResize}
-        />
-        <RightColumn projects={projects} projectId={selectedProjectId} />
+        {!rightCollapsed && (
+          <div
+            className={`resizer ${dragging ? "dragging" : ""}`}
+            onMouseDown={startResize}
+          />
+        )}
+        {/* RightColumn hosts a keep-alive shell TerminalView — never conditionally
+            unmount it (kills the PTY). display:contents makes this wrapper
+            layout-transparent when expanded, and display:none hides it (still
+            mounted) when collapsed. */}
+        <div style={rightCollapsed ? { display: "none" } : { display: "contents" }}>
+          <RightColumn projects={projects} projectId={selectedProjectId} />
+        </div>
       </div>
+      {showSettings && (
+        <Settings onClose={() => setShowSettings(false)} initialTab={settingsTab} />
+      )}
     </div>
   );
 }
