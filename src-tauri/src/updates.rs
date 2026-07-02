@@ -33,7 +33,19 @@ pub fn update_should_notify(remote_version: String, skipped_version: Option<Stri
 
 #[cfg(test)]
 mod tests {
-    use super::is_newer;
+    use super::{is_newer, update_should_notify};
+
+    #[test]
+    fn notifies_when_never_skipped() {
+        assert!(update_should_notify("0.5.0".into(), None));
+    }
+
+    #[test]
+    fn suppresses_equal_or_older_skip_but_notifies_newer() {
+        assert!(!update_should_notify("0.5.0".into(), Some("0.5.0".into())));
+        assert!(!update_should_notify("0.5.0".into(), Some("0.6.0".into())));
+        assert!(update_should_notify("0.6.0".into(), Some("0.5.0".into())));
+    }
 
     #[test]
     fn compares_patch_minor_major() {
@@ -50,5 +62,6 @@ mod tests {
         assert!(!is_newer("0.5", "0.5.0")); // equal
         assert!(!is_newer("garbage", "0.0.1")); // junk → 0.0.0, not newer
         assert!(is_newer("0.0.2", "garbage")); // baseline junk → 0.0.0
+        assert!(!is_newer("0.5.0-beta", "0.5.0")); // "-beta" component → 0, so equal, not newer
     }
 }
