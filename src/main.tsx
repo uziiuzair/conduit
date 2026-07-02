@@ -3,12 +3,17 @@ import App from "./App";
 import { ErrorBoundary } from "./components/ErrorBoundary";
 import { useStore } from "./store";
 import { applyTheme, resolveThemeId, readStoredPref, systemPrefersDark, watchSystemTheme } from "./themes";
+import { initMonaco } from "./monaco/setup";
 import "@xterm/xterm/css/xterm.css";
 import "./theme.css";
 
 // Apply the saved theme BEFORE the first paint so there is no flash of the
 // default palette when launching into a non-default theme.
 applyTheme(resolveThemeId(readStoredPref(), systemPrefersDark()));
+
+// Boot Monaco once: worker wiring, Monarch languages, themes, model factory.
+// (applyTheme above ran first; its Monaco recolor was a no-op until this registers the setter.)
+initMonaco();
 
 // Keep Auto mode in sync with the macOS light/dark appearance.
 watchSystemTheme((dark) => useStore.getState().applySystemDark(dark));

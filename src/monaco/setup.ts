@@ -58,7 +58,8 @@ import "monaco-editor/esm/vs/basic-languages/dockerfile/dockerfile.contribution.
 // Extension is required before the `?worker` query for the same package-exports reason
 // as above (Vite's resolver follows the same "exports" map as tsc/node).
 import EditorWorker from "monaco-editor/esm/vs/editor/editor.worker.js?worker";
-import { THEMES, DEFAULT_THEME_ID, type ThemeId } from "../themes";
+import { THEMES, type ThemeId, registerMonacoThemeSetter, currentThemeId } from "../themes";
+import { setModelFactory, type RegistryModel } from "./registry";
 
 export { monaco };
 
@@ -120,7 +121,14 @@ export function initMonaco(): void {
     getWorker: () => new EditorWorker(),
   };
   defineConduitThemes();
-  monaco.editor.setTheme(monacoThemeIdFor(DEFAULT_THEME_ID));
+  // Inject the real Monaco model factory into the framework-agnostic registry.
+  setModelFactory((path, value, languageId) =>
+    monaco.editor.createModel(value, languageId, monaco.Uri.file(path)) as unknown as RegistryModel,
+  );
+  // Let themes.ts recolor Monaco live on theme change (one global setTheme).
+  registerMonacoThemeSetter((id) => monaco.editor.setTheme(monacoThemeIdFor(id)));
+  // Respect the theme the user actually has applied, not just the default.
+  monaco.editor.setTheme(monacoThemeIdFor(currentThemeId()));
 }
 
 // File name / extension -> MONACO language id (default "plaintext"). Note this is a
