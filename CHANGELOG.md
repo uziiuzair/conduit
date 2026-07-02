@@ -3,6 +3,13 @@
 All notable changes to Conduit are documented here. This project uses
 [semantic versioning](https://semver.org/).
 
+## 0.5.0 — 2026-07-03
+
+- **Added — auto-updates (macOS).** Conduit now checks GitHub Releases in the
+  background and via Settings → About, and installs signed + notarized updates on
+  your consent. This is the first self-updating build — update to it once by hand;
+  future versions update in place.
+
 ## 0.4.0 — 2026-06-30
 
 - **Added — mobile companion (read + prompt).** A React Native (Expo) app that shows

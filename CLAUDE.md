@@ -85,7 +85,10 @@ Use semantic versioning. Don't bump the version as a side effect of an unrelated
   purely through CSS from group weights (see CONTRIBUTING.md).
 - **Lean dependencies.** The Rust side intentionally has no outbound HTTP client; network
   calls shell out to `curl` (see `claude_status.rs` / `claude_usage.rs`). Don't pull in
-  `reqwest`/`tokio` for a couple of GETs without a real reason.
+  `reqwest`/`tokio` for a couple of GETs without a real reason. The one exception is the
+  official `tauri-plugin-updater`, which brings its own HTTP+TLS stack (streaming download
+  + minisign verify + self-replace) — that's not a violation of the curl rule, which
+  targets hand-rolling a client for a couple of GETs.
 - **`claude` spawns must scrub `npm_config_prefix`.** Launching Conduit via a package
   manager leaks `npm_config_prefix` into the env; nvm then refuses to initialize in the
   login shell and `claude` falls off `PATH`. Both spawn sites — `pty.rs` and the

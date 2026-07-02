@@ -144,6 +144,17 @@ setx CONDUIT_CLAUDE_CONFIG_DIR "C:\path\to\that-account\.claude"
 so a session may start with a fresh in-app config the first time; the account, quota, and
 model access are the chosen account's.)
 
+## Updating
+
+From **0.5.0** onward, Conduit updates itself on macOS. It checks GitHub Releases
+in the background (and on demand via **Settings → About → Check for updates**);
+when a newer signed release exists, a notice offers **Install & Relaunch**.
+Updates are Developer ID–signed, notarized, and minisign-verified before install.
+
+> Because auto-update only exists from 0.5.0, existing users must download 0.5.0
+> once by hand from the [Releases page](https://github.com/uziiuzair/conduit/releases).
+> Every version after that updates in place.
+
 ## How it works
 
 | Concern                                                       | Where                                               |
