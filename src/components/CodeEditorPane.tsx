@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { monaco, languageFor } from "../monaco/setup";
+import { monaco, languageFor, setLastFocusedEditor } from "../monaco/setup";
 import * as registry from "../monaco/registry";
 import { useStore, baseName, type FileContent } from "../store";
 import { LanguageSelector } from "./LanguageSelector";
@@ -80,6 +80,10 @@ export function CodeEditorPane({ projectId, groupId, visible, style }: CodeEdito
       const p = currentPathRef.current;
       if (p) void saveFile(p);
     });
+
+    // Track last-focused editor for menu-triggered actions (e.g. Find) that dispatch
+    // after focus has moved away from the editor (App.tsx's "menu" listener).
+    editor.onDidFocusEditorText(() => setLastFocusedEditor(editor));
 
     const ro = new ResizeObserver(() => {
       if (visibleRef.current) editor.layout();

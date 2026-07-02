@@ -63,6 +63,17 @@ import { setModelFactory, type RegistryModel } from "./registry";
 
 export { monaco };
 
+// Tracks the most recently focused Monaco editor instance across all open CodeEditorPanes.
+// Menu-triggered actions (e.g. Find) run after focus has already moved off the editor, so
+// hasTextFocus() is unreliable at dispatch time — this ref survives that focus shift.
+let lastFocusedEditor: monaco.editor.IStandaloneCodeEditor | null = null;
+export function setLastFocusedEditor(ed: monaco.editor.IStandaloneCodeEditor | null): void {
+  lastFocusedEditor = ed;
+}
+export function getLastFocusedEditor(): monaco.editor.IStandaloneCodeEditor | null {
+  return lastFocusedEditor;
+}
+
 /** ThemeId -> the Monaco theme name registered by defineConduitThemes(). */
 export function monacoThemeIdFor(id: ThemeId): string {
   return `conduit-${id}`;

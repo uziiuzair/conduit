@@ -1,16 +1,20 @@
 import { useEffect, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/core";
+import { open } from "@tauri-apps/plugin-dialog";
 import {
   useStore,
   findSession,
   globalSelectedSessionId,
+  activeGroup,
   baseName,
   type Session,
   type TodoItem,
   type TodoStatus,
 } from "./store";
 import { type AgentId } from "./agents";
+import { type ThemePref } from "./themes";
+import { getLastFocusedEditor } from "./monaco/setup";
 import { Sidebar } from "./components/Sidebar";
 import { WorkspaceCenter } from "./components/WorkspaceCenter";
 import { RightColumn } from "./components/RightColumn";
@@ -100,6 +104,69 @@ export default function App() {
             st.setStatus(session, "needsInput");
             doNotify(session, body?.message ?? "needs your input");
           }
+          break;
+        }
+      }
+    });
+    return () => {
+      void unlisten.then((f) => f());
+    };
+  }, []);
+
+  // Native menu clicks relayed by Rust as a "menu" event whose payload is the item id.
+  useEffect(() => {
+    const unlisten = listen<string>("menu", ({ payload }) => {
+      const st = useStore.getState();
+      switch (payload) {
+        case "settings":
+          // wired in a follow-up task
+          break;
+        case "about":
+          // wired in a follow-up task
+          break;
+        case "toggle-sidebar":
+          // wired in a follow-up task
+          break;
+        case "toggle-right":
+          // wired in a follow-up task
+          break;
+        case "save": {
+          const layout = st.selectedProjectId ? st.layouts[st.selectedProjectId] : undefined;
+          const g = activeGroup(layout);
+          const tab = g?.tabs.find((t) => t.ref === g.activeRef);
+          if (tab?.kind === "file") void st.saveFile(tab.ref);
+          break;
+        }
+        case "close-tab": {
+          const layout = st.selectedProjectId ? st.layouts[st.selectedProjectId] : undefined;
+          const g = activeGroup(layout);
+          if (st.selectedProjectId && g && g.activeRef)
+            void st.requestCloseTab(st.selectedProjectId, g.id, g.activeRef);
+          break;
+        }
+        case "new-session":
+          if (st.selectedProjectId) void st.addSession(st.selectedProjectId);
+          break;
+        case "open-project":
+          void (async () => {
+            const dir = await open({ directory: true, multiple: false, title: "Add Project" });
+            if (typeof dir === "string") await st.addProject(dir);
+          })();
+          break;
+        case "find": {
+          const ed = getLastFocusedEditor();
+          if (ed) {
+            ed.focus();
+            ed.getAction("actions.find")?.run();
+          }
+          break;
+        }
+        case "theme:auto":
+        case "theme:warm-light":
+        case "theme:warm-dim":
+        case "theme:warm-near-black": {
+          const pref = payload.slice("theme:".length);
+          st.setThemePref(pref as ThemePref);
           break;
         }
       }
