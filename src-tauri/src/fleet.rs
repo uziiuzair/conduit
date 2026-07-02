@@ -279,6 +279,7 @@ mod tests {
             branch: None,
             agent: crate::agent::AgentId::Claude,
             role,
+            account_id: None,
         };
         let sessions = vec![
             mk("c", SessionRole::Conductor),
