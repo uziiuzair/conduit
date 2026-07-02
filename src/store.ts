@@ -14,6 +14,7 @@ import { AGENTS, type AgentId, type AgentInfo, DEFAULT_AGENT, type McpServer } f
 import { ask } from "@tauri-apps/plugin-dialog";
 import * as registry from "./monaco/registry";
 import { moveTab as reduceMoveTab, splitTab as reduceSplitTab } from "./layout";
+import type { SettingsTab } from "./components/Settings";
 
 // ---- Types (mirror the Rust serde structs, rename_all = "camelCase") ----
 export type SessionRole = "worker" | "conductor";
@@ -174,6 +175,24 @@ function writePlanConnected(v: boolean): void {
   try { localStorage.setItem(PLAN_CONNECTED_KEY, v ? "1" : "0"); } catch { /* quota — non-fatal */ }
 }
 
+// Sidebar / right-panel collapse state (native menu: View > Toggle Sidebar / Toggle
+// Right Panel). Small persisted UI prefs, same pattern as telemetryOptOut above.
+// Default: both expanded (false).
+const SIDEBAR_COLLAPSED_KEY = "conduit.sidebarCollapsed";
+const RIGHT_COLLAPSED_KEY = "conduit.rightCollapsed";
+function readSidebarCollapsed(): boolean {
+  try { return localStorage.getItem(SIDEBAR_COLLAPSED_KEY) === "1"; } catch { return false; }
+}
+function writeSidebarCollapsed(v: boolean): void {
+  try { localStorage.setItem(SIDEBAR_COLLAPSED_KEY, v ? "1" : "0"); } catch { /* quota — non-fatal */ }
+}
+function readRightCollapsed(): boolean {
+  try { return localStorage.getItem(RIGHT_COLLAPSED_KEY) === "1"; } catch { return false; }
+}
+function writeRightCollapsed(v: boolean): void {
+  try { localStorage.setItem(RIGHT_COLLAPSED_KEY, v ? "1" : "0"); } catch { /* quota — non-fatal */ }
+}
+
 // ---- helpers ----
 function uid(): string {
   try {
@@ -309,6 +328,21 @@ interface AppState {
   claudeUsage: ClaudeUsage | null;
   planConnected: boolean;
 
+  // ---- panel collapse + Settings dialog (native menu-driven, App-level) ----
+  /** Persisted. When true, the sidebar (and its resizer) is hidden. */
+  sidebarCollapsed: boolean;
+  toggleSidebar: () => void;
+  /** Persisted. When true, the right panel is hidden (kept mounted — it holds a
+   *  keep-alive shell terminal; never conditionally unmount it). */
+  rightCollapsed: boolean;
+  toggleRight: () => void;
+  /** Non-persisted ephemeral UI: Settings dialog, hosted at the App root so it still
+   *  opens when the sidebar is collapsed. */
+  showSettings: boolean;
+  setShowSettings: (v: boolean) => void;
+  settingsTab: SettingsTab;
+  setSettingsTab: (t: SettingsTab) => void;
+
   load: () => Promise<void>;
   agents: AgentInfo[] | null;
   defaultAgent: AgentId;
@@ -438,6 +472,10 @@ export const useStore = create<AppState>((set, get) => {
     claudeStatus: null,
     claudeUsage: null,
     planConnected: readPlanConnected(),
+    sidebarCollapsed: readSidebarCollapsed(),
+    rightCollapsed: readRightCollapsed(),
+    showSettings: false,
+    settingsTab: "agents",
     menu: null,
     editingSessionId: null,
     homeDir: null,
@@ -833,6 +871,22 @@ export const useStore = create<AppState>((set, get) => {
 
     setTopTab: (t) => set({ topTab: t }),
     setBottomTab: (t) => set({ bottomTab: t }),
+
+    toggleSidebar: () =>
+      set((s) => {
+        const next = !s.sidebarCollapsed;
+        writeSidebarCollapsed(next);
+        return { sidebarCollapsed: next };
+      }),
+    toggleRight: () =>
+      set((s) => {
+        const next = !s.rightCollapsed;
+        writeRightCollapsed(next);
+        return { rightCollapsed: next };
+      }),
+    setShowSettings: (v) => set({ showSettings: v }),
+    setSettingsTab: (t) => set({ settingsTab: t }),
+
     openMenu: (menu) => set({ menu }),
     closeMenu: () => set({ menu: null }),
     startRename: (sessionId) => set({ editingSessionId: sessionId, menu: null }),

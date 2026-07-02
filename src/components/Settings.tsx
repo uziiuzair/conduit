@@ -5,10 +5,16 @@ import { TelemetryToggle } from "./TelemetryToggle";
 import { AboutPanel } from "./AboutPanel";
 import { AccountList } from "./AccountList";
 
-type SettingsTab = "agents" | "accounts" | "mcp" | "privacy" | "about";
+export type SettingsTab = "agents" | "accounts" | "mcp" | "privacy" | "about";
 
-export function Settings({ onClose }: { onClose: () => void }) {
-  const [tab, setTab] = useState<SettingsTab>("agents");
+export function Settings({
+  onClose,
+  initialTab,
+}: {
+  onClose: () => void;
+  initialTab?: SettingsTab;
+}) {
+  const [tab, setTab] = useState<SettingsTab>(initialTab ?? "agents");
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => e.key === "Escape" && onClose();
