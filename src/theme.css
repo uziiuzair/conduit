@@ -2195,3 +2195,67 @@ button {
 .mcp-skip-link:hover {
   color: var(--text-mid);
 }
+
+/* ---- Auto-update notice ---- */
+.update-notice {
+  position: fixed;
+  right: 16px;
+  bottom: 16px;
+  z-index: 1000;
+  width: 340px;
+  padding: 14px 16px;
+  border-radius: 10px;
+  background: var(--panel, #1a1b26);
+  border: 1px solid var(--border, #2a2c3a);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+  color: var(--text, #c0caf5);
+}
+.update-notice-title {
+  font-weight: 600;
+  font-size: 13px;
+}
+.update-notice-sub {
+  margin-top: 4px;
+  font-size: 12px;
+  opacity: 0.8;
+  line-height: 1.4;
+}
+.update-notice-link {
+  color: var(--accent, #7aa2f7);
+  cursor: pointer;
+  text-decoration: underline;
+}
+.update-notice-actions {
+  margin-top: 12px;
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+}
+.update-notice-later,
+.update-notice-install {
+  font-size: 12px;
+  padding: 6px 12px;
+  border-radius: 6px;
+  cursor: pointer;
+  border: 1px solid var(--border, #2a2c3a);
+  background: transparent;
+  color: var(--text, #c0caf5);
+}
+.update-notice-install {
+  background: var(--accent, #7aa2f7);
+  border-color: var(--accent, #7aa2f7);
+  color: #0b0d16;
+  font-weight: 600;
+}
+.update-notice-progress {
+  margin-top: 12px;
+  height: 6px;
+  border-radius: 3px;
+  background: var(--border, #2a2c3a);
+  overflow: hidden;
+}
+.update-notice-progress-fill {
+  height: 100%;
+  background: var(--accent, #7aa2f7);
+  transition: width 0.15s ease;
+}

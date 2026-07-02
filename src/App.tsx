@@ -15,7 +15,9 @@ import { Sidebar } from "./components/Sidebar";
 import { WorkspaceCenter } from "./components/WorkspaceCenter";
 import { RightColumn } from "./components/RightColumn";
 import { Onboarding } from "./components/Onboarding";
+import { UpdateNotice } from "./components/UpdateNotice";
 import { useTelemetry } from "./hooks/useTelemetry";
+import { useUpdater } from "./hooks/useUpdater";
 
 interface HookPayload {
   session: string;
@@ -34,6 +36,9 @@ export default function App() {
 
   // Anonymous engagement heartbeat; no-op while opted out (Settings/onboarding).
   useTelemetry(telemetryOptOut);
+
+  // Background auto-update checks (launch + every 6h while visible).
+  useUpdater();
 
   useEffect(() => {
     void load();
@@ -241,6 +246,7 @@ export default function App() {
         />
         <RightColumn projects={projects} projectId={selectedProjectId} />
       </div>
+      <UpdateNotice />
     </div>
   );
 }
