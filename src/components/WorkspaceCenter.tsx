@@ -13,11 +13,6 @@ import {
 import { TerminalView } from "./Terminal";
 import { FileViewer } from "./FileViewer";
 import { TerminalIcon, FileIcon, CodeIcon, CloseIcon, SplitIcon } from "./Icons";
-import { SpikeMonaco } from "./SpikeMonaco"; // THROWAWAY (Phase 0 spike) — removed in revert task
-
-// THROWAWAY (Phase 0 spike): full-panel Monaco overlay to validate offline load,
-// Monarch parity, and theme sync. Flip to false / remove in the revert task.
-const SPIKE_MONACO = true;
 
 const MIN_WEIGHT = 0.14;
 
@@ -226,9 +221,6 @@ export function WorkspaceCenter({
             />
           ))}
         </div>
-
-        {/* THROWAWAY (Phase 0 spike) — remove in the revert task. */}
-        {SPIKE_MONACO && <SpikeMonaco />}
 
         {/* Right-edge drop zone: drag a tab here to split it into a new group. */}
         {dragging && (
