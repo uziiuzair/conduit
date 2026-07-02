@@ -11,6 +11,8 @@ import {
   writeStoredPref,
 } from "./themes";
 import { AGENTS, type AgentId, type AgentInfo, DEFAULT_AGENT, type McpServer } from "./agents";
+import { check, type Update } from "@tauri-apps/plugin-updater";
+import { relaunch } from "@tauri-apps/plugin-process";
 
 // ---- Types (mirror the Rust serde structs, rename_all = "camelCase") ----
 export type SessionRole = "worker" | "conductor";
@@ -119,6 +121,21 @@ export interface ClaudeUsage {
   plan: PlanWindow[] | null;
   planSource: "live" | "unavailable" | "disconnected";
 }
+
+// ---- Auto-update ----
+export interface UpdateInfo {
+  version: string;
+  currentVersion: string;
+  notes: string;
+  date?: string;
+}
+export type UpdatePhase = "idle" | "checking" | "available" | "downloading" | "error";
+
+const SKIPPED_VERSION_KEY = "conduit.skippedVersion";
+
+/** The live Update handle from the updater plugin. Not serializable, so it lives
+ *  outside the store; the store holds only the display metadata + phase. */
+let pendingUpdate: Update | null = null;
 
 const DEFAULT_AGENT_KEY = "conduit.defaultAgent";
 const SETUP_DONE_KEY = "conduit.agentSetupComplete";
@@ -287,6 +304,18 @@ interface AppState {
   claudeUsage: ClaudeUsage | null;
   planConnected: boolean;
 
+  // ---- Auto-update ----
+  updateInfo: UpdateInfo | null;
+  updatePhase: UpdatePhase;
+  updateProgress: number; // 0..1 while downloading
+  updateError: string | null;
+  /** Check for updates. `manual` = user-initiated (surface "up to date" and ignore skip). */
+  checkForUpdates: (opts?: { manual?: boolean }) => Promise<void>;
+  /** Download + install the pending update, then relaunch. */
+  installUpdate: () => Promise<void>;
+  /** "Later" — hide the notice and remember this version so we don't re-nag. */
+  dismissUpdate: () => void;
+
   load: () => Promise<void>;
   agents: AgentInfo[] | null;
   defaultAgent: AgentId;
@@ -402,6 +431,10 @@ export const useStore = create<AppState>((set, get) => {
     claudeStatus: null,
     claudeUsage: null,
     planConnected: readPlanConnected(),
+    updateInfo: null,
+    updatePhase: "idle",
+    updateProgress: 0,
+    updateError: null,
     menu: null,
     editingSessionId: null,
     homeDir: null,
@@ -762,6 +795,81 @@ export const useStore = create<AppState>((set, get) => {
         const u = await invoke<ClaudeUsage>("fetch_claude_usage");
         set({ claudeUsage: u });
       } catch { /* fail-open: keep last-known */ }
+    },
+
+    checkForUpdates: async (opts) => {
+      const manual = opts?.manual ?? false;
+      set({ updatePhase: "checking", updateError: null });
+      try {
+        const update = await check();
+        if (!update) {
+          pendingUpdate = null;
+          set({ updateInfo: null, updatePhase: "idle" });
+          return;
+        }
+        // Respect a prior "Later" unless this is a manual check.
+        const skipped = localStorage.getItem(SKIPPED_VERSION_KEY);
+        const shouldNotify = manual
+          ? true
+          : await invoke<boolean>("update_should_notify", {
+              remoteVersion: update.version,
+              skippedVersion: skipped,
+            });
+        if (!shouldNotify) {
+          pendingUpdate = update;
+          set({ updateInfo: null, updatePhase: "idle" });
+          return;
+        }
+        pendingUpdate = update;
+        set({
+          updateInfo: {
+            version: update.version,
+            currentVersion: update.currentVersion,
+            notes: update.body ?? "",
+            date: update.date ?? undefined,
+          },
+          updatePhase: "available",
+        });
+      } catch (e) {
+        // Network/offline/no-manifest: fail quiet on background checks; the manual
+        // path surfaces the error so the About panel can show it.
+        pendingUpdate = null;
+        set({ updatePhase: "error", updateError: String(e) });
+      }
+    },
+
+    installUpdate: async () => {
+      if (!pendingUpdate) return;
+      set({ updatePhase: "downloading", updateProgress: 0, updateError: null });
+      try {
+        let downloaded = 0;
+        let total = 0;
+        await pendingUpdate.downloadAndInstall((ev) => {
+          switch (ev.event) {
+            case "Started":
+              total = ev.data.contentLength ?? 0;
+              break;
+            case "Progress":
+              downloaded += ev.data.chunkLength;
+              set({ updateProgress: total > 0 ? downloaded / total : 0 });
+              break;
+            case "Finished":
+              set({ updateProgress: 1 });
+              break;
+          }
+        });
+        // Installed to disk; restart into the new version. This tears down PTYs —
+        // the notice copy warns about that before the user clicks Install.
+        await relaunch();
+      } catch (e) {
+        set({ updatePhase: "error", updateError: String(e) });
+      }
+    },
+
+    dismissUpdate: () => {
+      const v = get().updateInfo?.version;
+      if (v) localStorage.setItem(SKIPPED_VERSION_KEY, v);
+      set({ updateInfo: null, updatePhase: "idle" });
     },
 
     connectPlanUsage: async () => {
