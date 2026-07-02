@@ -3,6 +3,35 @@
 All notable changes to Conduit are documented here. This project uses
 [semantic versioning](https://semver.org/).
 
+## 0.5.0 — 2026-07-03
+
+- **Added — in-app code editor (Monaco).** Open any file from the tree into a full
+  Monaco editor and edit it in place: Cmd+S save-to-disk, per-tab unsaved-changes dots
+  with a close-guard, theme-synced syntax highlighting, a VS Code-style language
+  selector, and read-only banners for binary/oversized files. Editors live in the same
+  keep-alive split-pane system as the terminals.
+- **Added — smart reload.** When a `claude` agent (or anything else) edits a file you
+  have open on disk, a clean buffer silently refreshes with your undo history intact,
+  while a buffer with unsaved edits shows a non-blocking "changed on disk — reload /
+  keep mine" banner; deletions get their own banner. Your own saves never trigger it.
+- **Added — file management in the tree.** Right-click to create files/folders (inline
+  name rows), rename, or delete (with a confirm), and **drag-and-drop to move** files and
+  folders between directories. Only the touched folders re-list, so expansion state is
+  preserved.
+- **Added — VS Code-style tabs and splits.** Drag a tab sideways to reorder it, or drag
+  it onto a pane's left/right edge to split into a new column (drop on the center to move
+  it into that group). The old split button is gone.
+- **Added — native Conduit menu bar.** A real macOS menu wired to app actions — New
+  Session (⌘T), Open Project (⌘O), Save (⌘S), Close Tab (⌘W), Find (⌘F), toggle the
+  sidebar/right panel, switch theme, open Settings/About — plus standard Edit clipboard
+  items and a Quit that shuts sessions down cleanly.
+- **Changed — native app feel.** Text selection is now disabled across the app chrome
+  (kept where it's useful — the editor, the terminal, and inputs). The old read-only file
+  preview was replaced by the Monaco editor and its `react-syntax-highlighter` dependency
+  dropped.
+- **Fixed — in-app drag and drop.** Disabled the webview's native drag-drop handler,
+  which had been swallowing HTML5 drop events, so tab and file-tree drag-and-drop work.
+
 ## 0.4.0 — 2026-06-30
 
 - **Added — mobile companion (read + prompt).** A React Native (Expo) app that shows

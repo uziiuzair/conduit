@@ -15,6 +15,7 @@ mod fsops;
 mod git;
 mod hookbus;
 mod hooks;
+mod menu;
 mod notify;
 mod pty;
 mod store;
@@ -471,6 +472,36 @@ fn read_file(path: String) -> fsops::FileContent {
     fsops::read_file(&path)
 }
 
+#[tauri::command]
+fn write_file(path: String, content: String) -> Result<fsops::FileStat, String> {
+    fsops::write_file(&path, &content)
+}
+
+#[tauri::command]
+fn stat_file(path: String) -> fsops::FileStat {
+    fsops::stat_file(&path)
+}
+
+#[tauri::command]
+fn create_file(path: String) -> Result<(), String> {
+    fsops::create_file(&path)
+}
+
+#[tauri::command]
+fn create_dir(path: String) -> Result<(), String> {
+    fsops::create_dir(&path)
+}
+
+#[tauri::command]
+fn rename_path(from: String, to: String) -> Result<(), String> {
+    fsops::rename_path(&from, &to)
+}
+
+#[tauri::command]
+fn delete_path(path: String) -> Result<(), String> {
+    fsops::delete_path(&path)
+}
+
 // ---- Notifications -----------------------------------------------------------
 
 #[tauri::command]
@@ -650,6 +681,13 @@ pub fn run() {
             let pty = app.state::<Arc<PtyManager>>().inner().clone();
             let store = app.state::<Arc<Store>>().inner().clone();
             fleet_mcp::start(app.handle().clone(), store, pty, fleet);
+
+            // Native menu bar. Custom items forward to the frontend as a single "menu"
+            // event (payload = item id); Quit kills PTYs before exiting (see menu.rs).
+            let menu = menu::build(app.handle())?;
+            app.set_menu(menu)?;
+            app.on_menu_event(|app, event| menu::on_event(app, event.id().as_ref()));
+
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -683,6 +721,12 @@ pub fn run() {
             worktree_remove,
             list_dir,
             read_file,
+            write_file,
+            stat_file,
+            create_file,
+            create_dir,
+            rename_path,
+            delete_path,
             notify_user,
             open_in_vscode,
             open_external,

@@ -11,6 +11,10 @@ import {
   writeStoredPref,
 } from "./themes";
 import { AGENTS, type AgentId, type AgentInfo, DEFAULT_AGENT, type McpServer } from "./agents";
+import { ask } from "@tauri-apps/plugin-dialog";
+import * as registry from "./monaco/registry";
+import { moveTab as reduceMoveTab, splitTab as reduceSplitTab } from "./layout";
+import type { SettingsTab } from "./components/Settings";
 
 // ---- Types (mirror the Rust serde structs, rename_all = "camelCase") ----
 export type SessionRole = "worker" | "conductor";
@@ -40,6 +44,25 @@ export type TabKind = "session" | "file";
 export interface WsTab {
   kind: TabKind;
   ref: string; // sessionId (session) | absolute file path (file)
+}
+
+/** Mirror of fsops::FileContent (serde camelCase). read_file resolves (never rejects);
+ *  inspect error/binary/readOnly before creating an editable model. */
+export interface FileContent {
+  content: string;
+  truncated: boolean;
+  binary: boolean;
+  readOnly: boolean;
+  size: number;
+  mtimeMs: number;
+  error: string | null;
+}
+
+/** Mirror of fsops::FileStat — returned by write_file (and Phase 2 stat_file). */
+export interface FileStat {
+  mtimeMs: number;
+  size: number;
+  exists: boolean;
 }
 
 export interface EditorGroup {
@@ -150,6 +173,24 @@ export function readPlanConnected(): boolean {
 }
 function writePlanConnected(v: boolean): void {
   try { localStorage.setItem(PLAN_CONNECTED_KEY, v ? "1" : "0"); } catch { /* quota — non-fatal */ }
+}
+
+// Sidebar / right-panel collapse state (native menu: View > Toggle Sidebar / Toggle
+// Right Panel). Small persisted UI prefs, same pattern as telemetryOptOut above.
+// Default: both expanded (false).
+const SIDEBAR_COLLAPSED_KEY = "conduit.sidebarCollapsed";
+const RIGHT_COLLAPSED_KEY = "conduit.rightCollapsed";
+function readSidebarCollapsed(): boolean {
+  try { return localStorage.getItem(SIDEBAR_COLLAPSED_KEY) === "1"; } catch { return false; }
+}
+function writeSidebarCollapsed(v: boolean): void {
+  try { localStorage.setItem(SIDEBAR_COLLAPSED_KEY, v ? "1" : "0"); } catch { /* quota — non-fatal */ }
+}
+function readRightCollapsed(): boolean {
+  try { return localStorage.getItem(RIGHT_COLLAPSED_KEY) === "1"; } catch { return false; }
+}
+function writeRightCollapsed(v: boolean): void {
+  try { localStorage.setItem(RIGHT_COLLAPSED_KEY, v ? "1" : "0"); } catch { /* quota — non-fatal */ }
 }
 
 // ---- helpers ----
@@ -287,6 +328,21 @@ interface AppState {
   claudeUsage: ClaudeUsage | null;
   planConnected: boolean;
 
+  // ---- panel collapse + Settings dialog (native menu-driven, App-level) ----
+  /** Persisted. When true, the sidebar (and its resizer) is hidden. */
+  sidebarCollapsed: boolean;
+  toggleSidebar: () => void;
+  /** Persisted. When true, the right panel is hidden (kept mounted — it holds a
+   *  keep-alive shell terminal; never conditionally unmount it). */
+  rightCollapsed: boolean;
+  toggleRight: () => void;
+  /** Non-persisted ephemeral UI: Settings dialog, hosted at the App root so it still
+   *  opens when the sidebar is collapsed. */
+  showSettings: boolean;
+  setShowSettings: (v: boolean) => void;
+  settingsTab: SettingsTab;
+  setSettingsTab: (t: SettingsTab) => void;
+
   load: () => Promise<void>;
   agents: AgentInfo[] | null;
   defaultAgent: AgentId;
@@ -340,14 +396,37 @@ interface AppState {
   closeTab: (projectId: string, groupId: string, ref: string) => void;
   setActiveTab: (projectId: string, groupId: string, ref: string) => void;
   setActiveGroup: (projectId: string, groupId: string) => void;
-  moveTabToGroup: (
+  moveTab: (
     projectId: string,
     fromGroupId: string,
     ref: string,
     toGroupId: string,
+    toIndex: number,
   ) => void;
+  splitTab: (projectId: string, ref: string, targetGroupId: string, side: "left" | "right") => void;
   setGroupWeights: (projectId: string, weights: number[]) => void;
   openFile: (projectId: string, path: string) => void;
+
+  // ---- Phase 3: file-tree CRUD (all non-persisted) ----
+  /** dirPath -> bump counter; a FileTree entry re-lists when its counter changes. */
+  dirVersion: Record<string, number>;
+  /** Increment the counter for one directory so only that folder re-lists. */
+  bumpDir: (dirPath: string) => void;
+  /** Rename/move on disk; blocks a dirty open buffer; reconciles a clean open tab. */
+  renamePath: (projectId: string, from: string, to: string) => Promise<void>;
+  /** Permanent delete on disk; blocks a dirty open buffer; closes a clean open tab. */
+  deletePath: (projectId: string, path: string) => Promise<void>;
+
+  // ---- editor buffer state (Monaco) — NON-PERSISTED ----
+  /** absPath -> dirty; reactive mirror of registry.dirtyOf (delete key when false). */
+  dirty: Record<string, boolean>;
+  /** absPath -> external change (populated in Phase 2 by useFileWatch). */
+  conflict: Record<string, { mtimeMs: number; size: number } | "deleted">;
+  setDirty: (path: string, dirty: boolean) => void;
+  clearConflict: (path: string) => void;
+  setConflict: (path: string, c: { mtimeMs: number; size: number } | "deleted") => void;
+  saveFile: (path: string) => Promise<void>;
+  requestCloseTab: (projectId: string, groupId: string, ref: string) => Promise<void>;
 
   setTopTab: (t: TopTab) => void;
   setBottomTab: (t: BottomTab) => void;
@@ -398,10 +477,17 @@ export const useStore = create<AppState>((set, get) => {
     selectedProjectId: null,
     layouts: {},
     live: {},
+    dirVersion: {},
     pendingPrompts: {},
+    dirty: {},
+    conflict: {},
     claudeStatus: null,
     claudeUsage: null,
     planConnected: readPlanConnected(),
+    sidebarCollapsed: readSidebarCollapsed(),
+    rightCollapsed: readRightCollapsed(),
+    showSettings: false,
+    settingsTab: "agents",
     menu: null,
     editingSessionId: null,
     homeDir: null,
@@ -430,6 +516,14 @@ export const useStore = create<AppState>((set, get) => {
       const layouts: Record<string, ProjectLayout> = {};
       for (const p of projects) {
         layouts[p.id] = validateLayout(p.layout ?? defaultLayout(p), p);
+      }
+      // Balance close/removeProject release: acquire a model ref for every restored file tab.
+      for (const p of projects) {
+        for (const g of layouts[p.id].groups) {
+          for (const t of g.tabs) {
+            if (t.kind === "file") registry.acquire(t.ref);
+          }
+        }
       }
       set({
         projects,
@@ -552,13 +646,30 @@ export const useStore = create<AppState>((set, get) => {
     },
 
     removeProject: async (id) => {
+      const s = get();
+      const layout = s.layouts[id];
+      const fileTabs = layout
+        ? layout.groups.flatMap((g) => g.tabs.filter((t) => t.kind === "file").map((t) => t.ref))
+        : [];
+      if (fileTabs.some((ref) => s.dirty[ref])) {
+        const ok = await ask("This project has unsaved file changes. Remove it and discard them?", {
+          title: "Conduit",
+          kind: "warning",
+        });
+        if (!ok) return;
+      }
       await invoke("remove_project", { id });
-      set((s) => {
-        const layouts = { ...s.layouts };
+      for (const ref of fileTabs) {
+        s.setDirty(ref, false);
+        registry.release(ref);
+        registry.disposeIfUnreferenced(ref);
+      }
+      set((st) => {
+        const layouts = { ...st.layouts };
         delete layouts[id];
-        const projects = s.projects.filter((p) => p.id !== id);
+        const projects = st.projects.filter((p) => p.id !== id);
         const selectedProjectId =
-          s.selectedProjectId === id ? projects[0]?.id ?? null : s.selectedProjectId;
+          st.selectedProjectId === id ? projects[0]?.id ?? null : st.selectedProjectId;
         return { projects, layouts, selectedProjectId };
       });
     },
@@ -663,8 +774,137 @@ export const useStore = create<AppState>((set, get) => {
       applyLayout(projectId, (l) => rOpenToSide(l, tab));
       if (tab.kind === "session") clearNeeds(tab.ref);
     },
-    openFile: (projectId, path) =>
-      applyLayout(projectId, (l) => rOpenTab(l, { kind: "file", ref: path })),
+    openFile: (projectId, path) => {
+      const l = get().layouts[projectId];
+      // Only a genuinely new tab bumps the ref (rOpenTab just re-activates an existing one).
+      const already = !!l && l.groups.some((g) => g.tabs.some((t) => t.ref === path));
+      applyLayout(projectId, (l2) => rOpenTab(l2, { kind: "file", ref: path }));
+      if (!already) registry.acquire(path);
+    },
+
+    bumpDir: (dirPath) =>
+      set((s) => ({
+        dirVersion: { ...s.dirVersion, [dirPath]: (s.dirVersion[dirPath] ?? 0) + 1 },
+      })),
+
+    renamePath: async (projectId, from, to) => {
+      // Block: a dirty open buffer must be saved or discarded first.
+      if (get().dirty[from]) {
+        void invoke("notify_user", {
+          title: "Conduit",
+          body: "Save or discard changes before renaming this file.",
+        }).catch(() => {});
+        return;
+      }
+      try {
+        await invoke("rename_path", { from, to });
+      } catch (e) {
+        void invoke("notify_user", { title: "Conduit", body: String(e) }).catch(() => {});
+        return;
+      }
+      // If `from` is a (clean) open file tab: close old + release its model, open new.
+      const layout = get().layouts[projectId];
+      const g = layout?.groups.find((gr) =>
+        gr.tabs.some((t) => t.kind === "file" && t.ref === from),
+      );
+      if (g) {
+        get().closeTab(projectId, g.id, from);
+        registry.release(from);
+        registry.disposeIfUnreferenced(from);
+        get().openFile(projectId, to);
+      }
+      // Re-list only the affected folder(s).
+      get().bumpDir(parentDir(from));
+      const toParent = parentDir(to);
+      if (toParent !== parentDir(from)) get().bumpDir(toParent);
+    },
+
+    deletePath: async (projectId, path) => {
+      // Block: a dirty open buffer must be saved or discarded first.
+      if (get().dirty[path]) {
+        void invoke("notify_user", {
+          title: "Conduit",
+          body: "Save or discard changes before deleting this file.",
+        }).catch(() => {});
+        return;
+      }
+      try {
+        await invoke("delete_path", { path });
+      } catch (e) {
+        void invoke("notify_user", { title: "Conduit", body: String(e) }).catch(() => {});
+        return;
+      }
+      // Close a clean open tab for the deleted file + release its model.
+      const layout = get().layouts[projectId];
+      const g = layout?.groups.find((gr) =>
+        gr.tabs.some((t) => t.kind === "file" && t.ref === path),
+      );
+      if (g) {
+        get().closeTab(projectId, g.id, path);
+        registry.release(path);
+        registry.disposeIfUnreferenced(path);
+      }
+      get().bumpDir(parentDir(path));
+    },
+
+    setDirty: (path, dirty) =>
+      set((s) => {
+        const next = { ...s.dirty };
+        if (dirty) next[path] = true;
+        else delete next[path];
+        return { dirty: next };
+      }),
+
+    clearConflict: (path) =>
+      set((s) => {
+        if (!(path in s.conflict)) return {};
+        const next = { ...s.conflict };
+        delete next[path];
+        return { conflict: next };
+      }),
+
+    setConflict: (path, c) =>
+      set((s) => ({ conflict: { ...s.conflict, [path]: c } })),
+
+    saveFile: async (path) => {
+      const entry = registry.model(path);
+      // Hard guard: no model, read-only buffer, or unrevealed => never write.
+      if (!entry || entry.readOnly || !entry.model) return;
+      const value = entry.model.getValue();
+      registry.saving.add(path);
+      try {
+        const stat = await invoke<FileStat>("write_file", { path, content: value });
+        registry.setSaved(path, { mtimeMs: stat.mtimeMs, size: stat.size });
+        get().setDirty(path, false);
+        get().clearConflict(path);
+      } catch (e) {
+        void invoke("notify_user", { title: "Conduit", body: `Save failed: ${String(e)}` }).catch(
+          () => {},
+        );
+      } finally {
+        registry.saving.delete(path);
+      }
+    },
+
+    requestCloseTab: async (projectId, groupId, ref) => {
+      const s = get();
+      const group = s.layouts[projectId]?.groups.find((g) => g.id === groupId);
+      const tab = group?.tabs.find((t) => t.ref === ref);
+      const isFile = tab?.kind === "file";
+      if (isFile && s.dirty[ref]) {
+        const ok = await ask(`Discard unsaved changes to ${baseName(ref)}?`, {
+          title: "Conduit",
+          kind: "warning",
+        });
+        if (!ok) return;
+      }
+      s.closeTab(projectId, groupId, ref);
+      if (isFile) {
+        s.setDirty(ref, false);
+        registry.release(ref);
+        registry.disposeIfUnreferenced(ref);
+      }
+    },
 
     closeTab: (projectId, groupId, ref) =>
       applyLayout(projectId, (l) => {
@@ -697,21 +937,11 @@ export const useStore = create<AppState>((set, get) => {
         return l;
       }),
 
-    moveTabToGroup: (projectId, fromGroupId, ref, toGroupId) =>
-      applyLayout(projectId, (l) => {
-        if (fromGroupId === toGroupId) return l;
-        const from = l.groups.find((g) => g.id === fromGroupId);
-        const to = l.groups.find((g) => g.id === toGroupId);
-        if (!from || !to) return l;
-        const tab = from.tabs.find((t) => t.ref === ref);
-        if (!tab) return l;
-        from.tabs = from.tabs.filter((t) => t.ref !== ref);
-        if (from.activeRef === ref) from.activeRef = from.tabs[from.tabs.length - 1]?.ref ?? null;
-        if (!to.tabs.some((t) => t.ref === ref)) to.tabs.push(tab);
-        to.activeRef = ref;
-        l.activeGroupId = toGroupId;
-        return l;
-      }),
+    moveTab: (projectId, fromGroupId, ref, toGroupId, toIndex) =>
+      applyLayout(projectId, (l) => reduceMoveTab(l, fromGroupId, ref, toGroupId, toIndex)),
+
+    splitTab: (projectId, ref, targetGroupId, side) =>
+      applyLayout(projectId, (l) => reduceSplitTab(l, ref, targetGroupId, side, uid())),
 
     setGroupWeights: (projectId, weights) =>
       applyLayout(projectId, (l) => {
@@ -721,6 +951,22 @@ export const useStore = create<AppState>((set, get) => {
 
     setTopTab: (t) => set({ topTab: t }),
     setBottomTab: (t) => set({ bottomTab: t }),
+
+    toggleSidebar: () =>
+      set((s) => {
+        const next = !s.sidebarCollapsed;
+        writeSidebarCollapsed(next);
+        return { sidebarCollapsed: next };
+      }),
+    toggleRight: () =>
+      set((s) => {
+        const next = !s.rightCollapsed;
+        writeRightCollapsed(next);
+        return { rightCollapsed: next };
+      }),
+    setShowSettings: (v) => set({ showSettings: v }),
+    setSettingsTab: (t) => set({ settingsTab: t }),
+
     openMenu: (menu) => set({ menu }),
     closeMenu: () => set({ menu: null }),
     startRename: (sessionId) => set({ editingSessionId: sessionId, menu: null }),
@@ -820,6 +1066,13 @@ export function prettyPath(path: string, home: string | null): string {
 export function baseName(path: string): string {
   const parts = path.replace(/\/+$/, "").split("/");
   return parts[parts.length - 1] || path;
+}
+
+/** Parent directory of an absolute path (no trailing slash). Root stays "/". */
+export function parentDir(path: string): string {
+  const p = path.replace(/\/+$/, "");
+  const i = p.lastIndexOf("/");
+  return i <= 0 ? "/" : p.slice(0, i);
 }
 
 /** Open a directory in VS Code (Rust handles the launch + fallbacks). */

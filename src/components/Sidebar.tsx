@@ -27,7 +27,6 @@ import { ThemeSwitcher } from "./ThemeSwitcher";
 import { ClaudeStatusPill } from "./ClaudeStatusPill";
 import { ClaudeUsagePanel } from "./ClaudeUsagePanel";
 import { ClaudeStatusWarning } from "./ClaudeStatusWarning";
-import { Settings } from "./Settings";
 
 // Collapsed projects persist as a list of project ids in localStorage — a pure
 // sidebar UI preference, mirroring conduit.sidebarWidth / conduit.topH (no backend
@@ -93,7 +92,7 @@ async function deleteSession(
 export function Sidebar() {
   const projects = useStore((s) => s.projects);
   const addProject = useStore((s) => s.addProject);
-  const [showSettings, setShowSettings] = useState(false);
+  const setShowSettings = useStore((s) => s.setShowSettings);
   const selectedAgent = useStore((s) => {
     const id = globalSelectedSessionId(s);
     if (!id) return "claude" as const;
@@ -131,7 +130,6 @@ export function Sidebar() {
         <ThemeSwitcher />
       </div>
       <SessionContextMenu />
-      {showSettings && <Settings onClose={() => setShowSettings(false)} />}
     </div>
   );
 }
