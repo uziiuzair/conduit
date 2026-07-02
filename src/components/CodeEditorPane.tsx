@@ -3,6 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { monaco, languageFor } from "../monaco/setup";
 import * as registry from "../monaco/registry";
 import { useStore, baseName, type FileContent } from "../store";
+import { LanguageSelector } from "./LanguageSelector";
 
 interface CodeEditorPaneProps {
   projectId: string;
@@ -51,6 +52,10 @@ export function CodeEditorPane({ projectId, groupId, visible, style }: CodeEdito
   });
 
   const [load, setLoad] = useState<LoadState>({ kind: "none" });
+  // Displayed/active Monaco language id for the breadcrumb selector. Session-scoped:
+  // seeded by languageFor() on load, but reflects the CONCRETE model's language so a
+  // manual override (setModelLanguage) survives tab switches back to this file.
+  const [langId, setLangId] = useState("plaintext");
 
   // Create the editor exactly once (mirrors Terminal.tsx create-once).
   useEffect(() => {
@@ -109,6 +114,7 @@ export function CodeEditorPane({ projectId, groupId, visible, style }: CodeEdito
       currentPathRef.current = null;
       editor?.setModel(null);
       setLoad({ kind: "none" });
+      setLangId("plaintext");
       return;
     }
     currentPathRef.current = activePath;
@@ -123,6 +129,7 @@ export function CodeEditorPane({ projectId, groupId, visible, style }: CodeEdito
       // No model at all for binary / error tabs — banner only.
       if (fc.binary || fc.error !== null) {
         ed.setModel(null);
+        setLangId(languageFor(activePath));
         return;
       }
       // Editable only when nothing forbids it; large/non-UTF-8/truncated -> read-only model.
@@ -135,6 +142,10 @@ export function CodeEditorPane({ projectId, groupId, visible, style }: CodeEdito
       });
       ed.setModel(entry.model as unknown as monaco.editor.ITextModel);
       ed.updateOptions({ readOnly: !editable });
+      // Reflect the CONCRETE model's language, not just languageFor(): if this file was
+      // already open with a manually-overridden language, the override persists on the
+      // shared registry model and should win over re-running auto-detection here.
+      setLangId(ed.getModel()?.getLanguageId() ?? languageFor(activePath));
       const vs = registry.getViewState(activePath, groupId) as
         | monaco.editor.ICodeEditorViewState
         | undefined;
@@ -186,11 +197,23 @@ export function CodeEditorPane({ projectId, groupId, visible, style }: CodeEdito
   })();
   const noModel = !!fc && (fc.binary || fc.error !== null);
 
+  // Applies a manual language override to the active file's CONCRETE model (session-scoped,
+  // no persistence). Bails silently when there's no model to retag (empty group / binary /
+  // error tab) — the selector is disabled in that case anyway.
+  const onLangChange = (id: string) => {
+    const m = editorRef.current?.getModel();
+    if (m) {
+      monaco.editor.setModelLanguage(m, id);
+      setLangId(id);
+    }
+  };
+
   return (
     <div className={`code-pane ${visible ? "visible" : "hidden"}`} style={style}>
       <div className="code-breadcrumb">
         <span className="code-crumb-name">{activePath ? baseName(activePath) : ""}</span>
-        <span className="code-crumb-lang">{activePath ? languageFor(activePath) : ""}</span>
+        <span className="code-crumb-spacer" />
+        <LanguageSelector value={langId} onChange={onLangChange} disabled={noModel || !activePath} />
       </div>
       {banner && <div className={`code-banner ${banner.error ? "error" : ""}`}>{banner.text}</div>}
       <div ref={hostRef} className={`code-host ${noModel ? "empty" : ""}`} />
