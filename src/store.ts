@@ -13,6 +13,7 @@ import {
 import { AGENTS, type AgentId, type AgentInfo, DEFAULT_AGENT, type McpServer } from "./agents";
 import { ask } from "@tauri-apps/plugin-dialog";
 import * as registry from "./monaco/registry";
+import { moveTab as reduceMoveTab, splitTab as reduceSplitTab } from "./layout";
 
 // ---- Types (mirror the Rust serde structs, rename_all = "camelCase") ----
 export type SessionRole = "worker" | "conductor";
@@ -367,6 +368,14 @@ interface AppState {
     ref: string,
     toGroupId: string,
   ) => void;
+  moveTab: (
+    projectId: string,
+    fromGroupId: string,
+    ref: string,
+    toGroupId: string,
+    toIndex: number,
+  ) => void;
+  splitTab: (projectId: string, ref: string, targetGroupId: string, side: "left" | "right") => void;
   setGroupWeights: (projectId: string, weights: number[]) => void;
   openFile: (projectId: string, path: string) => void;
 
@@ -831,6 +840,12 @@ export const useStore = create<AppState>((set, get) => {
         l.activeGroupId = toGroupId;
         return l;
       }),
+
+    moveTab: (projectId, fromGroupId, ref, toGroupId, toIndex) =>
+      applyLayout(projectId, (l) => reduceMoveTab(l, fromGroupId, ref, toGroupId, toIndex)),
+
+    splitTab: (projectId, ref, targetGroupId, side) =>
+      applyLayout(projectId, (l) => reduceSplitTab(l, ref, targetGroupId, side, uid())),
 
     setGroupWeights: (projectId, weights) =>
       applyLayout(projectId, (l) => {
