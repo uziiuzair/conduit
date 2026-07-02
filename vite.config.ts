@@ -8,6 +8,13 @@ const host = process.env.TAURI_DEV_HOST;
 export default defineConfig(async () => ({
   plugins: [react()],
 
+  // Monaco is a large ESM tree with CJS interop; pre-bundle it so dev cold-start and
+  // the packaged `tauri build` resolve its entrypoints deterministically. (Phase 0 spike;
+  // validated to be required for the offline packaged worker load.)
+  optimizeDeps: {
+    include: ["monaco-editor"],
+  },
+
   // Vite options tailored for Tauri development and only applied in `tauri dev` or `tauri build`
   //
   // 1. prevent Vite from obscuring rust errors
