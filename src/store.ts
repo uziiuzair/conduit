@@ -105,6 +105,8 @@ export interface LocalModel {
   /** Context window when the server reports it (Ollama does) — used to autofill limits. */
   context?: number | null;
   detail: string;
+  /** Tool-calling support (Ollama reports it; null/undefined = unknown). */
+  tools?: boolean | null;
 }
 
 export type TabKind = "session" | "file";
