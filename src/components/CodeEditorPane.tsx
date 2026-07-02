@@ -1,5 +1,6 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import type * as Monaco from "monaco-editor";
 import { monaco, languageFor, setLastFocusedEditor } from "../monaco/setup";
 import * as registry from "../monaco/registry";
 import { useStore, baseName, type FileContent } from "../store";
@@ -11,6 +12,46 @@ interface CodeEditorPaneProps {
   visible: boolean;
   style?: React.CSSProperties;
 }
+
+// Non-blocking overlay for the disk-conflict / deleted banners: absolutely positioned
+// over the editor HOST only (not the breadcrumb), so it never reflows/obscures the
+// filename + language selector and never requires unmounting the editor.
+const bannerStyle: React.CSSProperties = {
+  position: "absolute",
+  top: 0,
+  left: 0,
+  right: 0,
+  zIndex: 5,
+  display: "flex",
+  alignItems: "center",
+  gap: 8,
+  padding: "4px 8px",
+  fontSize: 12,
+  color: "inherit",
+  background: "rgba(190, 150, 40, 0.20)",
+  borderBottom: "1px solid rgba(255, 255, 255, 0.14)",
+};
+
+const bannerBtn: React.CSSProperties = {
+  fontSize: 12,
+  padding: "2px 8px",
+  cursor: "pointer",
+  color: "inherit",
+  background: "rgba(255, 255, 255, 0.10)",
+  border: "1px solid rgba(255, 255, 255, 0.22)",
+  borderRadius: 4,
+};
+
+// Wraps just the editor HOST (not the breadcrumb) in a positioning context so the
+// conflict banner overlays the top of the editor viewport only — never the filename +
+// language selector above it — without touching the .code-host CSS/flex sizing.
+const hostWrapStyle: React.CSSProperties = {
+  position: "relative",
+  flex: "1 1 auto",
+  minHeight: 0,
+  display: "flex",
+  flexDirection: "column",
+};
 
 // Per-path load-result cache so banners survive tab switches without re-reading. Phase 2's
 // reload path will refresh this; for Phase 1 a file is read once per open.
@@ -56,6 +97,48 @@ export function CodeEditorPane({ projectId, groupId, visible, style }: CodeEdito
   // seeded by languageFor() on load, but reflects the CONCRETE model's language so a
   // manual override (setModelLanguage) survives tab switches back to this file.
   const [langId, setLangId] = useState("plaintext");
+
+  // Non-blocking disk-conflict banner state, driven by useFileWatch's poll (App-level).
+  const conflict = useStore((s) => (activePath ? s.conflict[activePath] : undefined));
+  const clearConflict = useStore((s) => s.clearConflict);
+  const requestCloseTab = useStore((s) => s.requestCloseTab);
+
+  // External-change "Reload": overwrite the buffer with disk content, discarding the
+  // user's edits, then clear the banner. Preserves undo via pushEditOperations.
+  const onReload = useCallback(async () => {
+    const p = activePath;
+    if (!p) return;
+    const fc = await invoke<FileContent>("read_file", { path: p });
+    if (fc.error === null && !fc.binary && !fc.readOnly) {
+      const entry = registry.model(p);
+      const m = entry?.model as unknown as Monaco.editor.ITextModel | undefined;
+      if (m) {
+        m.pushEditOperations(
+          [],
+          [{ range: m.getFullModelRange(), text: fc.content }],
+          () => null,
+        );
+        registry.setSaved(p, { mtimeMs: fc.mtimeMs, size: fc.size });
+      }
+    }
+    clearConflict(p);
+  }, [activePath, clearConflict]);
+
+  // "Keep mine": adopt the new disk stat as the baseline WITHOUT touching the saved
+  // version id, so the watcher stops nagging until the next external change.
+  const onKeepMine = useCallback(() => {
+    if (activePath && conflict && conflict !== "deleted") registry.setBaseline(activePath, conflict);
+    if (activePath) clearConflict(activePath);
+  }, [activePath, conflict, clearConflict]);
+
+  // "Keep buffer" on a deleted file: adopt a {0,0} sentinel baseline so the very next
+  // watcher tick (which will stat the still-missing file as {exists:false}) does not
+  // immediately re-flag "deleted" — see useFileWatch's baseline-aware guard.
+  const onKeepDeleted = useCallback(() => {
+    if (!activePath) return;
+    registry.setBaseline(activePath, { mtimeMs: 0, size: 0 });
+    clearConflict(activePath);
+  }, [activePath, clearConflict]);
 
   // Create the editor exactly once (mirrors Terminal.tsx create-once).
   useEffect(() => {
@@ -220,7 +303,33 @@ export function CodeEditorPane({ projectId, groupId, visible, style }: CodeEdito
         <LanguageSelector value={langId} onChange={onLangChange} disabled={noModel || !activePath} />
       </div>
       {banner && <div className={`code-banner ${banner.error ? "error" : ""}`}>{banner.text}</div>}
-      <div ref={hostRef} className={`code-host ${noModel ? "empty" : ""}`} />
+      <div style={hostWrapStyle}>
+        {visible && activePath && conflict === "deleted" ? (
+          <div style={bannerStyle} role="status">
+            <span style={{ flex: 1 }}>File deleted on disk.</span>
+            <button style={bannerBtn} onClick={onKeepDeleted}>
+              Keep buffer (save recreates)
+            </button>
+            <button
+              style={bannerBtn}
+              onClick={() => void requestCloseTab(projectId, groupId, activePath)}
+            >
+              Close tab
+            </button>
+          </div>
+        ) : visible && activePath && conflict ? (
+          <div style={bannerStyle} role="status">
+            <span style={{ flex: 1 }}>File changed on disk.</span>
+            <button style={bannerBtn} onClick={() => void onReload()}>
+              Reload
+            </button>
+            <button style={bannerBtn} onClick={onKeepMine}>
+              Keep mine
+            </button>
+          </div>
+        ) : null}
+        <div ref={hostRef} className={`code-host ${noModel ? "empty" : ""}`} />
+      </div>
     </div>
   );
 }
