@@ -1946,6 +1946,18 @@ button {
   background: var(--bg-elevated, var(--bg));
   color: var(--text);
 }
+.oc-advanced-toggle {
+  align-self: flex-start;
+  font-size: 11px;
+  color: var(--text-mid);
+  background: transparent;
+  border: none;
+  padding: 0;
+  cursor: pointer;
+}
+.oc-advanced-toggle:hover {
+  color: var(--text-bright);
+}
 
 /* ---- About panel ---- */
 .about-panel {

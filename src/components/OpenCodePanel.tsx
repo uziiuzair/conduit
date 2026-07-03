@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   useStore,
   type LocalModel,
@@ -7,12 +7,35 @@ import {
 } from "../store";
 
 /**
- * Feature 3 — route OpenCode sessions to a local GPU / self-hosted endpoint (Ollama,
- * LM Studio, vLLM, llama.cpp, OpenWebUI, or a custom OpenAI-compatible URL). Conduit
- * injects the provider + model into each OpenCode session at spawn (env-only inline
- * config that outranks the user's opencode.json files); nothing is written to disk and
- * the API key never leaves backend memory.
+ * Feature 3 — route OpenCode sessions to a local GPU / self-hosted endpoint. Zero-config
+ * by design: opening the panel (or flipping the switch) scans the well-known local
+ * servers, picks the best one, fetches its models, and selects the strongest coding
+ * model (tool-calling first, then context size) — the user only confirms. Conduit
+ * injects the result into each OpenCode session at spawn (env-only inline config); the
+ * API key never leaves backend memory and nothing is written to disk.
  */
+
+const PRESET_FALLBACK: Array<Pick<LocalProviderStatus, "preset" | "label" | "baseUrl">> = [
+  { preset: "ollama", label: "Ollama", baseUrl: "http://localhost:11434/v1" },
+  { preset: "lmstudio", label: "LM Studio", baseUrl: "http://localhost:1234/v1" },
+  { preset: "vllm", label: "vLLM", baseUrl: "http://localhost:8000/v1" },
+  { preset: "llamacpp", label: "llama.cpp", baseUrl: "http://localhost:8080/v1" },
+  { preset: "openwebui", label: "OpenWebUI", baseUrl: "http://localhost:3000/api" },
+];
+const CUSTOM = { preset: "custom", label: "Custom", baseUrl: "http://localhost:8000/v1" };
+
+/** Rank for auto-pick: tool-calling first (an agent is crippled without it), then the
+ * biggest context window. */
+const rankModels = (ms: LocalModel[]): LocalModel[] =>
+  [...ms].sort((a, b) => {
+    const at = a.tools === true ? 1 : 0;
+    const bt = b.tools === true ? 1 : 0;
+    if (at !== bt) return bt - at;
+    return (b.context ?? 0) - (a.context ?? 0);
+  });
+
+const fmtCtx = (n?: number | null) => (n ? `${Math.round(n / 1024)}k ctx` : "");
+
 export function OpenCodePanel() {
   const oc = useStore((s) => s.opencode);
   const keySet = useStore((s) => s.opencodeKeySet);
@@ -24,50 +47,122 @@ export function OpenCodePanel() {
   const listLocalModels = useStore((s) => s.listLocalModels);
 
   const [statuses, setStatuses] = useState<LocalProviderStatus[] | null>(null);
-  const [detecting, setDetecting] = useState(false);
   const [models, setModels] = useState<LocalModel[]>([]);
-  const [modelsError, setModelsError] = useState<string | null>(null);
-  const [fetchingModels, setFetchingModels] = useState(false);
+  const [busy, setBusy] = useState<string | null>(null);
+  const [note, setNote] = useState<{ kind: "ok" | "warn"; text: string } | null>(null);
   const [keyInput, setKeyInput] = useState("");
+  const [showAdvanced, setShowAdvanced] = useState(false);
+  const mounted = useRef(false);
 
-  const save = (patch: Partial<OpenCodeSettings>) => void setSettings({ ...oc, ...patch });
-
-  const runDetect = async () => {
-    setDetecting(true);
-    setStatuses(await detectLocalProviders());
-    setDetecting(false);
+  const save = (patch: Partial<OpenCodeSettings>) => {
+    const next = { ...useStore.getState().opencode, ...patch };
+    void setSettings(next);
+    return next;
   };
 
-  // Refresh persisted settings + key state, and probe for running servers, on open.
+  /** The whole "it just works" chain: scan servers → pick one → fetch models → pick the
+   * best → save. `presetHint` pins the server (a chip click); otherwise priority order.
+   * Keeps a model the user already chose when the server still offers it. Never touches
+   * `enabled` — the master toggle owns that (so an in-flight scan can't revert it) — and
+   * re-reads store state after each await so edits made mid-scan aren't stomped. */
+  const scanning = useRef(false);
+  const autoConfigure = async (opts?: { presetHint?: string }) => {
+    if (scanning.current) return; // one scan at a time; re-clicks are no-ops
+    scanning.current = true;
+    try {
+      setBusy("Scanning for local servers…");
+      setNote(null);
+      const found = await detectLocalProviders();
+      setStatuses(found);
+      const candidates = opts?.presetHint
+        ? found.filter((s) => s.preset === opts.presetHint)
+        : found.filter((s) => s.running && (!s.needsKey || keySet));
+      const target = candidates.find((s) => s.running) ?? candidates[0];
+      if (!target) {
+        setNote({
+          kind: "warn",
+          text: "No local server found. Start Ollama (or LM Studio / vLLM / …) and re-scan — or enter a URL under Advanced.",
+        });
+        return;
+      }
+      if (!target.running) {
+        // Explicitly chosen but not up: still prefill its URL so the user can fix/start it.
+        save({ preset: target.preset, baseUrl: target.baseUrl });
+        setNote({
+          kind: "warn",
+          text: `${target.label} isn't answering at ${target.baseUrl}${target.needsKey && !keySet ? " (it also needs an API key — set one under Advanced)" : ""}. Start it and re-scan.`,
+        });
+        return;
+      }
+      setBusy(`Found ${target.label} ${target.detail} — fetching models…`);
+      const listed = await listLocalModels(target.baseUrl, target.preset);
+      if (typeof listed === "string") {
+        save({ preset: target.preset, baseUrl: target.baseUrl });
+        setNote({ kind: "warn", text: `${target.label} found, but listing models failed: ${listed}` });
+        return;
+      }
+      setModels(listed);
+      const fresh = useStore.getState().opencode;
+      const keep = listed.find((m) => m.id === fresh.model);
+      const best = keep ?? rankModels(listed)[0];
+      const next = save({
+        preset: target.preset,
+        baseUrl: target.baseUrl,
+        model: best.id,
+        contextLimit: best.context ?? fresh.contextLimit ?? null,
+      });
+      setNote({
+        kind: "ok",
+        text: `${target.label} ${target.detail} — ${keep ? "kept" : "picked"} ${best.id}${
+          best.context ? ` (${fmtCtx(best.context)})` : ""
+        }${best.tools ? ", tool-calling ✓" : ""}. ${
+          next.enabled ? "Active for new OpenCode sessions." : "Turn the switch on to use it."
+        }`,
+      });
+    } finally {
+      scanning.current = false;
+      setBusy(null);
+    }
+  };
+
+  // On open: refresh persisted state, then configure automatically. An already-configured
+  // setup only gets a passive re-scan (never stomps the user's saved choice).
   useEffect(() => {
-    void loadSettings();
-    void runDetect();
+    if (mounted.current) return;
+    mounted.current = true;
+    void (async () => {
+      await loadSettings();
+      const cur = useStore.getState().opencode;
+      if (cur.model) {
+        setStatuses(await detectLocalProviders());
+      } else {
+        await autoConfigure();
+      }
+    })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const pickPreset = (preset: string, baseUrl: string) => {
-    // Re-prefill the URL when switching preset; keep a hand-edited URL for the same one.
-    save({ preset, baseUrl: oc.preset === preset && oc.baseUrl ? oc.baseUrl : baseUrl });
-    setModels([]);
-    setModelsError(null);
+  const onMasterToggle = (on: boolean) => {
+    // Optimistic: the switch responds instantly and a running scan can never revert it.
+    const next = save({ enabled: on });
+    if (on && !next.model) void autoConfigure(); // first enable = full auto-setup
   };
 
   const fetchModels = async () => {
-    setFetchingModels(true);
-    setModelsError(null);
+    setBusy("Fetching models…");
+    setNote(null);
     const r = await listLocalModels(oc.baseUrl, oc.preset || "custom");
     if (typeof r === "string") {
       setModels([]);
-      setModelsError(r);
+      setNote({ kind: "warn", text: r });
     } else {
       setModels(r);
     }
-    setFetchingModels(false);
+    setBusy(null);
   };
 
   const pickModel = (id: string) => {
     const m = models.find((x) => x.id === id);
-    // Autofill the context limit from what the server reports (editable afterwards).
     save({ model: id, ...(m?.context ? { contextLimit: m.context } : {}) });
   };
 
@@ -76,19 +171,15 @@ export function OpenCodePanel() {
     return Number.isFinite(n) && n > 0 ? n : null;
   };
 
-  const custom = { preset: "custom", label: "Custom", baseUrl: "http://localhost:8000/v1" };
-  const presetRows: Array<Pick<LocalProviderStatus, "preset" | "label" | "baseUrl">> =
-    statuses ?? [
-      { preset: "ollama", label: "Ollama", baseUrl: "http://localhost:11434/v1" },
-      { preset: "lmstudio", label: "LM Studio", baseUrl: "http://localhost:1234/v1" },
-      { preset: "vllm", label: "vLLM", baseUrl: "http://localhost:8000/v1" },
-      { preset: "llamacpp", label: "llama.cpp", baseUrl: "http://localhost:8080/v1" },
-      { preset: "openwebui", label: "OpenWebUI", baseUrl: "http://localhost:3000/api" },
-    ];
+  const presetRows = (statuses ?? PRESET_FALLBACK).concat([CUSTOM]);
   const statusOf = (preset: string) => statuses?.find((s) => s.preset === preset);
   const needsKey = statusOf(oc.preset)?.needsKey ?? oc.preset === "openwebui";
+  const showKeyRow = needsKey || keySet || oc.preset === "custom" || oc.preset === "vllm";
   const insecureRemote =
-    keySet && oc.baseUrl.startsWith("http://") && !/\/\/(localhost|127\.0\.0\.1)[:/]/.test(oc.baseUrl);
+    keySet &&
+    oc.baseUrl.startsWith("http://") &&
+    !/\/\/(localhost|127\.0\.0\.1)[:/]/.test(oc.baseUrl);
+  const lowContext = oc.enabled && oc.contextLimit != null && oc.contextLimit < 32768;
 
   return (
     <div className="trust-panel">
@@ -96,32 +187,38 @@ export function OpenCodePanel() {
         <input
           type="checkbox"
           checked={oc.enabled}
-          onChange={(e) => save({ enabled: e.target.checked, preset: oc.preset || "ollama" })}
+          onChange={(e) => onMasterToggle(e.target.checked)}
         />
-        <span>Run OpenCode sessions on a local / self-hosted model</span>
+        <span>Use a local model for OpenCode sessions</span>
       </label>
-      <p className="trust-note">
-        Point OpenCode at your own GPU — Ollama, LM Studio, vLLM, llama.cpp, OpenWebUI, or any
-        OpenAI-compatible endpoint. Applied to <strong>new</strong> OpenCode sessions at launch;
-        your <code>opencode.json</code> files are never modified. Off = OpenCode runs untouched.
-      </p>
+
+      {(busy || note) && (
+        <p className={`trust-note${note?.kind === "warn" ? " trust-warn" : ""}`}>
+          {busy ?? note?.text}
+        </p>
+      )}
 
       <div className="oc-section">
         <div className="section-label">
           Server
-          <button className="oc-detect" onClick={() => void runDetect()} disabled={detecting}>
-            {detecting ? "Scanning…" : "Re-scan"}
+          <button className="oc-detect" onClick={() => void autoConfigure()} disabled={!!busy}>
+            {busy ? "Working…" : "Re-scan & auto-set"}
           </button>
         </div>
         <div className="oc-presets">
-          {presetRows.concat([custom]).map((p) => {
+          {presetRows.map((p) => {
             const st = statusOf(p.preset);
             return (
               <button
                 key={p.preset}
                 className={`oc-preset${(oc.preset || "") === p.preset ? " on" : ""}`}
-                onClick={() => pickPreset(p.preset, p.baseUrl)}
-                title={p.baseUrl}
+                onClick={() =>
+                  p.preset === "custom"
+                    ? save({ preset: "custom", baseUrl: oc.baseUrl || CUSTOM.baseUrl })
+                    : void autoConfigure({ presetHint: p.preset })
+                }
+                title={`${p.baseUrl}${st?.running ? " — running" : ""}`}
+                disabled={!!busy}
               >
                 <span className={`oc-dot${st?.running ? " up" : ""}`} />
                 {p.label}
@@ -130,52 +227,6 @@ export function OpenCodePanel() {
             );
           })}
         </div>
-        <div className="oc-row">
-          <label className="oc-field">
-            <span>Base URL</span>
-            <input
-              type="text"
-              value={oc.baseUrl}
-              placeholder="http://localhost:11434/v1"
-              onChange={(e) => save({ baseUrl: e.target.value })}
-              spellCheck={false}
-            />
-          </label>
-        </div>
-        <div className="oc-row">
-          <label className="oc-field">
-            <span>API key {needsKey ? "(required by this server)" : "(optional)"}</span>
-            <input
-              type="password"
-              value={keyInput}
-              placeholder={keySet ? "•••••• key held for this run" : "none"}
-              onChange={(e) => setKeyInput(e.target.value)}
-              autoComplete="off"
-            />
-          </label>
-          <button
-            disabled={!keyInput.trim()}
-            onClick={() => {
-              void setOpenCodeKey(keyInput);
-              setKeyInput("");
-            }}
-          >
-            Set key
-          </button>
-          {keySet && (
-            <button onClick={() => void setOpenCodeKey("")}>Clear</button>
-          )}
-        </div>
-        <p className="trust-note">
-          The key is held in memory until Conduit quits and is passed to OpenCode only through
-          its process environment — never written to disk, settings, or logs.
-        </p>
-        {insecureRemote && (
-          <p className="trust-note trust-warn">
-            This endpoint is plain <code>http://</code> on a non-local host — the API key would
-            travel unencrypted. Prefer <code>https://</code> for remote GPUs.
-          </p>
-        )}
       </div>
 
       <div className="oc-section">
@@ -184,87 +235,132 @@ export function OpenCodePanel() {
           <button
             className="oc-detect"
             onClick={() => void fetchModels()}
-            disabled={fetchingModels || !oc.baseUrl.trim()}
+            disabled={!!busy || !oc.baseUrl.trim()}
           >
-            {fetchingModels ? "Fetching…" : "Fetch models"}
+            Refresh list
           </button>
         </div>
-        {models.length > 0 && (
+        {models.length > 0 ? (
+          <select
+            className="oc-model-select"
+            value={models.some((m) => m.id === oc.model) ? oc.model : ""}
+            onChange={(e) => e.target.value && pickModel(e.target.value)}
+          >
+            {!models.some((m) => m.id === oc.model) && <option value="">Pick a model…</option>}
+            {rankModels(models).map((m) => (
+              <option key={m.id} value={m.id}>
+                {m.id}
+                {m.context ? ` — ${fmtCtx(m.context)}` : ""}
+                {m.tools ? " — tools ✓" : ""}
+                {m.detail ? ` — ${m.detail}` : ""}
+              </option>
+            ))}
+          </select>
+        ) : (
           <div className="oc-row">
-            <select
-              className="oc-model-select"
-              value={models.some((m) => m.id === oc.model) ? oc.model : ""}
-              onChange={(e) => e.target.value && pickModel(e.target.value)}
-            >
-              <option value="">Pick a model…</option>
-              {models.map((m) => (
-                <option key={m.id} value={m.id}>
-                  {m.id}
-                  {m.context ? ` — ${Math.round(m.context / 1024)}k ctx` : ""}
-                  {m.detail ? ` — ${m.detail}` : ""}
-                </option>
-              ))}
-            </select>
+            <label className="oc-field">
+              <span>Model id</span>
+              <input
+                type="text"
+                value={oc.model}
+                placeholder="auto-set after scan"
+                onChange={(e) => save({ model: e.target.value })}
+                spellCheck={false}
+              />
+            </label>
           </div>
         )}
-        {modelsError && <p className="trust-note trust-warn">{modelsError}</p>}
-        <div className="oc-row">
-          <label className="oc-field">
-            <span>Model id</span>
-            <input
-              type="text"
-              value={oc.model}
-              placeholder="qwen3:30b-a3b"
-              onChange={(e) => save({ model: e.target.value })}
-              spellCheck={false}
-            />
-          </label>
-          <label className="oc-field oc-num">
-            <span>Context tokens</span>
-            <input
-              type="text"
-              inputMode="numeric"
-              value={oc.contextLimit ?? ""}
-              placeholder="auto"
-              onChange={(e) => save({ contextLimit: parseLimit(e.target.value) })}
-            />
-          </label>
-          <label className="oc-field oc-num">
-            <span>Max output</span>
-            <input
-              type="text"
-              inputMode="numeric"
-              value={oc.outputLimit ?? ""}
-              placeholder="auto"
-              onChange={(e) => save({ outputLimit: parseLimit(e.target.value) })}
-            />
-          </label>
-        </div>
-        <p className="trust-note">
-          Agentic coding wants a large context window — 64k+ is recommended; small contexts make
-          OpenCode forget its task. Context autofills when the server reports it (Ollama does).
-        </p>
+        {lowContext && (
+          <p className="trust-note trust-warn">
+            {oc.contextLimit} tokens of context is tight for agentic coding — 64k+ recommended.
+          </p>
+        )}
       </div>
 
       <div className="oc-section">
-        <label className="telemetry-toggle">
-          <input
-            type="checkbox"
-            checked={oc.pinLocal}
-            onChange={(e) => save({ pinLocal: e.target.checked })}
-          />
-          <span>Local only — block every other provider</span>
-        </label>
-        <p className="trust-note">
-          Pins OpenCode to this endpoint (<code>enabled_providers</code> allowlist), so it cannot
-          fall back to a cloud provider even if cloud credentials exist on this machine.
-          {privateMode && (
-            <>
-              {" "}Sessions marked <strong>sensitive</strong> under private mode are pinned
-              automatically, regardless of this switch.
-            </>
-          )}
-        </p>
+        <button className="oc-advanced-toggle" onClick={() => setShowAdvanced(!showAdvanced)}>
+          {showAdvanced ? "▾" : "▸"} Advanced
+        </button>
+        {showAdvanced && (
+          <>
+            <div className="oc-row">
+              <label className="oc-field">
+                <span>Base URL</span>
+                <input
+                  type="text"
+                  value={oc.baseUrl}
+                  placeholder="http://localhost:11434/v1"
+                  onChange={(e) => save({ baseUrl: e.target.value })}
+                  spellCheck={false}
+                />
+              </label>
+              <label className="oc-field oc-num">
+                <span>Context tokens</span>
+                <input
+                  type="text"
+                  inputMode="numeric"
+                  value={oc.contextLimit ?? ""}
+                  placeholder="auto"
+                  onChange={(e) => save({ contextLimit: parseLimit(e.target.value) })}
+                />
+              </label>
+              <label className="oc-field oc-num">
+                <span>Max output</span>
+                <input
+                  type="text"
+                  inputMode="numeric"
+                  value={oc.outputLimit ?? ""}
+                  placeholder="auto"
+                  onChange={(e) => save({ outputLimit: parseLimit(e.target.value) })}
+                />
+              </label>
+            </div>
+            {showKeyRow && (
+              <div className="oc-row">
+                <label className="oc-field">
+                  <span>API key {needsKey ? "(required by this server)" : "(optional)"}</span>
+                  <input
+                    type="password"
+                    value={keyInput}
+                    placeholder={keySet ? "•••••• held for this run" : "none"}
+                    onChange={(e) => setKeyInput(e.target.value)}
+                    autoComplete="off"
+                  />
+                </label>
+                <button
+                  disabled={!keyInput.trim()}
+                  onClick={() => {
+                    void setOpenCodeKey(keyInput);
+                    setKeyInput("");
+                  }}
+                >
+                  Set
+                </button>
+                {keySet && <button onClick={() => void setOpenCodeKey("")}>Clear</button>}
+              </div>
+            )}
+            <label className="telemetry-toggle">
+              <input
+                type="checkbox"
+                checked={oc.pinLocal}
+                onChange={(e) => save({ pinLocal: e.target.checked })}
+              />
+              <span>Local only — block every other provider</span>
+            </label>
+            <p className="trust-note">
+              Applied to new OpenCode sessions via an env-only config that outranks (but never
+              edits) your <code>opencode.json</code>; the key lives in memory until Conduit
+              quits. “Local only” allowlists this endpoint so OpenCode can’t fall back to a
+              cloud provider{privateMode ? " (sensitive sessions are pinned automatically)" : ""}.
+            </p>
+            {insecureRemote && (
+              <p className="trust-note trust-warn">
+                Plain <code>http://</code> to a non-local host — the API key would travel
+                unencrypted. Prefer <code>https://</code> for remote GPUs.
+              </p>
+            )}
+          </>
+        )}
       </div>
     </div>
   );
