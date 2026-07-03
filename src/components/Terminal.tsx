@@ -106,7 +106,7 @@ export function TerminalView({
           "resolve_terminal_path",
           { base: workingDirectory, token: raw },
         );
-        if (!r) return;
+        if (!r || disposedRef.current) return;
         useStore.getState().openFile(
           projectId,
           r.absPath,
@@ -131,6 +131,9 @@ export function TerminalView({
         let start = bufferLineNumber - 1;
         while (start > 0 && buf.getLine(start)?.isWrapped) start--;
         // Concatenate the wrapped rows at FULL width so a string index -> cell math stays exact.
+        // Caveat: a wide/CJK or combined (emoji/ZWJ) glyph earlier in the line emits a different
+        // number of JS chars than terminal columns, so a token after it can be mis-ranged — a
+        // benign missed/misplaced underline (the resolver still only opens files that exist).
         const cols = term.cols;
         let text = "";
         let row = start;
