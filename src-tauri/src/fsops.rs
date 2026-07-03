@@ -369,12 +369,18 @@ pub fn resolve_terminal_path(base: &str, token: &str) -> Option<ResolvedPath> {
     } else {
         Path::new(base).join(&expanded)
     };
-    let canon = fs::canonicalize(&joined).ok()?;
-    if !canon.is_file() {
+    // Verify it's an existing regular file. `metadata` follows symlinks for the check, but we
+    // deliberately do NOT `canonicalize` the returned path: the rest of the app (FileTree,
+    // add_project) keys tabs/models by the raw, non-symlink-resolved path, so canonicalizing
+    // here would open a duplicate tab/model for a file under a symlinked ancestor (e.g. macOS
+    // /tmp -> /private/tmp). Return the lexically-normalized join (drops `.`, keeps `..` and
+    // symlinks) so the path stays in the same namespace the tree uses.
+    if !fs::metadata(&joined).ok()?.is_file() {
         return None;
     }
+    let normalized: std::path::PathBuf = joined.components().collect();
     Some(ResolvedPath {
-        abs_path: canon.to_string_lossy().into_owned(),
+        abs_path: normalized.to_string_lossy().into_owned(),
         line,
         col,
     })
@@ -670,9 +676,10 @@ mod resolve_tests {
         let f = dir.join("hello.txt");
         fs::write(&f, b"hi").unwrap();
         let r = resolve_terminal_path(dir.to_str().unwrap(), "hello.txt:3:2").expect("resolves");
+        // Non-canonicalizing: the returned path stays in the same (raw) namespace as `base`.
         assert_eq!(
             r.abs_path,
-            fs::canonicalize(&f).unwrap().to_string_lossy().into_owned()
+            dir.join("hello.txt").to_string_lossy().into_owned()
         );
         assert_eq!(r.line, Some(3));
         assert_eq!(r.col, Some(2));
@@ -685,10 +692,7 @@ mod resolve_tests {
         let f = dir.join("x.txt");
         fs::write(&f, b"hi").unwrap();
         let r = resolve_terminal_path("/no/such/base", f.to_str().unwrap()).expect("resolves");
-        assert_eq!(
-            r.abs_path,
-            fs::canonicalize(&f).unwrap().to_string_lossy().into_owned()
-        );
+        assert_eq!(r.abs_path, f.to_string_lossy().into_owned());
         assert_eq!(r.line, None);
         fs::remove_dir_all(&dir).ok();
     }
@@ -707,5 +711,36 @@ mod resolve_tests {
         fs::create_dir(&sub).unwrap();
         assert!(resolve_terminal_path(dir.to_str().unwrap(), "sub").is_none());
         fs::remove_dir_all(&dir).ok();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn resolves_keep_symlink_namespace() {
+        use std::os::unix::fs::symlink;
+        let real = tmpdir();
+        fs::write(real.join("f.txt"), b"hi").unwrap();
+        // A sibling symlink pointing at the real dir.
+        let link = real
+            .parent()
+            .unwrap()
+            .join(format!("conduit-resolve-link-{}", std::process::id()));
+        let _ = fs::remove_file(&link);
+        symlink(&real, &link).unwrap();
+        // Resolve a relative token against the SYMLINK dir as base.
+        let r = resolve_terminal_path(link.to_str().unwrap(), "f.txt").expect("resolves");
+        // The returned path stays under the symlink dir (not canonicalized to the real dir).
+        assert_eq!(
+            r.abs_path,
+            link.join("f.txt").to_string_lossy().into_owned()
+        );
+        assert_ne!(
+            r.abs_path,
+            fs::canonicalize(link.join("f.txt"))
+                .unwrap()
+                .to_string_lossy()
+                .into_owned()
+        );
+        fs::remove_file(&link).ok();
+        fs::remove_dir_all(&real).ok();
     }
 }
