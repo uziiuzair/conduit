@@ -395,6 +395,98 @@ impl ProviderAdapter for AntigravityAdapter {
     }
 }
 
+/// The per-spawn OpenCode local-provider payload: an inline config for the
+/// child's OPENCODE_CONFIG_CONTENT env var, plus the endpoint API key that rides in a
+/// SEPARATE env var (CONDUIT_OC_APIKEY) referenced from the config as an `{env:...}`
+/// placeholder. Nothing here is ever written to disk or logged.
+#[derive(Clone, Debug, PartialEq)]
+pub struct OpenCodeSpawnConfig {
+    pub config_json: String,
+    pub api_key: Option<String>,
+}
+
+/// Human label for a local-provider preset id, shown as the provider name inside OpenCode.
+fn preset_label(preset: &str) -> &'static str {
+    match preset {
+        "ollama" => "Ollama",
+        "lmstudio" => "LM Studio",
+        "vllm" => "vLLM",
+        "llamacpp" => "llama.cpp",
+        "openwebui" => "OpenWebUI",
+        _ => "Local endpoint",
+    }
+}
+
+/// Build the inline OpenCode config that routes a session to the user's local/self-hosted
+/// endpoint. Injected via OPENCODE_CONFIG_CONTENT, which deep-merges ABOVE the user's
+/// global and project opencode.json (only managed/MDM config outranks it), so it wins
+/// without touching their files. Returns None when the feature is off or incomplete —
+/// the session then spawns exactly as before this feature.
+///
+/// The provider id is a fixed "conduit" (not the preset name) so the merge can never
+/// collide with a provider the user defined themselves. `small_model` is pinned too so
+/// title-generation etc. can't silently route to a cloud model. `pin_local` emits
+/// `enabled_providers: ["conduit"]` — an allowlist that keeps OpenCode from loading ANY
+/// other provider even when cloud credentials exist in its auth store; the spawner sets
+/// it for siloed/local-only sessions under private mode (trust boundaries) or by choice.
+pub fn build_opencode_config(
+    s: &crate::store::OpenCodeSettings,
+    api_key: Option<&str>,
+    pin_local: bool,
+) -> Option<OpenCodeSpawnConfig> {
+    if !s.enabled {
+        return None;
+    }
+    let base_url = s.base_url.trim();
+    let model_id = s.model.trim();
+    if base_url.is_empty() || model_id.is_empty() {
+        return None;
+    }
+
+    let mut options = serde_json::json!({ "baseURL": base_url });
+    if api_key.is_some() {
+        // Keep the placeholder in the JSON — the real key lives in exactly one child env
+        // var, so it is trivially redactable and never duplicated into the config blob.
+        options["apiKey"] = serde_json::json!("{env:CONDUIT_OC_APIKEY}");
+    }
+
+    let mut model_entry = serde_json::json!({ "name": model_id });
+    // OpenCode's schema requires BOTH keys once `limit` exists ("Missing key ...
+    // limit.output" otherwise — verified against opencode 1.17.13). So: emit `limit`
+    // only when the context window is known, defaulting output to a safe 8192; a lone
+    // output with an invented context would mislead OpenCode's compaction, so it's
+    // omitted instead.
+    if let Some(c) = s.context_limit {
+        model_entry["limit"] = serde_json::json!({
+            "context": c,
+            "output": s.output_limit.unwrap_or(8192),
+        });
+    }
+
+    let model_ref = format!("conduit/{model_id}");
+    let mut root = serde_json::json!({
+        "$schema": "https://opencode.ai/config.json",
+        "provider": {
+            "conduit": {
+                "npm": "@ai-sdk/openai-compatible",
+                "name": format!("{} via Conduit", preset_label(&s.preset)),
+                "options": options,
+                "models": { model_id: model_entry },
+            }
+        },
+        "model": model_ref,
+        "small_model": model_ref,
+    });
+    if pin_local {
+        root["enabled_providers"] = serde_json::json!(["conduit"]);
+    }
+
+    Some(OpenCodeSpawnConfig {
+        config_json: root.to_string(),
+        api_key: api_key.map(str::to_string),
+    })
+}
+
 /// Resolve the adapter for an agent id.
 pub fn adapter_for(agent: AgentId) -> Box<dyn ProviderAdapter> {
     match agent {
@@ -662,6 +754,87 @@ mod tests {
         assert!(ClaudeAdapter.plugin_profile().is_none());
         assert!(CodexAdapter.plugin_profile().is_none());
         assert!(GeminiAdapter.plugin_profile().is_none());
+    }
+
+    fn oc_settings() -> crate::store::OpenCodeSettings {
+        crate::store::OpenCodeSettings {
+            enabled: true,
+            preset: "ollama".into(),
+            base_url: "http://localhost:11434/v1".into(),
+            model: "qwen3:30b-a3b".into(),
+            context_limit: Some(262144),
+            output_limit: None,
+            pin_local: false,
+        }
+    }
+
+    #[test]
+    fn opencode_config_local_no_key_no_pin() {
+        let cfg = build_opencode_config(&oc_settings(), None, false).unwrap();
+        assert!(cfg.api_key.is_none());
+        let v: serde_json::Value = serde_json::from_str(&cfg.config_json).unwrap();
+        let provider = &v["provider"]["conduit"];
+        assert_eq!(provider["npm"], "@ai-sdk/openai-compatible");
+        assert_eq!(provider["name"], "Ollama via Conduit");
+        assert_eq!(provider["options"]["baseURL"], "http://localhost:11434/v1");
+        assert!(
+            provider["options"].get("apiKey").is_none(),
+            "no key configured -> no apiKey entry at all"
+        );
+        assert_eq!(
+            provider["models"]["qwen3:30b-a3b"]["limit"]["context"],
+            262144
+        );
+        // OpenCode requires both limit keys; unset output falls back to 8192.
+        assert_eq!(provider["models"]["qwen3:30b-a3b"]["limit"]["output"], 8192);
+        assert_eq!(v["model"], "conduit/qwen3:30b-a3b");
+        assert_eq!(v["small_model"], "conduit/qwen3:30b-a3b");
+        assert!(
+            v.get("enabled_providers").is_none(),
+            "no pin -> other providers stay usable"
+        );
+    }
+
+    #[test]
+    fn opencode_config_remote_key_and_pin() {
+        let mut s = oc_settings();
+        s.preset = "openwebui".into();
+        s.base_url = " http://gpu-box:3000/api ".into(); // whitespace is trimmed
+        s.context_limit = None;
+        s.output_limit = Some(8192);
+        let cfg = build_opencode_config(&s, Some("secret-key"), true).unwrap();
+        // The raw key rides ONLY in api_key (-> child env); the JSON carries a placeholder.
+        assert_eq!(cfg.api_key.as_deref(), Some("secret-key"));
+        assert!(!cfg.config_json.contains("secret-key"));
+        let v: serde_json::Value = serde_json::from_str(&cfg.config_json).unwrap();
+        assert_eq!(
+            v["provider"]["conduit"]["options"]["apiKey"],
+            "{env:CONDUIT_OC_APIKEY}"
+        );
+        assert_eq!(
+            v["provider"]["conduit"]["options"]["baseURL"],
+            "http://gpu-box:3000/api"
+        );
+        assert_eq!(v["provider"]["conduit"]["name"], "OpenWebUI via Conduit");
+        // Output without a known context would force an invented context value into
+        // OpenCode's schema (both keys required), so no limit is emitted at all.
+        assert!(v["provider"]["conduit"]["models"]["qwen3:30b-a3b"]
+            .get("limit")
+            .is_none());
+        assert_eq!(v["enabled_providers"], serde_json::json!(["conduit"]));
+    }
+
+    #[test]
+    fn opencode_config_none_when_disabled_or_incomplete() {
+        let mut s = oc_settings();
+        s.enabled = false;
+        assert!(build_opencode_config(&s, None, false).is_none());
+        let mut s = oc_settings();
+        s.model = "  ".into();
+        assert!(build_opencode_config(&s, None, false).is_none());
+        let mut s = oc_settings();
+        s.base_url = String::new();
+        assert!(build_opencode_config(&s, None, false).is_none());
     }
 
     #[test]
