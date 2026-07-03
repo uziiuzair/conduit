@@ -288,7 +288,7 @@ export function CodeEditorPane({ projectId, groupId, visible, style }: CodeEdito
     if (ed && model) {
       const line = Math.min(Math.max(pendingReveal.line, 1), model.getLineCount());
       ed.revealLineInCenter(line);
-      ed.setPosition({ lineNumber: line, column: pendingReveal.col });
+      ed.setPosition({ lineNumber: line, column: Math.max(pendingReveal.col, 1) });
       ed.focus();
     }
     clearPendingReveal();
