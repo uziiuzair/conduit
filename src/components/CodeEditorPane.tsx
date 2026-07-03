@@ -102,6 +102,8 @@ export function CodeEditorPane({ projectId, groupId, visible, style }: CodeEdito
   const conflict = useStore((s) => (activePath ? s.conflict[activePath] : undefined));
   const clearConflict = useStore((s) => s.clearConflict);
   const requestCloseTab = useStore((s) => s.requestCloseTab);
+  const pendingReveal = useStore((s) => s.pendingReveal);
+  const clearPendingReveal = useStore((s) => s.clearPendingReveal);
 
   // External-change "Reload": overwrite the buffer with disk content, discarding the
   // user's edits, then clear the banner. Preserves undo via pushEditOperations.
@@ -272,6 +274,24 @@ export function CodeEditorPane({ projectId, groupId, visible, style }: CodeEdito
       if (currentPathRef.current) ed.focus();
     });
   }, [visible]);
+
+  // Jump to a line when a terminal Cmd+Click opened this file with a reveal target. Fires once
+  // the model for the reveal path is set (so it survives the async read_file), whether the file
+  // was freshly opened or already open. Clears the one-shot flag once the target tab is loaded —
+  // even a binary/error tab with no model — so a stale reveal can never linger.
+  useEffect(() => {
+    if (!pendingReveal || pendingReveal.path !== activePath) return;
+    if (load.kind !== "ready") return;
+    const ed = editorRef.current;
+    const model = ed?.getModel();
+    if (ed && model) {
+      const line = Math.min(Math.max(pendingReveal.line, 1), model.getLineCount());
+      ed.revealLineInCenter(line);
+      ed.setPosition({ lineNumber: line, column: pendingReveal.col });
+      ed.focus();
+    }
+    clearPendingReveal();
+  }, [pendingReveal, activePath, load, clearPendingReveal]);
 
   const fc = load.kind === "ready" ? load.fc : null;
   const banner = ((): { text: string; error?: boolean } | null => {
