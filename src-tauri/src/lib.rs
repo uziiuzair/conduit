@@ -681,7 +681,14 @@ pub fn run() {
             let bus = app.state::<Arc<hookbus::HookBus>>().inner().clone();
             let broker = app.state::<Arc<broker::Broker>>().inner().clone();
             let presence = app.state::<Arc<broker::Presence>>().inner().clone();
-            hooks::start(app.handle().clone(), hook_state, bus, broker, presence, fleet.clone());
+            hooks::start(
+                app.handle().clone(),
+                hook_state,
+                bus,
+                broker,
+                presence,
+                fleet.clone(),
+            );
             bridge::start(app.handle().clone());
             let pty = app.state::<Arc<PtyManager>>().inner().clone();
             let store = app.state::<Arc<Store>>().inner().clone();

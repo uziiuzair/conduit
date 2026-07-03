@@ -178,14 +178,16 @@ impl Store {
         let state = fs::read(&save_path)
             .ok()
             .and_then(|data| {
-                serde_json::from_slice::<PersistState>(&data).ok().or_else(|| {
-                    serde_json::from_slice::<Vec<Project>>(&data)
-                        .ok()
-                        .map(|projects| PersistState {
-                            projects,
-                            ..Default::default()
-                        })
-                })
+                serde_json::from_slice::<PersistState>(&data)
+                    .ok()
+                    .or_else(|| {
+                        serde_json::from_slice::<Vec<Project>>(&data)
+                            .ok()
+                            .map(|projects| PersistState {
+                                projects,
+                                ..Default::default()
+                            })
+                    })
             })
             .unwrap_or_default();
 
@@ -431,7 +433,10 @@ impl Store {
             accounts.retain(|a| a.id != account_id);
         }
         {
-            let mut def = self.default_account.lock().unwrap_or_else(|e| e.into_inner());
+            let mut def = self
+                .default_account
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
             if def.as_deref() == Some(account_id) {
                 *def = None;
             }
@@ -449,7 +454,10 @@ impl Store {
 
     pub fn set_default_account(&self, account_id: Option<String>) {
         {
-            let mut def = self.default_account.lock().unwrap_or_else(|e| e.into_inner());
+            let mut def = self
+                .default_account
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
             *def = account_id;
         }
         self.persist();
@@ -609,7 +617,8 @@ mod tests {
         // Normalize separators so this holds on Windows (`\`) too; the path is built with
         // `Path::join` (native separator).
         assert!(
-            path.replace('\\', "/").starts_with("/repo/.claude/worktrees/"),
+            path.replace('\\', "/")
+                .starts_with("/repo/.claude/worktrees/"),
             "got {path}"
         );
         assert!(s.branch.unwrap().starts_with("worktree-"));
@@ -680,7 +689,10 @@ mod tests {
             .add_account("Work".into(), work_dir.to_string_lossy().into_owned())
             .unwrap();
         let personal = store
-            .add_account("Personal".into(), personal_dir.to_string_lossy().into_owned())
+            .add_account(
+                "Personal".into(),
+                personal_dir.to_string_lossy().into_owned(),
+            )
             .unwrap();
 
         let p = store.add_project("/repo".into());
