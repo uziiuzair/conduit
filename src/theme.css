@@ -1963,7 +1963,7 @@ button {
   background: color-mix(in srgb, var(--text-mid) 40%, transparent);
 }
 .oc-dot.up {
-  background: #4fbf6f;
+  background: var(--green);
 }
 .oc-row {
   display: flex;
@@ -1983,11 +1983,16 @@ button {
 .oc-field input {
   font-size: 12px;
   padding: 6px 8px;
-  border-radius: 6px;
+  border-radius: 5px;
   border: 1px solid var(--border);
-  background: var(--bg-elevated, var(--bg));
-  color: var(--text);
-  font-family: var(--font-mono, monospace);
+  background: var(--panel-bg);
+  color: var(--text-bright);
+  font-family: var(--mono-font);
+  outline: none;
+  caret-color: var(--accent);
+}
+.oc-field input:focus {
+  border-color: var(--accent);
 }
 .oc-field.oc-num {
   flex: 0 0 110px;
@@ -1996,10 +2001,19 @@ button {
   width: 100%;
   font-size: 12px;
   padding: 6px 8px;
-  border-radius: 6px;
+  border-radius: 5px;
   border: 1px solid var(--border);
-  background: var(--bg-elevated, var(--bg));
-  color: var(--text);
+  background: var(--panel-bg);
+  color: var(--text-bright);
+  font-family: var(--mono-font);
+  outline: none;
+}
+.oc-model-select:focus {
+  border-color: var(--accent);
+}
+.oc-model-select option {
+  background: var(--panel-bg);
+  color: var(--text-bright);
 }
 .oc-advanced-toggle {
   align-self: flex-start;

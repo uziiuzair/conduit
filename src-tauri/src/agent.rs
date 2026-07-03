@@ -451,15 +451,16 @@ pub fn build_opencode_config(
     }
 
     let mut model_entry = serde_json::json!({ "name": model_id });
-    let mut limit = serde_json::Map::new();
+    // OpenCode's schema requires BOTH keys once `limit` exists ("Missing key ...
+    // limit.output" otherwise — verified against opencode 1.17.13). So: emit `limit`
+    // only when the context window is known, defaulting output to a safe 8192; a lone
+    // output with an invented context would mislead OpenCode's compaction, so it's
+    // omitted instead.
     if let Some(c) = s.context_limit {
-        limit.insert("context".into(), c.into());
-    }
-    if let Some(o) = s.output_limit {
-        limit.insert("output".into(), o.into());
-    }
-    if !limit.is_empty() {
-        model_entry["limit"] = serde_json::Value::Object(limit);
+        model_entry["limit"] = serde_json::json!({
+            "context": c,
+            "output": s.output_limit.unwrap_or(8192),
+        });
     }
 
     let model_ref = format!("conduit/{model_id}");
@@ -784,12 +785,8 @@ mod tests {
             provider["models"]["qwen3:30b-a3b"]["limit"]["context"],
             262144
         );
-        assert!(
-            provider["models"]["qwen3:30b-a3b"]["limit"]
-                .get("output")
-                .is_none(),
-            "unset output limit is omitted"
-        );
+        // OpenCode requires both limit keys; unset output falls back to 8192.
+        assert_eq!(provider["models"]["qwen3:30b-a3b"]["limit"]["output"], 8192);
         assert_eq!(v["model"], "conduit/qwen3:30b-a3b");
         assert_eq!(v["small_model"], "conduit/qwen3:30b-a3b");
         assert!(
@@ -819,10 +816,11 @@ mod tests {
             "http://gpu-box:3000/api"
         );
         assert_eq!(v["provider"]["conduit"]["name"], "OpenWebUI via Conduit");
-        assert_eq!(
-            v["provider"]["conduit"]["models"]["qwen3:30b-a3b"]["limit"]["output"],
-            8192
-        );
+        // Output without a known context would force an invented context value into
+        // OpenCode's schema (both keys required), so no limit is emitted at all.
+        assert!(v["provider"]["conduit"]["models"]["qwen3:30b-a3b"]
+            .get("limit")
+            .is_none());
         assert_eq!(v["enabled_providers"], serde_json::json!(["conduit"]));
     }
 
