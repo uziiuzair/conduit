@@ -52,6 +52,27 @@ fn curl(url: &str, bearer: Option<&str>, max_time_s: u32) -> Option<String> {
     Some(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
+/// POST a JSON body. Long timeout — a cold model may need to load into VRAM first.
+fn curl_post(url: &str, body: &str, bearer: Option<&str>, max_time_s: u32) -> Option<String> {
+    let mut cmd = std::process::Command::new("curl");
+    cmd.args([
+        "-s",
+        "--max-time",
+        &max_time_s.to_string(),
+        "-H",
+        "Content-Type: application/json",
+    ]);
+    if let Some(key) = bearer {
+        cmd.args(["-H", &format!("Authorization: Bearer {key}")]);
+    }
+    cmd.args(["-d", body]).arg(url);
+    let out = cmd.no_window().output().ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    Some(String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
 // ---- pure parsers --------------------------------------------------------------
 
 /// Ollama GET /api/version → "v0.30.10".
@@ -145,6 +166,75 @@ fn parse_openai_models(body: &str) -> Vec<LocalModel> {
             })
         })
         .collect()
+}
+
+/// Verdict of a live tool-calling probe against a served model.
+#[derive(Serialize, Clone, Debug, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ToolProbeResult {
+    /// True when the model answered with a native (structured) tool call.
+    pub native: bool,
+    pub detail: String,
+}
+
+/// The one-shot chat request used to probe native tool calling: a single trivial tool
+/// and an instruction to call it. Roomy max_tokens because thinking models (qwen3 etc.)
+/// burn tokens on reasoning before the call.
+fn tool_probe_body(model: &str) -> String {
+    serde_json::json!({
+        "model": model,
+        "messages": [{ "role": "user", "content": "Call the list_files tool on path \".\" now." }],
+        "tools": [{ "type": "function", "function": {
+            "name": "list_files",
+            "description": "List files in a directory",
+            "parameters": { "type": "object",
+                "properties": { "path": { "type": "string" } },
+                "required": ["path"] } } }],
+        "max_tokens": 2048
+    })
+    .to_string()
+}
+
+/// Judge the probe response. A model that "supports tools" on paper can still write the
+/// call into content as plain text (qwen2.5-coder does) — OpenCode has no text fallback,
+/// so such a model silently does nothing in a session. This is the check that catches it.
+fn parse_tool_probe(body: &str) -> ToolProbeResult {
+    let fail = |detail: &str| ToolProbeResult {
+        native: false,
+        detail: detail.to_string(),
+    };
+    let v: serde_json::Value = match serde_json::from_str(body) {
+        Ok(v) => v,
+        Err(_) => return fail("server returned a non-JSON response"),
+    };
+    if let Some(err) = v.get("error") {
+        let msg = err
+            .get("message")
+            .and_then(|m| m.as_str())
+            .unwrap_or("unknown server error");
+        return fail(&format!("server error: {msg}"));
+    }
+    let msg = &v["choices"][0]["message"];
+    let called = msg
+        .get("tool_calls")
+        .and_then(|t| t.as_array())
+        .is_some_and(|t| !t.is_empty());
+    if called {
+        return ToolProbeResult {
+            native: true,
+            detail: "native tool-calling verified — agentic use will work".to_string(),
+        };
+    }
+    let content = msg.get("content").and_then(|c| c.as_str()).unwrap_or("");
+    if content.contains("\"name\"") || content.contains("\"arguments\"") {
+        fail(
+            "model wrote the tool call as plain text instead of calling it — OpenCode cannot \
+             execute that, sessions will appear to do nothing. Pick a different model \
+             (the qwen3 family works well).",
+        )
+    } else {
+        fail("model did not call the tool — expect poor agentic behavior")
+    }
 }
 
 /// Derive the server origin from an OpenAI-compatible base URL by stripping the trailing
@@ -269,6 +359,33 @@ pub async fn list_local_models(
     .map_err(|e| format!("probe task failed: {e}"))?
 }
 
+/// Live-test whether the served model actually does NATIVE tool calling (one chat
+/// request with a trivial tool). Advertised capabilities aren't enough: some models
+/// (e.g. qwen2.5-coder via Ollama) claim tools but emit the call as plain text, which
+/// OpenCode cannot execute. Slow on a cold model (load into VRAM) — up to ~2.5 min.
+#[tauri::command]
+pub async fn probe_tool_call(
+    base_url: String,
+    model: String,
+    store: tauri::State<'_, std::sync::Arc<crate::store::Store>>,
+) -> Result<ToolProbeResult, String> {
+    let api_key = store.opencode_key();
+    tauri::async_runtime::spawn_blocking(move || {
+        let base = base_url.trim().trim_end_matches('/');
+        if !base.starts_with("http://") && !base.starts_with("https://") {
+            return Err("base URL must start with http:// or https://".to_string());
+        }
+        let url = format!("{base}/chat/completions");
+        let body = tool_probe_body(model.trim());
+        match curl_post(&url, &body, api_key.as_deref(), 150) {
+            Some(resp) => Ok(parse_tool_probe(&resp)),
+            None => Err("server not reachable (or the model took too long to load)".to_string()),
+        }
+    })
+    .await
+    .map_err(|e| format!("probe task failed: {e}"))?
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -333,6 +450,38 @@ mod tests {
             Some("v0.9.2")
         );
         assert!(parse_openwebui_config(r#"{"name":"grafana"}"#).is_none());
+    }
+
+    #[test]
+    fn tool_probe_judges_native_text_and_errors() {
+        // Shapes captured live from Ollama 0.30.10 /v1/chat/completions.
+        let native = r#"{"choices":[{"finish_reason":"tool_calls","message":{"role":"assistant",
+            "content":"","reasoning":"...","tool_calls":[{"id":"call_1","type":"function",
+            "function":{"name":"list_files","arguments":"{\"path\":\".\"}"}}]}}]}"#;
+        assert!(parse_tool_probe(native).native);
+
+        // qwen2.5-coder failure mode: the "call" arrives as plain text content.
+        let text = r#"{"choices":[{"finish_reason":"stop","message":{"role":"assistant",
+            "content":"{\n  \"name\": \"list_files\",\n  \"arguments\": {\"path\": \".\"}\n}"}}]}"#;
+        let r = parse_tool_probe(text);
+        assert!(!r.native);
+        assert!(r.detail.contains("plain text"));
+
+        let chatty = r#"{"choices":[{"message":{"content":"I cannot run tools."}}]}"#;
+        let r = parse_tool_probe(chatty);
+        assert!(!r.native);
+        assert!(r.detail.contains("did not call"));
+
+        let err = r#"{"error":{"message":"model not found"}}"#;
+        assert!(parse_tool_probe(err).detail.contains("model not found"));
+        assert!(!parse_tool_probe("Not Found").native);
+
+        // The probe body is valid JSON and carries the model id + roomy token budget.
+        let body: serde_json::Value =
+            serde_json::from_str(&tool_probe_body("qwen3:30b-a3b")).unwrap();
+        assert_eq!(body["model"], "qwen3:30b-a3b");
+        assert_eq!(body["max_tokens"], 2048);
+        assert_eq!(body["tools"][0]["function"]["name"], "list_files");
     }
 
     #[test]

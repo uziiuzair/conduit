@@ -1930,6 +1930,10 @@ button {
   font-size: 11px;
   padding: 2px 10px;
 }
+.oc-actions {
+  display: inline-flex;
+  gap: 6px;
+}
 .oc-presets {
   display: flex;
   flex-wrap: wrap;
