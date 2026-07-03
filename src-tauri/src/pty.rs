@@ -17,7 +17,7 @@ use std::collections::VecDeque;
 use std::fs;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU16, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU64, Ordering};
 use std::sync::mpsc::{sync_channel, Receiver, SyncSender, TrySendError};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -124,6 +124,10 @@ struct PtySession {
     size: Arc<(AtomicU16, AtomicU16)>,
     /// Recent raw output, for the Conductor's `fleet_peek`.
     output: Arc<RingBuffer>,
+    /// Feature 4 silo: when true (a siloed session under private mode), output is NOT fanned
+    /// out to remote (mobile-bridge) subscribers and new subscriptions are refused. Kept as an
+    /// atomic so marking a *running* session sensitive can cut its remote stream immediately.
+    suppress_remote: Arc<AtomicBool>,
 }
 
 #[derive(Default)]
@@ -160,6 +164,7 @@ impl PtyManager {
         initial_prompt: Option<String>,
         account_config_dir: Option<String>,
         agent: crate::agent::AgentId,
+        suppress_remote: bool,
         on_event: Channel<String>,
     ) -> Result<(), String> {
         // Already running → re-attach the live reader to the new channel and force
@@ -322,6 +327,8 @@ impl PtyManager {
         let sink: Sink = Arc::new(Mutex::new(on_event));
         let output = Arc::new(RingBuffer::new(OUTPUT_RING_BYTES));
         let output_for_reader = output.clone();
+        let suppress_flag = Arc::new(AtomicBool::new(suppress_remote));
+        let suppress_for_reader = suppress_flag.clone();
 
         self.sessions.insert(
             session_id.clone(),
@@ -334,6 +341,7 @@ impl PtyManager {
                 next_sub_id: Arc::new(AtomicU64::new(0)),
                 size: Arc::new((AtomicU16::new(cols), AtomicU16::new(rows))),
                 output,
+                suppress_remote: suppress_flag,
             }),
         );
 
@@ -367,8 +375,13 @@ impl PtyManager {
                     Ok(n) => {
                         output_for_reader.push(&buf[..n]);
                         let encoded = engine.encode(&buf[..n]);
-                        if let Ok(mut subs) = subs_for_reader.lock() {
-                            broadcast(&mut subs, &encoded);
+                        // Remote (bridge) fan-out is suppressed for a siloed session so its
+                        // output never leaves the machine via a paired phone; the desktop sink
+                        // below still receives everything (the human reads the silo directly).
+                        if !suppress_for_reader.load(Ordering::Relaxed) {
+                            if let Ok(mut subs) = subs_for_reader.lock() {
+                                broadcast(&mut subs, &encoded);
+                            }
                         }
                         let ok = sink
                             .lock()
@@ -391,8 +404,10 @@ impl PtyManager {
             }
             let notice = "\r\n\u{1b}[90m[process exited]\u{1b}[0m\r\n";
             let enc_notice = engine.encode(notice);
-            if let Ok(mut subs) = subs_for_reader.lock() {
-                broadcast(&mut subs, &enc_notice);
+            if !suppress_for_reader.load(Ordering::Relaxed) {
+                if let Ok(mut subs) = subs_for_reader.lock() {
+                    broadcast(&mut subs, &enc_notice);
+                }
             }
             if let Ok(s) = sink.lock() {
                 let _ = s.send(enc_notice);
@@ -464,10 +479,30 @@ impl PtyManager {
     pub fn subscribe(&self, session_id: &str) -> Option<(u64, Receiver<String>)> {
         let entry = self.sessions.get(session_id)?;
         let session = entry.lock().ok()?;
+        // A siloed session is never streamed to a remote (mobile-bridge) viewer.
+        if session.suppress_remote.load(Ordering::Relaxed) {
+            return None;
+        }
         let id = session.next_sub_id.fetch_add(1, Ordering::SeqCst);
         let (tx, rx) = sync_channel(SUBSCRIBER_BUFFER);
         session.subscribers.lock().ok()?.push((id, tx));
         Some((id, rx))
+    }
+
+    /// Flip a running session's remote-stream suppression (Feature 4 silo). Setting it true
+    /// also drops any existing bridge subscribers, so marking a *running* session sensitive
+    /// immediately stops a paired phone from receiving further output. No-op if not running.
+    pub fn set_remote_suppressed(&self, session_id: &str, suppress: bool) {
+        if let Some(entry) = self.sessions.get(session_id) {
+            if let Ok(session) = entry.lock() {
+                session.suppress_remote.store(suppress, Ordering::Relaxed);
+                if suppress {
+                    if let Ok(mut subs) = session.subscribers.lock() {
+                        subs.clear();
+                    }
+                }
+            }
+        }
     }
 
     /// Detach a previously-subscribed consumer. No-op if the session or id is gone.
