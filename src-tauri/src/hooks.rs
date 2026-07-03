@@ -447,9 +447,8 @@ fn command(event: &str, port: u16) -> Value {
     // `is_conduit_entry` idempotency matching. Elsewhere keep the POSIX form.
     #[cfg(windows)]
     let cmd = {
-        let url = format!(
-            "http://127.0.0.1:{port}/hook?session=%CONDUIT_SESSION_ID%&event={event}"
-        );
+        let url =
+            format!("http://127.0.0.1:{port}/hook?session=%CONDUIT_SESSION_ID%&event={event}");
         format!(
             "curl -s -m 2 -X POST -H \"Content-Type: application/json\" --data-binary @- \"{url}\" >NUL 2>&1 || ver >NUL"
         )
