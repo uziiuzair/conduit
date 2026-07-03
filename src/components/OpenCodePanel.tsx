@@ -126,7 +126,8 @@ export function OpenCodePanel() {
   };
 
   // On open: refresh persisted state, then configure automatically. An already-configured
-  // setup only gets a passive re-scan (never stomps the user's saved choice).
+  // setup gets a passive re-scan plus a model-list refresh (so the picker is always a
+  // populated dropdown), but its saved choice is never stomped.
   useEffect(() => {
     if (mounted.current) return;
     mounted.current = true;
@@ -134,7 +135,14 @@ export function OpenCodePanel() {
       await loadSettings();
       const cur = useStore.getState().opencode;
       if (cur.model) {
-        setStatuses(await detectLocalProviders());
+        const [found, listed] = await Promise.all([
+          detectLocalProviders(),
+          cur.baseUrl.trim()
+            ? listLocalModels(cur.baseUrl, cur.preset || "custom")
+            : Promise.resolve<LocalModel[] | string>([]),
+        ]);
+        setStatuses(found);
+        if (typeof listed !== "string") setModels(listed);
       } else {
         await autoConfigure();
       }
@@ -246,7 +254,9 @@ export function OpenCodePanel() {
             value={models.some((m) => m.id === oc.model) ? oc.model : ""}
             onChange={(e) => e.target.value && pickModel(e.target.value)}
           >
-            {!models.some((m) => m.id === oc.model) && <option value="">Pick a model…</option>}
+            {!models.some((m) => m.id === oc.model) && (
+              <option value="">{oc.model ? `${oc.model} (not on server)` : "Pick a model…"}</option>
+            )}
             {rankModels(models).map((m) => (
               <option key={m.id} value={m.id}>
                 {m.id}
@@ -257,18 +267,13 @@ export function OpenCodePanel() {
             ))}
           </select>
         ) : (
-          <div className="oc-row">
-            <label className="oc-field">
-              <span>Model id</span>
-              <input
-                type="text"
-                value={oc.model}
-                placeholder="auto-set after scan"
-                onChange={(e) => save({ model: e.target.value })}
-                spellCheck={false}
-              />
-            </label>
-          </div>
+          <p className="trust-note">
+            {busy
+              ? "Loading model list…"
+              : oc.model
+                ? `Using ${oc.model}. No list from the server — re-scan, or type an id under Advanced.`
+                : "No models yet — re-scan, or type an id under Advanced."}
+          </p>
         )}
         {lowContext && (
           <p className="trust-note trust-warn">
@@ -294,6 +299,18 @@ export function OpenCodePanel() {
                   spellCheck={false}
                 />
               </label>
+              <label className="oc-field">
+                <span>Model id</span>
+                <input
+                  type="text"
+                  value={oc.model}
+                  placeholder="auto-set by scan"
+                  onChange={(e) => save({ model: e.target.value })}
+                  spellCheck={false}
+                />
+              </label>
+            </div>
+            <div className="oc-row">
               <label className="oc-field oc-num">
                 <span>Context tokens</span>
                 <input
@@ -310,7 +327,7 @@ export function OpenCodePanel() {
                   type="text"
                   inputMode="numeric"
                   value={oc.outputLimit ?? ""}
-                  placeholder="auto"
+                  placeholder="8192"
                   onChange={(e) => save({ outputLimit: parseLimit(e.target.value) })}
                 />
               </label>
