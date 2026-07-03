@@ -261,7 +261,7 @@ pub struct TrustSettings {
     pub private_mode: bool,
 }
 
-/// OpenCode local-provider settings (Feature 3): route `opencode` sessions to a
+/// OpenCode local-provider settings: route `opencode` sessions to a
 /// local/self-hosted OpenAI-compatible endpoint (Ollama, LM Studio, vLLM, llama.cpp,
 /// OpenWebUI, or a custom URL). Non-secret and persisted in state.json; the API key is
 /// deliberately NOT here — it lives only in `Store::opencode_key` (in memory) and reaches
@@ -747,7 +747,7 @@ impl Store {
             .unwrap_or(false)
     }
 
-    /// Whether a session is marked local-only (Feature 4). Under private mode this makes the
+    /// Whether a session is marked local-only (trust boundaries). Under private mode this makes the
     /// OpenCode spawner pin the injected local provider as the ONLY enabled provider.
     pub fn is_session_local_only(&self, session_id: &str) -> bool {
         self.projects
@@ -760,7 +760,7 @@ impl Store {
             .unwrap_or(false)
     }
 
-    // ---- OpenCode local provider (Feature 3) -------------------------------------
+    // ---- OpenCode local provider ---------------------------------------------------
 
     pub fn opencode_settings(&self) -> OpenCodeSettings {
         self.opencode
@@ -778,9 +778,11 @@ impl Store {
     }
 
     /// Set (Some) or clear (None) the in-memory endpoint API key. Never persisted.
+    /// Trimmed on the way in — a paste with padding would otherwise ride into the
+    /// Authorization header verbatim and 401 with no way to inspect the held value.
     pub fn set_opencode_key(&self, key: Option<String>) {
         let mut k = self.opencode_key.lock().unwrap_or_else(|e| e.into_inner());
-        *k = key.filter(|k| !k.trim().is_empty());
+        *k = key.map(|k| k.trim().to_string()).filter(|k| !k.is_empty());
     }
 
     /// The in-memory endpoint API key, if one was set this run.
@@ -1294,7 +1296,8 @@ mod tests {
         let store = Store::for_test(&dir);
         assert!(!store.opencode_settings().enabled, "defaults off");
 
-        store.set_opencode_key(Some("sk-local-test-XYZ".into()));
+        // Padding is trimmed on the way in (a padded paste would 401 silently).
+        store.set_opencode_key(Some("  sk-local-test-XYZ \n".into()));
         store.set_opencode_settings(OpenCodeSettings {
             enabled: true,
             preset: "ollama".into(),

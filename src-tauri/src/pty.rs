@@ -277,7 +277,7 @@ impl PtyManager {
             for (k, v) in adapter.env_overrides() {
                 cmd.env(k, v);
             }
-            // Route OpenCode to the configured local/self-hosted provider (Feature 3):
+            // Route OpenCode to the configured local/self-hosted provider:
             // an inline config env var that outranks the user's opencode.json files, plus
             // the endpoint key in its own env var (referenced from the config as
             // {env:CONDUIT_OC_APIKEY}). Env-only by design — never written to disk.
