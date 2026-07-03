@@ -30,6 +30,15 @@ export interface Session {
   role?: SessionRole;
   /** Registered Claude account id; absent = inherit the global default account. */
   accountId?: string | null;
+  // ---- Trust boundaries (Feature 4; only enforced under private mode) ----
+  clearance?: Clearance;
+  /** Asymmetric silo: this session may read others but no other agent may read it. */
+  silo?: boolean;
+  /** Must run against a local model and receive no cloud MCP (siloed sensitive-data agent). */
+  localOnly?: boolean;
+  channels?: string[];
+  modelTier?: string | null;
+  seedMemory?: string | null;
 }
 
 /** A registered Claude account (mirrors the Rust serde struct, camelCase). */
@@ -37,6 +46,29 @@ export interface Account {
   id: string;
   label: string;
   configDir: string;
+}
+
+// ---- Trust boundaries (Feature 4) — mirror the Rust serde structs (camelCase) ----
+export type Clearance = "public" | "internal" | "confidential";
+
+export interface TrustSettings {
+  privateMode: boolean;
+}
+
+/** A trust update applied to one session (the "mark sensitive" action / policy editor). */
+export interface SessionTrust {
+  clearance: Clearance;
+  silo: boolean;
+  localOnly: boolean;
+  channels: string[];
+  modelTier?: string | null;
+  seedMemory?: string | null;
+}
+
+/** A local sensitivity-scanner hit (offline; assists the manual "mark sensitive" decision). */
+export interface SensitivityHit {
+  kind: string;
+  hint: string;
 }
 
 export type TabKind = "session" | "file";
@@ -364,6 +396,16 @@ interface AppState {
   removeAccount: (id: string) => Promise<void>;
   setDefaultAccount: (id: string | null) => Promise<void>;
 
+  // ---- Trust boundaries (Feature 4) ----
+  /** Master switch for the trust-boundary regime. When false the whole thing is inert. */
+  privateMode: boolean;
+  loadTrustSettings: () => Promise<void>;
+  setPrivateMode: (on: boolean) => Promise<void>;
+  /** Mark/adjust a session's trust (clearance / silo / local-only / channels / tier / seed). */
+  setSessionTrust: (sessionId: string, trust: SessionTrust) => Promise<void>;
+  /** Local, offline secret/PII scan of arbitrary text (assist for "mark sensitive"). */
+  scanSensitivity: (text: string) => Promise<SensitivityHit[]>;
+
   // ---- MCP server registry ----
   mcpServers: McpServer[];
   mcpEnabled: Record<string, AgentId[]>;
@@ -495,6 +537,7 @@ export const useStore = create<AppState>((set, get) => {
     defaultAgent: readDefaultAgent(),
     accounts: [],
     defaultAccount: null,
+    privateMode: false,
     agentSetupComplete: localStorage.getItem(SETUP_DONE_KEY) === "1",
     telemetryOptOut: readTelemetryOptOut(),
 
@@ -507,11 +550,14 @@ export const useStore = create<AppState>((set, get) => {
     activeThemeId: resolveThemeId(readStoredPref(), systemPrefersDark()),
 
     load: async () => {
-      const [projects, home, accounts, defaultAccount] = await Promise.all([
+      const [projects, home, accounts, defaultAccount, trust] = await Promise.all([
         invoke<Project[]>("load_projects"),
         getHomeDir().catch(() => null),
         invoke<Account[]>("list_accounts").catch(() => [] as Account[]),
         invoke<string | null>("get_default_account").catch(() => null),
+        invoke<TrustSettings>("get_trust_settings").catch(
+          () => ({ privateMode: false }) as TrustSettings,
+        ),
       ]);
       const layouts: Record<string, ProjectLayout> = {};
       for (const p of projects) {
@@ -532,6 +578,7 @@ export const useStore = create<AppState>((set, get) => {
         selectedProjectId: projects[0]?.id ?? null,
         accounts,
         defaultAccount,
+        privateMode: trust.privateMode,
       });
     },
 
@@ -570,6 +617,46 @@ export const useStore = create<AppState>((set, get) => {
     setDefaultAccount: async (id) => {
       await invoke("set_default_account", { accountId: id }).catch(() => {});
       set({ defaultAccount: id });
+    },
+
+    // ---- Trust boundaries (Feature 4) ----
+    loadTrustSettings: async () => {
+      try {
+        const t = await invoke<TrustSettings>("get_trust_settings");
+        set({ privateMode: t.privateMode });
+      } catch { /* keep current */ }
+    },
+    setPrivateMode: async (on) => {
+      await invoke("set_trust_settings", { settings: { privateMode: on } }).catch(() => {});
+      set({ privateMode: on });
+    },
+    setSessionTrust: async (sessionId, trust) => {
+      await invoke("set_session_trust", { sessionId, trust }).catch(() => {});
+      set((s) => ({
+        projects: s.projects.map((p) => ({
+          ...p,
+          sessions: p.sessions.map((x) =>
+            x.id === sessionId
+              ? {
+                  ...x,
+                  clearance: trust.clearance,
+                  silo: trust.silo,
+                  localOnly: trust.localOnly,
+                  channels: trust.channels,
+                  modelTier: trust.modelTier ?? undefined,
+                  seedMemory: trust.seedMemory ?? undefined,
+                }
+              : x,
+          ),
+        })),
+      }));
+    },
+    scanSensitivity: async (text) => {
+      try {
+        return await invoke<SensitivityHit[]>("scan_sensitivity", { text });
+      } catch {
+        return [];
+      }
     },
     completeAgentSetup: () => {
       localStorage.setItem(SETUP_DONE_KEY, "1");
