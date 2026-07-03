@@ -71,7 +71,7 @@ export interface SensitivityHit {
   hint: string;
 }
 
-// ---- OpenCode local provider (Feature 3) — mirror the Rust serde structs (camelCase) ----
+// ---- OpenCode local provider — mirror the Rust serde structs (camelCase) ----
 
 /** Non-secret local-provider settings. The endpoint API key is never part of this (or of
  * any persisted state) — it is held in backend memory and reaches OpenCode via child env. */
@@ -79,7 +79,7 @@ export interface OpenCodeSettings {
   enabled: boolean;
   /** "ollama" | "lmstudio" | "vllm" | "llamacpp" | "openwebui" | "custom" ("" = unset). */
   preset: string;
-  /** Full OpenAI-compatible base URL (e.g. http://localhost:11434/v1). */
+  /** Full OpenAI-compatible base URL (e.g. http://127.0.0.1:11434/v1). */
   baseUrl: string;
   /** Model id exactly as the server reports it. */
   model: string;
@@ -450,7 +450,7 @@ interface AppState {
   /** Local, offline secret/PII scan of arbitrary text (assist for "mark sensitive"). */
   scanSensitivity: (text: string) => Promise<SensitivityHit[]>;
 
-  // ---- OpenCode local provider (Feature 3) ----
+  // ---- OpenCode local provider ----
   opencode: OpenCodeSettings;
   /** Whether an endpoint API key is held (in backend memory) for this app run. */
   opencodeKeySet: boolean;
@@ -729,7 +729,7 @@ export const useStore = create<AppState>((set, get) => {
       }
     },
 
-    // ---- OpenCode local provider (Feature 3) ----
+    // ---- OpenCode local provider ----
     loadOpenCodeSettings: async () => {
       try {
         const [opencode, opencodeKeySet] = await Promise.all([

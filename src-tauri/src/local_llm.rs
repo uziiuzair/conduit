@@ -37,19 +37,46 @@ pub struct LocalModel {
     pub tools: Option<bool>,
 }
 
-/// GET a URL with a short timeout; optional Bearer auth. None on any failure.
-fn curl(url: &str, bearer: Option<&str>, max_time_s: u32) -> Option<String> {
-    let mut cmd = std::process::Command::new("curl");
-    cmd.args(["-s", "--max-time", &max_time_s.to_string()]);
-    if let Some(key) = bearer {
-        cmd.args(["-H", &format!("Authorization: Bearer {key}")]);
-    }
-    cmd.arg(url);
-    let out = cmd.no_window().output().ok()?;
+/// Finish a prepared curl invocation. The Bearer key — when present — is fed through
+/// STDIN via `-H @-` (curl ≥7.55) so it never appears on the process command line,
+/// where any local process could read it from a process listing. Loopback goes direct
+/// even when http_proxy is set (corporate proxies would otherwise eat every probe).
+/// None on any failure — including curl itself missing — callers degrade gracefully.
+fn run_curl(mut cmd: std::process::Command, bearer: Option<&str>) -> Option<String> {
+    use std::io::Write;
+    use std::process::Stdio;
+    cmd.args(["--noproxy", "localhost,127.0.0.1"]);
+    let out = match bearer {
+        Some(key) => {
+            cmd.args(["-H", "@-"]);
+            let mut child = cmd
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::null())
+                .no_window()
+                .spawn()
+                .ok()?;
+            child
+                .stdin
+                .take()?
+                .write_all(format!("Authorization: Bearer {key}\n").as_bytes())
+                .ok()?;
+            child.wait_with_output().ok()?
+        }
+        None => cmd.no_window().output().ok()?,
+    };
     if !out.status.success() {
         return None;
     }
     Some(String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
+/// GET a URL with a short timeout; optional Bearer auth. None on any failure.
+fn curl(url: &str, bearer: Option<&str>, max_time_s: u32) -> Option<String> {
+    let mut cmd = std::process::Command::new("curl");
+    cmd.args(["-s", "--max-time", &max_time_s.to_string()]);
+    cmd.arg(url);
+    run_curl(cmd, bearer)
 }
 
 /// POST a JSON body. Long timeout — a cold model may need to load into VRAM first.
@@ -62,15 +89,8 @@ fn curl_post(url: &str, body: &str, bearer: Option<&str>, max_time_s: u32) -> Op
         "-H",
         "Content-Type: application/json",
     ]);
-    if let Some(key) = bearer {
-        cmd.args(["-H", &format!("Authorization: Bearer {key}")]);
-    }
     cmd.args(["-d", body]).arg(url);
-    let out = cmd.no_window().output().ok()?;
-    if !out.status.success() {
-        return None;
-    }
-    Some(String::from_utf8_lossy(&out.stdout).into_owned())
+    run_curl(cmd, bearer)
 }
 
 // ---- pure parsers --------------------------------------------------------------
@@ -132,10 +152,13 @@ fn parse_ollama_tags(body: &str) -> Vec<LocalModel> {
                     .join(" · ")
                 })
                 .unwrap_or_default();
-            let tools = m.get("capabilities").and_then(|c| c.as_array()).map(|caps| {
-                caps.iter()
-                    .any(|c| c.as_str().is_some_and(|s| s.eq_ignore_ascii_case("tools")))
-            });
+            let tools = m
+                .get("capabilities")
+                .and_then(|c| c.as_array())
+                .map(|caps| {
+                    caps.iter()
+                        .any(|c| c.as_str().is_some_and(|s| s.eq_ignore_ascii_case("tools")))
+                });
             Some(LocalModel {
                 id,
                 context,
@@ -207,11 +230,27 @@ fn parse_tool_probe(body: &str) -> ToolProbeResult {
         Ok(v) => v,
         Err(_) => return fail("server returned a non-JSON response"),
     };
+    // Error shapes differ per server: OpenAI/Ollama wrap in "error"; vLLM returns a
+    // flat {"object":"error","message":...}; OpenWebUI/FastAPI use {"detail":...}.
+    // Misreading these as a model verdict would tell users their model is broken
+    // when the server merely rejected the request.
     if let Some(err) = v.get("error") {
         let msg = err
             .get("message")
             .and_then(|m| m.as_str())
+            .or_else(|| err.as_str())
             .unwrap_or("unknown server error");
+        return fail(&format!("server error: {msg}"));
+    }
+    if v.get("object").and_then(|o| o.as_str()) == Some("error") {
+        let msg = v
+            .get("message")
+            .and_then(|m| m.as_str())
+            .unwrap_or("unknown server error");
+        return fail(&format!("server error: {msg}"));
+    }
+    if let Some(d) = v.get("detail") {
+        let msg = d.as_str().unwrap_or("request rejected");
         return fail(&format!("server error: {msg}"));
     }
     let msg = &v["choices"][0]["message"];
@@ -266,37 +305,41 @@ type ProviderProbe = (
 #[tauri::command]
 pub async fn detect_local_providers() -> Vec<LocalProviderStatus> {
     tauri::async_runtime::spawn_blocking(|| {
+        // 127.0.0.1, not localhost: curl falls back across address families, but the
+        // same URL handed to OpenCode's runtime can resolve IPv6-first and get refused
+        // by servers that bind IPv4 loopback only (Ollama does) — so the URL we PREFILL
+        // must be the one that works everywhere.
         let probes: [ProviderProbe; 5] = [
             (
                 "ollama",
                 "Ollama",
-                "http://localhost:11434/v1",
+                "http://127.0.0.1:11434/v1",
                 false,
-                || parse_ollama_version(&curl("http://localhost:11434/api/version", None, 2)?),
+                || parse_ollama_version(&curl("http://127.0.0.1:11434/api/version", None, 2)?),
             ),
             (
                 "lmstudio",
                 "LM Studio",
-                "http://localhost:1234/v1",
+                "http://127.0.0.1:1234/v1",
                 false,
-                || parse_openai_model_count(&curl("http://localhost:1234/v1/models", None, 2)?),
+                || parse_openai_model_count(&curl("http://127.0.0.1:1234/v1/models", None, 2)?),
             ),
-            ("vllm", "vLLM", "http://localhost:8000/v1", false, || {
-                parse_openai_model_count(&curl("http://localhost:8000/v1/models", None, 2)?)
+            ("vllm", "vLLM", "http://127.0.0.1:8000/v1", false, || {
+                parse_openai_model_count(&curl("http://127.0.0.1:8000/v1/models", None, 2)?)
             }),
             (
                 "llamacpp",
                 "llama.cpp",
-                "http://localhost:8080/v1",
+                "http://127.0.0.1:8080/v1",
                 false,
-                || parse_openai_model_count(&curl("http://localhost:8080/v1/models", None, 2)?),
+                || parse_openai_model_count(&curl("http://127.0.0.1:8080/v1/models", None, 2)?),
             ),
             (
                 "openwebui",
                 "OpenWebUI",
-                "http://localhost:3000/api",
+                "http://127.0.0.1:3000/api",
                 true,
-                || parse_openwebui_config(&curl("http://localhost:3000/api/config", None, 2)?),
+                || parse_openwebui_config(&curl("http://127.0.0.1:3000/api/config", None, 2)?),
             ),
         ];
         std::thread::scope(|scope| {
@@ -326,6 +369,19 @@ pub async fn detect_local_providers() -> Vec<LocalProviderStatus> {
     .unwrap_or_default()
 }
 
+/// The held key is credentials FOR the configured endpoint — never attach it to any
+/// other URL a (potentially compromised) frontend might pass, or these commands become
+/// an oracle that exfiltrates the key to an arbitrary host.
+fn key_for_endpoint(store: &crate::store::Store, requested_base_url: &str) -> Option<String> {
+    let configured = store.opencode_settings().base_url;
+    let norm = |s: &str| s.trim().trim_end_matches('/').to_ascii_lowercase();
+    if norm(requested_base_url) == norm(&configured) {
+        store.opencode_key()
+    } else {
+        None
+    }
+}
+
 /// List the models a local server offers, for the Settings model picker. Ollama is asked
 /// natively (/api/tags — carries context lengths); everything else via <base>/models with
 /// Bearer auth from the in-memory key holder (the key never round-trips to the frontend).
@@ -335,7 +391,7 @@ pub async fn list_local_models(
     preset: String,
     store: tauri::State<'_, std::sync::Arc<crate::store::Store>>,
 ) -> Result<Vec<LocalModel>, String> {
-    let api_key = store.opencode_key();
+    let api_key = key_for_endpoint(&store, &base_url);
     tauri::async_runtime::spawn_blocking(move || {
         let base = base_url.trim().trim_end_matches('/').to_string();
         if !base.starts_with("http://") && !base.starts_with("https://") {
@@ -369,7 +425,7 @@ pub async fn probe_tool_call(
     model: String,
     store: tauri::State<'_, std::sync::Arc<crate::store::Store>>,
 ) -> Result<ToolProbeResult, String> {
-    let api_key = store.opencode_key();
+    let api_key = key_for_endpoint(&store, &base_url);
     tauri::async_runtime::spawn_blocking(move || {
         let base = base_url.trim().trim_end_matches('/');
         if !base.starts_with("http://") && !base.starts_with("https://") {
@@ -474,6 +530,16 @@ mod tests {
 
         let err = r#"{"error":{"message":"model not found"}}"#;
         assert!(parse_tool_probe(err).detail.contains("model not found"));
+        // vLLM's flat error shape (e.g. tools rejected without --enable-auto-tool-choice)
+        // and OpenWebUI/FastAPI's {"detail"} must read as SERVER errors, not model verdicts.
+        let vllm = r#"{"object":"error","message":"tool use not enabled","type":"BadRequest"}"#;
+        let r = parse_tool_probe(vllm);
+        assert!(!r.native);
+        assert!(r.detail.contains("server error: tool use not enabled"));
+        let fastapi = r#"{"detail":"Not authenticated"}"#;
+        assert!(parse_tool_probe(fastapi)
+            .detail
+            .contains("server error: Not authenticated"));
         assert!(!parse_tool_probe("Not Found").native);
 
         // The probe body is valid JSON and carries the model id + roomy token budget.
