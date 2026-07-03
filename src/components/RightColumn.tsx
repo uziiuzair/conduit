@@ -249,6 +249,7 @@ export function RightColumn({
             <TerminalView
               key={`${session.id}::term`}
               sessionId={`${session.id}::term`}
+              projectId={project.id}
               workingDirectory={workingDirOf(project, session)}
               visible={activeSessionId === session.id && bottomTab === "terminal"}
               focusOnReveal={focusShellOnReveal}
