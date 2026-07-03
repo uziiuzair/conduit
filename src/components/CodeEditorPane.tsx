@@ -277,8 +277,9 @@ export function CodeEditorPane({ projectId, groupId, visible, style }: CodeEdito
 
   // Jump to a line when a terminal Cmd+Click opened this file with a reveal target. Fires once
   // the model for the reveal path is set (so it survives the async read_file), whether the file
-  // was freshly opened or already open. Clears the one-shot flag once the target tab is loaded —
-  // even a binary/error tab with no model — so a stale reveal can never linger.
+  // was freshly opened or already open, then clears the one-shot flag (even for a model-less
+  // binary/error tab). If the user leaves the target tab before its model loads, the companion
+  // effect below invalidates the pending reveal so it can't surprise-jump on a later return.
   useEffect(() => {
     if (!pendingReveal || pendingReveal.path !== activePath) return;
     if (load.kind !== "ready") return;
@@ -292,6 +293,16 @@ export function CodeEditorPane({ projectId, groupId, visible, style }: CodeEdito
     }
     clearPendingReveal();
   }, [pendingReveal, activePath, load, clearPendingReveal]);
+
+  // Invalidate a pending reveal if the user leaves this tab (switch/unmount) before its model
+  // loads, so a deferred reveal can't fire when they return to this file much later.
+  useEffect(() => {
+    const leavingPath = activePath;
+    return () => {
+      const s = useStore.getState();
+      if (s.pendingReveal?.path === leavingPath) s.clearPendingReveal();
+    };
+  }, [activePath]);
 
   const fc = load.kind === "ready" ? load.fc : null;
   const banner = ((): { text: string; error?: boolean } | null => {
