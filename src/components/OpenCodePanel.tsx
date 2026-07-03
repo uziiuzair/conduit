@@ -34,6 +34,14 @@ const rankModels = (ms: LocalModel[]): LocalModel[] =>
     return (b.context ?? 0) - (a.context ?? 0);
   });
 
+/** Auto-pick candidate list: models that declare tools=false can never drive an agent,
+ * so they're only eligible when nothing else is served. */
+const pickable = (ms: LocalModel[]): LocalModel[] => {
+  const ranked = rankModels(ms);
+  const usable = ranked.filter((m) => m.tools !== false);
+  return usable.length > 0 ? usable : ranked;
+};
+
 const fmtCtx = (n?: number | null) => (n ? `${Math.round(n / 1024)}k ctx` : "");
 
 export function OpenCodePanel() {
@@ -45,11 +53,14 @@ export function OpenCodePanel() {
   const setOpenCodeKey = useStore((s) => s.setOpenCodeKey);
   const detectLocalProviders = useStore((s) => s.detectLocalProviders);
   const listLocalModels = useStore((s) => s.listLocalModels);
+  const probeToolCall = useStore((s) => s.probeToolCall);
 
   const [statuses, setStatuses] = useState<LocalProviderStatus[] | null>(null);
   const [models, setModels] = useState<LocalModel[]>([]);
   const [busy, setBusy] = useState<string | null>(null);
   const [note, setNote] = useState<{ kind: "ok" | "warn"; text: string } | null>(null);
+  const [probe, setProbe] = useState<{ kind: "ok" | "warn"; text: string } | null>(null);
+  const [probing, setProbing] = useState(false);
   const [keyInput, setKeyInput] = useState("");
   const [showAdvanced, setShowAdvanced] = useState(false);
   const mounted = useRef(false);
@@ -104,7 +115,7 @@ export function OpenCodePanel() {
       setModels(listed);
       const fresh = useStore.getState().opencode;
       const keep = listed.find((m) => m.id === fresh.model);
-      const best = keep ?? rankModels(listed)[0];
+      const best = keep ?? pickable(listed)[0];
       const next = save({
         preset: target.preset,
         baseUrl: target.baseUrl,
@@ -171,7 +182,23 @@ export function OpenCodePanel() {
 
   const pickModel = (id: string) => {
     const m = models.find((x) => x.id === id);
+    setProbe(null); // verdict belongs to the previously tested model
     save({ model: id, ...(m?.context ? { contextLimit: m.context } : {}) });
+  };
+
+  /** Live-test that the served model does NATIVE tool calls. Advertised capabilities
+   * lie (qwen2.5-coder claims tools but prints the call as text); this catches it
+   * before the user wonders why a session "does nothing". */
+  const runProbe = async () => {
+    setProbing(true);
+    setProbe(null);
+    const r = await probeToolCall(oc.baseUrl, oc.model);
+    setProbe(
+      typeof r === "string"
+        ? { kind: "warn", text: r }
+        : { kind: r.native ? "ok" : "warn", text: `${oc.model}: ${r.detail}` },
+    );
+    setProbing(false);
   };
 
   const parseLimit = (v: string): number | null => {
@@ -240,13 +267,23 @@ export function OpenCodePanel() {
       <div className="oc-section">
         <div className="section-label">
           Model
-          <button
-            className="oc-detect"
-            onClick={() => void fetchModels()}
-            disabled={!!busy || !oc.baseUrl.trim()}
-          >
-            Refresh list
-          </button>
+          <span className="oc-actions">
+            <button
+              className="oc-detect"
+              onClick={() => void runProbe()}
+              disabled={!!busy || probing || !oc.model.trim() || !oc.baseUrl.trim()}
+              title="Sends one real request to check the model makes NATIVE tool calls — the thing agents live on. May take a minute if the model has to load."
+            >
+              {probing ? "Testing…" : "Test tool-calling"}
+            </button>
+            <button
+              className="oc-detect"
+              onClick={() => void fetchModels()}
+              disabled={!!busy || !oc.baseUrl.trim()}
+            >
+              Refresh list
+            </button>
+          </span>
         </div>
         {models.length > 0 ? (
           <select
@@ -262,6 +299,7 @@ export function OpenCodePanel() {
                 {m.id}
                 {m.context ? ` — ${fmtCtx(m.context)}` : ""}
                 {m.tools ? " — tools ✓" : ""}
+                {m.tools === false ? " — no tools ✗" : ""}
                 {m.detail ? ` — ${m.detail}` : ""}
               </option>
             ))}
@@ -275,9 +313,25 @@ export function OpenCodePanel() {
                 : "No models yet — re-scan, or type an id under Advanced."}
           </p>
         )}
+        {probing && (
+          <p className="trust-note">
+            Testing {oc.model} with a real tool call — a cold model may need a minute to load…
+          </p>
+        )}
+        {probe && (
+          <p className={`trust-note${probe.kind === "warn" ? " trust-warn" : ""}`}>{probe.text}</p>
+        )}
+        {models.find((m) => m.id === oc.model)?.tools === false && (
+          <p className="trust-note trust-warn">
+            {oc.model} reports no tool-calling support — an agent can’t work with it. Pick a
+            model marked “tools ✓”.
+          </p>
+        )}
         {lowContext && (
           <p className="trust-note trust-warn">
             {oc.contextLimit} tokens of context is tight for agentic coding — 64k+ recommended.
+            Small models also fail at tool calling far more often; “Test tool-calling” checks
+            before you burn a session.
           </p>
         )}
       </div>
