@@ -112,11 +112,11 @@ fn pty_spawn(
     let suppress_remote =
         !shell_only && store.is_private_mode() && store.is_session_siloed(&session_id);
 
-    // Feature 3: route an OpenCode session to the configured local/self-hosted provider.
-    // None (feature off / not an OpenCode session / settings incomplete) spawns untouched.
-    // Pinning (`enabled_providers: ["conduit"]`) applies globally by user choice, or is
-    // forced for a local-only (siloed) session under private mode — the "guaranteed local
-    // model" half of the Feature 4 silo.
+    // OpenCode local provider: route the session to the configured local/self-hosted
+    // endpoint. None (feature off / not an OpenCode session / settings incomplete) spawns
+    // untouched. Pinning (`enabled_providers: ["conduit"]`) applies globally by user
+    // choice, or is forced for a local-only (siloed) session under private mode — the
+    // "guaranteed local model" half of the trust-boundary silo.
     let opencode = if !shell_only && agent == crate::agent::AgentId::OpenCode {
         let settings = store.opencode_settings();
         let pin = settings.pin_local
@@ -338,7 +338,7 @@ fn scan_sensitivity(text: String) -> Vec<crate::store::SensitivityHit> {
     crate::store::scan_sensitivity(&text)
 }
 
-// ---- OpenCode local provider (Feature 3: local GPU / self-hosted endpoint) -----
+// ---- OpenCode local provider (local GPU / self-hosted endpoint) ----------------
 
 #[tauri::command]
 fn get_opencode_settings(store: State<Arc<Store>>) -> crate::store::OpenCodeSettings {

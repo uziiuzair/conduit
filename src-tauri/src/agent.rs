@@ -428,7 +428,7 @@ impl ProviderAdapter for AntigravityAdapter {
     }
 }
 
-/// The per-spawn OpenCode local-provider payload (Feature 3): an inline config for the
+/// The per-spawn OpenCode local-provider payload: an inline config for the
 /// child's OPENCODE_CONFIG_CONTENT env var, plus the endpoint API key that rides in a
 /// SEPARATE env var (CONDUIT_OC_APIKEY) referenced from the config as an `{env:...}`
 /// placeholder. Nothing here is ever written to disk or logged.
@@ -461,7 +461,7 @@ fn preset_label(preset: &str) -> &'static str {
 /// title-generation etc. can't silently route to a cloud model. `pin_local` emits
 /// `enabled_providers: ["conduit"]` — an allowlist that keeps OpenCode from loading ANY
 /// other provider even when cloud credentials exist in its auth store; the spawner sets
-/// it for siloed/local-only sessions under private mode (Feature 4) or globally by choice.
+/// it for siloed/local-only sessions under private mode (trust boundaries) or by choice.
 pub fn build_opencode_config(
     s: &crate::store::OpenCodeSettings,
     api_key: Option<&str>,

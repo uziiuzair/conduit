@@ -7,7 +7,7 @@ import {
 } from "../store";
 
 /**
- * Feature 3 — route OpenCode sessions to a local GPU / self-hosted endpoint. Zero-config
+ * Local models — route OpenCode sessions to a local GPU / self-hosted endpoint. Zero-config
  * by design: opening the panel (or flipping the switch) scans the well-known local
  * servers, picks the best one, fetches its models, and selects the strongest coding
  * model (tool-calling first, then context size) — the user only confirms. Conduit
@@ -15,14 +15,16 @@ import {
  * API key never leaves backend memory and nothing is written to disk.
  */
 
+// 127.0.0.1 (not localhost): OpenCode's runtime may resolve localhost IPv6-first and
+// get refused by servers that bind IPv4 loopback only (Ollama does).
 const PRESET_FALLBACK: Array<Pick<LocalProviderStatus, "preset" | "label" | "baseUrl">> = [
-  { preset: "ollama", label: "Ollama", baseUrl: "http://localhost:11434/v1" },
-  { preset: "lmstudio", label: "LM Studio", baseUrl: "http://localhost:1234/v1" },
-  { preset: "vllm", label: "vLLM", baseUrl: "http://localhost:8000/v1" },
-  { preset: "llamacpp", label: "llama.cpp", baseUrl: "http://localhost:8080/v1" },
-  { preset: "openwebui", label: "OpenWebUI", baseUrl: "http://localhost:3000/api" },
+  { preset: "ollama", label: "Ollama", baseUrl: "http://127.0.0.1:11434/v1" },
+  { preset: "lmstudio", label: "LM Studio", baseUrl: "http://127.0.0.1:1234/v1" },
+  { preset: "vllm", label: "vLLM", baseUrl: "http://127.0.0.1:8000/v1" },
+  { preset: "llamacpp", label: "llama.cpp", baseUrl: "http://127.0.0.1:8080/v1" },
+  { preset: "openwebui", label: "OpenWebUI", baseUrl: "http://127.0.0.1:3000/api" },
 ];
-const CUSTOM = { preset: "custom", label: "Custom", baseUrl: "http://localhost:8000/v1" };
+const CUSTOM = { preset: "custom", label: "Custom", baseUrl: "http://127.0.0.1:8000/v1" };
 
 /** Rank for auto-pick: tool-calling first (an agent is crippled without it), then the
  * biggest context window. */
@@ -66,7 +68,15 @@ export function OpenCodePanel() {
   const mounted = useRef(false);
 
   const save = (patch: Partial<OpenCodeSettings>) => {
-    const next = { ...useStore.getState().opencode, ...patch };
+    const cur = useStore.getState().opencode;
+    // A tool-calling verdict is only valid for the (endpoint, model) it tested.
+    if (
+      (patch.model !== undefined && patch.model !== cur.model) ||
+      (patch.baseUrl !== undefined && patch.baseUrl !== cur.baseUrl)
+    ) {
+      setProbe(null);
+    }
+    const next = { ...cur, ...patch };
     void setSettings(next);
     return next;
   };
@@ -348,7 +358,7 @@ export function OpenCodePanel() {
                 <input
                   type="text"
                   value={oc.baseUrl}
-                  placeholder="http://localhost:11434/v1"
+                  placeholder="http://127.0.0.1:11434/v1"
                   onChange={(e) => save({ baseUrl: e.target.value })}
                   spellCheck={false}
                 />
@@ -375,8 +385,11 @@ export function OpenCodePanel() {
                   onChange={(e) => save({ contextLimit: parseLimit(e.target.value) })}
                 />
               </label>
-              <label className="oc-field oc-num">
-                <span>Max output</span>
+              <label
+                className="oc-field oc-num"
+                title="OpenCode requires context and output limits together, so this only applies when Context tokens is set (defaults to 8192 then)."
+              >
+                <span>Max output{oc.contextLimit == null ? " (needs context)" : ""}</span>
                 <input
                   type="text"
                   inputMode="numeric"
