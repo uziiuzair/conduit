@@ -109,6 +109,12 @@ export interface LocalModel {
   tools?: boolean | null;
 }
 
+/** Verdict of the live tool-calling probe (probe_tool_call). */
+export interface ToolProbeResult {
+  native: boolean;
+  detail: string;
+}
+
 export type TabKind = "session" | "file";
 
 export interface WsTab {
@@ -455,6 +461,8 @@ interface AppState {
   detectLocalProviders: () => Promise<LocalProviderStatus[]>;
   /** Models the server at baseUrl offers; a string is the error message. */
   listLocalModels: (baseUrl: string, preset: string) => Promise<LocalModel[] | string>;
+  /** Live-test native tool calling on the served model; a string is the error message. */
+  probeToolCall: (baseUrl: string, model: string) => Promise<ToolProbeResult | string>;
 
   // ---- MCP server registry ----
   mcpServers: McpServer[];
@@ -754,6 +762,13 @@ export const useStore = create<AppState>((set, get) => {
     listLocalModels: async (baseUrl, preset) => {
       try {
         return await invoke<LocalModel[]>("list_local_models", { baseUrl, preset });
+      } catch (e) {
+        return String(e);
+      }
+    },
+    probeToolCall: async (baseUrl, model) => {
+      try {
+        return await invoke<ToolProbeResult>("probe_tool_call", { baseUrl, model });
       } catch (e) {
         return String(e);
       }

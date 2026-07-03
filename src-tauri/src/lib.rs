@@ -815,6 +815,7 @@ pub fn run() {
             opencode_key_set,
             local_llm::detect_local_providers,
             local_llm::list_local_models,
+            local_llm::probe_tool_call,
             remove_session,
             suggest_session_name,
             git_branch,
