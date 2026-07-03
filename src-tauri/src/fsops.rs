@@ -618,8 +618,10 @@ mod resolve_tests {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let dir = std::env::temp_dir()
-            .join(format!("conduit-fsops-resolve-{}-{nanos}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!(
+            "conduit-fsops-resolve-{}-{nanos}",
+            std::process::id()
+        ));
         fs::create_dir_all(&dir).unwrap();
         dir
     }
@@ -627,9 +629,18 @@ mod resolve_tests {
     #[test]
     fn parse_token_variants() {
         assert_eq!(parse_path_token("src/a.ts"), ("src/a.ts", None, None));
-        assert_eq!(parse_path_token("src/a.ts:45"), ("src/a.ts", Some(45), None));
-        assert_eq!(parse_path_token("src/a.ts:45:12"), ("src/a.ts", Some(45), Some(12)));
-        assert_eq!(parse_path_token("/abs/a.ts:9"), ("/abs/a.ts", Some(9), None));
+        assert_eq!(
+            parse_path_token("src/a.ts:45"),
+            ("src/a.ts", Some(45), None)
+        );
+        assert_eq!(
+            parse_path_token("src/a.ts:45:12"),
+            ("src/a.ts", Some(45), Some(12))
+        );
+        assert_eq!(
+            parse_path_token("/abs/a.ts:9"),
+            ("/abs/a.ts", Some(9), None)
+        );
         assert_eq!(parse_path_token("~/a.ts"), ("~/a.ts", None, None));
         // a non-numeric colon suffix stays part of the path (not a line number)
         assert_eq!(parse_path_token("weird:name"), ("weird:name", None, None));
@@ -638,12 +649,31 @@ mod resolve_tests {
     }
 
     #[test]
+    fn expand_home_variants() {
+        let home = dirs::home_dir().expect("home dir");
+        // leading ~ and ~/ expand to the home dir
+        assert_eq!(expand_home("~"), home.to_string_lossy().into_owned());
+        assert_eq!(
+            expand_home("~/a/b.ts"),
+            home.join("a/b.ts").to_string_lossy().into_owned()
+        );
+        // absolute and relative paths pass through unchanged
+        assert_eq!(expand_home("/abs/x.ts"), "/abs/x.ts");
+        assert_eq!(expand_home("rel/x.ts"), "rel/x.ts");
+        // ~user is NOT expanded (only a bare ~ or ~/ prefix)
+        assert_eq!(expand_home("~bob/x.ts"), "~bob/x.ts");
+    }
+
+    #[test]
     fn resolves_relative_against_base_with_line_col() {
         let dir = tmpdir();
         let f = dir.join("hello.txt");
         fs::write(&f, b"hi").unwrap();
         let r = resolve_terminal_path(dir.to_str().unwrap(), "hello.txt:3:2").expect("resolves");
-        assert_eq!(r.abs_path, fs::canonicalize(&f).unwrap().to_string_lossy().into_owned());
+        assert_eq!(
+            r.abs_path,
+            fs::canonicalize(&f).unwrap().to_string_lossy().into_owned()
+        );
         assert_eq!(r.line, Some(3));
         assert_eq!(r.col, Some(2));
         fs::remove_dir_all(&dir).ok();
@@ -655,7 +685,10 @@ mod resolve_tests {
         let f = dir.join("x.txt");
         fs::write(&f, b"hi").unwrap();
         let r = resolve_terminal_path("/no/such/base", f.to_str().unwrap()).expect("resolves");
-        assert_eq!(r.abs_path, fs::canonicalize(&f).unwrap().to_string_lossy().into_owned());
+        assert_eq!(
+            r.abs_path,
+            fs::canonicalize(&f).unwrap().to_string_lossy().into_owned()
+        );
         assert_eq!(r.line, None);
         fs::remove_dir_all(&dir).ok();
     }
