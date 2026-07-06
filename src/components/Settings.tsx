@@ -7,6 +7,7 @@ import { AccountList } from "./AccountList";
 import { TrustPanel } from "./TrustPanel";
 import { OpenCodePanel } from "./OpenCodePanel";
 
+// Exported for the native menu integration (menu → open Settings at a specific tab).
 export type SettingsTab =
   | "agents"
   | "accounts"

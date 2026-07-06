@@ -103,3 +103,26 @@ Service status + subscription/local usage (distinct from per-session hook status
   (local consumption + best-effort plan limits via `/api/oauth/usage`).
 - UI: `src/components/Claude{StatusPill,Popover,UsagePanel,StatusWarning}.tsx`, polled by
   `src/hooks/useClaudeAmbient.ts`, state in the Claude slice of `src/store.ts`.
+
+## Where the fleet/Conductor orchestration lives
+
+A per-project **Conductor** (a Claude session flagged `role: Conductor`) observes and
+commands the fleet through five MCP tools (`fleet_list`/`fleet_peek`/`fleet_spawn`/
+`fleet_send`/`fleet_stop`) served by an in-app HTTP MCP server. As shipped (v0.3.0):
+
+- Rust: `src-tauri/src/fleet.rs` (status mirror, `CONDUCTOR_PERSONA`, worker cap, human
+  confirm handshake), `src-tauri/src/fleet_mcp.rs` (the MCP server + tool dispatch),
+  `Session.role`/`SessionRole` in `store.rs`.
+- The Conductor is currently **Claude-only, spawns only Claude workers**, and hands back
+  nothing structured — only a lossy terminal scrape via `fleet_peek`. See
+  `docs/superpowers/specs/2026-06-30-conductor-design.md` for how it actually works today.
+
+**A follow-on redesign is planned but NOT implemented** (as of this writing): heterogeneous
+(5-adapter, tiered) workers, a project-scoped result/mailbox blackboard, and a per-agent
+usage bar. Read `docs/superpowers/specs/2026-07-04-orchestration-v2-design.md` and its
+`2026-07-05-orchestration-v2-scope-expansion-design.md` companion (+ matching plan docs)
+before touching `fleet.rs`/`fleet_mcp.rs`/`agent.rs`'s adapter dispatch — there's a
+confirmed, not-yet-fixed cross-project security leak in `fleet_peek`/`fleet_send`
+documented there (SPEC-0), and a caller-role guardrail gap in `dispatch_tool` that any
+change granting a worker MCP access must close (design doc §2.0). Short index:
+`claude_docs/feature-6-orchestration-v2.md` (gitignored, not committed).

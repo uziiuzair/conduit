@@ -39,6 +39,7 @@ export interface Session {
   channels?: string[];
   modelTier?: string | null;
   seedMemory?: string | null;
+  effort?: string | null;
 }
 
 /** A registered Claude account (mirrors the Rust serde struct, camelCase). */
@@ -63,6 +64,7 @@ export interface SessionTrust {
   channels: string[];
   modelTier?: string | null;
   seedMemory?: string | null;
+  effort?: string | null;
 }
 
 /** A local sensitivity-scanner hit (offline; assists the manual "mark sensitive" decision). */

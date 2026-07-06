@@ -5,6 +5,7 @@
 //! and exposes them to the React frontend as Tauri commands.
 
 mod agent;
+mod board;
 mod bridge;
 mod broker;
 mod claude_status;
@@ -22,6 +23,7 @@ mod pty;
 mod store;
 mod telemetry;
 mod transcript;
+mod usage_tally;
 mod worktree;
 
 use std::path::Path;
@@ -54,6 +56,14 @@ impl NoWindow for std::process::Command {
     }
 }
 
+/// SPEC-F: does a WORKER session qualify for fleet MCP via mailbox opt-in (as opposed to
+/// a fleet mission)? True iff it has no mission AND has explicitly joined at least one
+/// channel (the Sidebar "Share in project" toggle sets `channels: ["project"]`). Pure so
+/// it's unit-testable without touching `Store`/Tauri.
+fn opts_into_mailbox(has_mission: bool, channels: &[String]) -> bool {
+    !has_mission && !channels.is_empty()
+}
+
 // ---- Terminal / PTY commands -------------------------------------------------
 
 #[tauri::command]
@@ -71,6 +81,7 @@ fn pty_spawn(
     pty: State<Arc<PtyManager>>,
     hook_state: State<Arc<HookState>>,
     fleet: State<Arc<crate::fleet::FleetState>>,
+    board: State<Arc<crate::board::BoardState>>,
     store: State<Arc<Store>>,
 ) -> Result<(), String> {
     let port = hook_state.port.load(Ordering::SeqCst);
@@ -95,13 +106,78 @@ fn pty_spawn(
         })
     };
 
-    // A Conductor session gets the fleet MCP server (scoped to it via --mcp-config)
-    // and the orchestration persona; workers get neither.
-    let (mcp_config_path, system_prompt) = if !shell_only && role.as_deref() == Some("conductor") {
+    // A Conductor session gets the fleet MCP server (scoped to it via --mcp-config) and
+    // the full orchestration persona. A WORKER gets the SAME MCP server, scoped to its own
+    // id, but only a tiny brief instead of the Conductor's persona -- `authorize()`
+    // server-side restricts it to fleet_result/fleet_note/fleet_inbox, never the
+    // orchestration tools, so attaching the connection at all is safe even though the
+    // persona here is minimal. A worker qualifies one of two ways: (a) it was spawned via
+    // fleet_spawn (SPEC-C: it has a Mission record on the project's board), or (b) it's a
+    // manual/custom session that explicitly opted into the horizontal mailbox (SPEC-F: the
+    // Sidebar "Share in project" toggle sets non-empty `channels`) -- a manual session with
+    // no opt-in gets neither and stays fully isolated, per the baseline design's invariant 3.
+    // One session lookup, reused below for the mailbox opt-in check and the model_tier/
+    // effort resolution -- avoids repeating the fleet_snapshot scan three times.
+    let this_session = store
+        .fleet_snapshot(&session_id)
+        .and_then(|snap| snap.sessions.into_iter().find(|s| s.id == session_id));
+    let mission_record = if !shell_only && role.as_deref() == Some("worker") {
+        store.fleet_snapshot(&session_id).and_then(|snap| {
+            board
+                .query(&snap.project_id, Some(crate::board::BoardKind::Mission))
+                .into_iter()
+                .find(|m| m.author_session == session_id)
+        })
+    } else {
+        None
+    };
+    let opted_into_mailbox = !shell_only
+        && role.as_deref() == Some("worker")
+        && this_session
+            .as_ref()
+            .is_some_and(|s| opts_into_mailbox(mission_record.is_some(), &s.channels));
+    let gets_fleet_mcp = mission_record.is_some() || opted_into_mailbox;
+    // SPEC-B: model_tier -> concrete model id + effort, Claude only -- the only adapter
+    // with a verified per-invocation flag for either (`claude --help` lists both `--model
+    // <model>` and `--effort <low|medium|high|xhigh|max>`). Other adapters have no
+    // equivalent CLI knob today; model_tier/effort are still recorded on the Session (by
+    // fleet_spawn) so they're visible/queryable, just not acted on here.
+    let claude_model = (!shell_only && agent == crate::agent::AgentId::Claude)
+        .then(|| {
+            this_session
+                .as_ref()
+                .and_then(|s| s.model_tier.as_deref())
+                .and_then(|tier| crate::agent::model_for_tier(agent, tier))
+        })
+        .flatten();
+    let claude_effort = (!shell_only && agent == crate::agent::AgentId::Claude)
+        .then(|| this_session.as_ref().and_then(|s| s.effort.as_deref()))
+        .flatten();
+    let is_conductor = !shell_only
+        && role.as_deref() == Some("conductor")
+        && agent == crate::agent::AgentId::Claude;
+    // `--mcp-config`/`--append-system-prompt-file` are Claude CLI flags, carried through
+    // `flags` into `build_invocation` -- ONLY meaningful for Claude. OpenCode's fleet-MCP
+    // wiring goes entirely through `OPENCODE_CONFIG_CONTENT` (see the `opencode` block
+    // below); passing these as bogus CLI flags to `opencode` itself would break its
+    // invocation outright, so this branch is deliberately Claude-only.
+    //
+    // The persona rides as a FILE (`--append-system-prompt-file`), never inline: inline
+    // `--append-system-prompt <~5KB persona>` overflowed cmd.exe's 8191-char command-line
+    // limit on Windows once `build_invocation` doubled the flag string for its `||`
+    // fallback -- the "command line is too long" Conductor-spawn failure. See
+    // `fleet::write_persona_file`.
+    let (mcp_config_path, system_prompt_file) = if is_conductor {
         let mcp_port = fleet.mcp_port.load(Ordering::SeqCst);
         (
             crate::fleet::write_mcp_config(mcp_port, &session_id),
-            Some(crate::fleet::CONDUCTOR_PERSONA.to_string()),
+            crate::fleet::write_persona_file(&session_id, crate::fleet::CONDUCTOR_PERSONA),
+        )
+    } else if gets_fleet_mcp && agent == crate::agent::AgentId::Claude {
+        let mcp_port = fleet.mcp_port.load(Ordering::SeqCst);
+        (
+            crate::fleet::write_mcp_config(mcp_port, &session_id),
+            crate::fleet::write_persona_file(&session_id, crate::fleet::WORKER_BRIEF_SUFFIX),
         )
     } else {
         (None, None)
@@ -121,7 +197,19 @@ fn pty_spawn(
         let settings = store.opencode_settings();
         let pin = settings.pin_local
             || (store.is_private_mode() && store.is_session_local_only(&session_id));
-        crate::agent::build_opencode_config(&settings, store.opencode_key().as_deref(), pin)
+        let base =
+            crate::agent::build_opencode_config(&settings, store.opencode_key().as_deref(), pin);
+        if gets_fleet_mcp {
+            // SPEC-A Tier 1 / SPEC-F: an OpenCode fleet worker (or a manual worker opted
+            // into the mailbox) gets the SAME fleet MCP server a Claude worker does,
+            // layered on top of whatever local-model config applies (or nothing, if
+            // local-model routing is off) -- Tier-1 participation must
+            // work independently of that feature.
+            let mcp_port = fleet.mcp_port.load(Ordering::SeqCst);
+            Some(crate::agent::inject_fleet_mcp(base, mcp_port, &session_id))
+        } else {
+            base
+        }
     } else {
         None
     };
@@ -136,6 +224,55 @@ fn pty_spawn(
         let (cwd, worktree_arg) =
             worktree::spawn_target(&working_directory, slug, &wt_path, exists);
         (cwd, worktree_arg, settings)
+    } else if worktree_name.is_some() && !adapter.supports_worktree() {
+        // SPEC-A: Conduit-driven worktree isolation for the four adapters with no
+        // built-in `--worktree` flag. `Store::add_session` already computes
+        // `worktree_path`/`branch` agent-agnostically when `use_worktree=true` -- this is
+        // the first place that path is actually REALIZED on disk for a non-Claude agent
+        // (previously silently inert; see Audit Finding 1).
+        let slug = worktree_name.as_deref().unwrap();
+        let wt_path = worktree::worktree_path(&working_directory, slug);
+        let branch = worktree::branch_name(slug);
+        if !Path::new(&wt_path).exists() {
+            let base_ref =
+                crate::git::current_branch(&working_directory).unwrap_or_else(|| "HEAD".into());
+            if let Err(e) = worktree::add(&working_directory, &wt_path, &branch, &base_ref) {
+                eprintln!("conduit: git worktree add failed for {slug}: {e}");
+                // Fail-safe: surface the error rather than silently spawning unisolated in
+                // the shared project root -- an isolation failure must be visible, never
+                // quietly downgraded to "no isolation".
+                return Err(format!("worktree setup failed: {e}"));
+            }
+        }
+        // Install this adapter's status/result/note channel INTO the worktree, not the
+        // repo root -- routing must be scoped to the worker's own tree.
+        if let Some(profile) = adapter.hooks_profile() {
+            hooks::install_profile(&wt_path, port, &profile);
+        }
+        if let Some(plugin) = adapter.plugin_profile() {
+            hooks::install_plugin(&wt_path, port, &plugin);
+        }
+        // §7.4: brief a Tier-2/3 worker via AGENTS.md since it has no MCP channel to learn
+        // its mission from. Only fires for a real fleet_spawn mission -- never for a
+        // manual/custom session that merely happens to use a worktree.
+        if let Some(mission) = &mission_record {
+            hooks::write_mission_context(&wt_path, &mission.payload);
+        }
+        // SPEC-A Tier 2: Codex has no MCP, so its structured result rides the hook
+        // channel instead -- provision the schema (and, on Windows, the curl helper
+        // script) its build_invocation references, for every Codex worktree spawn, not
+        // only a fleet-spawned one (a manual Codex session run with "use worktree" gets
+        // the same `codex exec` result-reporting behavior for free).
+        if agent == crate::agent::AgentId::Codex {
+            if let Err(e) = hooks::write_codex_result_schema(&wt_path) {
+                eprintln!("conduit: failed to write codex result schema: {e}");
+            }
+            #[cfg(windows)]
+            if let Err(e) = hooks::write_codex_result_script(&wt_path, port) {
+                eprintln!("conduit: failed to write codex result script: {e}");
+            }
+        }
+        (wt_path, None, None)
     } else {
         // Normal session: install this agent's status integration. Hook-based agents
         // (Claude/Codex/Gemini) write a settings/hooks file; OpenCode installs a JS
@@ -159,12 +296,15 @@ fn pty_spawn(
         worktree_arg,
         settings_path,
         mcp_config_path,
-        system_prompt,
+        system_prompt_file,
         initial_prompt,
         account_config_dir,
         agent,
         suppress_remote,
         opencode,
+        is_conductor,
+        claude_model.map(str::to_string),
+        claude_effort.map(str::to_string),
         on_event,
     )
 }
@@ -786,6 +926,27 @@ fn open_external(url: String) -> Result<(), String> {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn opts_into_mailbox_requires_channels_and_no_mission() {
+        assert!(
+            !opts_into_mailbox(false, &[]),
+            "no channels -> not opted in"
+        );
+        assert!(
+            opts_into_mailbox(false, &["project".to_string()]),
+            "channels + no mission -> opted in"
+        );
+        assert!(
+            !opts_into_mailbox(true, &["project".to_string()]),
+            "a fleet mission already grants fleet MCP -- this predicate is mailbox-opt-in specifically"
+        );
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -796,16 +957,20 @@ pub fn run() {
         .manage(Arc::new(Store::new()))
         .manage(Arc::new(HookState::default()))
         .manage(Arc::new(crate::fleet::FleetState::default()))
+        .manage(Arc::new(crate::board::BoardState::default()))
         .manage(Arc::new(claude_usage::ClaudeAuth::default()))
         .manage(Arc::new(hookbus::HookBus::default()))
         .manage(Arc::new(broker::Broker::default()))
         .manage(Arc::new(broker::Presence::default()))
         .setup(|app| {
             let fleet = app.state::<Arc<crate::fleet::FleetState>>().inner().clone();
+            let board = app.state::<Arc<crate::board::BoardState>>().inner().clone();
             let hook_state = app.state::<Arc<HookState>>().inner().clone();
             let bus = app.state::<Arc<hookbus::HookBus>>().inner().clone();
             let broker = app.state::<Arc<broker::Broker>>().inner().clone();
             let presence = app.state::<Arc<broker::Presence>>().inner().clone();
+            let pty = app.state::<Arc<PtyManager>>().inner().clone();
+            let store = app.state::<Arc<Store>>().inner().clone();
             hooks::start(
                 app.handle().clone(),
                 hook_state,
@@ -813,11 +978,12 @@ pub fn run() {
                 broker,
                 presence,
                 fleet.clone(),
+                store.clone(),
+                pty.clone(),
+                board.clone(),
             );
             bridge::start(app.handle().clone());
-            let pty = app.state::<Arc<PtyManager>>().inner().clone();
-            let store = app.state::<Arc<Store>>().inner().clone();
-            fleet_mcp::start(app.handle().clone(), store, pty, fleet);
+            fleet_mcp::start(app.handle().clone(), store, pty, fleet, board);
 
             // Native menu bar. Custom items forward to the frontend as a single "menu"
             // event (payload = item id); Quit kills PTYs before exiting (see menu.rs).
