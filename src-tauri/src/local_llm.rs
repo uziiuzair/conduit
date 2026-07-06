@@ -1,0 +1,566 @@
+//! Local LLM server detection + model listing for the OpenCode local-provider feature.
+//! HTTP via `curl` shell-out per the repo convention (no HTTP client dependency, see
+//! claude_status.rs); parsing is pure and unit-tested; everything fails open — a probe
+//! that errors just reports "not running" and never blocks the UI or a spawn.
+
+use serde::Serialize;
+
+use crate::NoWindow;
+
+/// One detectable local inference server, as reported to the Settings UI.
+#[derive(Serialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct LocalProviderStatus {
+    /// Preset id ("ollama" | "lmstudio" | "vllm" | "llamacpp" | "openwebui").
+    pub preset: &'static str,
+    pub label: &'static str,
+    /// The OpenAI-compatible base URL to prefill when this preset is picked.
+    pub base_url: &'static str,
+    pub running: bool,
+    /// Human hint when running ("v0.30.10", "3 models", ...). Empty otherwise.
+    pub detail: String,
+    /// Whether this server requires an API key by default (OpenWebUI does).
+    pub needs_key: bool,
+}
+
+/// A model the local server offers. `context` comes back only from servers that report
+/// it (Ollama's /api/tags) and lets the UI autofill the context limit.
+#[derive(Serialize, Clone, Debug, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct LocalModel {
+    pub id: String,
+    pub context: Option<u64>,
+    /// Extra hint for the picker ("30.5B · Q4_K_M"). Empty when unknown.
+    pub detail: String,
+    /// Whether the model supports tool calling (Ollama reports capabilities; None =
+    /// unknown). An agentic coder is near-useless without tools, so auto-pick ranks by it.
+    pub tools: Option<bool>,
+}
+
+/// Finish a prepared curl invocation. The Bearer key — when present — is fed through
+/// STDIN via `-H @-` (curl ≥7.55) so it never appears on the process command line,
+/// where any local process could read it from a process listing. Loopback goes direct
+/// even when http_proxy is set (corporate proxies would otherwise eat every probe).
+/// None on any failure — including curl itself missing — callers degrade gracefully.
+fn run_curl(mut cmd: std::process::Command, bearer: Option<&str>) -> Option<String> {
+    use std::io::Write;
+    use std::process::Stdio;
+    cmd.args(["--noproxy", "localhost,127.0.0.1"]);
+    let out = match bearer {
+        Some(key) => {
+            cmd.args(["-H", "@-"]);
+            let mut child = cmd
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::null())
+                .no_window()
+                .spawn()
+                .ok()?;
+            child
+                .stdin
+                .take()?
+                .write_all(format!("Authorization: Bearer {key}\n").as_bytes())
+                .ok()?;
+            child.wait_with_output().ok()?
+        }
+        None => cmd.no_window().output().ok()?,
+    };
+    if !out.status.success() {
+        return None;
+    }
+    Some(String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
+/// GET a URL with a short timeout; optional Bearer auth. None on any failure.
+fn curl(url: &str, bearer: Option<&str>, max_time_s: u32) -> Option<String> {
+    let mut cmd = std::process::Command::new("curl");
+    cmd.args(["-s", "--max-time", &max_time_s.to_string()]);
+    cmd.arg(url);
+    run_curl(cmd, bearer)
+}
+
+/// POST a JSON body. Long timeout — a cold model may need to load into VRAM first.
+fn curl_post(url: &str, body: &str, bearer: Option<&str>, max_time_s: u32) -> Option<String> {
+    let mut cmd = std::process::Command::new("curl");
+    cmd.args([
+        "-s",
+        "--max-time",
+        &max_time_s.to_string(),
+        "-H",
+        "Content-Type: application/json",
+    ]);
+    cmd.args(["-d", body]).arg(url);
+    run_curl(cmd, bearer)
+}
+
+// ---- pure parsers --------------------------------------------------------------
+
+/// Ollama GET /api/version → "v0.30.10".
+fn parse_ollama_version(body: &str) -> Option<String> {
+    let v: serde_json::Value = serde_json::from_str(body).ok()?;
+    Some(format!("v{}", v.get("version")?.as_str()?))
+}
+
+/// OpenAI-compatible GET <base>/models → "N models". None when the body is not the
+/// expected shape (which is how a random non-LLM service on the same port is rejected).
+fn parse_openai_model_count(body: &str) -> Option<String> {
+    let v: serde_json::Value = serde_json::from_str(body).ok()?;
+    let n = v.get("data")?.as_array()?.len();
+    Some(format!("{n} model{}", if n == 1 { "" } else { "s" }))
+}
+
+/// OpenWebUI GET /api/config → "Open WebUI vX" (the `name` field identifies it).
+fn parse_openwebui_config(body: &str) -> Option<String> {
+    let v: serde_json::Value = serde_json::from_str(body).ok()?;
+    let name = v.get("name")?.as_str()?;
+    if !name.eq_ignore_ascii_case("open webui") {
+        return None;
+    }
+    match v.get("version").and_then(|x| x.as_str()) {
+        Some(ver) => Some(format!("v{ver}")),
+        None => Some("running".to_string()),
+    }
+}
+
+/// Ollama GET /api/tags → models with context length + size/quant hints.
+fn parse_ollama_tags(body: &str) -> Vec<LocalModel> {
+    let v: serde_json::Value = match serde_json::from_str(body) {
+        Ok(v) => v,
+        Err(_) => return Vec::new(),
+    };
+    let models = match v.get("models").and_then(|m| m.as_array()) {
+        Some(m) => m,
+        None => return Vec::new(),
+    };
+    models
+        .iter()
+        .filter_map(|m| {
+            let id = m.get("name")?.as_str()?.to_string();
+            let details = m.get("details");
+            let context = details
+                .and_then(|d| d.get("context_length"))
+                .and_then(|c| c.as_u64());
+            let detail = details
+                .map(|d| {
+                    [
+                        d.get("parameter_size").and_then(|x| x.as_str()),
+                        d.get("quantization_level").and_then(|x| x.as_str()),
+                    ]
+                    .into_iter()
+                    .flatten()
+                    .collect::<Vec<_>>()
+                    .join(" · ")
+                })
+                .unwrap_or_default();
+            let tools = m
+                .get("capabilities")
+                .and_then(|c| c.as_array())
+                .map(|caps| {
+                    caps.iter()
+                        .any(|c| c.as_str().is_some_and(|s| s.eq_ignore_ascii_case("tools")))
+                });
+            Some(LocalModel {
+                id,
+                context,
+                detail,
+                tools,
+            })
+        })
+        .collect()
+}
+
+/// OpenAI-compatible GET <base>/models → data[].id (vLLM/LM Studio/llama.cpp/OpenWebUI).
+fn parse_openai_models(body: &str) -> Vec<LocalModel> {
+    let v: serde_json::Value = match serde_json::from_str(body) {
+        Ok(v) => v,
+        Err(_) => return Vec::new(),
+    };
+    let data = match v.get("data").and_then(|d| d.as_array()) {
+        Some(d) => d,
+        None => return Vec::new(),
+    };
+    data.iter()
+        .filter_map(|m| {
+            Some(LocalModel {
+                id: m.get("id")?.as_str()?.to_string(),
+                context: m.get("max_model_len").and_then(|c| c.as_u64()), // vLLM reports this
+                detail: String::new(),
+                tools: None, // the OpenAI list shape doesn't carry capabilities
+            })
+        })
+        .collect()
+}
+
+/// Verdict of a live tool-calling probe against a served model.
+#[derive(Serialize, Clone, Debug, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ToolProbeResult {
+    /// True when the model answered with a native (structured) tool call.
+    pub native: bool,
+    pub detail: String,
+}
+
+/// The one-shot chat request used to probe native tool calling: a single trivial tool
+/// and an instruction to call it. Roomy max_tokens because thinking models (qwen3 etc.)
+/// burn tokens on reasoning before the call.
+fn tool_probe_body(model: &str) -> String {
+    serde_json::json!({
+        "model": model,
+        "messages": [{ "role": "user", "content": "Call the list_files tool on path \".\" now." }],
+        "tools": [{ "type": "function", "function": {
+            "name": "list_files",
+            "description": "List files in a directory",
+            "parameters": { "type": "object",
+                "properties": { "path": { "type": "string" } },
+                "required": ["path"] } } }],
+        "max_tokens": 2048
+    })
+    .to_string()
+}
+
+/// Judge the probe response. A model that "supports tools" on paper can still write the
+/// call into content as plain text (qwen2.5-coder does) — OpenCode has no text fallback,
+/// so such a model silently does nothing in a session. This is the check that catches it.
+fn parse_tool_probe(body: &str) -> ToolProbeResult {
+    let fail = |detail: &str| ToolProbeResult {
+        native: false,
+        detail: detail.to_string(),
+    };
+    let v: serde_json::Value = match serde_json::from_str(body) {
+        Ok(v) => v,
+        Err(_) => return fail("server returned a non-JSON response"),
+    };
+    // Error shapes differ per server: OpenAI/Ollama wrap in "error"; vLLM returns a
+    // flat {"object":"error","message":...}; OpenWebUI/FastAPI use {"detail":...}.
+    // Misreading these as a model verdict would tell users their model is broken
+    // when the server merely rejected the request.
+    if let Some(err) = v.get("error") {
+        let msg = err
+            .get("message")
+            .and_then(|m| m.as_str())
+            .or_else(|| err.as_str())
+            .unwrap_or("unknown server error");
+        return fail(&format!("server error: {msg}"));
+    }
+    if v.get("object").and_then(|o| o.as_str()) == Some("error") {
+        let msg = v
+            .get("message")
+            .and_then(|m| m.as_str())
+            .unwrap_or("unknown server error");
+        return fail(&format!("server error: {msg}"));
+    }
+    if let Some(d) = v.get("detail") {
+        let msg = d.as_str().unwrap_or("request rejected");
+        return fail(&format!("server error: {msg}"));
+    }
+    let msg = &v["choices"][0]["message"];
+    let called = msg
+        .get("tool_calls")
+        .and_then(|t| t.as_array())
+        .is_some_and(|t| !t.is_empty());
+    if called {
+        return ToolProbeResult {
+            native: true,
+            detail: "native tool-calling verified — agentic use will work".to_string(),
+        };
+    }
+    let content = msg.get("content").and_then(|c| c.as_str()).unwrap_or("");
+    if content.contains("\"name\"") || content.contains("\"arguments\"") {
+        fail(
+            "model wrote the tool call as plain text instead of calling it — OpenCode cannot \
+             execute that, sessions will appear to do nothing. Pick a different model \
+             (the qwen3 family works well).",
+        )
+    } else {
+        fail("model did not call the tool — expect poor agentic behavior")
+    }
+}
+
+/// Derive the server origin from an OpenAI-compatible base URL by stripping the trailing
+/// path segment(s) we know about ("/v1", "/api"). Used to reach Ollama's native /api/*.
+fn origin_of(base_url: &str) -> String {
+    let b = base_url.trim().trim_end_matches('/');
+    for suffix in ["/v1", "/api"] {
+        if let Some(stripped) = b.strip_suffix(suffix) {
+            return stripped.to_string();
+        }
+    }
+    b.to_string()
+}
+
+// ---- commands ------------------------------------------------------------------
+
+/// One detection probe row: (preset, label, base_url, needs_key, probe-fn). The probe
+/// returns a human detail string when the server answers and identifies itself.
+type ProviderProbe = (
+    &'static str,
+    &'static str,
+    &'static str,
+    bool,
+    fn() -> Option<String>,
+);
+
+/// Probe the well-known local inference servers concurrently (≤2s each). Purely
+/// informational for the Settings UI — detection never gates a spawn.
+#[tauri::command]
+pub async fn detect_local_providers() -> Vec<LocalProviderStatus> {
+    tauri::async_runtime::spawn_blocking(|| {
+        // 127.0.0.1, not localhost: curl falls back across address families, but the
+        // same URL handed to OpenCode's runtime can resolve IPv6-first and get refused
+        // by servers that bind IPv4 loopback only (Ollama does) — so the URL we PREFILL
+        // must be the one that works everywhere.
+        let probes: [ProviderProbe; 5] = [
+            (
+                "ollama",
+                "Ollama",
+                "http://127.0.0.1:11434/v1",
+                false,
+                || parse_ollama_version(&curl("http://127.0.0.1:11434/api/version", None, 2)?),
+            ),
+            (
+                "lmstudio",
+                "LM Studio",
+                "http://127.0.0.1:1234/v1",
+                false,
+                || parse_openai_model_count(&curl("http://127.0.0.1:1234/v1/models", None, 2)?),
+            ),
+            ("vllm", "vLLM", "http://127.0.0.1:8000/v1", false, || {
+                parse_openai_model_count(&curl("http://127.0.0.1:8000/v1/models", None, 2)?)
+            }),
+            (
+                "llamacpp",
+                "llama.cpp",
+                "http://127.0.0.1:8080/v1",
+                false,
+                || parse_openai_model_count(&curl("http://127.0.0.1:8080/v1/models", None, 2)?),
+            ),
+            (
+                "openwebui",
+                "OpenWebUI",
+                "http://127.0.0.1:3000/api",
+                true,
+                || parse_openwebui_config(&curl("http://127.0.0.1:3000/api/config", None, 2)?),
+            ),
+        ];
+        std::thread::scope(|scope| {
+            let handles: Vec<_> = probes
+                .iter()
+                .map(|(preset, label, base_url, needs_key, probe)| {
+                    scope.spawn(move || {
+                        let detail = probe();
+                        LocalProviderStatus {
+                            preset,
+                            label,
+                            base_url,
+                            running: detail.is_some(),
+                            detail: detail.unwrap_or_default(),
+                            needs_key: *needs_key,
+                        }
+                    })
+                })
+                .collect();
+            handles
+                .into_iter()
+                .filter_map(|h| h.join().ok())
+                .collect::<Vec<_>>()
+        })
+    })
+    .await
+    .unwrap_or_default()
+}
+
+/// The held key is credentials FOR the configured endpoint — never attach it to any
+/// other URL a (potentially compromised) frontend might pass, or these commands become
+/// an oracle that exfiltrates the key to an arbitrary host.
+fn key_for_endpoint(store: &crate::store::Store, requested_base_url: &str) -> Option<String> {
+    let configured = store.opencode_settings().base_url;
+    let norm = |s: &str| s.trim().trim_end_matches('/').to_ascii_lowercase();
+    if norm(requested_base_url) == norm(&configured) {
+        store.opencode_key()
+    } else {
+        None
+    }
+}
+
+/// List the models a local server offers, for the Settings model picker. Ollama is asked
+/// natively (/api/tags — carries context lengths); everything else via <base>/models with
+/// Bearer auth from the in-memory key holder (the key never round-trips to the frontend).
+#[tauri::command]
+pub async fn list_local_models(
+    base_url: String,
+    preset: String,
+    store: tauri::State<'_, std::sync::Arc<crate::store::Store>>,
+) -> Result<Vec<LocalModel>, String> {
+    let api_key = key_for_endpoint(&store, &base_url);
+    tauri::async_runtime::spawn_blocking(move || {
+        let base = base_url.trim().trim_end_matches('/').to_string();
+        if !base.starts_with("http://") && !base.starts_with("https://") {
+            return Err("base URL must start with http:// or https://".to_string());
+        }
+        let models = if preset == "ollama" {
+            let url = format!("{}/api/tags", origin_of(&base));
+            parse_ollama_tags(&curl(&url, None, 5).ok_or("server not reachable")?)
+        } else {
+            let url = format!("{base}/models");
+            parse_openai_models(&curl(&url, api_key.as_deref(), 5).ok_or("server not reachable")?)
+        };
+        if models.is_empty() {
+            return Err(
+                "no models reported — is the server running (and the API key valid)?".to_string(),
+            );
+        }
+        Ok(models)
+    })
+    .await
+    .map_err(|e| format!("probe task failed: {e}"))?
+}
+
+/// Live-test whether the served model actually does NATIVE tool calling (one chat
+/// request with a trivial tool). Advertised capabilities aren't enough: some models
+/// (e.g. qwen2.5-coder via Ollama) claim tools but emit the call as plain text, which
+/// OpenCode cannot execute. Slow on a cold model (load into VRAM) — up to ~2.5 min.
+#[tauri::command]
+pub async fn probe_tool_call(
+    base_url: String,
+    model: String,
+    store: tauri::State<'_, std::sync::Arc<crate::store::Store>>,
+) -> Result<ToolProbeResult, String> {
+    let api_key = key_for_endpoint(&store, &base_url);
+    tauri::async_runtime::spawn_blocking(move || {
+        let base = base_url.trim().trim_end_matches('/');
+        if !base.starts_with("http://") && !base.starts_with("https://") {
+            return Err("base URL must start with http:// or https://".to_string());
+        }
+        let url = format!("{base}/chat/completions");
+        let body = tool_probe_body(model.trim());
+        match curl_post(&url, &body, api_key.as_deref(), 150) {
+            Some(resp) => Ok(parse_tool_probe(&resp)),
+            None => Err("server not reachable (or the model took too long to load)".to_string()),
+        }
+    })
+    .await
+    .map_err(|e| format!("probe task failed: {e}"))?
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_ollama_tags_with_context_and_details() {
+        // Shape captured live from Ollama 0.30.10 /api/tags.
+        let body = r#"{"models":[
+            {"name":"qwen3:30b-a3b","model":"qwen3:30b-a3b",
+             "details":{"parameter_size":"30.5B","quantization_level":"Q4_K_M","context_length":262144},
+             "capabilities":["completion","tools","thinking"]},
+            {"name":"bare-model"},
+            {"name":"no-tools","capabilities":["completion"]}]}"#;
+        let models = parse_ollama_tags(body);
+        assert_eq!(models.len(), 3);
+        assert_eq!(models[0].id, "qwen3:30b-a3b");
+        assert_eq!(models[0].context, Some(262144));
+        assert_eq!(models[0].detail, "30.5B · Q4_K_M");
+        assert_eq!(models[0].tools, Some(true));
+        assert_eq!(models[1].id, "bare-model");
+        assert_eq!(models[1].context, None);
+        assert_eq!(models[1].tools, None, "no capabilities field -> unknown");
+        assert_eq!(models[2].tools, Some(false));
+        assert!(parse_ollama_tags("Not Found").is_empty());
+        assert!(parse_ollama_tags(r#"{"ok":true}"#).is_empty());
+    }
+
+    #[test]
+    fn parses_openai_models_list() {
+        let body = r#"{"object":"list","data":[
+            {"id":"qwen/qwen3-32b","object":"model","max_model_len":32768},
+            {"id":"gemma-3n"}]}"#;
+        let models = parse_openai_models(body);
+        assert_eq!(models.len(), 2);
+        assert_eq!(models[0].id, "qwen/qwen3-32b");
+        assert_eq!(models[0].context, Some(32768));
+        assert_eq!(models[1].context, None);
+        // A non-LLM service answering on the port is rejected, not misparsed.
+        assert!(parse_openai_models("Not Found").is_empty());
+        assert!(parse_openai_models(r#"{"detail":"Unauthorized"}"#).is_empty());
+    }
+
+    #[test]
+    fn detection_parsers_identify_servers() {
+        assert_eq!(
+            parse_ollama_version(r#"{"version":"0.30.10"}"#).as_deref(),
+            Some("v0.30.10")
+        );
+        assert!(parse_ollama_version("nope").is_none());
+        assert_eq!(
+            parse_openai_model_count(r#"{"data":[{"id":"a"},{"id":"b"}]}"#).as_deref(),
+            Some("2 models")
+        );
+        assert_eq!(
+            parse_openai_model_count(r#"{"data":[{"id":"a"}]}"#).as_deref(),
+            Some("1 model")
+        );
+        // Open WebUI /api/config identifies by name; other JSON on the port is rejected.
+        assert_eq!(
+            parse_openwebui_config(r#"{"status":true,"name":"Open WebUI","version":"0.9.2"}"#)
+                .as_deref(),
+            Some("v0.9.2")
+        );
+        assert!(parse_openwebui_config(r#"{"name":"grafana"}"#).is_none());
+    }
+
+    #[test]
+    fn tool_probe_judges_native_text_and_errors() {
+        // Shapes captured live from Ollama 0.30.10 /v1/chat/completions.
+        let native = r#"{"choices":[{"finish_reason":"tool_calls","message":{"role":"assistant",
+            "content":"","reasoning":"...","tool_calls":[{"id":"call_1","type":"function",
+            "function":{"name":"list_files","arguments":"{\"path\":\".\"}"}}]}}]}"#;
+        assert!(parse_tool_probe(native).native);
+
+        // qwen2.5-coder failure mode: the "call" arrives as plain text content.
+        let text = r#"{"choices":[{"finish_reason":"stop","message":{"role":"assistant",
+            "content":"{\n  \"name\": \"list_files\",\n  \"arguments\": {\"path\": \".\"}\n}"}}]}"#;
+        let r = parse_tool_probe(text);
+        assert!(!r.native);
+        assert!(r.detail.contains("plain text"));
+
+        let chatty = r#"{"choices":[{"message":{"content":"I cannot run tools."}}]}"#;
+        let r = parse_tool_probe(chatty);
+        assert!(!r.native);
+        assert!(r.detail.contains("did not call"));
+
+        let err = r#"{"error":{"message":"model not found"}}"#;
+        assert!(parse_tool_probe(err).detail.contains("model not found"));
+        // vLLM's flat error shape (e.g. tools rejected without --enable-auto-tool-choice)
+        // and OpenWebUI/FastAPI's {"detail"} must read as SERVER errors, not model verdicts.
+        let vllm = r#"{"object":"error","message":"tool use not enabled","type":"BadRequest"}"#;
+        let r = parse_tool_probe(vllm);
+        assert!(!r.native);
+        assert!(r.detail.contains("server error: tool use not enabled"));
+        let fastapi = r#"{"detail":"Not authenticated"}"#;
+        assert!(parse_tool_probe(fastapi)
+            .detail
+            .contains("server error: Not authenticated"));
+        assert!(!parse_tool_probe("Not Found").native);
+
+        // The probe body is valid JSON and carries the model id + roomy token budget.
+        let body: serde_json::Value =
+            serde_json::from_str(&tool_probe_body("qwen3:30b-a3b")).unwrap();
+        assert_eq!(body["model"], "qwen3:30b-a3b");
+        assert_eq!(body["max_tokens"], 2048);
+        assert_eq!(body["tools"][0]["function"]["name"], "list_files");
+    }
+
+    #[test]
+    fn origin_strips_known_api_suffixes() {
+        assert_eq!(
+            origin_of("http://localhost:11434/v1"),
+            "http://localhost:11434"
+        );
+        assert_eq!(
+            origin_of("http://localhost:11434/v1/"),
+            "http://localhost:11434"
+        );
+        assert_eq!(origin_of("http://gpu:3000/api"), "http://gpu:3000");
+        assert_eq!(origin_of("http://gpu:9999"), "http://gpu:9999");
+    }
+}

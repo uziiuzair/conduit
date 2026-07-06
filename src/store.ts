@@ -71,6 +71,50 @@ export interface SensitivityHit {
   hint: string;
 }
 
+// ---- OpenCode local provider — mirror the Rust serde structs (camelCase) ----
+
+/** Non-secret local-provider settings. The endpoint API key is never part of this (or of
+ * any persisted state) — it is held in backend memory and reaches OpenCode via child env. */
+export interface OpenCodeSettings {
+  enabled: boolean;
+  /** "ollama" | "lmstudio" | "vllm" | "llamacpp" | "openwebui" | "custom" ("" = unset). */
+  preset: string;
+  /** Full OpenAI-compatible base URL (e.g. http://127.0.0.1:11434/v1). */
+  baseUrl: string;
+  /** Model id exactly as the server reports it. */
+  model: string;
+  contextLimit?: number | null;
+  outputLimit?: number | null;
+  /** Allowlist the injected provider so OpenCode can't fall back to cloud providers. */
+  pinLocal: boolean;
+}
+
+/** One probed local inference server (detect_local_providers). */
+export interface LocalProviderStatus {
+  preset: string;
+  label: string;
+  baseUrl: string;
+  running: boolean;
+  detail: string;
+  needsKey: boolean;
+}
+
+/** A model the local server offers (list_local_models). */
+export interface LocalModel {
+  id: string;
+  /** Context window when the server reports it (Ollama does) — used to autofill limits. */
+  context?: number | null;
+  detail: string;
+  /** Tool-calling support (Ollama reports it; null/undefined = unknown). */
+  tools?: boolean | null;
+}
+
+/** Verdict of the live tool-calling probe (probe_tool_call). */
+export interface ToolProbeResult {
+  native: boolean;
+  detail: string;
+}
+
 export type TabKind = "session" | "file";
 
 export interface WsTab {
@@ -408,6 +452,20 @@ interface AppState {
   /** Local, offline secret/PII scan of arbitrary text (assist for "mark sensitive"). */
   scanSensitivity: (text: string) => Promise<SensitivityHit[]>;
 
+  // ---- OpenCode local provider ----
+  opencode: OpenCodeSettings;
+  /** Whether an endpoint API key is held (in backend memory) for this app run. */
+  opencodeKeySet: boolean;
+  loadOpenCodeSettings: () => Promise<void>;
+  setOpenCodeSettings: (settings: OpenCodeSettings) => Promise<void>;
+  /** Non-empty = hold/replace the key for this run; empty = clear it. Never persisted. */
+  setOpenCodeKey: (key: string) => Promise<void>;
+  detectLocalProviders: () => Promise<LocalProviderStatus[]>;
+  /** Models the server at baseUrl offers; a string is the error message. */
+  listLocalModels: (baseUrl: string, preset: string) => Promise<LocalModel[] | string>;
+  /** Live-test native tool calling on the served model; a string is the error message. */
+  probeToolCall: (baseUrl: string, model: string) => Promise<ToolProbeResult | string>;
+
   // ---- MCP server registry ----
   mcpServers: McpServer[];
   mcpEnabled: Record<string, AgentId[]>;
@@ -540,6 +598,16 @@ export const useStore = create<AppState>((set, get) => {
     accounts: [],
     defaultAccount: null,
     privateMode: false,
+    opencode: {
+      enabled: false,
+      preset: "",
+      baseUrl: "",
+      model: "",
+      contextLimit: null,
+      outputLimit: null,
+      pinLocal: false,
+    },
+    opencodeKeySet: false,
     agentSetupComplete: localStorage.getItem(SETUP_DONE_KEY) === "1",
     telemetryOptOut: readTelemetryOptOut(),
 
@@ -552,7 +620,7 @@ export const useStore = create<AppState>((set, get) => {
     activeThemeId: resolveThemeId(readStoredPref(), systemPrefersDark()),
 
     load: async () => {
-      const [projects, home, accounts, defaultAccount, trust] = await Promise.all([
+      const [projects, home, accounts, defaultAccount, trust, opencode] = await Promise.all([
         invoke<Project[]>("load_projects"),
         getHomeDir().catch(() => null),
         invoke<Account[]>("list_accounts").catch(() => [] as Account[]),
@@ -560,6 +628,7 @@ export const useStore = create<AppState>((set, get) => {
         invoke<TrustSettings>("get_trust_settings").catch(
           () => ({ privateMode: false }) as TrustSettings,
         ),
+        invoke<OpenCodeSettings>("get_opencode_settings").catch(() => get().opencode),
       ]);
       const layouts: Record<string, ProjectLayout> = {};
       for (const p of projects) {
@@ -581,6 +650,7 @@ export const useStore = create<AppState>((set, get) => {
         accounts,
         defaultAccount,
         privateMode: trust.privateMode,
+        opencode,
       });
     },
 
@@ -669,6 +739,51 @@ export const useStore = create<AppState>((set, get) => {
         return await invoke<SensitivityHit[]>("scan_sensitivity", { text });
       } catch {
         return [];
+      }
+    },
+
+    // ---- OpenCode local provider ----
+    loadOpenCodeSettings: async () => {
+      try {
+        const [opencode, opencodeKeySet] = await Promise.all([
+          invoke<OpenCodeSettings>("get_opencode_settings"),
+          invoke<boolean>("opencode_key_set"),
+        ]);
+        set({ opencode, opencodeKeySet });
+      } catch { /* keep current */ }
+    },
+    setOpenCodeSettings: async (settings) => {
+      await invoke("set_opencode_settings", { settings }).catch(() => {});
+      set({ opencode: settings });
+    },
+    setOpenCodeKey: async (key) => {
+      if (key.trim()) {
+        await invoke("set_opencode_key", { key }).catch(() => {});
+        set({ opencodeKeySet: true });
+      } else {
+        await invoke("clear_opencode_key").catch(() => {});
+        set({ opencodeKeySet: false });
+      }
+    },
+    detectLocalProviders: async () => {
+      try {
+        return await invoke<LocalProviderStatus[]>("detect_local_providers");
+      } catch {
+        return [];
+      }
+    },
+    listLocalModels: async (baseUrl, preset) => {
+      try {
+        return await invoke<LocalModel[]>("list_local_models", { baseUrl, preset });
+      } catch (e) {
+        return String(e);
+      }
+    },
+    probeToolCall: async (baseUrl, model) => {
+      try {
+        return await invoke<ToolProbeResult>("probe_tool_call", { baseUrl, model });
+      } catch (e) {
+        return String(e);
       }
     },
     completeAgentSetup: () => {

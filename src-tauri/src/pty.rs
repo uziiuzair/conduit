@@ -165,6 +165,7 @@ impl PtyManager {
         account_config_dir: Option<String>,
         agent: crate::agent::AgentId,
         suppress_remote: bool,
+        opencode: Option<crate::agent::OpenCodeSpawnConfig>,
         on_event: Channel<String>,
     ) -> Result<(), String> {
         // Already running → re-attach the live reader to the new channel and force
@@ -275,6 +276,16 @@ impl PtyManager {
             cmd.env("CONDUIT_HOOK_PORT", hook_port.to_string());
             for (k, v) in adapter.env_overrides() {
                 cmd.env(k, v);
+            }
+            // Route OpenCode to the configured local/self-hosted provider:
+            // an inline config env var that outranks the user's opencode.json files, plus
+            // the endpoint key in its own env var (referenced from the config as
+            // {env:CONDUIT_OC_APIKEY}). Env-only by design — never written to disk.
+            if let Some(oc) = &opencode {
+                cmd.env("OPENCODE_CONFIG_CONTENT", &oc.config_json);
+                if let Some(key) = &oc.api_key {
+                    cmd.env("CONDUIT_OC_APIKEY", key);
+                }
             }
             // Select a Claude account (Feature 1/2) without disturbing the user's default
             // `claude`. A `.claude` account set up via a HOME-redirect launcher (e.g. a
