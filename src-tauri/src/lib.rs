@@ -608,6 +608,50 @@ fn mcp_apply(
     }
 }
 
+/// Install an agent's CLI by running its official installer, on explicit user action. Mirrors
+/// `mcp_apply`'s shell handling (scrub `npm_config_prefix`, `no_window`). Windows runs through
+/// Windows PowerShell (present on every box) so one path serves both the npm installs AND the
+/// vendor PowerShell one-liner (agy's `irm … | iex`); other platforms use an interactive login
+/// shell for PATH parity with `detect_agents` / the PTY spawner. Returns the installer's combined
+/// output; the caller then re-runs `detect_agents`. Install != ready: every agent still needs
+/// sign-in on first launch inside its session.
+#[tauri::command(async)]
+fn install_agent(agent: crate::agent::AgentId) -> Result<String, String> {
+    let adapter = crate::agent::adapter_for(agent);
+    let cmd = adapter
+        .install_command()
+        .ok_or_else(|| format!("No known installer for {}.", adapter.binary()))?;
+    #[cfg(windows)]
+    let out = std::process::Command::new("powershell")
+        .args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", &cmd])
+        .env_remove("npm_config_prefix")
+        .no_window()
+        .output()
+        .map_err(|e| format!("spawn installer: {e}"))?;
+    #[cfg(not(windows))]
+    let out = {
+        let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
+        std::process::Command::new(&shell)
+            .args(["-i", "-l", "-c", &cmd])
+            .env_remove("npm_config_prefix")
+            .no_window()
+            .output()
+            .map_err(|e| format!("spawn installer: {e}"))?
+    };
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    if out.status.success() {
+        Ok(combined.trim().to_string())
+    } else if combined.trim().is_empty() {
+        Err(format!("installer exited with {}", out.status))
+    } else {
+        Err(combined.trim().to_string())
+    }
+}
+
 /// Open a directory in VS Code. Tries the `code` CLI first (cross-platform), then
 /// falls back to launching by macOS bundle id / app name so it still works when the
 /// `code` shell command isn't installed.
@@ -785,6 +829,7 @@ pub fn run() {
             claude_usage::fetch_claude_usage,
             claude_usage::connect_claude_plan_usage,
             mcp_apply,
+            install_agent,
             telemetry::telemetry_ping,
         ])
         .build(tauri::generate_context!())

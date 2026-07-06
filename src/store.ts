@@ -380,6 +380,8 @@ interface AppState {
   defaultAgent: AgentId;
   agentSetupComplete: boolean;
   setDefaultAgent: (id: AgentId) => void;
+  /** Run an agent's official installer, then re-detect. Returns an error string or null. */
+  installAgent: (id: AgentId) => Promise<string | null>;
   completeAgentSetup: () => void;
   /** Anonymous-telemetry opt-out (true = do not send). Default false (on). */
   telemetryOptOut: boolean;
@@ -585,6 +587,17 @@ export const useStore = create<AppState>((set, get) => {
     setDefaultAgent: (id) => {
       localStorage.setItem(DEFAULT_AGENT_KEY, id);
       set({ defaultAgent: id });
+    },
+
+    installAgent: async (id) => {
+      try {
+        await invoke<string>("install_agent", { agent: id });
+      } catch (e) {
+        return String(e);
+      }
+      // Re-detect so a freshly-installed agent flips to "ready".
+      await get().loadAgents();
+      return null;
     },
 
     loadAccounts: async () => {
