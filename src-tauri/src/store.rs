@@ -70,13 +70,19 @@ pub struct Session {
     /// editor; not yet consulted by `can_read` / `can_inject`.
     #[serde(default)]
     pub channels: Vec<String>,
-    /// Preferred model tier (e.g. "opus"/"sonnet"/"haiku", or a local model id). Reserved for
-    /// the Phase 4 per-agent tier routing.
+    /// Preferred model tier: "cheap" | "standard" | "hard" (SPEC-B, §7.5). Mapped to a
+    /// concrete per-adapter model id by `agent::model_for_tier`.
     #[serde(default)]
     pub model_tier: Option<String>,
     /// Seeded / "prefixed" memory injected at spawn as an appended system prompt. Phase 5.
     #[serde(default)]
     pub seed_memory: Option<String>,
+    /// Effort level: "low" | "medium" | "high" | "xhigh" | "max" (SPEC-B, §7.2). Only
+    /// Claude has a per-invocation effort control today (verified: `claude --help` lists
+    /// `--effort <level>` with exactly these five values) -- other adapters record this
+    /// but don't act on it (`agent::clamp_effort`'s doc comment explains why).
+    #[serde(default)]
+    pub effort: Option<String>,
 }
 
 /// Directed READ policy: may `caller` read `target`'s output? The single source of truth for
@@ -118,6 +124,8 @@ pub struct SessionTrust {
     pub model_tier: Option<String>,
     #[serde(default)]
     pub seed_memory: Option<String>,
+    #[serde(default)]
+    pub effort: Option<String>,
 }
 
 /// A hit from the local sensitivity scanner. Surfaced to the UI as an ASSIST for the manual
@@ -612,6 +620,25 @@ impl Store {
             .clone()
     }
 
+    /// The config dir of the global default account, or None if no default is set / it no
+    /// longer resolves. Used by the (session-less) Claude usage panel so its local-token
+    /// read AND its plan-usage token read follow the account the user actually selected --
+    /// otherwise both silently read `~/.claude` (the first/only account) and show the wrong
+    /// account's usage. Mirrors `session_account_config_dir`'s default-account branch, minus
+    /// the per-session lookup (the usage panel is global, not tied to one session).
+    pub fn default_account_config_dir(&self) -> Option<String> {
+        let account_id = self
+            .default_account
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()?;
+        let accounts = self.accounts.lock().unwrap_or_else(|e| e.into_inner());
+        accounts
+            .iter()
+            .find(|a| a.id == account_id)
+            .map(|a| a.config_dir.clone())
+    }
+
     /// Register an account. Errors on an empty / missing / duplicate config dir; else the
     /// new Account. The `.claude` dir need not be authenticated -- an empty one just drops
     /// the user into `claude`'s normal login flow inside the session.
@@ -729,6 +756,7 @@ impl Store {
                 s.channels = trust.channels;
                 s.model_tier = trust.model_tier;
                 s.seed_memory = trust.seed_memory;
+                s.effort = trust.effort;
                 break;
             }
         }
@@ -881,7 +909,10 @@ mod tests {
     use super::*;
 
     impl Store {
-        fn for_test(dir: &std::path::Path) -> Self {
+        /// Test-only constructor bypassing `data_dir()`/disk I/O. `pub(crate)` so other
+        /// modules' `#[cfg(test)]` code (e.g. `fleet_mcp.rs`'s SPEC-0 regression tests) can
+        /// build a real `Store` without touching the user's actual state.json.
+        pub(crate) fn for_test(dir: &std::path::Path) -> Self {
             Store {
                 projects: Mutex::new(Vec::new()),
                 accounts: Mutex::new(Vec::new()),

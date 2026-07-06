@@ -4,6 +4,16 @@
 - **Status:** Approved (design); pending implementation plan
 - **Topic:** A per-project "Conductor" agent session you converse with, that sees every worker session's structured status (with on-demand transcript peeks) and can act on the fleet — spawn worktree-isolated workers, send input, stop workers — via a Conduit-hosted MCP server.
 
+> **2026-07-05 forward pointer:** this design shipped (v0.3.0, README §Changelog)
+> and is being extended by a follow-on initiative — heterogeneous (5-adapter)
+> workers, a project-scoped result/mailbox blackboard, and a usage meter. See
+> `docs/superpowers/specs/2026-07-04-orchestration-v2-design.md` and its
+> `2026-07-05-orchestration-v2-scope-expansion-design.md` companion for the
+> current plan (not yet implemented as of this note). This document remains
+> the accurate record of the Conductor *as shipped* — read it first for how
+> the fleet MCP server, `fleet_spawn`/`fleet_peek`/etc., and the worktree/
+> confirm-gate mechanics actually work today.
+
 ## Context
 
 Conduit runs multiple real `claude` CLI sessions side by side, one PTY per session, grouped by project (`pty.rs`, `store.rs`). Sessions are deliberately **peers** — there is no master, and there is **no inter-session communication** today (confirmed: the only fan-out is the mobile bridge, which is client↔session, never session↔session).

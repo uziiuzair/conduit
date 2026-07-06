@@ -436,7 +436,15 @@ function SessionContextMenu() {
       void setSessionTrust(
         sid,
         siloed
-          ? { clearance: "public", silo: false, localOnly: false, channels: [], modelTier: null, seedMemory: null }
+          ? {
+              clearance: "public",
+              silo: false,
+              localOnly: false,
+              channels: [],
+              modelTier: null,
+              seedMemory: null,
+              effort: null,
+            }
           : {
               clearance: "confidential",
               silo: true,
@@ -444,6 +452,7 @@ function SessionContextMenu() {
               channels: menuSession.channels ?? [],
               modelTier: menuSession.modelTier ?? null,
               seedMemory: menuSession.seedMemory ?? null,
+              effort: menuSession.effort ?? null,
             },
       );
       if (!privateMode && !siloed) {
@@ -452,6 +461,28 @@ function SessionContextMenu() {
           body: "Marked sensitive. Enable Private mode (Settings → Security) for the silo to take effect.",
         }).catch(() => {});
       }
+    }
+    closeMenu();
+  };
+  // SPEC-F: a custom/manual session is isolated by default (no fleet MCP, no board access
+  // at all) -- this is the one opt-in toggle that joins it to the project's mailbox, still
+  // scoped to that one project. Full-overwrite semantics on set_session_trust mean every
+  // other trust field must be resent unchanged, same as toggleSensitive above.
+  const sharedInProject = !!menuSession?.channels?.includes("project");
+  const toggleShareInProject = () => {
+    if (menuSession) {
+      const channels = sharedInProject
+        ? (menuSession.channels ?? []).filter((c) => c !== "project")
+        : [...(menuSession.channels ?? []), "project"];
+      void setSessionTrust(sid, {
+        clearance: menuSession.clearance ?? "public",
+        silo: menuSession.silo ?? false,
+        localOnly: menuSession.localOnly ?? false,
+        channels,
+        modelTier: menuSession.modelTier ?? null,
+        seedMemory: menuSession.seedMemory ?? null,
+        effort: menuSession.effort ?? null,
+      });
     }
     closeMenu();
   };
@@ -472,6 +503,12 @@ function SessionContextMenu() {
       </button>
       <button onClick={toggleSensitive} title="Silo this session: no other agent can read it">
         {siloed ? "Clear sensitive mark" : "Mark sensitive (silo)"}
+      </button>
+      <button
+        onClick={toggleShareInProject}
+        title="Join this project's horizontal mailbox: post/read short data-only notes with other opted-in sessions via fleet_note/fleet_inbox"
+      >
+        {sharedInProject ? "Stop sharing in project" : "Share in project"}
       </button>
       <button
         onClick={() => {
