@@ -2082,6 +2082,37 @@ button {
   padding-top: 4px;
 }
 
+/* ---- One-click agent install (Feature 5) ---- */
+.agent-install-btn {
+  font-size: 10px;
+  padding: 3px 10px;
+  border-radius: 4px;
+  white-space: nowrap;
+  flex-shrink: 0;
+  color: var(--accent);
+  border: 1px solid color-mix(in srgb, var(--accent) 45%, transparent);
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+}
+.agent-install-btn:hover:not(:disabled) {
+  color: var(--text-bright);
+  background: color-mix(in srgb, var(--accent) 20%, transparent);
+}
+.agent-install-btn:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+.agent-install-note {
+  font-size: 10.5px;
+  color: var(--green);
+  padding-top: 2px;
+}
+.agent-install-err {
+  font-size: 10.5px;
+  color: #f2b8b8;
+  padding-top: 2px;
+  word-break: break-word;
+}
+
 /* ---- Settings gear button (add-bar) ---- */
 .settings-btn {
   width: 36px;
