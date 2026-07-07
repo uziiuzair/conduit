@@ -65,6 +65,17 @@ pub fn build<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<Menu<R>> {
     let find = MenuItemBuilder::with_id("find", "Find")
         .accelerator("CmdOrCtrl+F")
         .build(app)?;
+    // Accelerator on macOS only (Cmd+Alt+F, VS Code's mac replace binding). On
+    // Windows, Ctrl+Alt+F is indistinguishable from AltGr+F in Win32 accelerator
+    // matching — it would swallow ordinary characters (e.g. "[" on Hungarian/Croatian
+    // layouts) typed into a live terminal. VS Code's Ctrl+H is backspace in terminals,
+    // so no non-mac accelerator; Monaco's own editor-scoped Ctrl+H still works.
+    let replace = {
+        let b = MenuItemBuilder::with_id("replace", "Find and Replace");
+        #[cfg(target_os = "macos")]
+        let b = b.accelerator("Cmd+Alt+F");
+        b.build(app)?
+    };
     let edit_menu = SubmenuBuilder::new(app, "Edit")
         .undo()
         .redo()
@@ -75,6 +86,7 @@ pub fn build<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<Menu<R>> {
         .select_all()
         .separator()
         .item(&find)
+        .item(&replace)
         .build()?;
 
     // ---- View (with nested Theme submenu) ----

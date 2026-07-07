@@ -151,9 +151,16 @@ export function CodeEditorPane({ projectId, groupId, visible, style }: CodeEdito
       lineHeight: 18,
       minimap: { enabled: false },
       scrollBeyondLastLine: false,
-      renderWhitespace: "none",
+      // Whitespace stays invisible except inside a selection — enough to spot stray
+      // tabs/trailing spaces while reviewing without ambient dot noise.
+      renderWhitespace: "selection",
       tabSize: 2,
       padding: { top: 12, bottom: 6 },
+      // Already monaco 0.55's default (its outlineModel source falls back to the
+      // indentation model when no symbol providers exist) — pinned explicitly so an
+      // upstream default flip can't silently turn it off.
+      stickyScroll: { enabled: true },
+      guides: { bracketPairs: "active" },
     });
     editorRef.current = editor;
 
