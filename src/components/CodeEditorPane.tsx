@@ -5,6 +5,7 @@ import { monaco, languageFor, setLastFocusedEditor } from "../monaco/setup";
 import * as registry from "../monaco/registry";
 import { useStore, baseName, type FileContent } from "../store";
 import { LanguageSelector } from "./LanguageSelector";
+import { MarkdownPreview } from "./MarkdownPreview";
 
 interface CodeEditorPaneProps {
   projectId: string;
@@ -93,6 +94,26 @@ export function CodeEditorPane({ projectId, groupId, visible, style }: CodeEdito
   });
 
   const [load, setLoad] = useState<LoadState>({ kind: "none" });
+  // Markdown preview toggle. Pane-scoped and sticky across tab switches (like VS Code's
+  // preview column); it only takes effect while the active model's language is markdown.
+  // The ref mirror lets the create-once editor command and the focus guards read it.
+  const [previewOn, setPreviewOnState] = useState(false);
+  const previewOnRef = useRef(false);
+  const setPreviewOn = useCallback((v: boolean | ((prev: boolean) => boolean)) => {
+    setPreviewOnState((prev) => {
+      const next = typeof v === "function" ? v(prev) : v;
+      previewOnRef.current = next;
+      return next;
+    });
+  }, []);
+  // True when the preview overlay is covering this pane's editor — used to keep
+  // programmatic focus off the covered editor (keystrokes would edit it invisibly).
+  const previewCovers = useCallback(
+    () =>
+      previewOnRef.current &&
+      editorRef.current?.getModel()?.getLanguageId() === "markdown",
+    [],
+  );
   // Displayed/active Monaco language id for the breadcrumb selector. Session-scoped:
   // seeded by languageFor() on load, but reflects the CONCRETE model's language so a
   // manual override (setModelLanguage) survives tab switches back to this file.
@@ -171,6 +192,12 @@ export function CodeEditorPane({ projectId, groupId, visible, style }: CodeEdito
       if (p) void saveFile(p);
     });
 
+    // ⇧⌘V opens the markdown preview (VS Code's binding). Editor-focused only; the
+    // preview overlay binds the same chord itself to toggle back.
+    editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyMod.Shift | monaco.KeyCode.KeyV, () => {
+      if (editor.getModel()?.getLanguageId() === "markdown") setPreviewOn(true);
+    });
+
     // Track last-focused editor for menu-triggered actions (e.g. Find) that dispatch
     // after focus has moved away from the editor (App.tsx's "menu" listener).
     editor.onDidFocusEditorText(() => setLastFocusedEditor(editor));
@@ -246,7 +273,7 @@ export function CodeEditorPane({ projectId, groupId, visible, style }: CodeEdito
       if (vs) ed.restoreViewState(vs);
       if (visibleRef.current) {
         ed.layout();
-        ed.focus();
+        if (!previewCovers()) ed.focus();
       }
 
       // Dirty tracking: dispatch setDirty ONLY on a clean<->dirty transition.
@@ -276,9 +303,9 @@ export function CodeEditorPane({ projectId, groupId, visible, style }: CodeEdito
     if (!ed) return;
     requestAnimationFrame(() => {
       ed.layout();
-      if (currentPathRef.current) ed.focus();
+      if (currentPathRef.current && !previewCovers()) ed.focus();
     });
-  }, [visible]);
+  }, [visible, previewCovers]);
 
   const fc = load.kind === "ready" ? load.fc : null;
   const banner = ((): { text: string; error?: boolean } | null => {
@@ -290,6 +317,10 @@ export function CodeEditorPane({ projectId, groupId, visible, style }: CodeEdito
     return null;
   })();
   const noModel = !!fc && (fc.binary || fc.error !== null);
+  // Follows the breadcrumb's language id, so a manual retag to/from markdown shows or
+  // hides the whole preview affordance, exactly like the tokenizer switch.
+  const isMarkdown = langId === "markdown";
+  const showPreview = previewOn && isMarkdown && !!activePath && !!fc && !noModel;
 
   // Applies a manual language override to the active file's CONCRETE model (session-scoped,
   // no persistence). Bails silently when there's no model to retag (empty group / binary /
@@ -307,6 +338,15 @@ export function CodeEditorPane({ projectId, groupId, visible, style }: CodeEdito
       <div className="code-breadcrumb">
         <span className="code-crumb-name">{activePath ? baseName(activePath) : ""}</span>
         <span className="code-crumb-spacer" />
+        {isMarkdown && !!activePath && !noModel && (
+          <button
+            className="md-toggle-btn"
+            onClick={() => setPreviewOn((v) => !v)}
+            title="Toggle Markdown preview (⇧⌘V)"
+          >
+            {previewOn ? "Source" : "Preview"}
+          </button>
+        )}
         <LanguageSelector value={langId} onChange={onLangChange} disabled={noModel || !activePath} />
       </div>
       {banner && <div className={`code-banner ${banner.error ? "error" : ""}`}>{banner.text}</div>}
@@ -335,6 +375,16 @@ export function CodeEditorPane({ projectId, groupId, visible, style }: CodeEdito
             </button>
           </div>
         ) : null}
+        {showPreview && activePath && (
+          <MarkdownPreview
+            path={activePath}
+            visible={visible}
+            onClose={() => {
+              setPreviewOn(false);
+              editorRef.current?.focus();
+            }}
+          />
+        )}
         <div ref={hostRef} className={`code-host ${noModel ? "empty" : ""}`} />
       </div>
     </div>
