@@ -50,10 +50,32 @@ pub struct PlanWindow {
 
 #[derive(Deserialize, Default)]
 struct StatsCache {
+    #[serde(default, rename = "lastComputedDate")]
+    last_computed_date: String,
+    #[serde(default, rename = "firstSessionDate")]
+    first_session_date: String,
+    #[serde(default, rename = "modelUsage")]
+    model_usage: HashMap<String, ModelUsage>,
+    #[serde(default, rename = "totalMessages")]
+    total_messages: i64,
+    #[serde(default, rename = "totalSessions")]
+    total_sessions: i64,
     #[serde(default, rename = "dailyModelTokens")]
     daily_model_tokens: Vec<DailyModelTokens>,
     #[serde(default, rename = "dailyActivity")]
     daily_activity: Vec<DailyActivity>,
+}
+
+#[derive(Deserialize, Default)]
+struct ModelUsage {
+    #[serde(default, rename = "inputTokens")]
+    input_tokens: i64,
+    #[serde(default, rename = "outputTokens")]
+    output_tokens: i64,
+    #[serde(default, rename = "cacheReadInputTokens")]
+    cache_read_input_tokens: i64,
+    #[serde(default, rename = "cacheCreationInputTokens")]
+    cache_creation_input_tokens: i64,
 }
 
 #[derive(Deserialize)]
@@ -74,8 +96,9 @@ struct DailyActivity {
     session_count: i64,
 }
 
-/// Parse stats-cache.json into the latest day's local usage. Uses the LAST entry
-/// of each array (most recent) so we never need the current date. Empty on error.
+/// Parse stats-cache.json into local usage. Prefer the cumulative `modelUsage` /
+/// `totalMessages` fields when present; older cache shapes fall back to the latest
+/// daily entry so we never need the current date. Empty on error.
 pub fn parse_stats_cache(body: &str) -> LocalUsage {
     let cache: StatsCache = match serde_json::from_str(body) {
         Ok(v) => v,
@@ -83,6 +106,32 @@ pub fn parse_stats_cache(body: &str) -> LocalUsage {
     };
 
     let mut out = LocalUsage::default();
+
+    if !cache.model_usage.is_empty() {
+        let mut models: Vec<ModelTokens> = cache
+            .model_usage
+            .iter()
+            .map(|(m, u)| ModelTokens {
+                model: m.clone(),
+                tokens: u.input_tokens
+                    + u.output_tokens
+                    + u.cache_read_input_tokens
+                    + u.cache_creation_input_tokens,
+            })
+            .filter(|m| m.tokens > 0)
+            .collect();
+        models.sort_by(|a, b| b.tokens.cmp(&a.tokens));
+        out.total_tokens = models.iter().map(|m| m.tokens).sum();
+        out.tokens_by_model = models;
+        out.messages = cache.total_messages;
+        out.sessions = cache.total_sessions;
+        out.date = if !cache.last_computed_date.is_empty() {
+            cache.last_computed_date
+        } else {
+            cache.first_session_date
+        };
+        return out;
+    }
 
     if let Some(day) = cache.daily_model_tokens.last() {
         out.date = day.date.clone();
@@ -350,6 +399,34 @@ mod tests {
       ]
     }"#;
 
+    const CUMULATIVE_FIXTURE: &str = r#"{
+      "version": 1,
+      "firstSessionDate": "2026-06-01",
+      "lastComputedDate": "2026-06-26",
+      "totalMessages": 42,
+      "totalSessions": 7,
+      "modelUsage": {
+        "claude-opus-4-8": {
+          "inputTokens": 100,
+          "outputTokens": 25,
+          "cacheReadInputTokens": 1000,
+          "cacheCreationInputTokens": 250
+        },
+        "claude-sonnet-4-6": {
+          "inputTokens": 50,
+          "outputTokens": 10,
+          "cacheReadInputTokens": 0,
+          "cacheCreationInputTokens": 5
+        }
+      },
+      "dailyModelTokens": [
+        {"date": "2026-06-26", "tokensByModel": {"claude-opus-4-8": 10}}
+      ],
+      "dailyActivity": [
+        {"date": "2026-06-26", "messageCount": 1, "sessionCount": 1, "toolCallCount": 9}
+      ]
+    }"#;
+
     #[test]
     fn config_dir_prefers_selected_account_over_home() {
         // The account-usage bug: a selected (non-default-home) account dir must win, so the
@@ -385,6 +462,20 @@ mod tests {
         assert_eq!(u.total_tokens, 1_230_000);
         assert_eq!(u.messages, 320);
         assert_eq!(u.sessions, 14);
+    }
+
+    #[test]
+    fn prefers_cumulative_model_usage_when_present() {
+        let u = parse_stats_cache(CUMULATIVE_FIXTURE);
+        assert_eq!(u.date, "2026-06-26");
+        assert_eq!(u.total_tokens, 1_440);
+        assert_eq!(u.messages, 42);
+        assert_eq!(u.sessions, 7);
+        assert_eq!(u.tokens_by_model.len(), 2);
+        assert_eq!(u.tokens_by_model[0].model, "claude-opus-4-8");
+        assert_eq!(u.tokens_by_model[0].tokens, 1_375);
+        assert_eq!(u.tokens_by_model[1].model, "claude-sonnet-4-6");
+        assert_eq!(u.tokens_by_model[1].tokens, 65);
     }
 
     #[test]

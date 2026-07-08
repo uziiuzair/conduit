@@ -63,7 +63,7 @@ export function ClaudeUsagePanel() {
           {usage.local && usage.local.totalTokens > 0 ? (
             <>
               <div className="claude-pop-row">
-                <span className="name">Today</span>
+                <span className="name">Local total</span>
                 <span>{fmtTokens(usage.local.totalTokens)} tokens</span>
               </div>
               {usage.local.tokensByModel.slice(0, 2).map((m) => (
