@@ -30,6 +30,16 @@ export interface Session {
   role?: SessionRole;
   /** Registered Claude account id; absent = inherit the global default account. */
   accountId?: string | null;
+  // ---- Trust boundaries (Feature 4; only enforced under private mode) ----
+  clearance?: Clearance;
+  /** Asymmetric silo: this session may read others but no other agent may read it. */
+  silo?: boolean;
+  /** Must run against a local model and receive no cloud MCP (siloed sensitive-data agent). */
+  localOnly?: boolean;
+  channels?: string[];
+  modelTier?: string | null;
+  seedMemory?: string | null;
+  effort?: string | null;
 }
 
 /** A registered Claude account (mirrors the Rust serde struct, camelCase). */
@@ -37,6 +47,74 @@ export interface Account {
   id: string;
   label: string;
   configDir: string;
+}
+
+// ---- Trust boundaries (Feature 4) — mirror the Rust serde structs (camelCase) ----
+export type Clearance = "public" | "internal" | "confidential";
+
+export interface TrustSettings {
+  privateMode: boolean;
+}
+
+/** A trust update applied to one session (the "mark sensitive" action / policy editor). */
+export interface SessionTrust {
+  clearance: Clearance;
+  silo: boolean;
+  localOnly: boolean;
+  channels: string[];
+  modelTier?: string | null;
+  seedMemory?: string | null;
+  effort?: string | null;
+}
+
+/** A local sensitivity-scanner hit (offline; assists the manual "mark sensitive" decision). */
+export interface SensitivityHit {
+  kind: string;
+  hint: string;
+}
+
+// ---- OpenCode local provider — mirror the Rust serde structs (camelCase) ----
+
+/** Non-secret local-provider settings. The endpoint API key is never part of this (or of
+ * any persisted state) — it is held in backend memory and reaches OpenCode via child env. */
+export interface OpenCodeSettings {
+  enabled: boolean;
+  /** "ollama" | "lmstudio" | "vllm" | "llamacpp" | "openwebui" | "custom" ("" = unset). */
+  preset: string;
+  /** Full OpenAI-compatible base URL (e.g. http://127.0.0.1:11434/v1). */
+  baseUrl: string;
+  /** Model id exactly as the server reports it. */
+  model: string;
+  contextLimit?: number | null;
+  outputLimit?: number | null;
+  /** Allowlist the injected provider so OpenCode can't fall back to cloud providers. */
+  pinLocal: boolean;
+}
+
+/** One probed local inference server (detect_local_providers). */
+export interface LocalProviderStatus {
+  preset: string;
+  label: string;
+  baseUrl: string;
+  running: boolean;
+  detail: string;
+  needsKey: boolean;
+}
+
+/** A model the local server offers (list_local_models). */
+export interface LocalModel {
+  id: string;
+  /** Context window when the server reports it (Ollama does) — used to autofill limits. */
+  context?: number | null;
+  detail: string;
+  /** Tool-calling support (Ollama reports it; null/undefined = unknown). */
+  tools?: boolean | null;
+}
+
+/** Verdict of the live tool-calling probe (probe_tool_call). */
+export interface ToolProbeResult {
+  native: boolean;
+  detail: string;
 }
 
 export type TabKind = "session" | "file";
@@ -348,6 +426,8 @@ interface AppState {
   defaultAgent: AgentId;
   agentSetupComplete: boolean;
   setDefaultAgent: (id: AgentId) => void;
+  /** Run an agent's official installer, then re-detect. Returns an error string or null. */
+  installAgent: (id: AgentId) => Promise<string | null>;
   completeAgentSetup: () => void;
   /** Anonymous-telemetry opt-out (true = do not send). Default false (on). */
   telemetryOptOut: boolean;
@@ -363,6 +443,30 @@ interface AppState {
   addAccount: (label: string, configDir: string) => Promise<string | null>;
   removeAccount: (id: string) => Promise<void>;
   setDefaultAccount: (id: string | null) => Promise<void>;
+
+  // ---- Trust boundaries (Feature 4) ----
+  /** Master switch for the trust-boundary regime. When false the whole thing is inert. */
+  privateMode: boolean;
+  loadTrustSettings: () => Promise<void>;
+  setPrivateMode: (on: boolean) => Promise<void>;
+  /** Mark/adjust a session's trust (clearance / silo / local-only / channels / tier / seed). */
+  setSessionTrust: (sessionId: string, trust: SessionTrust) => Promise<void>;
+  /** Local, offline secret/PII scan of arbitrary text (assist for "mark sensitive"). */
+  scanSensitivity: (text: string) => Promise<SensitivityHit[]>;
+
+  // ---- OpenCode local provider ----
+  opencode: OpenCodeSettings;
+  /** Whether an endpoint API key is held (in backend memory) for this app run. */
+  opencodeKeySet: boolean;
+  loadOpenCodeSettings: () => Promise<void>;
+  setOpenCodeSettings: (settings: OpenCodeSettings) => Promise<void>;
+  /** Non-empty = hold/replace the key for this run; empty = clear it. Never persisted. */
+  setOpenCodeKey: (key: string) => Promise<void>;
+  detectLocalProviders: () => Promise<LocalProviderStatus[]>;
+  /** Models the server at baseUrl offers; a string is the error message. */
+  listLocalModels: (baseUrl: string, preset: string) => Promise<LocalModel[] | string>;
+  /** Live-test native tool calling on the served model; a string is the error message. */
+  probeToolCall: (baseUrl: string, model: string) => Promise<ToolProbeResult | string>;
 
   // ---- MCP server registry ----
   mcpServers: McpServer[];
@@ -499,6 +603,17 @@ export const useStore = create<AppState>((set, get) => {
     defaultAgent: readDefaultAgent(),
     accounts: [],
     defaultAccount: null,
+    privateMode: false,
+    opencode: {
+      enabled: false,
+      preset: "",
+      baseUrl: "",
+      model: "",
+      contextLimit: null,
+      outputLimit: null,
+      pinLocal: false,
+    },
+    opencodeKeySet: false,
     agentSetupComplete: localStorage.getItem(SETUP_DONE_KEY) === "1",
     telemetryOptOut: readTelemetryOptOut(),
 
@@ -511,11 +626,15 @@ export const useStore = create<AppState>((set, get) => {
     activeThemeId: resolveThemeId(readStoredPref(), systemPrefersDark()),
 
     load: async () => {
-      const [projects, home, accounts, defaultAccount] = await Promise.all([
+      const [projects, home, accounts, defaultAccount, trust, opencode] = await Promise.all([
         invoke<Project[]>("load_projects"),
         getHomeDir().catch(() => null),
         invoke<Account[]>("list_accounts").catch(() => [] as Account[]),
         invoke<string | null>("get_default_account").catch(() => null),
+        invoke<TrustSettings>("get_trust_settings").catch(
+          () => ({ privateMode: false }) as TrustSettings,
+        ),
+        invoke<OpenCodeSettings>("get_opencode_settings").catch(() => get().opencode),
       ]);
       const layouts: Record<string, ProjectLayout> = {};
       for (const p of projects) {
@@ -536,12 +655,25 @@ export const useStore = create<AppState>((set, get) => {
         selectedProjectId: projects[0]?.id ?? null,
         accounts,
         defaultAccount,
+        privateMode: trust.privateMode,
+        opencode,
       });
     },
 
     setDefaultAgent: (id) => {
       localStorage.setItem(DEFAULT_AGENT_KEY, id);
       set({ defaultAgent: id });
+    },
+
+    installAgent: async (id) => {
+      try {
+        await invoke<string>("install_agent", { agent: id });
+      } catch (e) {
+        return String(e);
+      }
+      // Re-detect so a freshly-installed agent flips to "ready".
+      await get().loadAgents();
+      return null;
     },
 
     loadAccounts: async () => {
@@ -574,6 +706,91 @@ export const useStore = create<AppState>((set, get) => {
     setDefaultAccount: async (id) => {
       await invoke("set_default_account", { accountId: id }).catch(() => {});
       set({ defaultAccount: id });
+    },
+
+    // ---- Trust boundaries (Feature 4) ----
+    loadTrustSettings: async () => {
+      try {
+        const t = await invoke<TrustSettings>("get_trust_settings");
+        set({ privateMode: t.privateMode });
+      } catch { /* keep current */ }
+    },
+    setPrivateMode: async (on) => {
+      await invoke("set_trust_settings", { settings: { privateMode: on } }).catch(() => {});
+      set({ privateMode: on });
+    },
+    setSessionTrust: async (sessionId, trust) => {
+      await invoke("set_session_trust", { sessionId, trust }).catch(() => {});
+      set((s) => ({
+        projects: s.projects.map((p) => ({
+          ...p,
+          sessions: p.sessions.map((x) =>
+            x.id === sessionId
+              ? {
+                  ...x,
+                  clearance: trust.clearance,
+                  silo: trust.silo,
+                  localOnly: trust.localOnly,
+                  channels: trust.channels,
+                  modelTier: trust.modelTier ?? undefined,
+                  seedMemory: trust.seedMemory ?? undefined,
+                }
+              : x,
+          ),
+        })),
+      }));
+    },
+    scanSensitivity: async (text) => {
+      try {
+        return await invoke<SensitivityHit[]>("scan_sensitivity", { text });
+      } catch {
+        return [];
+      }
+    },
+
+    // ---- OpenCode local provider ----
+    loadOpenCodeSettings: async () => {
+      try {
+        const [opencode, opencodeKeySet] = await Promise.all([
+          invoke<OpenCodeSettings>("get_opencode_settings"),
+          invoke<boolean>("opencode_key_set"),
+        ]);
+        set({ opencode, opencodeKeySet });
+      } catch { /* keep current */ }
+    },
+    setOpenCodeSettings: async (settings) => {
+      await invoke("set_opencode_settings", { settings }).catch(() => {});
+      set({ opencode: settings });
+    },
+    setOpenCodeKey: async (key) => {
+      if (key.trim()) {
+        await invoke("set_opencode_key", { key }).catch(() => {});
+        set({ opencodeKeySet: true });
+      } else {
+        await invoke("clear_opencode_key").catch(() => {});
+        set({ opencodeKeySet: false });
+      }
+    },
+    detectLocalProviders: async () => {
+      try {
+        return await invoke<LocalProviderStatus[]>("detect_local_providers");
+      } catch {
+        return [];
+      }
+    },
+    listLocalModels: async (baseUrl, preset) => {
+      try {
+        return await invoke<LocalModel[]>("list_local_models", { baseUrl, preset });
+      } catch (e) {
+        return String(e);
+      }
+    },
+    probeToolCall: async (baseUrl, model) => {
+      try {
+        return await invoke<ToolProbeResult>("probe_tool_call", { baseUrl, model });
+      } catch (e) {
+        return String(e);
+      }
     },
     completeAgentSetup: () => {
       localStorage.setItem(SETUP_DONE_KEY, "1");

@@ -53,11 +53,35 @@ import "monaco-editor/esm/vs/basic-languages/r/r.contribution.js";
 import "monaco-editor/esm/vs/basic-languages/perl/perl.contribution.js";
 import "monaco-editor/esm/vs/basic-languages/elixir/elixir.contribution.js";
 import "monaco-editor/esm/vs/basic-languages/dockerfile/dockerfile.contribution.js";
+// Editor-feature contribs Conduit RELIES ON (the find widget, folding, ⌘/ comments,
+// ⌘D, context menu, …). Each self-registers on import, like the Monarch tokenizers.
+// In monaco-editor 0.55.1 these are redundant at runtime (basic-languages'
+// _.contribution.js side-door already imports the full edcore contrib set) and cost
+// ~0 bytes; they PIN the features Conduit's menus/UX depend on across monaco bumps.
+// Deliberately not the edcore.main.js aggregator. See
+// docs/superpowers/specs/2026-07-06-editor-polish-tier1-design.md for the full story.
+import "monaco-editor/esm/vs/editor/contrib/find/browser/findController.js";
+import "monaco-editor/esm/vs/editor/contrib/folding/browser/folding.js";
+import "monaco-editor/esm/vs/editor/contrib/comment/browser/comment.js";
+import "monaco-editor/esm/vs/editor/contrib/multicursor/browser/multicursor.js";
+import "monaco-editor/esm/vs/editor/contrib/linesOperations/browser/linesOperations.js";
+import "monaco-editor/esm/vs/editor/contrib/wordOperations/browser/wordOperations.js"; // ⌥←/→ word moves
+import "monaco-editor/esm/vs/editor/contrib/bracketMatching/browser/bracketMatching.js";
+import "monaco-editor/esm/vs/editor/contrib/wordHighlighter/browser/wordHighlighter.js";
+import "monaco-editor/esm/vs/editor/contrib/smartSelect/browser/smartSelect.js";
+import "monaco-editor/esm/vs/editor/contrib/links/browser/links.js";
+import "monaco-editor/esm/vs/editor/contrib/unicodeHighlighter/browser/unicodeHighlighter.js";
+import "monaco-editor/esm/vs/editor/contrib/contextmenu/browser/contextmenu.js";
+import "monaco-editor/esm/vs/editor/contrib/stickyScroll/browser/stickyScrollContribution.js";
+import "monaco-editor/esm/vs/editor/contrib/clipboard/browser/clipboard.js"; // ctx-menu Cut/Copy/Paste
+import "monaco-editor/esm/vs/editor/contrib/hover/browser/hoverContribution.js";
+import "monaco-editor/esm/vs/editor/contrib/readOnlyMessage/browser/contribution.js"; // "Cannot edit in read-only editor"
 // Local worker, bundled offline by Vite. `?worker` default export is a Worker constructor
 // (typed via vite/client in src/vite-env.d.ts). editor.worker is the ONLY worker we ship.
 // Extension is required before the `?worker` query for the same package-exports reason
 // as above (Vite's resolver follows the same "exports" map as tsc/node).
 import EditorWorker from "monaco-editor/esm/vs/editor/editor.worker.js?worker";
+import { invoke } from "@tauri-apps/api/core";
 import { THEMES, type ThemeId, registerMonacoThemeSetter, currentThemeId } from "../themes";
 import { setModelFactory, type RegistryModel } from "./registry";
 
@@ -113,6 +137,17 @@ export function defineConduitThemes(): void {
         "editorLineNumber.foreground": term.brightBlack ?? fg,
         "editorCursor.foreground": term.cursor ?? fg,
         "editor.selectionBackground": term.selectionBackground ?? "#3a3a3a",
+        // Bracket-pair colorization + the active-pair guide (guides.bracketPairs in
+        // CodeEditorPane) — cycled from the same ANSI palette as the token rules.
+        // Guide colors are set explicitly because their defaults don't inherit from
+        // editorBracketHighlight in a custom theme.
+        "editorBracketHighlight.foreground1": term.yellow ?? fg,
+        "editorBracketHighlight.foreground2": term.magenta ?? fg,
+        "editorBracketHighlight.foreground3": term.cyan ?? fg,
+        "editorBracketHighlight.unexpectedBracket.foreground": term.red ?? fg,
+        "editorBracketPairGuide.activeBackground1": term.yellow ?? fg,
+        "editorBracketPairGuide.activeBackground2": term.magenta ?? fg,
+        "editorBracketPairGuide.activeBackground3": term.cyan ?? fg,
       },
     });
   });
@@ -140,6 +175,19 @@ export function initMonaco(): void {
   registerMonacoThemeSetter((id) => monaco.editor.setTheme(monacoThemeIdFor(id)));
   // Respect the theme the user actually has applied, not just the default.
   monaco.editor.setTheme(monacoThemeIdFor(currentThemeId()));
+  // Route ⌘-clicked links (the links contrib) through the existing `open_external`
+  // command (http/https only, per-OS shell-out). Without this Monaco falls back to
+  // window.open, which the Tauri webview does not route to the system browser.
+  monaco.editor.registerLinkOpener({
+    open: (resource) => {
+      // Case-insensitive: Monaco's link detector accepts "HTTPS://…" and URI.parse
+      // preserves the scheme's case. open_external re-validates on the Rust side.
+      const scheme = resource.scheme.toLowerCase();
+      if (scheme !== "http" && scheme !== "https") return false;
+      void invoke("open_external", { url: resource.toString() }).catch(() => {});
+      return true;
+    },
+  });
 }
 
 // File name / extension -> MONACO language id (default "plaintext"). Note this is a

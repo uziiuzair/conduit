@@ -271,6 +271,7 @@ function SessionRow({
           {session.branch}
         </span>
       )}
+      {!editing && <TrustChip session={session} />}
       <StatusAccessory status={status} activity={activity} compacting={compacting} />
     </div>
   );
@@ -316,6 +317,36 @@ function RenameInput({
   );
 }
 
+/** Trust-boundary badge (Feature 4). Only shown while private mode is on, since the marking is
+ *  inert otherwise: a lock for a siloed (confidential, unreadable-by-others) session, or a small
+ *  clearance tag. */
+function TrustChip({ session }: { session: Session }) {
+  const privateMode = useStore((s) => s.privateMode);
+  if (!privateMode) return null;
+  if (session.silo)
+    return (
+      <span
+        className="trust-chip silo"
+        title="Siloed — confidential; other agents cannot read this session and it is not streamed to a paired phone"
+      >
+        🔒
+      </span>
+    );
+  if (session.clearance === "confidential")
+    return (
+      <span className="trust-chip conf" title="Confidential clearance">
+        conf
+      </span>
+    );
+  if (session.clearance === "internal")
+    return (
+      <span className="trust-chip internal" title="Internal clearance">
+        int
+      </span>
+    );
+  return null;
+}
+
 function StatusAccessory({
   status,
   activity,
@@ -348,6 +379,8 @@ function SessionContextMenu() {
   const removeSession = useStore((s) => s.removeSession);
   const removeProject = useStore((s) => s.removeProject);
   const openToSide = useStore((s) => s.openToSide);
+  const setSessionTrust = useStore((s) => s.setSessionTrust);
+  const privateMode = useStore((s) => s.privateMode);
 
   useEffect(() => {
     if (!menu) return;
@@ -396,6 +429,63 @@ function SessionContextMenu() {
 
   if (!menu.sessionId) return null;
   const sid = menu.sessionId;
+  const menuSession = findSession(projects, sid)?.session;
+  const siloed = !!menuSession?.silo;
+  const toggleSensitive = () => {
+    if (menuSession) {
+      void setSessionTrust(
+        sid,
+        siloed
+          ? {
+              clearance: "public",
+              silo: false,
+              localOnly: false,
+              channels: [],
+              modelTier: null,
+              seedMemory: null,
+              effort: null,
+            }
+          : {
+              clearance: "confidential",
+              silo: true,
+              localOnly: true,
+              channels: menuSession.channels ?? [],
+              modelTier: menuSession.modelTier ?? null,
+              seedMemory: menuSession.seedMemory ?? null,
+              effort: menuSession.effort ?? null,
+            },
+      );
+      if (!privateMode && !siloed) {
+        void invoke("notify_user", {
+          title: "Conduit",
+          body: "Marked sensitive. Enable Private mode (Settings → Security) for the silo to take effect.",
+        }).catch(() => {});
+      }
+    }
+    closeMenu();
+  };
+  // SPEC-F: a custom/manual session is isolated by default (no fleet MCP, no board access
+  // at all) -- this is the one opt-in toggle that joins it to the project's mailbox, still
+  // scoped to that one project. Full-overwrite semantics on set_session_trust mean every
+  // other trust field must be resent unchanged, same as toggleSensitive above.
+  const sharedInProject = !!menuSession?.channels?.includes("project");
+  const toggleShareInProject = () => {
+    if (menuSession) {
+      const channels = sharedInProject
+        ? (menuSession.channels ?? []).filter((c) => c !== "project")
+        : [...(menuSession.channels ?? []), "project"];
+      void setSessionTrust(sid, {
+        clearance: menuSession.clearance ?? "public",
+        silo: menuSession.silo ?? false,
+        localOnly: menuSession.localOnly ?? false,
+        channels,
+        modelTier: menuSession.modelTier ?? null,
+        seedMemory: menuSession.seedMemory ?? null,
+        effort: menuSession.effort ?? null,
+      });
+    }
+    closeMenu();
+  };
   return (
     <div
       className="context-menu"
@@ -410,6 +500,15 @@ function SessionContextMenu() {
         }}
       >
         Open to the Side
+      </button>
+      <button onClick={toggleSensitive} title="Silo this session: no other agent can read it">
+        {siloed ? "Clear sensitive mark" : "Mark sensitive (silo)"}
+      </button>
+      <button
+        onClick={toggleShareInProject}
+        title="Join this project's horizontal mailbox: post/read short data-only notes with other opted-in sessions via fleet_note/fleet_inbox"
+      >
+        {sharedInProject ? "Stop sharing in project" : "Share in project"}
       </button>
       <button
         onClick={() => {
