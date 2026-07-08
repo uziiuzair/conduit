@@ -28,7 +28,7 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 use tauri::ipc::Channel;
-use tauri::{Manager, State};
+use tauri::{Emitter, Manager, State};
 
 use hooks::HookState;
 use pty::PtyManager;
@@ -52,6 +52,13 @@ impl NoWindow for std::process::Command {
         self
     }
 }
+
+/// Unsaved-buffer count pushed from the frontend (`set_dirty_count`). Rust has no
+/// other view of editor dirtiness; the quit paths (menu.rs `quit` arm and the
+/// `CloseRequested` handler below) consult it so a clean quit stays instant and
+/// webview-independent, while a dirty quit round-trips for a confirm dialog.
+#[derive(Default)]
+pub(crate) struct DirtyGuard(pub std::sync::atomic::AtomicUsize);
 
 // ---- Terminal / PTY commands -------------------------------------------------
 
@@ -542,6 +549,26 @@ fn delete_path(path: String) -> Result<(), String> {
     fsops::delete_path(&path)
 }
 
+#[tauri::command]
+fn read_file_base64(path: String) -> Result<fsops::FileBase64, String> {
+    fsops::read_file_base64(&path)
+}
+
+// ---- Quit guard ----------------------------------------------------------------
+
+#[tauri::command]
+fn set_dirty_count(count: usize, dirty: State<DirtyGuard>) {
+    dirty.0.store(count, Ordering::SeqCst);
+}
+
+/// Actually quit, invoked by the frontend after the dirty-buffer confirm. Preserves
+/// the PTY-cleanup-before-exit ordering of the direct quit path.
+#[tauri::command]
+fn quit_app(app: tauri::AppHandle, pty: State<Arc<PtyManager>>) {
+    pty.kill_all();
+    app.exit(0);
+}
+
 // ---- Notifications -----------------------------------------------------------
 
 #[tauri::command]
@@ -696,6 +723,61 @@ fn open_external(url: String) -> Result<(), String> {
     }
 }
 
+/// Reveal a file or directory in the OS file manager, selecting it where the
+/// platform supports selection (Finder `open -R`, Explorer `/select,`). Same
+/// shell-out doctrine as `open_external`: args passed positionally, never through
+/// a shell.
+#[tauri::command]
+fn reveal_path(path: String) -> Result<(), String> {
+    use std::process::Command;
+
+    if !Path::new(&path).exists() {
+        return Err("path does not exist".into());
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        return match Command::new("open")
+            .args(["-R", &path])
+            .no_window()
+            .status()
+        {
+            Ok(s) if s.success() => Ok(()),
+            Ok(s) => Err(format!("opener exited with {s}")),
+            Err(e) => Err(format!("failed to launch opener: {e}")),
+        };
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        // raw_arg, not arg: std would quote the WHOLE "/select,…" token when the path
+        // contains a space, and Explorer's nonstandard comma-splitting parser then
+        // fails to select (or opens Documents). Quote only the path; Windows file
+        // names cannot contain '"'. explorer.exe exits nonzero even on success, so
+        // only launch failures are reported.
+        let mut c = Command::new("explorer.exe");
+        c.raw_arg(format!("/select,\"{path}\""));
+        return c
+            .no_window()
+            .status()
+            .map(|_| ())
+            .map_err(|e| format!("failed to launch explorer: {e}"));
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        // xdg-open has no selection concept; open the containing directory.
+        let parent = Path::new(&path)
+            .parent()
+            .unwrap_or_else(|| Path::new("/"))
+            .to_path_buf();
+        return match Command::new("xdg-open").arg(parent).no_window().status() {
+            Ok(s) if s.success() => Ok(()),
+            Ok(s) => Err(format!("opener exited with {s}")),
+            Err(e) => Err(format!("failed to launch opener: {e}")),
+        };
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -710,6 +792,22 @@ pub fn run() {
         .manage(Arc::new(hookbus::HookBus::default()))
         .manage(Arc::new(broker::Broker::default()))
         .manage(Arc::new(broker::Presence::default()))
+        .manage(DirtyGuard::default())
+        .on_window_event(|window, event| {
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                // Closing the (only) window quits the app; give dirty buffers the
+                // same confirm round-trip as Cmd+Q. Clean windows close instantly.
+                let dirty = window
+                    .app_handle()
+                    .state::<DirtyGuard>()
+                    .0
+                    .load(Ordering::SeqCst);
+                if dirty > 0 {
+                    api.prevent_close();
+                    let _ = window.app_handle().emit("menu", "quit");
+                }
+            }
+        })
         .setup(|app| {
             let fleet = app.state::<Arc<crate::fleet::FleetState>>().inner().clone();
             let hook_state = app.state::<Arc<HookState>>().inner().clone();
@@ -778,9 +876,13 @@ pub fn run() {
             create_dir,
             rename_path,
             delete_path,
+            read_file_base64,
+            set_dirty_count,
+            quit_app,
             notify_user,
             open_in_vscode,
             open_external,
+            reveal_path,
             claude_status::fetch_claude_status,
             claude_usage::fetch_claude_usage,
             claude_usage::connect_claude_plan_usage,

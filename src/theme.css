@@ -431,6 +431,14 @@ button {
   background: var(--selection-bg);
 }
 
+.context-menu button:disabled {
+  color: var(--text-dim);
+  cursor: default;
+}
+.context-menu button:disabled:hover {
+  background: transparent;
+}
+
 .context-menu button.danger {
   color: var(--red);
 }
@@ -933,6 +941,11 @@ button {
   border-bottom-color: var(--accent);
 }
 
+/* Preview (transient) tab — VS Code's italic-label convention. */
+.tab.preview .tab-label {
+  font-style: italic;
+}
+
 .tab .tab-label {
   overflow: hidden;
   text-overflow: ellipsis;
@@ -1252,6 +1265,57 @@ button {
   background: var(--hover);
   border-color: var(--border);
 }
+.md-toggle-btn:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+.md-toggle-btn:disabled:hover {
+  color: var(--text-dim);
+  background: transparent;
+  border-color: transparent;
+}
+
+/* Non-interactive breadcrumb status chips (Ln/Col, indentation) — same recipe as
+   .md-toggle-btn / .lang-select-btn minus the hover affordance. */
+.status-chip {
+  flex: 0 0 auto;
+  color: var(--text-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  font-size: 10px;
+  padding: 2px 0;
+  white-space: nowrap;
+}
+
+/* Image preview overlay (binary raster files) — same layer as .md-preview. */
+.image-preview {
+  position: absolute;
+  inset: 0;
+  z-index: 4; /* opaque over the (empty) editor host, under the conflict banners (5) */
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  overflow: auto;
+  padding: 20px;
+  background: var(--panel-bg);
+}
+.image-preview img {
+  max-width: 100%;
+  max-height: calc(100% - 32px);
+  object-fit: contain;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background:
+    repeating-conic-gradient(var(--hover) 0% 25%, transparent 0% 50%) 0 0 / 16px 16px;
+}
+.image-preview-note {
+  flex: 0 0 auto;
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
 .md-preview {
   position: absolute;
   inset: 0;
