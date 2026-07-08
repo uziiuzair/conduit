@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/core";
-import { open } from "@tauri-apps/plugin-dialog";
+import { ask, open } from "@tauri-apps/plugin-dialog";
 import {
   useStore,
   findSession,
@@ -72,6 +72,33 @@ export default function App() {
     const onCtx = (e: MouseEvent) => e.preventDefault();
     window.addEventListener("contextmenu", onCtx);
     return () => window.removeEventListener("contextmenu", onCtx);
+  }, []);
+
+  // Window-level (capture-phase) tab-navigation shortcuts. Everything else stays a
+  // native menu accelerator; these two can't:
+  // - ⌃Tab/⌃⇧Tab: muda maps Key::Tab to the ⇥ display glyph as the NSMenuItem
+  //   keyEquivalent, which AppKit never matches against a real Tab keypress, so the
+  //   Window-menu accelerator is display-only on macOS. Capture phase because xterm
+  //   cancels Tab-family keydowns before they'd bubble out of a focused terminal.
+  // - ⌘1..9 (⌘9 = last, browser convention): meta ONLY — ctrl+digit is a real
+  //   terminal input (ctrl+3 = ESC would interrupt the agent) and must pass through.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.ctrlKey && !e.metaKey && !e.altKey && e.key === "Tab") {
+        e.preventDefault();
+        e.stopPropagation();
+        useStore.getState().cycleTab(e.shiftKey ? -1 : 1);
+        return;
+      }
+      if (e.metaKey && !e.ctrlKey && !e.altKey && !e.shiftKey) {
+        const m = /^Digit([1-9])$/.exec(e.code);
+        if (!m) return;
+        e.preventDefault();
+        useStore.getState().activateTabAt(Number(m[1]));
+      }
+    };
+    window.addEventListener("keydown", onKey, true);
+    return () => window.removeEventListener("keydown", onKey, true);
   }, []);
 
   // Claude Code hook events relayed by the Rust HTTP listener.
@@ -158,6 +185,58 @@ export default function App() {
           const g = activeGroup(layout);
           const tab = g?.tabs.find((t) => t.ref === g.activeRef);
           if (tab?.kind === "file") void st.saveFile(tab.ref);
+          break;
+        }
+        case "save-all":
+          void st.saveAll();
+          break;
+        case "reopen-tab":
+          st.reopenClosedTab();
+          break;
+        case "reveal-active": {
+          const layout = st.selectedProjectId ? st.layouts[st.selectedProjectId] : undefined;
+          const g = activeGroup(layout);
+          const tab = g?.tabs.find((t) => t.ref === g.activeRef);
+          if (tab?.kind === "file") st.revealInTree(tab.ref);
+          break;
+        }
+        case "next-tab":
+          st.cycleTab(1);
+          break;
+        case "prev-tab":
+          st.cycleTab(-1);
+          break;
+        case "toggle-word-wrap":
+          st.toggleWordWrap();
+          break;
+        case "toggle-trim-on-save":
+          st.toggleTrimOnSave();
+          break;
+        case "zoom-in":
+          st.setFontZoom(st.fontZoom + 1);
+          break;
+        case "zoom-out":
+          st.setFontZoom(st.fontZoom - 1);
+          break;
+        case "zoom-reset":
+          st.setFontZoom(0);
+          break;
+        case "toggle-maximize":
+          if (st.selectedProjectId) st.toggleMaximizeGroup(st.selectedProjectId);
+          break;
+        case "quit": {
+          // Rust forwards quit here only when it saw a nonzero dirty count
+          // (menu.rs quit arm / CloseRequested handler); confirm, then quit for real.
+          void (async () => {
+            const n = Object.keys(st.dirty).length;
+            const ok =
+              n === 0 ||
+              (await ask(
+                `Quit with unsaved changes? ${n} file${n === 1 ? " has" : "s have"} unsaved edits that will be lost.`,
+                { title: "Conduit", kind: "warning", okLabel: "Quit Anyway", cancelLabel: "Cancel" },
+              ));
+            if (ok) await invoke("quit_app").catch(() => {});
+          })();
           break;
         }
         case "close-tab": {

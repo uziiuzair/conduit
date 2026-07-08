@@ -91,10 +91,15 @@ export function dirtyOf(path: string): boolean {
   return e.model.getAlternativeVersionId() !== e.savedVersionId;
 }
 
-export function setSaved(path: string, baseline: Baseline): void {
+/** Record the saved point. `versionId` is the version whose CONTENT was written —
+ *  async writers (saveFile) must snapshot it next to getValue(), because reading the
+ *  current id after an awaited write would absorb any keystroke that landed mid-write
+ *  and report the buffer clean while it differs from disk. Synchronous reconcilers
+ *  (watcher reload, banner Reload) omit it: capture-at-call is exact there. */
+export function setSaved(path: string, baseline: Baseline, versionId?: number): void {
   const e = entries.get(path);
   if (!e || !e.model) return;
-  e.savedVersionId = e.model.getAlternativeVersionId();
+  e.savedVersionId = versionId ?? e.model.getAlternativeVersionId();
   e.baseline = baseline;
 }
 
