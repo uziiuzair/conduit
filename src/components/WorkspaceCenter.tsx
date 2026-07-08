@@ -177,6 +177,7 @@ export function WorkspaceCenter({
               <TerminalView
                 key={session.id}
                 sessionId={session.id}
+                projectId={project.id}
                 workingDirectory={session.useWorktree ? project.path : workingDirOf(project, session)}
                 // Re-extract the slug Claude was given at create time (last path segment).
                 worktreeName={

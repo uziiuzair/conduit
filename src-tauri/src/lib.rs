@@ -728,6 +728,11 @@ fn delete_path(path: String) -> Result<(), String> {
     fsops::delete_path(&path)
 }
 
+#[tauri::command]
+fn resolve_terminal_path(base: String, token: String) -> Option<fsops::ResolvedPath> {
+    fsops::resolve_terminal_path(&base, &token)
+}
+
 // ---- Notifications -----------------------------------------------------------
 
 #[tauri::command]
@@ -1042,6 +1047,7 @@ pub fn run() {
             create_dir,
             rename_path,
             delete_path,
+            resolve_terminal_path,
             notify_user,
             open_in_vscode,
             open_external,
