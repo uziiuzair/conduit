@@ -44,6 +44,14 @@ exactly as they do in a normal terminal.
 - **Branch-lane git graph**, a **Changes** view, and a per-session plain terminal.
 - **Live status from Claude Code hooks** — status dots (running / done / needs-you),
   a live to-dos list, and native notifications.
+- **Local models for OpenCode** — point OpenCode at your own GPU (Ollama, LM Studio,
+  vLLM, llama.cpp, OpenWebUI, or any OpenAI-compatible endpoint) from
+  _Settings → Local models_. It auto-detects running servers, fetches their model
+  lists, picks the strongest tool-calling model, and can live-test that a model
+  really makes native tool calls before you commit a session to it. Config is
+  injected per session via `OPENCODE_CONFIG_CONTENT` (your `opencode.json` files are
+  never touched); an optional endpoint API key is held in memory only — never
+  written to disk.
 - **Claude service status + usage** — an ambient sidebar readout: a status dot from
   [status.claude.com](https://status.claude.com) (click for component & incident detail,
   with a **warning banner** when something's degraded), plus a usage panel showing today's
@@ -154,6 +162,7 @@ model access are the chosen account's.)
 | Hook HTTP listener + per-agent hook/plugin installer          | `src-tauri/src/hooks.rs`                            |
 | Claude **service** status (status.claude.com)                 | `src-tauri/src/claude_status.rs`                   |
 | Claude **usage** — local consumption + plan limits            | `src-tauri/src/claude_usage.rs`                    |
+| Local LLM servers — detect / list models / tool-call probe    | `src-tauri/src/local_llm.rs`                       |
 | Git metadata + branch graph data                              | `src-tauri/src/git.rs`                              |
 | Read-only filesystem (Files tab + viewer)                     | `src-tauri/src/fsops.rs`                            |
 | Notifications                                                 | `src-tauri/src/notify.rs`                           |

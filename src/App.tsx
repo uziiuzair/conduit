@@ -29,6 +29,16 @@ interface HookPayload {
   body: any;
 }
 
+// Menu-dispatched Monaco editor actions (Find, Replace, …): refocus the last-focused
+// editor — menu clicks land after focus has left it — then run the action by id.
+function runEditorAction(id: string): void {
+  const ed = getLastFocusedEditor();
+  if (ed) {
+    ed.focus();
+    void ed.getAction(id)?.run();
+  }
+}
+
 export default function App() {
   const projects = useStore((s) => s.projects);
   const selectedProjectId = useStore((s) => s.selectedProjectId);
@@ -55,7 +65,9 @@ export default function App() {
   }, [load, loadAgents]);
 
   // Suppress the webview's default context menu (Reload / Inspect Element).
-  // Our own row menus call preventDefault + stopPropagation, so they're unaffected.
+  // Our own row menus call preventDefault + stopPropagation, so they're unaffected —
+  // and Monaco's context menu (contextmenu contrib) is its own widget, not the native
+  // menu, so preventDefault here doesn't block it either.
   useEffect(() => {
     const onCtx = (e: MouseEvent) => e.preventDefault();
     window.addEventListener("contextmenu", onCtx);
@@ -164,14 +176,14 @@ export default function App() {
             if (typeof dir === "string") await st.addProject(dir);
           })();
           break;
-        case "find": {
-          const ed = getLastFocusedEditor();
-          if (ed) {
-            ed.focus();
-            ed.getAction("actions.find")?.run();
-          }
+        case "find":
+          runEditorAction("actions.find");
           break;
-        }
+        case "replace":
+          // No-ops on read-only editors (the action's implementation bails on
+          // EditorOption.readOnly), same as VS Code.
+          runEditorAction("editor.action.startFindReplaceAction");
+          break;
         case "theme:auto":
         case "theme:warm-light":
         case "theme:warm-dim":

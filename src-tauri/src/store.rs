@@ -20,7 +20,20 @@ pub enum SessionRole {
     Conductor,
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug)]
+/// Confidentiality level of a session, lowest to highest. Ordered so a clearance comparison
+/// (`caller >= target`) gates reads: an agent may only read a session at or below its own
+/// clearance. Part of the opt-in trust-boundary regime (see [`TrustSettings`], [`can_read`]);
+/// ignored entirely when private mode is off.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum Clearance {
+    #[default]
+    Public,
+    Internal,
+    Confidential,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct Session {
     pub id: String,
@@ -39,6 +52,160 @@ pub struct Session {
     /// default account (or Conduit's own env when no default is set).
     #[serde(default)]
     pub account_id: Option<String>,
+    // ---- Trust boundaries (Feature 4; only enforced when TrustSettings.private_mode) -------
+    /// Confidentiality level. Reads are gated by `caller.clearance >= target.clearance`.
+    #[serde(default)]
+    pub clearance: Clearance,
+    /// Asymmetric silo: this session may read others (per policy) but NO other session may
+    /// read its output. Enforced in the fleet MCP `fleet_peek` gate and by suppressing its
+    /// remote (mobile-bridge) stream -- never dependent on a soft persona instruction.
+    #[serde(default)]
+    pub silo: bool,
+    /// This session must run against a local model and receive no cloud/network MCP. Set on
+    /// siloed sensitive-data agents (OpenCode + Ollama). The model-pinning half composes with
+    /// the local-OpenCode feature; Phase 1 enforces "no cloud MCP" + remote-stream suppression.
+    #[serde(default)]
+    pub local_only: bool,
+    /// Named collaboration channels this session belongs to. Reserved for the Phase 3 policy
+    /// editor; not yet consulted by `can_read` / `can_inject`.
+    #[serde(default)]
+    pub channels: Vec<String>,
+    /// Preferred model tier: "cheap" | "standard" | "hard" (SPEC-B, §7.5). Mapped to a
+    /// concrete per-adapter model id by `agent::model_for_tier`.
+    #[serde(default)]
+    pub model_tier: Option<String>,
+    /// Seeded / "prefixed" memory injected at spawn as an appended system prompt. Phase 5.
+    #[serde(default)]
+    pub seed_memory: Option<String>,
+    /// Effort level: "low" | "medium" | "high" | "xhigh" | "max" (SPEC-B, §7.2). Only
+    /// Claude has a per-invocation effort control today (verified: `claude --help` lists
+    /// `--effort <level>` with exactly these five values) -- other adapters record this
+    /// but don't act on it (`agent::clamp_effort`'s doc comment explains why).
+    #[serde(default)]
+    pub effort: Option<String>,
+}
+
+/// Directed READ policy: may `caller` read `target`'s output? The single source of truth for
+/// the silo, consulted only when private mode is on. Phase 1 semantics: a session may read
+/// itself; a siloed target is NEVER readable by anyone else (the asymmetric silo); otherwise
+/// reads are gated by a clearance ceiling. Channel membership is reserved for Phase 3.
+pub fn can_read(caller: &Session, target: &Session) -> bool {
+    if caller.id == target.id {
+        return true;
+    }
+    if target.silo {
+        return false; // asymmetric: no readback of a siloed session, ever
+    }
+    caller.clearance >= target.clearance
+}
+
+/// Directed INJECT policy: may `caller` type into `target`? Phase 1 keeps the existing
+/// self-block; channel/clearance-aware injection is Phase 3. The confidentiality guarantee
+/// does not rely on this gate -- siloed data never reaches a cloud agent because `can_read`
+/// stops the orchestrator from reading it in the first place.
+pub fn can_inject(caller: &Session, target: &Session) -> bool {
+    caller.id != target.id
+}
+
+/// A trust update applied to one session via `set_session_trust` (the "mark sensitive" action
+/// and, later, the policy editor).
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionTrust {
+    #[serde(default)]
+    pub clearance: Clearance,
+    #[serde(default)]
+    pub silo: bool,
+    #[serde(default)]
+    pub local_only: bool,
+    #[serde(default)]
+    pub channels: Vec<String>,
+    #[serde(default)]
+    pub model_tier: Option<String>,
+    #[serde(default)]
+    pub seed_memory: Option<String>,
+    #[serde(default)]
+    pub effort: Option<String>,
+}
+
+/// A hit from the local sensitivity scanner. Surfaced to the UI as an ASSIST for the manual
+/// "mark sensitive" action -- never the sole trigger for siloing, and never sent to any cloud
+/// agent (the scan runs entirely in-process).
+#[derive(Serialize, Clone, Debug, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct SensitivityHit {
+    pub kind: &'static str,
+    pub hint: &'static str,
+}
+
+/// True if `text` contains `prefix` immediately followed by at least `min_tail` token
+/// characters (alnum / - / _) -- i.e. a plausible secret, not just a bare prefix word.
+fn contains_token(text: &str, prefix: &str, min_tail: usize) -> bool {
+    text.match_indices(prefix).any(|(i, _)| {
+        text[i + prefix.len()..]
+            .chars()
+            .take_while(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
+            .count()
+            >= min_tail
+    })
+}
+
+/// True if `text` has a credential-looking assignment: a key like password/secret/api_key
+/// followed (past quotes/space) by `=` or `:` and a non-empty value.
+fn has_credential_assignment(text: &str) -> bool {
+    let lower = text.to_ascii_lowercase();
+    const KEYS: [&str; 5] = ["password", "passwd", "secret", "api_key", "apikey"];
+    KEYS.iter().any(|k| {
+        lower.match_indices(k).any(|(i, _)| {
+            let rest = lower[i + k.len()..]
+                .trim_start_matches(|c: char| c == '"' || c == '\'' || c.is_whitespace());
+            rest.strip_prefix('=')
+                .or_else(|| rest.strip_prefix(':'))
+                .is_some_and(|v| {
+                    v.trim_start()
+                        .chars()
+                        .next()
+                        .is_some_and(|c| !c.is_whitespace())
+                })
+        })
+    })
+}
+
+/// Scan text for high-signal secret / credential markers, entirely locally. Returns a
+/// deduplicated list of hit categories. Pattern-based (no regex dependency, keeping the Rust
+/// side lean) and tuned for precision over recall since it only assists a manual decision.
+pub fn scan_sensitivity(text: &str) -> Vec<SensitivityHit> {
+    let mut hits: Vec<SensitivityHit> = Vec::new();
+    let mut push = |kind, hint| {
+        if !hits.iter().any(|h| h.kind == kind) {
+            hits.push(SensitivityHit { kind, hint });
+        }
+    };
+    if text.contains("-----BEGIN") && text.contains("PRIVATE KEY") {
+        push("private-key", "PEM private key block");
+    }
+    if text.contains("AKIA") || text.contains("ASIA") {
+        push("aws-access-key", "AWS access-key id prefix");
+    }
+    if text.contains("sk-ant-") || contains_token(text, "sk-", 20) {
+        push("api-key", "secret API key (sk-...)");
+    }
+    if ["ghp_", "gho_", "ghs_", "github_pat_"]
+        .iter()
+        .any(|p| text.contains(p))
+    {
+        push("github-token", "GitHub token");
+    }
+    if ["xoxb-", "xoxp-", "xoxa-"].iter().any(|p| text.contains(p)) {
+        push("slack-token", "Slack token");
+    }
+    if contains_token(text, "AIza", 30) {
+        push("google-api-key", "Google API key");
+    }
+    if has_credential_assignment(text) {
+        push("credential", "password / secret assignment");
+    }
+    hits
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -92,6 +259,48 @@ pub struct Account {
     pub config_dir: String,
 }
 
+/// Opt-in trust-boundary settings (Feature 4). When `private_mode` is false the entire regime
+/// is inert: the `can_read` / `can_inject` gates are skipped and a session's silo / local_only
+/// flags have no effect, so OpenCode and every other agent behave like normal sessions.
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct TrustSettings {
+    #[serde(default)]
+    pub private_mode: bool,
+}
+
+/// OpenCode local-provider settings: route `opencode` sessions to a
+/// local/self-hosted OpenAI-compatible endpoint (Ollama, LM Studio, vLLM, llama.cpp,
+/// OpenWebUI, or a custom URL). Non-secret and persisted in state.json; the API key is
+/// deliberately NOT here — it lives only in `Store::opencode_key` (in memory) and reaches
+/// the child solely through its process env at spawn.
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct OpenCodeSettings {
+    /// Master switch. Off = OpenCode spawns untouched (its own config applies).
+    #[serde(default)]
+    pub enabled: bool,
+    /// Preset id: "ollama" | "lmstudio" | "vllm" | "llamacpp" | "openwebui" | "custom".
+    /// Only affects labels and how models are listed; the spawn config is uniform.
+    #[serde(default)]
+    pub preset: String,
+    /// Full OpenAI-compatible base URL (e.g. http://localhost:11434/v1).
+    #[serde(default)]
+    pub base_url: String,
+    /// Model id exactly as the server reports it (e.g. "qwen3:30b-a3b").
+    #[serde(default)]
+    pub model: String,
+    /// Optional per-model limits forwarded to OpenCode ("limit": {context, output}).
+    #[serde(default)]
+    pub context_limit: Option<u32>,
+    #[serde(default)]
+    pub output_limit: Option<u32>,
+    /// Allowlist the injected provider (`enabled_providers: ["conduit"]`) so OpenCode
+    /// cannot fall back to cloud providers even if the user has credentials for them.
+    #[serde(default)]
+    pub pin_local: bool,
+}
+
 /// Root of state.json. Was a bare `Vec<Project>`; promoted to an object so the account
 /// registry persists alongside projects. Legacy array files migrate on load.
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
@@ -103,12 +312,21 @@ pub struct PersistState {
     pub accounts: Vec<Account>,
     #[serde(default)]
     pub default_account: Option<String>,
+    #[serde(default)]
+    pub trust: TrustSettings,
+    #[serde(default)]
+    pub opencode: OpenCodeSettings,
 }
 
 pub struct Store {
     projects: Mutex<Vec<Project>>,
     accounts: Mutex<Vec<Account>>,
     default_account: Mutex<Option<String>>,
+    trust: Mutex<TrustSettings>,
+    opencode: Mutex<OpenCodeSettings>,
+    /// The local-endpoint API key, held in memory for the app's lifetime only. Never part
+    /// of `PersistState`/`save()`, never logged; injected into an `opencode` child's env.
+    opencode_key: Mutex<Option<String>>,
     save_path: PathBuf,
 }
 
@@ -195,6 +413,9 @@ impl Store {
             projects: Mutex::new(state.projects),
             accounts: Mutex::new(state.accounts),
             default_account: Mutex::new(state.default_account),
+            trust: Mutex::new(state.trust),
+            opencode: Mutex::new(state.opencode),
+            opencode_key: Mutex::new(None),
             save_path,
         }
     }
@@ -213,6 +434,12 @@ impl Store {
                 .clone(),
             default_account: self
                 .default_account
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone(),
+            trust: self.trust.lock().unwrap_or_else(|e| e.into_inner()).clone(),
+            opencode: self
+                .opencode
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
                 .clone(),
@@ -326,6 +553,7 @@ impl Store {
             agent,
             role,
             account_id: None,
+            ..Default::default()
         };
         project.sessions.push(session.clone());
         self.save(&projects);
@@ -390,6 +618,25 @@ impl Store {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .clone()
+    }
+
+    /// The config dir of the global default account, or None if no default is set / it no
+    /// longer resolves. Used by the (session-less) Claude usage panel so its local-token
+    /// read AND its plan-usage token read follow the account the user actually selected --
+    /// otherwise both silently read `~/.claude` (the first/only account) and show the wrong
+    /// account's usage. Mirrors `session_account_config_dir`'s default-account branch, minus
+    /// the per-session lookup (the usage panel is global, not tied to one session).
+    pub fn default_account_config_dir(&self) -> Option<String> {
+        let account_id = self
+            .default_account
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()?;
+        let accounts = self.accounts.lock().unwrap_or_else(|e| e.into_inner());
+        accounts
+            .iter()
+            .find(|a| a.id == account_id)
+            .map(|a| a.config_dir.clone())
     }
 
     /// Register an account. Errors on an empty / missing / duplicate config dir; else the
@@ -472,6 +719,106 @@ impl Store {
             }
         }
         self.save(&projects);
+    }
+
+    // ---- Trust boundaries (Feature 4: multi-agent silo / controlled sharing) -----
+
+    pub fn trust_settings(&self) -> TrustSettings {
+        self.trust.lock().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+
+    /// Whether the trust-boundary regime is active. The fleet MCP gates and the spawner's
+    /// silo handling all short-circuit to their pre-Feature-4 behavior when this is false.
+    pub fn is_private_mode(&self) -> bool {
+        self.trust
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .private_mode
+    }
+
+    pub fn set_trust_settings(&self, settings: TrustSettings) {
+        {
+            let mut t = self.trust.lock().unwrap_or_else(|e| e.into_inner());
+            *t = settings;
+        }
+        self.persist();
+    }
+
+    /// Apply a trust update to one session (the "mark sensitive" action; later, the policy
+    /// editor). Overwrites the session's clearance / silo / local_only / channels / tier / seed.
+    pub fn set_session_trust(&self, session_id: &str, trust: SessionTrust) {
+        let mut projects = self.projects.lock().unwrap_or_else(|e| e.into_inner());
+        for p in projects.iter_mut() {
+            if let Some(s) = p.sessions.iter_mut().find(|s| s.id == session_id) {
+                s.clearance = trust.clearance;
+                s.silo = trust.silo;
+                s.local_only = trust.local_only;
+                s.channels = trust.channels;
+                s.model_tier = trust.model_tier;
+                s.seed_memory = trust.seed_memory;
+                s.effort = trust.effort;
+                break;
+            }
+        }
+        self.save(&projects);
+    }
+
+    /// Whether a session is siloed. Read by the spawner to suppress its remote (bridge) stream.
+    pub fn is_session_siloed(&self, session_id: &str) -> bool {
+        self.projects
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .flat_map(|p| &p.sessions)
+            .find(|s| s.id == session_id)
+            .map(|s| s.silo)
+            .unwrap_or(false)
+    }
+
+    /// Whether a session is marked local-only (trust boundaries). Under private mode this makes the
+    /// OpenCode spawner pin the injected local provider as the ONLY enabled provider.
+    pub fn is_session_local_only(&self, session_id: &str) -> bool {
+        self.projects
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .flat_map(|p| &p.sessions)
+            .find(|s| s.id == session_id)
+            .map(|s| s.local_only)
+            .unwrap_or(false)
+    }
+
+    // ---- OpenCode local provider ---------------------------------------------------
+
+    pub fn opencode_settings(&self) -> OpenCodeSettings {
+        self.opencode
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+
+    pub fn set_opencode_settings(&self, settings: OpenCodeSettings) {
+        {
+            let mut s = self.opencode.lock().unwrap_or_else(|e| e.into_inner());
+            *s = settings;
+        }
+        self.persist();
+    }
+
+    /// Set (Some) or clear (None) the in-memory endpoint API key. Never persisted.
+    /// Trimmed on the way in — a paste with padding would otherwise ride into the
+    /// Authorization header verbatim and 401 with no way to inspect the held value.
+    pub fn set_opencode_key(&self, key: Option<String>) {
+        let mut k = self.opencode_key.lock().unwrap_or_else(|e| e.into_inner());
+        *k = key.map(|k| k.trim().to_string()).filter(|k| !k.is_empty());
+    }
+
+    /// The in-memory endpoint API key, if one was set this run.
+    pub fn opencode_key(&self) -> Option<String> {
+        self.opencode_key
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
     }
 
     /// Auto-detect candidate Claude account dirs to prefill the accounts manager (does not
@@ -562,11 +909,17 @@ mod tests {
     use super::*;
 
     impl Store {
-        fn for_test(dir: &std::path::Path) -> Self {
+        /// Test-only constructor bypassing `data_dir()`/disk I/O. `pub(crate)` so other
+        /// modules' `#[cfg(test)]` code (e.g. `fleet_mcp.rs`'s SPEC-0 regression tests) can
+        /// build a real `Store` without touching the user's actual state.json.
+        pub(crate) fn for_test(dir: &std::path::Path) -> Self {
             Store {
                 projects: Mutex::new(Vec::new()),
                 accounts: Mutex::new(Vec::new()),
                 default_account: Mutex::new(None),
+                trust: Mutex::new(TrustSettings::default()),
+                opencode: Mutex::new(OpenCodeSettings::default()),
+                opencode_key: Mutex::new(None),
                 save_path: dir.join("state.json"),
             }
         }
@@ -831,8 +1184,184 @@ mod tests {
             agent: crate::agent::AgentId::Claude,
             role: SessionRole::Conductor,
             account_id: None,
+            ..Default::default()
         };
         let v = serde_json::to_string(&s).unwrap();
         assert!(v.contains(r#""role":"conductor""#), "got {v}");
+    }
+
+    // ---- Trust boundaries (Feature 4) ----
+
+    fn mk(id: &str) -> Session {
+        Session {
+            id: id.into(),
+            name: id.into(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn can_read_allows_self_and_equal_public_clearance() {
+        let a = mk("a");
+        let b = mk("b");
+        assert!(can_read(&a, &a), "a session can always read itself");
+        assert!(can_read(&a, &b), "public reads public");
+    }
+
+    #[test]
+    fn silo_is_never_readable_by_others_but_reads_others() {
+        let conductor = mk("c");
+        let mut opencode = mk("oc");
+        opencode.silo = true;
+        // The crown jewel: no other agent may read the siloed session.
+        assert!(!can_read(&conductor, &opencode));
+        // Asymmetry: the siloed session may still read non-siloed peers.
+        assert!(can_read(&opencode, &conductor));
+    }
+
+    #[test]
+    fn clearance_ceiling_blocks_reading_up() {
+        let public = mk("p"); // Clearance::Public by default
+        let mut confidential = mk("k");
+        confidential.clearance = Clearance::Confidential;
+        assert!(
+            !can_read(&public, &confidential),
+            "public cannot read confidential"
+        );
+        assert!(
+            can_read(&confidential, &public),
+            "confidential can read public"
+        );
+    }
+
+    #[test]
+    fn can_inject_blocks_only_self() {
+        let a = mk("a");
+        let b = mk("b");
+        assert!(!can_inject(&a, &a));
+        assert!(can_inject(&a, &b));
+    }
+
+    #[test]
+    fn clearance_orders_low_to_high() {
+        assert!(Clearance::Public < Clearance::Internal);
+        assert!(Clearance::Internal < Clearance::Confidential);
+    }
+
+    #[test]
+    fn old_state_json_defaults_trust_fields() {
+        // A session persisted before Feature 4 must load as public / non-silo.
+        let json = r#"{"id":"x","name":"n","useWorktree":false}"#;
+        let s: Session = serde_json::from_str(json).unwrap();
+        assert_eq!(s.clearance, Clearance::Public);
+        assert!(!s.silo);
+        assert!(!s.local_only);
+        assert!(s.channels.is_empty());
+        assert!(s.model_tier.is_none());
+        // A state.json with no `trust` key defaults private_mode = false (regime inert).
+        let ps: PersistState = serde_json::from_str(r#"{"projects":[]}"#).unwrap();
+        assert!(!ps.trust.private_mode);
+    }
+
+    #[test]
+    fn scanner_flags_secrets_and_ignores_prose() {
+        assert!(scan_sensitivity("just some prose about a cat and a hat").is_empty());
+        assert!(scan_sensitivity("AKIA1234567890ABCDEF")
+            .iter()
+            .any(|h| h.kind == "aws-access-key"));
+        assert!(scan_sensitivity("token: ghp_abcDEF1234567890")
+            .iter()
+            .any(|h| h.kind == "github-token"));
+        assert!(scan_sensitivity("-----BEGIN RSA PRIVATE KEY-----")
+            .iter()
+            .any(|h| h.kind == "private-key"));
+        assert!(scan_sensitivity("password = hunter2")
+            .iter()
+            .any(|h| h.kind == "credential"));
+        // sk- needs a long token tail to count, so ordinary words don't false-positive.
+        assert!(scan_sensitivity("sk-abcdefghijklmnopqrstuvwxyz012345")
+            .iter()
+            .any(|h| h.kind == "api-key"));
+        assert!(scan_sensitivity("please ask-me later about the task")
+            .iter()
+            .all(|h| h.kind != "api-key"));
+    }
+
+    #[test]
+    fn set_session_trust_marks_sensitive_and_persists_private_mode() {
+        let dir = temp_dir("trust");
+        let store = Store::for_test(&dir);
+        assert!(!store.is_private_mode());
+        store.set_trust_settings(TrustSettings { private_mode: true });
+        assert!(store.is_private_mode());
+
+        let p = store.add_project("/repo".into());
+        let s = store
+            .add_session(
+                &p.id,
+                "s".into(),
+                false,
+                crate::agent::AgentId::OpenCode,
+                SessionRole::Worker,
+            )
+            .unwrap();
+        assert!(!store.is_session_siloed(&s.id));
+        store.set_session_trust(
+            &s.id,
+            SessionTrust {
+                clearance: Clearance::Confidential,
+                silo: true,
+                local_only: true,
+                channels: vec!["collab".into()],
+                ..Default::default()
+            },
+        );
+        assert!(store.is_session_siloed(&s.id));
+        assert!(store.is_session_local_only(&s.id));
+        assert!(!store.is_session_local_only("missing"));
+    }
+
+    #[test]
+    fn opencode_settings_persist_but_key_never_touches_disk() {
+        let dir = temp_dir("oc_settings");
+        let store = Store::for_test(&dir);
+        assert!(!store.opencode_settings().enabled, "defaults off");
+
+        // Padding is trimmed on the way in (a padded paste would 401 silently).
+        store.set_opencode_key(Some("  sk-local-test-XYZ \n".into()));
+        store.set_opencode_settings(OpenCodeSettings {
+            enabled: true,
+            preset: "ollama".into(),
+            base_url: "http://localhost:11434/v1".into(),
+            model: "qwen3:30b-a3b".into(),
+            context_limit: Some(262144),
+            output_limit: Some(16384),
+            pin_local: true,
+        });
+        assert_eq!(store.opencode_key().as_deref(), Some("sk-local-test-XYZ"));
+
+        // Settings round-trip through the persisted file; the key must NOT be in it.
+        let raw = fs::read_to_string(dir.join("state.json")).unwrap();
+        assert!(
+            !raw.contains("sk-local-test-XYZ"),
+            "API key leaked into state.json"
+        );
+        let ps: PersistState = serde_json::from_str(&raw).unwrap();
+        assert!(ps.opencode.enabled);
+        assert_eq!(ps.opencode.model, "qwen3:30b-a3b");
+        assert_eq!(ps.opencode.context_limit, Some(262144));
+        assert!(ps.opencode.pin_local);
+
+        // Clearing (or setting a blank) key empties the holder.
+        store.set_opencode_key(Some("   ".into()));
+        assert!(store.opencode_key().is_none());
+    }
+
+    #[test]
+    fn old_state_json_without_opencode_defaults_disabled() {
+        let ps: PersistState = serde_json::from_str(r#"{"projects":[]}"#).unwrap();
+        assert!(!ps.opencode.enabled);
+        assert!(ps.opencode.base_url.is_empty());
+        assert!(ps.opencode.context_limit.is_none());
     }
 }

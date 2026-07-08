@@ -1,6 +1,12 @@
 # Conductor Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+>
+> **2026-07-05 forward pointer:** shipped (v0.3.0). Follow-on work extending
+> this — heterogeneous adapters, mailbox, usage meter — is planned in
+> `docs/superpowers/plans/2026-07-04-orchestration-v2-plan.md` and its
+> `2026-07-05-orchestration-v2-scope-expansion.md` companion. Not yet
+> implemented as of this note.
 
 **Goal:** Add a per-project "Conductor" — a Claude terminal session that observes every worker session's status (with on-demand output peeks) and acts on the fleet (spawn worktree-isolated workers, send input, stop workers) through a Conduit-hosted MCP server.
 
