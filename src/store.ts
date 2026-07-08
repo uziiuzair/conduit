@@ -509,7 +509,7 @@ interface AppState {
   ) => void;
   splitTab: (projectId: string, ref: string, targetGroupId: string, side: "left" | "right") => void;
   setGroupWeights: (projectId: string, weights: number[]) => void;
-  openFile: (projectId: string, path: string) => void;
+  openFile: (projectId: string, path: string, reveal?: { line: number; col?: number }) => void;
 
   // ---- Phase 3: file-tree CRUD (all non-persisted) ----
   /** dirPath -> bump counter; a FileTree entry re-lists when its counter changes. */
@@ -531,6 +531,9 @@ interface AppState {
   setConflict: (path: string, c: { mtimeMs: number; size: number } | "deleted") => void;
   saveFile: (path: string) => Promise<void>;
   requestCloseTab: (projectId: string, groupId: string, ref: string) => Promise<void>;
+  /** One-shot editor reveal target set by a terminal path Cmd+Click; consumed by CodeEditorPane. */
+  pendingReveal: { path: string; line: number; col: number } | null;
+  clearPendingReveal: () => void;
 
   setTopTab: (t: TopTab) => void;
   setBottomTab: (t: BottomTab) => void;
@@ -585,6 +588,7 @@ export const useStore = create<AppState>((set, get) => {
     pendingPrompts: {},
     dirty: {},
     conflict: {},
+    pendingReveal: null,
     claudeStatus: null,
     claudeUsage: null,
     planConnected: readPlanConnected(),
@@ -991,12 +995,14 @@ export const useStore = create<AppState>((set, get) => {
       applyLayout(projectId, (l) => rOpenToSide(l, tab));
       if (tab.kind === "session") clearNeeds(tab.ref);
     },
-    openFile: (projectId, path) => {
+    openFile: (projectId, path, reveal) => {
       const l = get().layouts[projectId];
       // Only a genuinely new tab bumps the ref (rOpenTab just re-activates an existing one).
       const already = !!l && l.groups.some((g) => g.tabs.some((t) => t.ref === path));
       applyLayout(projectId, (l2) => rOpenTab(l2, { kind: "file", ref: path }));
       if (!already) registry.acquire(path);
+      // One-shot reveal target: CodeEditorPane scrolls to it once the model is set.
+      if (reveal) set({ pendingReveal: { path, line: reveal.line, col: reveal.col ?? 1 } });
     },
 
     bumpDir: (dirPath) =>
@@ -1082,6 +1088,8 @@ export const useStore = create<AppState>((set, get) => {
 
     setConflict: (path, c) =>
       set((s) => ({ conflict: { ...s.conflict, [path]: c } })),
+
+    clearPendingReveal: () => set((s) => (s.pendingReveal ? { pendingReveal: null } : {})),
 
     saveFile: async (path) => {
       const entry = registry.model(path);
