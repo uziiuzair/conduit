@@ -206,6 +206,10 @@ pub struct WsTab {
     pub kind: String, // "session" | "file"
     #[serde(rename = "ref")]
     pub r#ref: String,
+    /// Preview (transient, italic) tab — replaced by the next preview open in its
+    /// group. Must exist here or serde strips it from persisted layouts.
+    #[serde(default)]
+    pub preview: bool,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]

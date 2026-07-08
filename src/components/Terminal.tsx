@@ -13,6 +13,10 @@ function b64ToBytes(b64: string): Uint8Array {
   return bytes;
 }
 
+// Base terminal font size; the View-menu zoom offsets it (editors scale from their own
+// 12px base in CodeEditorPane — the two surfaces deliberately keep their 1px gap).
+const TERM_BASE_FONT = 13;
+
 interface Props {
   sessionId: string;
   workingDirectory: string;
@@ -30,6 +34,9 @@ interface Props {
    * so it never steals focus from the agent on a session switch. Defaults to true.
    */
   focusOnReveal?: boolean;
+  /** Clicking into the terminal body makes its editor group the active group (center
+   *  terminals only — the right-panel shell has no group and omits this). */
+  onFocusGroup?: () => void;
   /** Positioning applied to the host (e.g. left/width % for the active group's slot). */
   style?: React.CSSProperties;
 }
@@ -49,6 +56,7 @@ export function TerminalView({
   shellOnly = false,
   role,
   focusOnReveal = true,
+  onFocusGroup,
   style,
 }: Props) {
   const innerRef = useRef<HTMLDivElement>(null);
@@ -62,7 +70,7 @@ export function TerminalView({
   useEffect(() => {
     const term = new Xterm({
       fontFamily: '"SF Mono", SFMono-Regular, Menlo, monospace',
-      fontSize: 13,
+      fontSize: TERM_BASE_FONT + useStore.getState().fontZoom,
       lineHeight: 1.0,
       theme: currentTerminalTheme(),
       cursorBlink: true,
@@ -190,6 +198,21 @@ export function TerminalView({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [visible]);
 
+  // App-wide font zoom (View menu). Setting options.fontSize changes cell metrics
+  // WITHOUT firing the ResizeObserver (the host box is unchanged), so cols/rows must
+  // be renegotiated with the PTY explicitly. Hidden keep-alive terminals skip the fit
+  // (0×0 hazard) and pick the new size up through the reveal-refit path.
+  const fontZoom = useStore((s) => s.fontZoom);
+  useEffect(() => {
+    const term = termRef.current;
+    if (!term) return;
+    const size = TERM_BASE_FONT + fontZoom;
+    if (term.options.fontSize === size) return;
+    term.options.fontSize = size;
+    if (visibleRef.current) scheduleFit();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [fontZoom]);
+
   function scheduleFit() {
     if (disposedRef.current) return;
     if (resizeTimer.current) window.clearTimeout(resizeTimer.current);
@@ -213,7 +236,11 @@ export function TerminalView({
   }
 
   return (
-    <div className={`term-host ${visible ? "visible" : "hidden"}`} style={style}>
+    <div
+      className={`term-host ${visible ? "visible" : "hidden"}`}
+      style={style}
+      onMouseDown={onFocusGroup}
+    >
       <div ref={innerRef} className="term-inner" />
     </div>
   );

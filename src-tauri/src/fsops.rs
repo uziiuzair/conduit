@@ -172,6 +172,45 @@ fn err_content(msg: String) -> FileContent {
     }
 }
 
+// ---- raw-bytes read (image preview) ----------------------------------------
+
+/// Cap for `read_file_base64`, well under the text HARD_CAP — a 16 MB file already
+/// becomes a ~21 MB base64 string over IPC.
+const IMAGE_CAP: u64 = 16 * 1024 * 1024;
+
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct FileBase64 {
+    pub base64: String,
+    pub size: u64,
+}
+
+/// Read a file's raw bytes base64-encoded (STANDARD engine, same as pty.rs frames).
+/// Fallible at the IPC layer: the caller shows the error string in the preview pane.
+/// The cap is enforced on the BYTES ACTUALLY READ (`take`, like `read_file`'s
+/// HARD_CAP) — a pre-read metadata check alone is a TOCTOU hole: a file that grows
+/// (or a symlink to an unbounded stream) between stat and read would otherwise be
+/// read to EOF without limit.
+pub fn read_file_base64(path: &str) -> Result<FileBase64, String> {
+    use base64::Engine;
+    let f = fs::File::open(path).map_err(|e| format!("could not read file: {e}"))?;
+    let mut data = Vec::new();
+    f.take(IMAGE_CAP + 1)
+        .read_to_end(&mut data)
+        .map_err(|e| format!("could not read file: {e}"))?;
+    if data.len() as u64 > IMAGE_CAP {
+        return Err(format!(
+            "file is too large to preview (limit {} MB)",
+            IMAGE_CAP / (1024 * 1024)
+        ));
+    }
+    let size = data.len() as u64;
+    Ok(FileBase64 {
+        base64: base64::engine::general_purpose::STANDARD.encode(&data),
+        size,
+    })
+}
+
 // ---- write contract (atomic, std-only) ------------------------------------
 
 /// Size + mtime of a path. Shared by `write_file` (returns it, `exists:true`) and the

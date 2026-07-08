@@ -13,7 +13,14 @@ import {
 import { AGENTS, type AgentId, type AgentInfo, DEFAULT_AGENT, type McpServer } from "./agents";
 import { ask } from "@tauri-apps/plugin-dialog";
 import * as registry from "./monaco/registry";
-import { moveTab as reduceMoveTab, splitTab as reduceSplitTab } from "./layout";
+import {
+  cycleTabRef,
+  moveTab as reduceMoveTab,
+  reopenTabAt as reduceReopenTabAt,
+  splitTab as reduceSplitTab,
+} from "./layout";
+import { cleanupEdits } from "./trim";
+import type * as Monaco from "monaco-editor";
 import type { SettingsTab } from "./components/Settings";
 
 // ---- Types (mirror the Rust serde structs, rename_all = "camelCase") ----
@@ -76,6 +83,18 @@ export type TabKind = "session" | "file";
 export interface WsTab {
   kind: TabKind;
   ref: string; // sessionId (session) | absolute file path (file)
+  /** Preview (transient, italic) tab: the next preview open in its group replaces it.
+   *  Pinned by editing, double-click, or an explicit (non-preview) open. Mirrored in
+   *  the Rust WsTab struct so it survives layout persistence. */
+  preview?: boolean;
+}
+
+/** A recently closed file tab, restorable via ⌘⇧T (explicit closes only). */
+export interface ClosedTab {
+  projectId: string;
+  groupId: string;
+  index: number;
+  ref: string;
 }
 
 /** Mirror of fsops::FileContent (serde camelCase). read_file resolves (never rejects);
@@ -225,6 +244,37 @@ function writeRightCollapsed(v: boolean): void {
   try { localStorage.setItem(RIGHT_COLLAPSED_KEY, v ? "1" : "0"); } catch { /* quota — non-fatal */ }
 }
 
+// Editor UX prefs (native View menu). Same localStorage pattern as the collapse flags;
+// fontZoom follows the width prefs' validate-else-default idiom (never clamp a bad read).
+const WORD_WRAP_KEY = "conduit.wordWrap";
+const TRIM_ON_SAVE_KEY = "conduit.trimOnSave";
+const FONT_ZOOM_KEY = "conduit.fontZoom";
+export const FONT_ZOOM_MIN = -4;
+export const FONT_ZOOM_MAX = 8;
+function readWordWrap(): boolean {
+  try { return localStorage.getItem(WORD_WRAP_KEY) === "1"; } catch { return false; }
+}
+function writeWordWrap(v: boolean): void {
+  try { localStorage.setItem(WORD_WRAP_KEY, v ? "1" : "0"); } catch { /* quota — non-fatal */ }
+}
+function readTrimOnSave(): boolean {
+  try { return localStorage.getItem(TRIM_ON_SAVE_KEY) === "1"; } catch { return false; }
+}
+function writeTrimOnSave(v: boolean): void {
+  try { localStorage.setItem(TRIM_ON_SAVE_KEY, v ? "1" : "0"); } catch { /* quota — non-fatal */ }
+}
+function readFontZoom(): number {
+  try {
+    const v = Number(localStorage.getItem(FONT_ZOOM_KEY));
+    return Number.isInteger(v) && v >= FONT_ZOOM_MIN && v <= FONT_ZOOM_MAX ? v : 0;
+  } catch {
+    return 0;
+  }
+}
+function writeFontZoom(v: number): void {
+  try { localStorage.setItem(FONT_ZOOM_KEY, String(v)); } catch { /* quota — non-fatal */ }
+}
+
 // ---- helpers ----
 function uid(): string {
   try {
@@ -331,6 +381,37 @@ export function globalSelectedSessionId(state: {
 }): string | null {
   if (!state.selectedProjectId) return null;
   return activeSessionIdOf(state.layouts[state.selectedProjectId]);
+}
+
+// ---- whitespace-on-save ----
+/** Apply "Clean Whitespace on Save" as ONE undoable model edit, just before the
+ *  write, so the post-cleanup version id becomes the saved baseline (saveFile's
+ *  setSaved captures it after the write). Cast precedent: CodeEditorPane's onReload —
+ *  RegistryModel deliberately hides edit APIs. Markdown keeps trailing spaces (hard
+ *  line breaks) but still gains the final newline. */
+function applyWhitespaceCleanup(m: Monaco.editor.ITextModel): void {
+  const lines = m.getLinesContent();
+  const { trims, appendFinalNewline } = cleanupEdits(lines, {
+    trimTrailing: m.getLanguageId() !== "markdown",
+  });
+  const edits: Monaco.editor.IIdentifiedSingleEditOperation[] = trims.map((t) => ({
+    range: {
+      startLineNumber: t.lineNumber,
+      startColumn: t.fromColumn,
+      endLineNumber: t.lineNumber,
+      endColumn: t.endColumn,
+    },
+    text: "",
+  }));
+  if (appendFinalNewline) {
+    const line = lines.length;
+    const col = (lines[line - 1]?.length ?? 0) + 1;
+    edits.push({
+      range: { startLineNumber: line, startColumn: col, endLineNumber: line, endColumn: col },
+      text: m.getEOL(),
+    });
+  }
+  if (edits.length) m.pushEditOperations([], edits, () => null);
 }
 
 // ---- debounced persistence ----
@@ -447,7 +528,38 @@ interface AppState {
   ) => void;
   splitTab: (projectId: string, ref: string, targetGroupId: string, side: "left" | "right") => void;
   setGroupWeights: (projectId: string, weights: number[]) => void;
-  openFile: (projectId: string, path: string) => void;
+  /** Open a file tab. `preview: true` opens transiently: it replaces the active
+   *  group's current preview tab; a later explicit open (or an edit) pins it. */
+  openFile: (projectId: string, path: string, opts?: { preview?: boolean }) => void;
+  /** Clear the preview flag on any tab holding `ref` (pin). */
+  pinTab: (projectId: string, ref: string) => void;
+
+  // ---- Tier-2 editor UX ----
+  /** Recently closed file tabs (explicit closes only), most recent last. Session-only. */
+  closedTabs: ClosedTab[];
+  reopenClosedTab: () => void;
+  saveAll: () => Promise<void>;
+  /** ⌃Tab / ⌃⇧Tab within the active group (wrapping). */
+  cycleTab: (delta: 1 | -1) => void;
+  /** ⌘1..9 — 1-based tab index in the active group; 9 = last (browser convention). */
+  activateTabAt: (index: number) => void;
+  /** projectId -> maximized groupId. Ephemeral by design: validateLayout and the Rust
+   *  ProjectLayout struct would both strip it from the persisted layout. */
+  maximized: Record<string, string>;
+  toggleMaximizeGroup: (projectId: string) => void;
+  /** Persisted editor prefs (View menu). */
+  wordWrap: boolean;
+  toggleWordWrap: () => void;
+  trimOnSave: boolean;
+  toggleTrimOnSave: () => void;
+  fontZoom: number;
+  setFontZoom: (z: number) => void;
+  /** Ask the file tree to expand to + scroll to a path (nonce forces re-trigger). */
+  reveal: { path: string; nonce: number } | null;
+  revealInTree: (path: string) => void;
+  /** Consume the reveal request (FileTree calls this once handled) — without it a
+   *  stale request would replay on every FileTree remount (refresh, git poll, …). */
+  clearReveal: () => void;
 
   // ---- Phase 3: file-tree CRUD (all non-persisted) ----
   /** dirPath -> bump counter; a FileTree entry re-lists when its counter changes. */
@@ -499,7 +611,18 @@ export const useStore = create<AppState>((set, get) => {
       const project = s.projects.find((p) => p.id === projectId);
       const next = validateLayout(fn(clone(cur)), project);
       persistLayout(projectId, next);
-      return { layouts: { ...s.layouts, [projectId]: next } };
+      const patch: Partial<AppState> = { layouts: { ...s.layouts, [projectId]: next } };
+      // Maximize follows the active group: any layout action that activates a
+      // DIFFERENT group (open/select/split/reopen/…) — or prunes the maximized one —
+      // restores the split view. Without this, the newly active pane would stay
+      // hidden behind the `gi === maxIdx` visibility gate: an invisible active group.
+      const maxId = s.maximized[projectId];
+      if (maxId && (next.activeGroupId !== maxId || !next.groups.some((g) => g.id === maxId))) {
+        const m = { ...s.maximized };
+        delete m[projectId];
+        patch.maximized = m;
+      }
+      return patch;
     });
   };
 
@@ -548,6 +671,12 @@ export const useStore = create<AppState>((set, get) => {
     bottomTab: "terminal",
     themePref: readStoredPref(),
     activeThemeId: resolveThemeId(readStoredPref(), systemPrefersDark()),
+    closedTabs: [],
+    maximized: {},
+    wordWrap: readWordWrap(),
+    trimOnSave: readTrimOnSave(),
+    fontZoom: readFontZoom(),
+    reveal: null,
 
     load: async () => {
       const [projects, home, accounts, defaultAccount, trust] = await Promise.all([
@@ -747,17 +876,22 @@ export const useStore = create<AppState>((set, get) => {
       }
       await invoke("remove_project", { id });
       for (const ref of fileTabs) {
-        s.setDirty(ref, false);
+        // Clear dirty only when this was the model's last reference — the same
+        // absolute path can be open under another project, whose buffer (and its
+        // unsaved edits) survives this release.
+        if ((registry.model(ref)?.refCount ?? 1) <= 1) s.setDirty(ref, false);
         registry.release(ref);
         registry.disposeIfUnreferenced(ref);
       }
       set((st) => {
         const layouts = { ...st.layouts };
         delete layouts[id];
+        const maximized = { ...st.maximized };
+        delete maximized[id];
         const projects = st.projects.filter((p) => p.id !== id);
         const selectedProjectId =
           st.selectedProjectId === id ? projects[0]?.id ?? null : st.selectedProjectId;
-        return { projects, layouts, selectedProjectId };
+        return { projects, layouts, selectedProjectId, maximized };
       });
     },
 
@@ -837,13 +971,22 @@ export const useStore = create<AppState>((set, get) => {
             : p,
         );
         let layouts = s.layouts;
+        let maximized = s.maximized;
         const cur = s.layouts[projectId];
         if (cur) {
           const next = validateLayout(cur, projects.find((p) => p.id === projectId));
           persistLayout(projectId, next);
           layouts = { ...s.layouts, [projectId]: next };
+          // Same maximize hygiene as applyLayout (this path commits a layout
+          // directly): a pruned/deactivated maximized group must drop the flag or
+          // the next ⇧⌘M is a silent no-op on a stale id.
+          const maxId = s.maximized[projectId];
+          if (maxId && (next.activeGroupId !== maxId || !next.groups.some((g) => g.id === maxId))) {
+            maximized = { ...s.maximized };
+            delete maximized[projectId];
+          }
         }
-        return { projects, live, layouts };
+        return { projects, live, layouts, maximized };
       });
     },
 
@@ -861,13 +1004,57 @@ export const useStore = create<AppState>((set, get) => {
       applyLayout(projectId, (l) => rOpenToSide(l, tab));
       if (tab.kind === "session") clearNeeds(tab.ref);
     },
-    openFile: (projectId, path) => {
+    openFile: (projectId, path, opts) => {
       const l = get().layouts[projectId];
       // Only a genuinely new tab bumps the ref (rOpenTab just re-activates an existing one).
       const already = !!l && l.groups.some((g) => g.tabs.some((t) => t.ref === path));
-      applyLayout(projectId, (l2) => rOpenTab(l2, { kind: "file", ref: path }));
+      const preview = !!opts?.preview && !already;
+      // A preview open replaces the active group's current preview tab in place.
+      let replaced: string | null = null;
+      if (preview && l) {
+        const g = activeGroup(l);
+        replaced = g?.tabs.find((t) => t.preview && t.ref !== path)?.ref ?? null;
+      }
+      applyLayout(projectId, (l2) => {
+        if (!opts?.preview) {
+          // An explicit open of an existing preview tab pins it.
+          for (const g of l2.groups) {
+            const t = g.tabs.find((x) => x.ref === path && x.preview);
+            if (t) delete t.preview;
+          }
+        }
+        const tab: WsTab = preview
+          ? { kind: "file", ref: path, preview: true }
+          : { kind: "file", ref: path };
+        if (replaced) {
+          const g = l2.groups.find((x) => x.id === l2.activeGroupId) ?? l2.groups[0];
+          const i = g ? g.tabs.findIndex((t) => t.ref === replaced) : -1;
+          if (g && i !== -1) {
+            g.tabs.splice(i, 1, tab);
+            g.activeRef = path;
+            l2.activeGroupId = g.id;
+            return l2;
+          }
+        }
+        return rOpenTab(l2, tab);
+      });
       if (!already) registry.acquire(path);
+      if (replaced) {
+        // Same release pair as requestCloseTab. A preview tab pins on its first edit,
+        // so the replaced buffer is never dirty.
+        registry.release(replaced);
+        registry.disposeIfUnreferenced(replaced);
+      }
     },
+
+    pinTab: (projectId, ref) =>
+      applyLayout(projectId, (l) => {
+        for (const g of l.groups) {
+          const t = g.tabs.find((x) => x.ref === ref);
+          if (t) delete t.preview;
+        }
+        return l;
+      }),
 
     bumpDir: (dirPath) =>
       set((s) => ({
@@ -934,13 +1121,28 @@ export const useStore = create<AppState>((set, get) => {
       get().bumpDir(parentDir(path));
     },
 
-    setDirty: (path, dirty) =>
+    setDirty: (path, dirty) => {
       set((s) => {
         const next = { ...s.dirty };
         if (dirty) next[path] = true;
         else delete next[path];
         return { dirty: next };
-      }),
+      });
+      // Editing pins a preview tab (VS Code semantics) — this also guarantees a
+      // preview tab replaced by openFile is never dirty.
+      if (dirty) {
+        const s = get();
+        for (const p of s.projects) {
+          const hasPreview = s.layouts[p.id]?.groups.some((g) =>
+            g.tabs.some((t) => t.ref === path && t.preview),
+          );
+          if (hasPreview) s.pinTab(p.id, path);
+        }
+      }
+      // Rust consults this count on quit/window-close (DirtyGuard) so clean quits
+      // stay instant while dirty ones round-trip for a confirm.
+      void invoke("set_dirty_count", { count: Object.keys(get().dirty).length }).catch(() => {});
+    },
 
     clearConflict: (path) =>
       set((s) => {
@@ -956,13 +1158,26 @@ export const useStore = create<AppState>((set, get) => {
     saveFile: async (path) => {
       const entry = registry.model(path);
       // Hard guard: no model, read-only buffer, or unrevealed => never write.
-      if (!entry || entry.readOnly || !entry.model) return;
-      const value = entry.model.getValue();
+      // The saving.has guard also makes the window re-entrancy-safe: a second ⌘S
+      // while a write is in flight must not run (its finally would tear down the
+      // first save's suppression window — the shared Set doesn't nest).
+      if (!entry || entry.readOnly || !entry.model || registry.saving.has(path)) return;
+      // Enter the saving window BEFORE any cleanup edit: it silences both the file
+      // watcher and the pane's dirty dispatch for these transitional events — the
+      // store is settled explicitly in the finally below.
       registry.saving.add(path);
+      if (get().trimOnSave) {
+        applyWhitespaceCleanup(entry.model as unknown as Monaco.editor.ITextModel);
+      }
+      const value = entry.model.getValue();
+      // The version whose content is being written — snapshotted NEXT TO getValue().
+      // setSaved must record this, not the post-write current id: a keystroke landing
+      // during the awaited write would otherwise be absorbed into the saved point and
+      // the buffer would read clean while differing from disk.
+      const writtenVersion = entry.model.getAlternativeVersionId();
       try {
         const stat = await invoke<FileStat>("write_file", { path, content: value });
-        registry.setSaved(path, { mtimeMs: stat.mtimeMs, size: stat.size });
-        get().setDirty(path, false);
+        registry.setSaved(path, { mtimeMs: stat.mtimeMs, size: stat.size }, writtenVersion);
         get().clearConflict(path);
       } catch (e) {
         void invoke("notify_user", { title: "Conduit", body: `Save failed: ${String(e)}` }).catch(
@@ -970,6 +1185,10 @@ export const useStore = create<AppState>((set, get) => {
         );
       } finally {
         registry.saving.delete(path);
+        // Settle the store on BOTH outcomes: success leaves it clean unless a
+        // keystroke landed mid-write; a failed write after suppressed trim edits
+        // must re-arm the dirty dot / Save All / quit guard.
+        get().setDirty(path, registry.dirtyOf(path));
       }
     },
 
@@ -978,20 +1197,119 @@ export const useStore = create<AppState>((set, get) => {
       const group = s.layouts[projectId]?.groups.find((g) => g.id === groupId);
       const tab = group?.tabs.find((t) => t.ref === ref);
       const isFile = tab?.kind === "file";
-      if (isFile && s.dirty[ref]) {
+      // Guard/clear dirty only when this tab is the model's LAST reference (the same
+      // absolute path can be open under another project): otherwise nothing is
+      // discarded — the buffer lives on elsewhere — and force-clearing store.dirty
+      // would strand it clean while the surviving tab still holds unsaved edits.
+      const lastRef = isFile && (registry.model(ref)?.refCount ?? 1) <= 1;
+      if (isFile && lastRef && s.dirty[ref]) {
         const ok = await ask(`Discard unsaved changes to ${baseName(ref)}?`, {
           title: "Conduit",
           kind: "warning",
         });
         if (!ok) return;
       }
+      // Record explicit file closes for ⌘⇧T (rename/delete closes bypass this path —
+      // their old ref is gone from disk and shouldn't be restorable).
+      if (isFile && group) {
+        const index = group.tabs.findIndex((t) => t.ref === ref);
+        set((st) => ({
+          closedTabs: [...st.closedTabs, { projectId, groupId, index, ref }].slice(-20),
+        }));
+      }
       s.closeTab(projectId, groupId, ref);
       if (isFile) {
-        s.setDirty(ref, false);
+        if (lastRef) s.setDirty(ref, false);
         registry.release(ref);
         registry.disposeIfUnreferenced(ref);
       }
     },
+
+    reopenClosedTab: () => {
+      const stack = [...get().closedTabs];
+      while (stack.length) {
+        const c = stack.pop()!;
+        if (!get().projects.some((p) => p.id === c.projectId)) continue;
+        set({ closedTabs: stack, selectedProjectId: c.projectId });
+        const l = get().layouts[c.projectId];
+        const already = !!l && l.groups.some((g) => g.tabs.some((t) => t.ref === c.ref));
+        applyLayout(c.projectId, (l2) =>
+          reduceReopenTabAt(l2, c.groupId, c.index, { kind: "file", ref: c.ref }),
+        );
+        if (!already) registry.acquire(c.ref);
+        return;
+      }
+      set({ closedTabs: [] });
+    },
+
+    saveAll: async () => {
+      const s = get();
+      await Promise.all(Object.keys(s.dirty).map((p) => s.saveFile(p)));
+    },
+
+    cycleTab: (delta) => {
+      const s = get();
+      if (!s.selectedProjectId) return;
+      const g = activeGroup(s.layouts[s.selectedProjectId]);
+      if (!g) return;
+      const ref = cycleTabRef(g, delta);
+      if (ref) s.setActiveTab(s.selectedProjectId, g.id, ref);
+    },
+
+    activateTabAt: (index) => {
+      const s = get();
+      if (!s.selectedProjectId) return;
+      const g = activeGroup(s.layouts[s.selectedProjectId]);
+      if (!g || g.tabs.length === 0) return;
+      const i = index >= 9 ? g.tabs.length - 1 : index - 1;
+      if (i >= g.tabs.length) return;
+      s.setActiveTab(s.selectedProjectId, g.id, g.tabs[i].ref);
+    },
+
+    toggleMaximizeGroup: (projectId) =>
+      set((s) => {
+        const next = { ...s.maximized };
+        const l = s.layouts[projectId];
+        const g = activeGroup(l);
+        if (next[projectId] || !l || !g || l.groups.length < 2) {
+          delete next[projectId];
+        } else {
+          next[projectId] = g.id;
+        }
+        return { maximized: next };
+      }),
+
+    toggleWordWrap: () =>
+      set((s) => {
+        const next = !s.wordWrap;
+        writeWordWrap(next);
+        return { wordWrap: next };
+      }),
+
+    toggleTrimOnSave: () =>
+      set((s) => {
+        const next = !s.trimOnSave;
+        writeTrimOnSave(next);
+        return { trimOnSave: next };
+      }),
+
+    setFontZoom: (z) => {
+      const v = Math.max(FONT_ZOOM_MIN, Math.min(FONT_ZOOM_MAX, Math.round(z)));
+      writeFontZoom(v);
+      set({ fontZoom: v });
+    },
+
+    revealInTree: (path) =>
+      set((s) => {
+        if (s.rightCollapsed) writeRightCollapsed(false);
+        return {
+          rightCollapsed: false,
+          topTab: "files" as TopTab,
+          reveal: { path, nonce: (s.reveal?.nonce ?? 0) + 1 },
+        };
+      }),
+
+    clearReveal: () => set({ reveal: null }),
 
     closeTab: (projectId, groupId, ref) =>
       applyLayout(projectId, (l) => {
@@ -1025,10 +1343,28 @@ export const useStore = create<AppState>((set, get) => {
       }),
 
     moveTab: (projectId, fromGroupId, ref, toGroupId, toIndex) =>
-      applyLayout(projectId, (l) => reduceMoveTab(l, fromGroupId, ref, toGroupId, toIndex)),
+      applyLayout(projectId, (l) => {
+        const next = reduceMoveTab(l, fromGroupId, ref, toGroupId, toIndex);
+        // Dragging a tab is a deliberate placement — it pins a preview tab (VS Code
+        // semantics), which also keeps the one-preview-per-group invariant: without
+        // this, a dragged-in preview could be silently replaced by the next
+        // single-click open in its new group.
+        for (const g of next.groups) {
+          const t = g.tabs.find((x) => x.ref === ref);
+          if (t) delete t.preview;
+        }
+        return next;
+      }),
 
     splitTab: (projectId, ref, targetGroupId, side) =>
-      applyLayout(projectId, (l) => reduceSplitTab(l, ref, targetGroupId, side, uid())),
+      applyLayout(projectId, (l) => {
+        const next = reduceSplitTab(l, ref, targetGroupId, side, uid());
+        for (const g of next.groups) {
+          const t = g.tabs.find((x) => x.ref === ref);
+          if (t) delete t.preview; // splitting out is a deliberate placement too
+        }
+        return next;
+      }),
 
     setGroupWeights: (projectId, weights) =>
       applyLayout(projectId, (l) => {

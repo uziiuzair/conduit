@@ -83,6 +83,12 @@ export function useFileWatch(): void {
 
           // Clean buffer -> silent reload, preserving undo history.
           const fc = await invoke<FileContent>("read_file", { path });
+          // Re-check the saving guard AFTER the awaits: a save that started while
+          // stat_file/read_file were in flight owns the buffer now — reloading over
+          // it (and tearing down its suppression window in our finally) would leave
+          // buffer, disk, and baseline permanently disagreeing. The reload window
+          // below is fully synchronous, so no save can begin inside it.
+          if (registry.saving.has(path)) continue;
           if (fc.error !== null || fc.binary || fc.readOnly) {
             // Became binary / oversized / unreadable: surface a banner instead of
             // silently pushing partial/lossy content.
@@ -90,13 +96,24 @@ export function useFileWatch(): void {
             continue;
           }
           const m = entry.model as unknown as Monaco.editor.ITextModel;
-          m.pushEditOperations(
-            [],
-            [{ range: m.getFullModelRange(), text: fc.content }],
-            () => null,
-          );
-          // Baseline + saved point from the SAME read that produced the content.
-          registry.setSaved(path, { mtimeMs: fc.mtimeMs, size: fc.size });
+          // The saving-set marks this as a reconciliation window: the pane's
+          // contentSub must not dispatch setDirty for the reload edit — the content
+          // event fires BEFORE setSaved (while dirtyOf is transiently true), and
+          // setSaved emits no event to heal the store afterwards. Without this, a
+          // silently-reloaded clean buffer would be stranded dirty in the store,
+          // falsely arming the quit guard and letting Save All rewrite the file.
+          registry.saving.add(path);
+          try {
+            m.pushEditOperations(
+              [],
+              [{ range: m.getFullModelRange(), text: fc.content }],
+              () => null,
+            );
+            // Baseline + saved point from the SAME read that produced the content.
+            registry.setSaved(path, { mtimeMs: fc.mtimeMs, size: fc.size });
+          } finally {
+            registry.saving.delete(path);
+          }
           store.clearConflict(path);
         }
       } finally {
