@@ -12,14 +12,18 @@ mod claude_status;
 mod claude_usage;
 mod fleet;
 mod fleet_mcp;
+mod format;
 mod fsops;
 mod git;
+mod git_mut;
 mod hookbus;
 mod hooks;
+mod hotexit;
 mod local_llm;
 mod menu;
 mod notify;
 mod pty;
+mod search;
 mod store;
 mod telemetry;
 mod transcript;
@@ -681,6 +685,63 @@ fn git_graph(dir: String) -> Vec<git::GraphCommit> {
     git::graph(&dir, 80)
 }
 
+/// Diff original (left) side: file content at HEAD. `(async)`: `git show` on a big
+/// file shouldn't stall the main thread.
+#[tauri::command(async)]
+fn git_show_head(dir: String, path: String) -> Result<String, String> {
+    git::show_head(&dir, &path)
+}
+
+#[tauri::command(async)]
+fn git_diff_hunks(dir: String, path: String) -> Result<Vec<git::Hunk>, String> {
+    git::diff_hunks(&dir, &path)
+}
+
+/// Quick Open corpus: `git ls-files` in a repo, bounded walk elsewhere.
+#[tauri::command(async)]
+fn list_project_files(dir: String) -> Vec<String> {
+    match git::ls_files(&dir) {
+        Ok(files) if !files.is_empty() => files,
+        _ => fsops::walk_files(&dir, git::LS_FILES_CAP / 2),
+    }
+}
+
+/// Find in Files. `(async)`: a cold rg over a big tree can take a second.
+#[tauri::command(async)]
+fn search_content(dir: String, query: String) -> Result<search::SearchResult, String> {
+    search::search(&dir, &query)
+}
+
+// ---- Git (mutating — confirm-guarded in the UI) --------------------------------
+
+#[tauri::command(async)]
+fn git_discard_file(dir: String, path: String) -> Result<String, String> {
+    git_mut::discard_file(&dir, &path)
+}
+
+// ---- Format Document -----------------------------------------------------------
+
+#[tauri::command(async)]
+fn format_content(
+    dir: String,
+    path: String,
+    content: String,
+) -> Result<format::FormatResult, String> {
+    format::format_content(&dir, &path, &content)
+}
+
+// ---- Hot exit -------------------------------------------------------------------
+
+#[tauri::command]
+fn hotexit_save(entries: Vec<hotexit::HotExitEntry>) -> Result<(), String> {
+    hotexit::save(&entries)
+}
+
+#[tauri::command]
+fn hotexit_load() -> Vec<hotexit::HotExitEntry> {
+    hotexit::load()
+}
+
 // ---- Worktree lifecycle ------------------------------------------------------
 
 #[tauri::command]
@@ -1135,6 +1196,14 @@ pub fn run() {
             git_changes,
             git_commits,
             git_graph,
+            git_show_head,
+            git_diff_hunks,
+            git_discard_file,
+            list_project_files,
+            search_content,
+            format_content,
+            hotexit_save,
+            hotexit_load,
             worktree_is_dirty,
             worktree_remove,
             list_dir,

@@ -90,6 +90,12 @@ export function CodeEditorPane({ projectId, groupId, visible, style }: CodeEdito
   const contentSubRef = useRef<{ dispose(): void } | null>(null);
   const currentPathRef = useRef<string | null>(null);
   const visibleRef = useRef(visible);
+  // Diff-with-HEAD overlay (lazy createDiffEditor; the plain editor never unmounts).
+  const diffHostRef = useRef<HTMLDivElement>(null);
+  const diffEditorRef = useRef<monaco.editor.IStandaloneDiffEditor | null>(null);
+  const diffOriginalRef = useRef<monaco.editor.ITextModel | null>(null);
+  // Gutter change stripes (working tree vs HEAD), swapped per model.
+  const gutterRef = useRef<monaco.editor.IEditorDecorationsCollection | null>(null);
 
   const setDirty = useStore((s) => s.setDirty);
   const saveFile = useStore((s) => s.saveFile);
@@ -125,6 +131,18 @@ export function CodeEditorPane({ projectId, groupId, visible, style }: CodeEdito
       return next;
     });
   }, []);
+  // Diff-with-HEAD toggle. Pane-scoped and sticky across tab switches like the
+  // markdown preview; the original (HEAD) side is fetched per active path.
+  const [diffOn, setDiffOnState] = useState(false);
+  const diffOnRef = useRef(false);
+  const setDiffOn = useCallback((v: boolean | ((prev: boolean) => boolean)) => {
+    setDiffOnState((prev) => {
+      const next = typeof v === "function" ? v(prev) : v;
+      diffOnRef.current = next;
+      return next;
+    });
+  }, []);
+
   // True when the preview overlay is covering this pane's editor — used to keep
   // programmatic focus off the covered editor (keystrokes would edit it invisibly).
   const previewCovers = useCallback(
@@ -132,6 +150,12 @@ export function CodeEditorPane({ projectId, groupId, visible, style }: CodeEdito
       previewOnRef.current &&
       editorRef.current?.getModel()?.getLanguageId() === "markdown",
     [],
+  );
+  // Same guard for the diff overlay: while it covers the pane, programmatic focus
+  // belongs to the diff's modified editor, never the hidden plain editor.
+  const covered = useCallback(
+    () => previewCovers() || diffOnRef.current,
+    [previewCovers],
   );
   // Displayed/active Monaco language id for the breadcrumb selector. Session-scoped:
   // seeded by languageFor() on load, but reflects the CONCRETE model's language so a
@@ -166,10 +190,15 @@ export function CodeEditorPane({ projectId, groupId, visible, style }: CodeEdito
   const fontZoom = useStore((s) => s.fontZoom);
   useEffect(() => {
     editorRef.current?.updateOptions({ wordWrap: wordWrap ? "on" : "off" });
+    diffEditorRef.current?.updateOptions({ wordWrap: wordWrap ? "on" : "off" });
   }, [wordWrap]);
   useEffect(() => {
     const size = EDITOR_BASE_FONT + fontZoom;
     editorRef.current?.updateOptions({ fontSize: size, lineHeight: editorLineHeight(size) });
+    diffEditorRef.current?.updateOptions({
+      fontSize: size,
+      lineHeight: editorLineHeight(size),
+    });
   }, [fontZoom]);
 
   // Non-blocking disk-conflict banner state, driven by useFileWatch's poll (App-level).
@@ -294,7 +323,10 @@ export function CodeEditorPane({ projectId, groupId, visible, style }: CodeEdito
     });
 
     const ro = new ResizeObserver(() => {
-      if (visibleRef.current) editor.layout();
+      if (visibleRef.current) {
+        editor.layout();
+        diffEditorRef.current?.layout();
+      }
     });
     ro.observe(hostRef.current);
 
@@ -304,6 +336,10 @@ export function CodeEditorPane({ projectId, groupId, visible, style }: CodeEdito
       if (p) registry.setViewState(p, groupId, editor.saveViewState());
       contentSubRef.current?.dispose();
       ro.disconnect();
+      diffEditorRef.current?.dispose();
+      diffEditorRef.current = null;
+      diffOriginalRef.current?.dispose();
+      diffOriginalRef.current = null;
       editor.dispose();
       editorRef.current = null;
     };
@@ -363,10 +399,27 @@ export function CodeEditorPane({ projectId, groupId, visible, style }: CodeEdito
         | monaco.editor.ICodeEditorViewState
         | undefined;
       if (vs) ed.restoreViewState(vs);
+      // Hot-exit restore: a backup from the previous run is applied on top of the
+      // fresh disk model, leaving the buffer dirty by construction (undo returns to
+      // disk). Only a CLEAN model may be seeded — a pre-existing edited model (file
+      // already open elsewhere) must never be clobbered. One-shot per path.
+      if (entry.model && editable && !registry.dirtyOf(activePath)) {
+        const backup = useStore.getState().consumeHotExit(activePath);
+        if (backup !== undefined && backup !== fc.content) {
+          const m = entry.model as unknown as Monaco.editor.ITextModel;
+          m.pushEditOperations(
+            [],
+            [{ range: m.getFullModelRange(), text: backup }],
+            () => null,
+          );
+          // The contentSub isn't attached yet, so settle the store by hand.
+          setDirty(activePath, registry.dirtyOf(activePath));
+        }
+      }
       refreshModelStatus(); // after restoreViewState so the chips show the restored cursor
       if (visibleRef.current) {
         ed.layout();
-        if (!previewCovers() && isActiveGroupRef.current) ed.focus();
+        if (!covered() && isActiveGroupRef.current) ed.focus();
       }
 
       // Dirty tracking: dispatch setDirty only when the store disagrees with the
@@ -403,9 +456,10 @@ export function CodeEditorPane({ projectId, groupId, visible, style }: CodeEdito
     if (!ed) return;
     requestAnimationFrame(() => {
       ed.layout();
-      if (currentPathRef.current && !previewCovers() && isActiveGroupRef.current) ed.focus();
+      diffEditorRef.current?.layout();
+      if (currentPathRef.current && !covered() && isActiveGroupRef.current) ed.focus();
     });
-  }, [visible, previewCovers]);
+  }, [visible, covered]);
 
   // Jump to a line when a terminal Cmd+Click opened this file with a reveal target. Fires once
   // the model for the reveal path is set (so it survives the async read_file), whether the file
@@ -426,15 +480,173 @@ export function CodeEditorPane({ projectId, groupId, visible, style }: CodeEdito
     clearPendingReveal();
   }, [pendingReveal, activePath, load, clearPendingReveal]);
 
-  // Invalidate a pending reveal if the user leaves this tab (switch/unmount) before its model
-  // loads, so a deferred reveal can't fire when they return to this file much later.
+  // Invalidate a pending reveal/diff if the user leaves this tab (switch/unmount) before its
+  // model loads, so a deferred request can't fire when they return to this file much later.
   useEffect(() => {
     const leavingPath = activePath;
     return () => {
       const s = useStore.getState();
       if (s.pendingReveal?.path === leavingPath) s.clearPendingReveal();
+      if (s.pendingDiff?.path === leavingPath) s.clearPendingDiff();
     };
   }, [activePath]);
+
+  // ---- Diff with HEAD -------------------------------------------------------
+
+  const fcReady = load.kind === "ready" ? load.fc : null;
+  const hasModel = !!activePath && !!fcReady && !fcReady.binary && fcReady.error === null;
+  const showDiff = diffOn && hasModel;
+
+  // Consume a one-shot diff request aimed at this pane's active file (Changes-row
+  // click arms "on"; the View-menu item arms "toggle"). Active group only — the
+  // same file can be visible in two groups and both panes see the request.
+  const pendingDiff = useStore((s) => s.pendingDiff);
+  const clearPendingDiff = useStore((s) => s.clearPendingDiff);
+  useEffect(() => {
+    if (!pendingDiff || pendingDiff.path !== activePath) return;
+    if (!isActiveGroupRef.current || load.kind !== "ready") return;
+    setDiffOn((v) => (pendingDiff.mode === "toggle" ? !v : true));
+    clearPendingDiff();
+  }, [pendingDiff, activePath, load, setDiffOn, clearPendingDiff]);
+
+  // Mount/refresh the diff overlay: lazy-create the diff editor, fetch the HEAD
+  // side, pair it with the LIVE registry model as the modified side (edits in the
+  // diff are real buffer edits — dirty/save/quit-guard all just work).
+  useEffect(() => {
+    if (!showDiff || !activePath) return;
+    let alive = true;
+    const path = activePath;
+    const dir = path.slice(0, path.lastIndexOf("/")) || "/";
+
+    void invoke<string>("git_show_head", { dir, path })
+      .then((original) => {
+        if (!alive || currentPathRef.current !== path || !diffOnRef.current) return;
+        const entry = registry.model(path);
+        const host = diffHostRef.current;
+        if (!entry?.model || !host) return;
+        if (!diffEditorRef.current) {
+          const prefs = useStore.getState();
+          const size = EDITOR_BASE_FONT + prefs.fontZoom;
+          diffEditorRef.current = monaco.editor.createDiffEditor(host, {
+            automaticLayout: false,
+            fontFamily: '"SF Mono", SFMono-Regular, Menlo, monospace',
+            fontSize: size,
+            lineHeight: editorLineHeight(size),
+            wordWrap: prefs.wordWrap ? "on" : "off",
+            minimap: { enabled: false },
+            scrollBeyondLastLine: false,
+            renderSideBySide: true,
+            originalEditable: false,
+          });
+          // ⌘S inside the diff's modified editor saves like the plain editor does.
+          diffEditorRef.current
+            .getModifiedEditor()
+            .addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS, () => {
+              const p = currentPathRef.current;
+              if (p) void saveFile(p);
+            });
+          diffEditorRef.current.getModifiedEditor().onDidFocusEditorText(() => {
+            const st = useStore.getState();
+            if (activeGroup(st.layouts[projectId])?.id !== groupId) {
+              st.setActiveGroup(projectId, groupId);
+            }
+          });
+        }
+        diffOriginalRef.current?.dispose();
+        diffOriginalRef.current = monaco.editor.createModel(
+          original,
+          (entry.model as unknown as monaco.editor.ITextModel).getLanguageId(),
+          monaco.Uri.parse(`conduit-git://HEAD/${encodeURIComponent(path)}`),
+        );
+        diffEditorRef.current.setModel({
+          original: diffOriginalRef.current,
+          modified: entry.model as unknown as monaco.editor.ITextModel,
+        });
+        diffEditorRef.current.updateOptions({
+          readOnly: !!fcReady && fcReady.readOnly,
+        });
+        if (visibleRef.current) {
+          diffEditorRef.current.layout();
+          if (isActiveGroupRef.current) diffEditorRef.current.getModifiedEditor().focus();
+        }
+      })
+      .catch((e) => {
+        if (!alive) return;
+        setDiffOn(false);
+        void invoke("notify_user", {
+          title: "Diff",
+          body: String(e),
+        }).catch(() => {});
+      });
+
+    return () => {
+      alive = false;
+      // Detach + drop the throwaway original; the modified side is the registry
+      // model and must NEVER be disposed here.
+      diffEditorRef.current?.setModel(null);
+      diffOriginalRef.current?.dispose();
+      diffOriginalRef.current = null;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [showDiff, activePath]);
+
+  // Hand focus back to the plain editor when the diff closes.
+  useEffect(() => {
+    if (diffOn || !visibleRef.current) return;
+    if (currentPathRef.current && !previewCovers() && isActiveGroupRef.current) {
+      editorRef.current?.focus();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [diffOn]);
+
+  // ---- Gutter change stripes (vs HEAD) ---------------------------------------
+  // Refreshed on model swap and every time the buffer settles CLEAN (save, reload,
+  // discard convergence) — deliberately not per keystroke or watcher tick; stripes
+  // mark "changed since HEAD" and may drift during active typing.
+  const isDirtyNow = useStore((s) => (activePath ? !!s.dirty[activePath] : false));
+  useEffect(() => {
+    const ed = editorRef.current;
+    if (!ed || !activePath || load.kind !== "ready" || !hasModel) {
+      gutterRef.current?.clear();
+      return;
+    }
+    if (isDirtyNow) return; // keep the last stripes while typing
+    let alive = true;
+    const path = activePath;
+    const dir = path.slice(0, path.lastIndexOf("/")) || "/";
+    void invoke<{ kind: string; start: number; count: number }[]>("git_diff_hunks", {
+      dir,
+      path,
+    })
+      .then((hunks) => {
+        if (!alive || currentPathRef.current !== path) return;
+        const model = ed.getModel();
+        if (!model) return;
+        const decos = hunks.map((h) => {
+          const line = Math.min(Math.max(h.start, 1), model.getLineCount());
+          const endLine = Math.min(
+            Math.max(h.start + Math.max(h.count, 1) - 1, 1),
+            model.getLineCount(),
+          );
+          return {
+            range: new monaco.Range(line, 1, h.kind === "deleted" ? line : endLine, 1),
+            options: {
+              isWholeLine: false,
+              linesDecorationsClassName: `gutter-${h.kind}`,
+            },
+          };
+        });
+        if (!gutterRef.current) gutterRef.current = ed.createDecorationsCollection();
+        gutterRef.current.set(decos);
+      })
+      .catch(() => {
+        if (alive) gutterRef.current?.clear(); // not a repo / outside it — no stripes
+      });
+    return () => {
+      alive = false;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activePath, load, isDirtyNow, hasModel]);
 
   const fc = load.kind === "ready" ? load.fc : null;
   // Binary raster images skip the banner: the ImagePreview overlay renders instead.
@@ -461,7 +673,7 @@ export function CodeEditorPane({ projectId, groupId, visible, style }: CodeEdito
         : monaco.editor.EndOfLineSequence.LF,
     );
     refreshModelStatus();
-    if (!previewCovers()) ed?.focus();
+    if (!covered()) ed?.focus();
   };
   // Follows the breadcrumb's language id, so a manual retag to/from markdown shows or
   // hides the whole preview affordance, exactly like the tokenizer switch.
@@ -505,6 +717,15 @@ export function CodeEditorPane({ projectId, groupId, visible, style }: CodeEdito
               {eol}
             </button>
           </>
+        )}
+        {!!activePath && !noModel && !!fc && (
+          <button
+            className="md-toggle-btn"
+            onClick={() => setDiffOn((v) => !v)}
+            title="Toggle diff with HEAD"
+          >
+            {diffOn ? "Editor" : "± Diff"}
+          </button>
         )}
         {isMarkdown && !!activePath && !noModel && (
           <button
@@ -554,6 +775,10 @@ export function CodeEditorPane({ projectId, groupId, visible, style }: CodeEdito
           />
         )}
         {isImage && activePath && <ImagePreview path={activePath} />}
+        {/* Always mounted (the diff editor is created lazily into it); visibility is
+            CSS-only so toggling never re-creates editors — same keep-alive discipline
+            as everything else in this app. */}
+        <div ref={diffHostRef} className={`diff-host ${showDiff ? "" : "hidden"}`} />
         <div ref={hostRef} className={`code-host ${noModel ? "empty" : ""}`} />
       </div>
     </div>

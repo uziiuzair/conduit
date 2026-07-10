@@ -20,8 +20,11 @@ import { WorkspaceCenter } from "./components/WorkspaceCenter";
 import { RightColumn } from "./components/RightColumn";
 import { Onboarding } from "./components/Onboarding";
 import { Settings } from "./components/Settings";
+import { QuickOpen } from "./components/QuickOpen";
+import { SearchPalette } from "./components/SearchPalette";
 import { useTelemetry } from "./hooks/useTelemetry";
 import { useFileWatch } from "./hooks/useFileWatch";
+import { useHotExit } from "./hooks/useHotExit";
 
 interface HookPayload {
   session: string;
@@ -58,6 +61,12 @@ export default function App() {
 
   // Single app-level poll: silently reload clean open files an agent edits on disk.
   useFileWatch();
+
+  // Hot exit's crash net: debounced backups of dirty buffers to the app-data dir.
+  useHotExit();
+
+  // ⌘P / ⌘⇧F palettes (menu-dispatched; rendered at the app root like Settings).
+  const [palette, setPalette] = useState<"quickopen" | "search" | null>(null);
 
   useEffect(() => {
     void load();
@@ -224,15 +233,36 @@ export default function App() {
         case "toggle-maximize":
           if (st.selectedProjectId) st.toggleMaximizeGroup(st.selectedProjectId);
           break;
+        case "quick-open":
+          setPalette("quickopen");
+          break;
+        case "find-in-files":
+          setPalette("search");
+          break;
+        case "format-document":
+          void st.formatActiveDocument();
+          break;
+        case "toggle-diff": {
+          const layout = st.selectedProjectId ? st.layouts[st.selectedProjectId] : undefined;
+          const g = activeGroup(layout);
+          const tab = g?.tabs.find((t) => t.ref === g.activeRef);
+          if (tab?.kind === "file") st.requestDiff(tab.ref, "toggle");
+          break;
+        }
         case "quit": {
           // Rust forwards quit here only when it saw a nonzero dirty count
-          // (menu.rs quit arm / CloseRequested handler); confirm, then quit for real.
+          // (menu.rs quit arm / CloseRequested handler). Hot exit: back up the
+          // dirty buffers and quit silently — they restore as dirty on relaunch.
+          // Only when the backup WRITE fails does the Tier-2 confirm dialog
+          // reappear as the data-loss gate.
           void (async () => {
+            const flushed = await st.flushHotExit();
             const n = Object.keys(st.dirty).length;
             const ok =
+              flushed ||
               n === 0 ||
               (await ask(
-                `Quit with unsaved changes? ${n} file${n === 1 ? " has" : "s have"} unsaved edits that will be lost.`,
+                `Quit with unsaved changes? Backing them up failed — ${n} file${n === 1 ? " has" : "s have"} unsaved edits that will be lost.`,
                 { title: "Conduit", kind: "warning", okLabel: "Quit Anyway", cancelLabel: "Cancel" },
               ));
             if (ok) await invoke("quit_app").catch(() => {});
@@ -423,6 +453,16 @@ export default function App() {
       {showSettings && (
         <Settings onClose={() => setShowSettings(false)} initialTab={settingsTab} />
       )}
+      {(() => {
+        if (!palette) return null;
+        const p = projects.find((x) => x.id === selectedProjectId);
+        if (!p) return null;
+        return palette === "quickopen" ? (
+          <QuickOpen projectId={p.id} dir={p.path} onClose={() => setPalette(null)} />
+        ) : (
+          <SearchPalette projectId={p.id} dir={p.path} onClose={() => setPalette(null)} />
+        );
+      })()}
     </div>
   );
 }

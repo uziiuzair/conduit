@@ -162,6 +162,13 @@ export interface FileStat {
   exists: boolean;
 }
 
+/** Mirror of hotexit::HotExitEntry (serde camelCase). */
+export interface HotExitEntry {
+  path: string;
+  content: string;
+  mtimeMs: number;
+}
+
 export interface EditorGroup {
   id: string;
   tabs: WsTab[];
@@ -628,6 +635,30 @@ interface AppState {
    *  stale request would replay on every FileTree remount (refresh, git poll, …). */
   clearReveal: () => void;
 
+  // ---- Tier-3 editor UX ----
+  /** projectId -> MRU absolute file paths, most recent first (Quick Open's empty-
+   *  query list). Session-only. */
+  recentFiles: Record<string, string[]>;
+  /** One-shot request that the pane showing `path` enter ("on") or flip ("toggle")
+   *  its diff-with-HEAD view. Consumed by CodeEditorPane like pendingReveal. */
+  pendingDiff: { path: string; nonce: number; mode: "on" | "toggle" } | null;
+  requestDiff: (path: string, mode: "on" | "toggle") => void;
+  clearPendingDiff: () => void;
+  /** Format the active file tab through the project's formatter (Rust shell-out);
+   *  applies the result as one undo-preserving edit. Errors surface as toasts. */
+  formatActiveDocument: () => Promise<void>;
+  /** Overwrite an open buffer with current disk content (undo-preserving), settle
+   *  its dirty/conflict state. Used after an explicit discard-to-HEAD; no-op when
+   *  the path has no live editable model. */
+  reloadBufferFromDisk: (path: string) => Promise<void>;
+  /** Hot exit: path -> backed-up content from the previous run, loaded once at
+   *  startup and consumed (one-shot) as panes create models for those paths. */
+  hotExit: Record<string, string>;
+  consumeHotExit: (path: string) => string | undefined;
+  /** Write the current dirty set to the hot-exit backup. True on success —
+   *  the quit path quits silently only when this succeeds. */
+  flushHotExit: () => Promise<boolean>;
+
   // ---- Phase 3: file-tree CRUD (all non-persisted) ----
   /** dirPath -> bump counter; a FileTree entry re-lists when its counter changes. */
   dirVersion: Record<string, number>;
@@ -758,18 +789,23 @@ export const useStore = create<AppState>((set, get) => {
     trimOnSave: readTrimOnSave(),
     fontZoom: readFontZoom(),
     reveal: null,
+    recentFiles: {},
+    pendingDiff: null,
+    hotExit: {},
 
     load: async () => {
-      const [projects, home, accounts, defaultAccount, trust, opencode] = await Promise.all([
-        invoke<Project[]>("load_projects"),
-        getHomeDir().catch(() => null),
-        invoke<Account[]>("list_accounts").catch(() => [] as Account[]),
-        invoke<string | null>("get_default_account").catch(() => null),
-        invoke<TrustSettings>("get_trust_settings").catch(
-          () => ({ privateMode: false }) as TrustSettings,
-        ),
-        invoke<OpenCodeSettings>("get_opencode_settings").catch(() => get().opencode),
-      ]);
+      const [projects, home, accounts, defaultAccount, trust, opencode, hotExitEntries] =
+        await Promise.all([
+          invoke<Project[]>("load_projects"),
+          getHomeDir().catch(() => null),
+          invoke<Account[]>("list_accounts").catch(() => [] as Account[]),
+          invoke<string | null>("get_default_account").catch(() => null),
+          invoke<TrustSettings>("get_trust_settings").catch(
+            () => ({ privateMode: false }) as TrustSettings,
+          ),
+          invoke<OpenCodeSettings>("get_opencode_settings").catch(() => get().opencode),
+          invoke<HotExitEntry[]>("hotexit_load").catch(() => [] as HotExitEntry[]),
+        ]);
       const layouts: Record<string, ProjectLayout> = {};
       for (const p of projects) {
         layouts[p.id] = validateLayout(p.layout ?? defaultLayout(p), p);
@@ -782,6 +818,10 @@ export const useStore = create<AppState>((set, get) => {
           }
         }
       }
+      // Hot-exit backups from the previous run: stashed keyed by path, consumed
+      // one-shot as panes create models. Never blocks load.
+      const hotExit: Record<string, string> = {};
+      for (const e of hotExitEntries) hotExit[e.path] = e.content;
       set({
         projects,
         homeDir: home,
@@ -791,6 +831,7 @@ export const useStore = create<AppState>((set, get) => {
         defaultAccount,
         privateMode: trust.privateMode,
         opencode,
+        hotExit,
       });
     },
 
@@ -1187,6 +1228,12 @@ export const useStore = create<AppState>((set, get) => {
       // One-shot reveal target: CodeEditorPane scrolls to it once the model is set.
       if (opts?.reveal)
         set({ pendingReveal: { path, line: opts.reveal.line, col: opts.reveal.col ?? 1 } });
+      // Quick Open's MRU: most recent first, deduped, capped.
+      set((s) => {
+        const prev = s.recentFiles[projectId] ?? [];
+        const next = [path, ...prev.filter((p) => p !== path)].slice(0, 30);
+        return { recentFiles: { ...s.recentFiles, [projectId]: next } };
+      });
     },
 
     pinTab: (projectId, ref) =>
@@ -1454,6 +1501,116 @@ export const useStore = create<AppState>((set, get) => {
       }),
 
     clearReveal: () => set({ reveal: null }),
+
+    requestDiff: (path, mode) =>
+      set((s) => ({
+        pendingDiff: { path, nonce: (s.pendingDiff?.nonce ?? 0) + 1, mode },
+      })),
+    clearPendingDiff: () => set((s) => (s.pendingDiff ? { pendingDiff: null } : {})),
+
+    formatActiveDocument: async () => {
+      const s = get();
+      const toast = (body: string) =>
+        void invoke("notify_user", { title: "Format Document", body }).catch(() => {});
+      const pid = s.selectedProjectId;
+      const project = s.projects.find((p) => p.id === pid);
+      const g = pid ? activeGroup(s.layouts[pid]) : null;
+      const tab = g?.tabs.find((t) => t.ref === g.activeRef);
+      if (!project || !tab || tab.kind !== "file") return;
+      const path = tab.ref;
+      const entry = registry.model(path);
+      if (!entry?.model || entry.readOnly || registry.saving.has(path)) return;
+      const content = entry.model.getValue();
+      let formatted: string;
+      try {
+        const r = await invoke<{ formatted: string; formatter: string }>("format_content", {
+          dir: project.path,
+          path,
+          content,
+        });
+        formatted = r.formatted;
+      } catch (e) {
+        toast(String(e));
+        return;
+      }
+      // The buffer may have moved while the formatter ran; formatting a stale
+      // snapshot would silently revert those keystrokes.
+      if (entry.model.getValue() !== content) {
+        toast("Buffer changed while formatting — try again.");
+        return;
+      }
+      if (formatted === content) return;
+      const m = entry.model as unknown as Monaco.editor.ITextModel;
+      m.pushEditOperations(
+        [],
+        [{ range: m.getFullModelRange(), text: formatted }],
+        () => null,
+      );
+    },
+
+    reloadBufferFromDisk: async (path) => {
+      const entry = registry.model(path);
+      if (!entry?.model || entry.readOnly || registry.saving.has(path)) return;
+      const fc = await invoke<FileContent>("read_file", { path });
+      // Same post-await re-check + reconciliation window as CodeEditorPane.onReload:
+      // an own save that started mid-read owns the buffer, and the pane's contentSub
+      // must not dispatch for this transitional edit.
+      if (registry.saving.has(path)) return;
+      if (fc.error !== null || fc.binary || fc.readOnly) return;
+      const m = entry.model as unknown as Monaco.editor.ITextModel;
+      registry.saving.add(path);
+      try {
+        m.pushEditOperations([], [{ range: m.getFullModelRange(), text: fc.content }], () => null);
+        registry.setSaved(path, { mtimeMs: fc.mtimeMs, size: fc.size });
+      } finally {
+        registry.saving.delete(path);
+      }
+      get().setDirty(path, registry.dirtyOf(path));
+      get().clearConflict(path);
+    },
+
+    consumeHotExit: (path) => {
+      const content = get().hotExit[path];
+      if (content === undefined) return undefined;
+      set((s) => {
+        const hotExit = { ...s.hotExit };
+        delete hotExit[path];
+        return { hotExit };
+      });
+      return content;
+    },
+
+    flushHotExit: async () => {
+      const entries: HotExitEntry[] = [];
+      const covered = new Set<string>();
+      for (const path of Object.keys(get().dirty)) {
+        const entry = registry.model(path);
+        if (!entry?.model || entry.readOnly) continue;
+        covered.add(path);
+        entries.push({ path, content: entry.model.getValue(), mtimeMs: Date.now() });
+      }
+      // Backups not yet consumed (their tab exists but was never revealed, so no
+      // model was created) MUST ride along — models are lazy, and dropping these
+      // here would destroy the only copy of the previous run's edits. A backup
+      // whose tab no longer exists anywhere is dropped: nothing will ever consume it.
+      const openRefs = new Set<string>();
+      for (const layout of Object.values(get().layouts)) {
+        for (const g of layout.groups) {
+          for (const t of g.tabs) if (t.kind === "file") openRefs.add(t.ref);
+        }
+      }
+      for (const [path, content] of Object.entries(get().hotExit)) {
+        if (!covered.has(path) && openRefs.has(path)) {
+          entries.push({ path, content, mtimeMs: Date.now() });
+        }
+      }
+      try {
+        await invoke("hotexit_save", { entries });
+        return true;
+      } catch {
+        return false;
+      }
+    },
 
     closeTab: (projectId, groupId, ref) =>
       applyLayout(projectId, (l) => {
