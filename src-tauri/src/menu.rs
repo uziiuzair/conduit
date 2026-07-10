@@ -67,9 +67,14 @@ pub fn build<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<Menu<R>> {
         .build(app)?;
     let reveal_active =
         MenuItemBuilder::with_id("reveal-active", "Reveal Active File in Tree").build(app)?;
+    let quick_open = MenuItemBuilder::with_id("quick-open", "Go to File…")
+        .accelerator("CmdOrCtrl+P")
+        .build(app)?;
     let file_menu = SubmenuBuilder::new(app, "File")
         .item(&new_session)
         .item(&open_project)
+        .separator()
+        .item(&quick_open)
         .separator()
         .item(&save)
         .item(&save_all)
@@ -94,6 +99,14 @@ pub fn build<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<Menu<R>> {
         let b = b.accelerator("Cmd+Alt+F");
         b.build(app)?
     };
+    let find_in_files = MenuItemBuilder::with_id("find-in-files", "Find in Files")
+        .accelerator("CmdOrCtrl+Shift+F")
+        .build(app)?;
+    // Shift+Alt+F is VS Code's own cross-platform Format binding; unlike plain
+    // Alt combos it can't be conflated with AltGr (= Ctrl+Alt) on Win32.
+    let format_doc = MenuItemBuilder::with_id("format-document", "Format Document")
+        .accelerator("Shift+Alt+F")
+        .build(app)?;
     let edit_menu = SubmenuBuilder::new(app, "Edit")
         .undo()
         .redo()
@@ -105,6 +118,9 @@ pub fn build<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<Menu<R>> {
         .separator()
         .item(&find)
         .item(&replace)
+        .item(&find_in_files)
+        .separator()
+        .item(&format_doc)
         .build()?;
 
     // ---- View (with nested Theme submenu) ----
@@ -147,9 +163,13 @@ pub fn build<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<Menu<R>> {
     let maximize_group = MenuItemBuilder::with_id("toggle-maximize", "Maximize Editor Group")
         .accelerator("CmdOrCtrl+Shift+M")
         .build(app)?;
+    let toggle_diff =
+        MenuItemBuilder::with_id("toggle-diff", "Toggle Diff with HEAD").build(app)?;
     let view_menu = SubmenuBuilder::new(app, "View")
         .item(&toggle_sidebar)
         .item(&toggle_right)
+        .separator()
+        .item(&toggle_diff)
         .separator()
         .item(&word_wrap)
         .item(&trim_on_save)

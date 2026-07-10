@@ -41,6 +41,45 @@ pub fn list_dir(dir: &str) -> Vec<DirEntry> {
     entries
 }
 
+/// Quick Open's fallback when the project isn't a git repo: a bounded recursive
+/// walk. Depth/entry caps keep a mistakenly-opened $HOME from hanging the palette;
+/// the heavy well-known noise dirs are skipped outright.
+const WALK_DEPTH: usize = 6;
+const WALK_SKIP: &[&str] = &[
+    ".git",
+    "node_modules",
+    "target",
+    "dist",
+    ".venv",
+    "__pycache__",
+];
+
+pub fn walk_files(dir: &str, cap: usize) -> Vec<String> {
+    fn rec(base: &Path, dir: &Path, depth: usize, cap: usize, out: &mut Vec<String>) {
+        if depth > WALK_DEPTH || out.len() >= cap {
+            return;
+        }
+        let Ok(rd) = fs::read_dir(dir) else { return };
+        for e in rd.flatten() {
+            if out.len() >= cap {
+                return;
+            }
+            let name = e.file_name().to_string_lossy().into_owned();
+            let is_dir = e.file_type().map(|t| t.is_dir()).unwrap_or(false);
+            if is_dir {
+                if !WALK_SKIP.contains(&name.as_str()) && !name.starts_with('.') {
+                    rec(base, &e.path(), depth + 1, cap, out);
+                }
+            } else if let Ok(rel) = e.path().strip_prefix(base) {
+                out.push(rel.to_string_lossy().replace('\\', "/"));
+            }
+        }
+    }
+    let mut out = Vec::new();
+    rec(Path::new(dir), Path::new(dir), 0, cap, &mut out);
+    out
+}
+
 // ---- read contract --------------------------------------------------------
 
 /// Fully editable up to 8 MB.
