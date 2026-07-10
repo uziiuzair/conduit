@@ -142,8 +142,14 @@ Leave it running alongside Conduit. Then, on your **phone**:
    |---|---|
    | `/conduit list` | Lists projects + sessions on the desktop, numbered, with running/idle |
    | `/conduit use 2` | Binds *this room* to session #2 |
-   | *(anything else)* | Sent to the bound session as a prompt |
-   | `/conduit status` | Shows the binding + whether the bridge link is up |
+   | *(anything else)* | Sent to the bound session as a prompt (and runs) |
+   | `y` / `n` | Answers Claude's y/n approval prompts (they stream here) |
+   | `/conduit stop` | Interrupts the running agent (Ctrl-C) |
+   | `/conduit key <name>` | Sends a control key: esc, enter, up, down, left, right, tab, ctrl-c, y, n |
+   | `/conduit send <text>` | Types text into the session *without* running it |
+   | `/conduit todos` | Shows the session's current plan/checklist |
+   | `/conduit watch on` | Pings this room when a turn finishes while you're away |
+   | `/conduit status` | Binding, live activity, tools this turn, token/cost, watch state |
    | `/conduit detach` | Unbinds this room |
    | `/conduit help` | The command list |
 
@@ -152,8 +158,10 @@ Leave it running alongside Conduit. Then, on your **phone**:
 What you'll see back in the room:
 - The assistant's replies as normal messages (they push to your phone).
 - Tool activity as compact notices (`⚙ ran npm test`, `⚙ edited store.ts`).
+- A **live checklist** that ticks off as the agent works its plan (one edited message).
 - A **typing indicator** while the session is working.
 - An **alert message** (which pushes) when a session needs your input.
+- With `watch on`: a `✅ finished a turn` ping (plan progress + cost) when you're away.
 
 Tip: one room ↔ one session. Make a separate room per session you want to follow.
 

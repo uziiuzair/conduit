@@ -27,7 +27,7 @@ Effort key: **🟢 adapter-only** · **🟡 adapter + small bridge addition** ·
 
 ---
 
-## Phase 1 — Reliable core + manual controls 🟢 (this phase)
+## Phase 1 — Reliable core + manual controls 🟢 ✅ SHIPPED
 
 Everything adapter-side; no Conduit changes. Makes the loop trustworthy.
 
@@ -44,7 +44,7 @@ Everything adapter-side; no Conduit changes. Makes the loop trustworthy.
 This already delivers *approvals by text*: Claude asks "allow Bash(rm …)? (y/n)" in
 the terminal → it streams to your room → you reply `y`. Crude but real, today.
 
-## Phase 2 — Awareness / mission control 🟢
+## Phase 2 — Awareness / mission control 🟢 ✅ SHIPPED
 
 - **`/conduit sessions`** — one message, edited live via `m.replace`, showing every
   session with a status dot (running/idle/needs-input/done), its current activity
