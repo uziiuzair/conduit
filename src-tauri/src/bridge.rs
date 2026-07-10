@@ -217,6 +217,14 @@ fn spawn_reply(
     })
 }
 
+/// Ask the desktop to open (activate) a session's tab, which spawns its PTY — the
+/// frontend owns the terminal Channel, so Rust can't spawn it directly. The
+/// frontend's `bridge-open-session` listener resolves the project and selects it.
+fn wake_session(app: &AppHandle, session_id: &str) {
+    use tauri::Emitter;
+    let _ = app.emit("bridge-open-session", json!({ "sessionId": session_id }));
+}
+
 /// Build the transcript backfill payload from raw jsonl lines.
 fn history_payload(lines: &[String]) -> serde_json::Value {
     let items: Vec<serde_json::Value> = lines
@@ -369,7 +377,22 @@ fn handle_conn(stream: TcpStream, app: AppHandle, token: Option<String>) {
                     ));
                 }
                 Some(ClientMsg::Attach { session_id }) => {
-                    if let Some((sub_id, rx)) = pty.subscribe(&session_id) {
+                    // Auto-wake: an idle session has no live PTY (Conduit spawns it
+                    // lazily when its tab is shown). Ask the desktop to open it, then
+                    // poll briefly for the PTY to come up before giving up — so
+                    // `/conduit use` works on ANY session, not just running ones.
+                    let mut sub = pty.subscribe(&session_id);
+                    if sub.is_none() {
+                        wake_session(&app, &session_id);
+                        for _ in 0..25 {
+                            std::thread::sleep(Duration::from_millis(200));
+                            sub = pty.subscribe(&session_id);
+                            if sub.is_some() {
+                                break;
+                            }
+                        }
+                    }
+                    if let Some((sub_id, rx)) = sub {
                         // Desktop-authoritative sizing: tell the new viewer the PTY's
                         // current size so it renders at the desktop's dimensions rather
                         // than resizing the shared TTY out from under the desktop.
