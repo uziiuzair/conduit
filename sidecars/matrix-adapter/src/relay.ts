@@ -6,7 +6,15 @@
 import type { MatrixClient } from "@vector-im/matrix-bot-sdk";
 import { discoverBridgeUrl, fetchProjects, SessionLink } from "./bridge.js";
 import { loadSettings, saveSettings, type Settings } from "./config.js";
-import { promptToKeystrokes, typingForStatus, type ChatItem } from "./protocol.js";
+import {
+  controlKeyBytes,
+  CONTROL_KEY_NAMES,
+  INTERRUPT_KEY,
+  promptToInsert,
+  SUBMIT_KEY,
+  typingForStatus,
+  type ChatItem,
+} from "./protocol.js";
 import {
   HELP_TEXT,
   parseCommand,
@@ -20,6 +28,9 @@ import {
 import { sendMessage } from "./matrix.js";
 
 const TYPING_REFRESH_MS = 25_000;
+/** Gap between inserting the prompt text and sending Enter, so the TUI renders the
+ *  text as field content before it sees the submit keystroke. */
+const SUBMIT_DELAY_MS = 90;
 
 interface RoomState {
   link: SessionLink;
@@ -87,11 +98,15 @@ export class Relay {
       await this.notice(roomId, "No session bound here — `/conduit list` then `/conduit use <n>`.");
       return;
     }
-    const keystrokes = promptToKeystrokes(body);
     state.echo.record(body.trim());
-    if (!state.link.send(keystrokes)) {
+    // Two writes: insert the text, then a beat later send Enter as its own
+    // keystroke. Sending them together makes Claude Code's TUI treat the whole
+    // thing as a paste and NOT submit (the "typed but not executed" bug).
+    if (!state.link.send(promptToInsert(body))) {
       await this.notice(roomId, "⚠️ Bridge link is down — is Conduit running on the desktop?");
+      return;
     }
+    setTimeout(() => state.link.send(SUBMIT_KEY), SUBMIT_DELAY_MS);
   }
 
   private async handleCommand(
@@ -135,6 +150,43 @@ export class Relay {
             roomId,
             `Bound to session ${state.link.sessionId} — bridge link ${state.link.isUp ? "up" : "DOWN (retrying)"}.`,
           );
+        }
+        return;
+      }
+      case "stop": {
+        const state = this.rooms.get(roomId);
+        if (!state) {
+          await this.notice(roomId, "No session bound here.");
+        } else if (state.link.send(INTERRUPT_KEY)) {
+          await this.notice(roomId, "⎋ sent interrupt (Ctrl-C).");
+        } else {
+          await this.notice(roomId, "⚠️ Bridge link is down.");
+        }
+        return;
+      }
+      case "key": {
+        const state = this.rooms.get(roomId);
+        if (!state) {
+          await this.notice(roomId, "No session bound here.");
+          return;
+        }
+        const bytes = controlKeyBytes(command.key);
+        if (bytes === null) {
+          await this.notice(roomId, `Unknown key "${command.key}". Try: ${CONTROL_KEY_NAMES}`);
+          return;
+        }
+        if (!state.link.send(bytes)) await this.notice(roomId, "⚠️ Bridge link is down.");
+        return;
+      }
+      case "send": {
+        const state = this.rooms.get(roomId);
+        if (!state) {
+          await this.notice(roomId, "No session bound here.");
+          return;
+        }
+        // Insert text WITHOUT the submitting Enter (edit on the desktop first).
+        if (!state.link.send(promptToInsert(command.text))) {
+          await this.notice(roomId, "⚠️ Bridge link is down.");
         }
         return;
       }

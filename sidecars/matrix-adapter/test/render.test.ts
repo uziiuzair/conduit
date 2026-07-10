@@ -37,6 +37,15 @@ describe("parseCommand", () => {
     expect(parseCommand("/conduit bogus")).toEqual({ cmd: "help" });
   });
 
+  it("parses the Phase-1 control verbs", () => {
+    expect(parseCommand("/conduit stop")).toEqual({ cmd: "stop" });
+    expect(parseCommand("/conduit key esc")).toEqual({ cmd: "key", key: "esc" });
+    expect(parseCommand("/conduit send npm run build")).toEqual({
+      cmd: "send",
+      text: "npm run build",
+    });
+  });
+
   it("treats non-commands and /bot as not-ours", () => {
     expect(parseCommand("fix the tests")).toBeNull();
     expect(parseCommand("/bot list")).toBeNull();

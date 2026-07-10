@@ -3,7 +3,8 @@ import {
   attachFrame,
   inputFrame,
   parseServerFrame,
-  promptToKeystrokes,
+  promptToInsert,
+  SUBMIT_KEY,
   typingForStatus,
 } from "../src/protocol.js";
 
@@ -33,20 +34,33 @@ describe("parseServerFrame", () => {
   });
 });
 
-describe("promptToKeystrokes", () => {
-  it("single line: text + carriage return", () => {
-    expect(promptToKeystrokes("fix the bug")).toBe("fix the bug\r");
+describe("promptToInsert", () => {
+  it("single line: text only, no submit (Enter is sent separately)", () => {
+    expect(promptToInsert("fix the bug")).toBe("fix the bug");
+    expect(SUBMIT_KEY).toBe("\r");
   });
 
-  it("multi-line: bracketed paste then submit", () => {
-    expect(promptToKeystrokes("line one\nline two")).toBe(
-      "\x1b[200~line one\nline two\x1b[201~\r",
-    );
+  it("multi-line: bracketed paste, still no trailing Enter", () => {
+    expect(promptToInsert("line one\nline two")).toBe("\x1b[200~line one\nline two\x1b[201~");
   });
 
   it("normalizes CRLF and strips trailing newlines", () => {
-    expect(promptToKeystrokes("a\r\nb\n")).toBe("\x1b[200~a\nb\x1b[201~\r");
-    expect(promptToKeystrokes("solo\n\n")).toBe("solo\r");
+    expect(promptToInsert("a\r\nb\n")).toBe("\x1b[200~a\nb\x1b[201~");
+    expect(promptToInsert("solo\n\n")).toBe("solo");
+  });
+});
+
+describe("controlKeyBytes", () => {
+  it("maps friendly names to bytes; y/n include submit", async () => {
+    const { controlKeyBytes, INTERRUPT_KEY } = await import("../src/protocol.js");
+    expect(controlKeyBytes("esc")).toBe("\x1b");
+    expect(controlKeyBytes("Enter")).toBe("\r");
+    expect(controlKeyBytes("up")).toBe("\x1b[A");
+    expect(controlKeyBytes("ctrl-c")).toBe("\x03");
+    expect(controlKeyBytes("y")).toBe("y\r");
+    expect(controlKeyBytes("n")).toBe("n\r");
+    expect(controlKeyBytes("bogus")).toBeNull();
+    expect(INTERRUPT_KEY).toBe("\x03");
   });
 });
 

@@ -72,17 +72,56 @@ export const attachFrame = (sessionId: string): string =>
 export const inputFrame = (sessionId: string, data: string): string =>
   JSON.stringify({ type: "input", session_id: sessionId, data });
 
+/** The Enter keystroke that submits the prompt. Sent as its OWN pty write, a beat
+ *  after the text — see promptToInsert. */
+export const SUBMIT_KEY = "\r";
+
 /**
- * A phone message -> raw PTY keystrokes. Single-line text is typed + Enter.
- * Multi-line text rides inside bracketed paste so the Claude CLI receives it as
- * one paste block (a bare "\n" mid-stream would submit the first line alone),
- * then Enter submits.
+ * A phone message -> the "insert into the input field" keystrokes, WITHOUT the
+ * submitting Enter. Multi-line text rides inside bracketed paste so the Claude CLI
+ * receives it as one block (a bare "\n" mid-stream would submit the first line
+ * alone). The Enter is deliberately NOT appended: an Ink-based TUI like Claude
+ * Code treats a text burst that ends in "\r" as pasted content and drops the
+ * newline into the field instead of submitting, so the caller sends SUBMIT_KEY as
+ * a separate keystroke once the field has rendered the text.
  */
-export function promptToKeystrokes(text: string): string {
+export function promptToInsert(text: string): string {
   const t = text.replace(/\r\n/g, "\n").replace(/\n+$/, "");
-  if (!t.includes("\n")) return t + "\r";
-  return `\x1b[200~${t}\x1b[201~\r`;
+  if (!t.includes("\n")) return t;
+  return `\x1b[200~${t}\x1b[201~`;
 }
+
+/** Interrupt a running agent (Ctrl-C). */
+export const INTERRUPT_KEY = "\x03";
+
+/** Friendly control-key names -> the bytes to write to the PTY. Lets the phone
+ *  drive Claude Code's interactive prompts/menus (y/n approvals, selection lists).
+ *  `y`/`n` include the submitting Enter so a one-tap answer works. */
+const CONTROL_KEYS: Record<string, string> = {
+  esc: "\x1b",
+  escape: "\x1b",
+  enter: "\r",
+  up: "\x1b[A",
+  down: "\x1b[B",
+  right: "\x1b[C",
+  left: "\x1b[D",
+  tab: "\t",
+  "ctrl-c": "\x03",
+  ctrlc: "\x03",
+  space: " ",
+  y: "y\r",
+  yes: "y\r",
+  n: "n\r",
+  no: "n\r",
+};
+
+/** Bytes for a named control key, or null if the name is unknown. Pure. */
+export function controlKeyBytes(name: string): string | null {
+  return CONTROL_KEYS[name.trim().toLowerCase()] ?? null;
+}
+
+/** Names accepted by `/conduit key`, for help text. */
+export const CONTROL_KEY_NAMES = "esc, enter, up, down, left, right, tab, ctrl-c, space, y, n";
 
 // ---- hook status events -> presence -------------------------------------------
 

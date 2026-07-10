@@ -10,20 +10,28 @@ export type Command =
   | { cmd: "list" }
   | { cmd: "use"; target: string }
   | { cmd: "detach" }
-  | { cmd: "status" };
+  | { cmd: "status" }
+  | { cmd: "stop" }
+  | { cmd: "key"; key: string }
+  | { cmd: "send"; text: string };
 
 /** Parse "/conduit …" (null = not a command; the text is a prompt). "/bot …" is
  *  BadgerClaw's own namespace and is treated as not-ours (also null). */
 export function parseCommand(body: string): Command | null {
-  const m = /^\/conduit\b\s*(.*)$/is.exec(body.trim());
+  const m = /^\/conduit\b\s*([\s\S]*)$/i.exec(body.trim());
   if (!m) return null;
   const rest = m[1].trim();
   if (rest === "" || /^help$/i.test(rest)) return { cmd: "help" };
   if (/^list$/i.test(rest)) return { cmd: "list" };
   if (/^detach$/i.test(rest)) return { cmd: "detach" };
   if (/^status$/i.test(rest)) return { cmd: "status" };
+  if (/^stop$/i.test(rest)) return { cmd: "stop" };
   const use = /^use\s+(.+)$/i.exec(rest);
   if (use) return { cmd: "use", target: use[1].trim() };
+  const key = /^key\s+(.+)$/i.exec(rest);
+  if (key) return { cmd: "key", key: key[1].trim() };
+  const send = /^send\s+([\s\S]+)$/i.exec(rest);
+  if (send) return { cmd: "send", text: send[1] };
   return { cmd: "help" };
 }
 
@@ -33,7 +41,11 @@ export const HELP_TEXT = [
   "/conduit use <n | session-id> — bind this room to a session",
   "/conduit detach — unbind this room",
   "/conduit status — binding + bridge connectivity",
+  "/conduit stop — interrupt the running agent (Ctrl-C)",
+  "/conduit key <name> — send a control key (esc, enter, up, down, y, n, …)",
+  "/conduit send <text> — type text into the session WITHOUT running it",
   "Anything else you type here is sent to the bound session as a prompt.",
+  "Tip: Claude's y/n approval prompts stream here — just reply y or n.",
 ].join("\n");
 
 // ---- session listing --------------------------------------------------------------
