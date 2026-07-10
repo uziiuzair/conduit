@@ -10,7 +10,7 @@ a push when a session needs you. All over Matrix (E2EE), no new iOS app, no VPS.
 
 **The one hard rule:** this Mac must stay **awake and online**. Conduit's sessions are
 processes *inside* the desktop app — the adapter mirrors them, it can't keep them
-alive. If the Mac sleeps, the sessions freeze until it wakes. See §5 for keeping it up.
+alive. If the Mac sleeps, the sessions freeze until it wakes. See §6 for keeping it up.
 
 ---
 
@@ -75,7 +75,26 @@ pnpm build
 
 ---
 
-## 3. Create the bot in BadgerClaw and pair it
+## 3. Register this Mac as a host (one time)
+
+BadgerClaw's backend only lets a bot be paired to a **registered host machine**, so
+before pairing you sign in once and register this Mac. (This is the equivalent of
+`badgerclaw login`, but it does **not** install BadgerClaw's gateway/plugin daemon —
+your adapter is the only thing that will run the bot.)
+
+```bash
+cd /Users/fahedyasin/Documents2/Conduit/conduit/sidecars/matrix-adapter
+node dist/index.js login
+```
+
+A browser opens to sign in to BadgerClaw; approve it. The command then registers this
+Mac and prints your account id + instance id. Session is saved to
+`~/.conduit/matrix-adapter/account.json` (mode 0600).
+
+> Being signed into the **iOS app** is not the same as registering this Mac — the
+> host machine needs its own registration, which is what this step does.
+
+## 4. Create the bot in BadgerClaw and pair it
 
 1. In the **BadgerClaw app**: **Bot Management → New Bot**.
    - Pick a name (e.g. `conduit`).
@@ -84,22 +103,22 @@ pnpm build
      "an external client backs this bot" option. Also: don't run BadgerClaw's own
      OpenClaw plugin for this bot — the adapter owns it.)
 2. Generate a **pair code** for the bot (looks like `BCK-XXXX-XXXX`).
-3. On this Mac, redeem it and allowlist yourself as the owner:
+3. On this Mac, redeem it:
 
    ```bash
-   cd /Users/fahedyasin/Documents2/Conduit/conduit/sidecars/matrix-adapter
-   node dist/index.js pair BCK-XXXX-XXXX --owner @you:badger.signout.io
+   node dist/index.js pair BCK-XXXX-XXXX
    ```
 
-   Use **your own** Matrix id for `--owner`. Only allowlisted ids can command the bot
-   or type into your terminal — room membership alone grants nothing.
+   The owner defaults to your logged-in account id — that's who's allowed to command
+   the bot and type into your terminal (room membership alone grants nothing). Add
+   more owners with `--owner @someone:badger.signout.io`.
 
-   Credentials land in `~/.conduit/matrix-adapter/` (mode 0600). The pair code is
-   one-time and short-lived; if it expires, generate a fresh one in the app.
+   Bot credentials land in `~/.conduit/matrix-adapter/` (mode 0600). Pair codes are
+   one-time and short-lived; if one expires, generate a fresh one in the app.
 
 ---
 
-## 4. Run it and use it
+## 5. Run it and use it
 
 ```bash
 cd /Users/fahedyasin/Documents2/Conduit/conduit/sidecars/matrix-adapter
@@ -133,7 +152,7 @@ Tip: one room ↔ one session. Make a separate room per session you want to foll
 
 ---
 
-## 5. Keep it connected while you travel
+## 6. Keep it connected while you travel
 
 Three things must stay up on this Mac: **it must not sleep**, **Conduit must run**,
 **the adapter must run**.
@@ -187,7 +206,7 @@ is fine; a logged-out one is not.)
 
 ---
 
-## 6. Troubleshooting
+## 7. Troubleshooting
 
 - **`/conduit list` says the bridge is unreachable.** Conduit isn't running, or
   it's the *old* installed build whose bridge crashes on list. Confirm you're
@@ -211,7 +230,7 @@ is fine; a logged-out one is not.)
 
 ---
 
-## 7. What this is and isn't (so there are no surprises)
+## 8. What this is and isn't (so there are no surprises)
 
 - **Outbound-only & private:** the adapter opens connections *out* (loopback to
   Conduit, HTTPS to the Matrix homeserver). It listens on nothing, opens no firewall

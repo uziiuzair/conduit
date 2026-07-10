@@ -4,10 +4,12 @@
 //   run                                                 start the relay
 // See docs/superpowers/specs/2026-07-10-conduit-matrix-adapter-design.md.
 
-import { DEFAULT_API_BASE, redeemPairCode } from "./badgerclaw.js";
+import { DEFAULT_API_BASE, login as bcLogin, redeemPairCode } from "./badgerclaw.js";
 import {
+  loadAccount,
   loadCredentials,
   loadSettings,
+  saveAccount,
   saveCredentials,
   saveSettings,
 } from "./config.js";
@@ -19,9 +21,13 @@ function usage(): never {
     [
       "conduit-matrix — chat with Conduit sessions from the BadgerClaw app",
       "",
-      "  conduit-matrix pair <BCK-code> --owner <@user:server> [--api <base-url>]",
-      "      Redeem a pair code minted in BadgerClaw (Bot Management → Pair) and",
-      "      allowlist the owner mxid. Credentials land in ~/.conduit/matrix-adapter/.",
+      "  conduit-matrix login",
+      "      Sign in to BadgerClaw in the browser and register THIS Mac as a host.",
+      "      Required once before pairing (the backend needs a registered instance).",
+      "",
+      "  conduit-matrix pair <BCK-code> [--owner <@user:server>]",
+      "      Redeem a pair code minted in BadgerClaw (Bot Management → Pair).",
+      "      Owner defaults to your logged-in account; only owners can command the bot.",
       "",
       "  conduit-matrix run",
       "      Connect to Matrix and the local Conduit bridge, then relay.",
@@ -37,6 +43,16 @@ function argValue(args: string[], flag: string): string | null {
   return i !== -1 && i + 1 < args.length ? args[i + 1] : null;
 }
 
+async function login(args: string[]): Promise<void> {
+  const api = argValue(args, "--api") ?? DEFAULT_API_BASE;
+  const authBase = argValue(args, "--auth") ?? undefined;
+  const account = await bcLogin(api, authBase);
+  saveAccount(account);
+  console.log(`\nlogged in as ${account.userId}`);
+  console.log(`this Mac is registered as instance ${account.instanceId}`);
+  console.log("next: conduit-matrix pair <BCK-code>");
+}
+
 async function pair(args: string[]): Promise<void> {
   // Positional = the pair code; skip each --flag together with its value.
   let code: string | null = null;
@@ -48,11 +64,22 @@ async function pair(args: string[]): Promise<void> {
       break;
     }
   }
-  const owner = argValue(args, "--owner");
   const api = argValue(args, "--api") ?? DEFAULT_API_BASE;
-  if (!code || !owner || !owner.startsWith("@")) usage();
+  if (!code) usage();
 
-  const creds = await redeemPairCode(code, api);
+  const account = loadAccount();
+  if (!account) {
+    console.error("not logged in — run `conduit-matrix login` first (registers this Mac).");
+    process.exit(1);
+  }
+  // Owner defaults to the logged-in account's own mxid; --owner overrides/adds.
+  const owner = argValue(args, "--owner") ?? account.userId;
+  if (!owner.startsWith("@")) {
+    console.error(`--owner must be a Matrix id like @you:badger.signout.io (got ${owner})`);
+    process.exit(1);
+  }
+
+  const creds = await redeemPairCode(code, account.instanceId, api);
   saveCredentials(creds);
   const settings = loadSettings();
   if (!settings.owners.includes(owner)) settings.owners.push(owner);
@@ -82,7 +109,14 @@ async function run(): Promise<void> {
 }
 
 const [, , cmd, ...rest] = process.argv;
-const main = cmd === "pair" ? pair(rest) : cmd === "run" ? run() : Promise.resolve(usage());
+const main =
+  cmd === "login"
+    ? login(rest)
+    : cmd === "pair"
+      ? pair(rest)
+      : cmd === "run"
+        ? run()
+        : Promise.resolve(usage());
 main.catch((e) => {
   console.error(`conduit-matrix: ${e instanceof Error ? e.message : e}`);
   process.exit(1);

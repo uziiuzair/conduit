@@ -18,6 +18,17 @@ export interface Credentials {
   botId: string | null;
 }
 
+/** BadgerClaw ACCOUNT session (from `login`), distinct from the bot's Matrix
+ *  session above. Holds the registered instance id that `redeem` now requires. */
+export interface Account {
+  /** Account access token (Bearer) — used only to register the instance. */
+  accessToken: string;
+  /** The account's own Matrix user id (the default bot owner). */
+  userId: string;
+  /** Canonical instance id the backend returned from /openclaw/register. */
+  instanceId: string;
+}
+
 export interface Settings {
   /** Matrix user ids allowed to command the bot / type into sessions. */
   owners: string[];
@@ -37,6 +48,7 @@ export function ensureDataDir(): string {
 
 const credsPath = () => path.join(dataDir(), "credentials.json");
 const settingsPath = () => path.join(dataDir(), "settings.json");
+const accountPath = () => path.join(dataDir(), "account.json");
 
 function writeJson(file: string, value: unknown): void {
   ensureDataDir();
@@ -60,3 +72,6 @@ export function loadSettings(): Settings {
   return readJson<Settings>(settingsPath()) ?? { owners: [], rooms: {} };
 }
 export const saveSettings = (s: Settings): void => writeJson(settingsPath(), s);
+
+export const saveAccount = (a: Account): void => writeJson(accountPath(), a);
+export const loadAccount = (): Account | null => readJson<Account>(accountPath());
