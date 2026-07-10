@@ -5,6 +5,7 @@ import {
   indexSessions,
   parseCommand,
   PromptEcho,
+  renderChanges,
   renderChatBatch,
   renderSessionList,
   renderTodos,
@@ -54,6 +55,14 @@ describe("parseCommand", () => {
     expect(parseCommand("/conduit watch")).toEqual({ cmd: "watch", on: true });
     expect(parseCommand("/conduit watch on")).toEqual({ cmd: "watch", on: true });
     expect(parseCommand("/conduit watch off")).toEqual({ cmd: "watch", on: false });
+  });
+
+  it("parses the Phase-5 diff-review verbs", () => {
+    expect(parseCommand("/conduit changes")).toEqual({ cmd: "changes" });
+    expect(parseCommand("/conduit diff src/store.ts")).toEqual({
+      cmd: "diff",
+      path: "src/store.ts",
+    });
   });
 
   it("treats non-commands and /bot as not-ours", () => {
@@ -143,6 +152,19 @@ describe("renderTodos", () => {
     expect(out).toContain("🔄 Wiring the relay");
     expect(out).toContain("⬜ Add tests");
     expect(renderTodos([])).toContain("No plan yet");
+  });
+});
+
+describe("renderChanges", () => {
+  it("summarizes changed files with counts", () => {
+    const out = renderChanges([
+      { status: "M", path: "src/a.ts", added: 5, removed: 2 },
+      { status: "A", path: "b.ts", added: 10, removed: 0 },
+    ]);
+    expect(out).toContain("Changed files (2):");
+    expect(out).toContain("M  src/a.ts +5 -2");
+    expect(out).toContain("A  b.ts +10");
+    expect(renderChanges([])).toBe("No changes against HEAD.");
   });
 });
 

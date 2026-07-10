@@ -23,6 +23,7 @@ import {
   HELP_TEXT,
   parseCommand,
   PromptEcho,
+  renderChanges,
   renderChatBatch,
   renderSessionList,
   renderTodos,
@@ -32,7 +33,7 @@ import {
   type IndexedSession,
   type Usage,
 } from "./render.js";
-import { editMessage, sendMessage } from "./matrix.js";
+import { editMessage, sendCode, sendMessage } from "./matrix.js";
 
 const TYPING_REFRESH_MS = 25_000;
 /** Gap between inserting the prompt text and sending Enter, so the TUI renders the
@@ -234,6 +235,36 @@ export class Relay {
         // Insert text WITHOUT the submitting Enter (edit on the desktop first).
         if (!state.link.send(promptToInsert(command.text))) {
           await this.notice(roomId, "⚠️ Bridge link is down.");
+        }
+        return;
+      }
+      case "changes": {
+        const state = this.rooms.get(roomId);
+        if (!state) {
+          await this.notice(roomId, "No session bound here.");
+          return;
+        }
+        const res = await state.link.requestGit("changes");
+        if (!res || res.error || !res.changes) {
+          await this.notice(roomId, `⚠️ Couldn't read changes${res?.error ? `: ${res.error}` : " (bridge timeout)"}.`);
+        } else {
+          await this.notice(roomId, renderChanges(res.changes));
+        }
+        return;
+      }
+      case "diff": {
+        const state = this.rooms.get(roomId);
+        if (!state) {
+          await this.notice(roomId, "No session bound here.");
+          return;
+        }
+        const res = await state.link.requestGit("diff", command.path);
+        if (!res) {
+          await this.notice(roomId, "⚠️ Couldn't read the diff (bridge timeout).");
+        } else if (res.error) {
+          await this.notice(roomId, `⚠️ ${res.error}`);
+        } else {
+          await sendCode(this.client, roomId, `diff — ${command.path}`, res.diff ?? "(empty)");
         }
         return;
       }

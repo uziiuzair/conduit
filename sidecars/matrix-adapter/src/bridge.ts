@@ -5,11 +5,13 @@
 import WebSocket from "ws";
 import {
   attachFrame,
+  gitFrame,
   inputFrame,
   listFrame,
   parseServerFrame,
   type BridgeProject,
   type ChatItem,
+  type GitResult,
   type ServerFrame,
 } from "./protocol.js";
 
@@ -96,6 +98,9 @@ export class SessionLink {
   private up = false;
   private pending: ChatItem[] = [];
   private flushTimer: NodeJS.Timeout | null = null;
+  /** FIFO of resolvers waiting on a `gitresult` (git queries are user-driven and
+   *  sequential per room, so first-in-first-out matching is sufficient). */
+  private gitWaiters: ((r: GitResult | null) => void)[] = [];
 
   constructor(
     private url: string,
@@ -113,6 +118,28 @@ export class SessionLink {
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return false;
     this.ws.send(inputFrame(this.sessionId, data));
     return true;
+  }
+
+  /** Request a git query for this session's repo; resolves with the gitresult
+   *  frame (or null on timeout / link down). */
+  requestGit(action: string, path?: string, timeoutMs = 8000): Promise<GitResult | null> {
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return Promise.resolve(null);
+    return new Promise((resolve) => {
+      let settled = false;
+      const done = (r: GitResult | null) => {
+        if (settled) return;
+        settled = true;
+        resolve(r);
+      };
+      this.gitWaiters.push(done);
+      setTimeout(() => {
+        // Drop this waiter if it's still pending (keeps the FIFO aligned).
+        const i = this.gitWaiters.indexOf(done);
+        if (i !== -1) this.gitWaiters.splice(i, 1);
+        done(null);
+      }, timeoutMs);
+      this.ws!.send(gitFrame(this.sessionId, action, path));
+    });
   }
 
   close(): void {
@@ -174,6 +201,11 @@ export class SessionLink {
       case "error":
         this.events.onDown(frame.message);
         break;
+      case "gitresult": {
+        const waiter = this.gitWaiters.shift();
+        if (waiter) waiter(frame);
+        break;
+      }
       case "output":
       case "projects":
         break; // PTY bytes / unsolicited lists: not chat material

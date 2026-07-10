@@ -1,7 +1,7 @@
 // Pure rendering + command parsing: chat items -> Matrix message content, and
 // owner messages -> /conduit commands. No Matrix SDK imports (unit-testable).
 
-import type { BridgeProject, ChatItem, TodoItem } from "./protocol.js";
+import type { BridgeProject, ChatItem, GitChange, TodoItem } from "./protocol.js";
 
 // ---- /conduit command parsing ---------------------------------------------------
 
@@ -15,7 +15,9 @@ export type Command =
   | { cmd: "key"; key: string }
   | { cmd: "send"; text: string }
   | { cmd: "todos" }
-  | { cmd: "watch"; on: boolean };
+  | { cmd: "watch"; on: boolean }
+  | { cmd: "changes" }
+  | { cmd: "diff"; path: string };
 
 /** Parse "/conduit …" (null = not a command; the text is a prompt). "/bot …" is
  *  BadgerClaw's own namespace and is treated as not-ours (also null). */
@@ -29,6 +31,9 @@ export function parseCommand(body: string): Command | null {
   if (/^status$/i.test(rest)) return { cmd: "status" };
   if (/^stop$/i.test(rest)) return { cmd: "stop" };
   if (/^todos$/i.test(rest)) return { cmd: "todos" };
+  if (/^changes$/i.test(rest)) return { cmd: "changes" };
+  const diff = /^diff\s+(.+)$/i.exec(rest);
+  if (diff) return { cmd: "diff", path: diff[1].trim() };
   const watch = /^watch(?:\s+(on|off))?$/i.exec(rest);
   if (watch) return { cmd: "watch", on: (watch[1] ?? "on").toLowerCase() === "on" };
   const use = /^use\s+(.+)$/i.exec(rest);
@@ -50,6 +55,8 @@ export const HELP_TEXT = [
   "/conduit key <name> — send a control key (esc, enter, up, down, y, n, …)",
   "/conduit send <text> — type text into the session WITHOUT running it",
   "/conduit todos — the bound session's current plan/checklist",
+  "/conduit changes — files changed vs HEAD in the session's repo",
+  "/conduit diff <file> — the diff of one changed file",
   "/conduit watch on|off — ping this room when a turn finishes (for when you're away)",
   "Anything else you type here is sent to the bound session as a prompt.",
   "Tip: Claude's y/n approval prompts stream here — just reply y or n.",
@@ -101,6 +108,18 @@ export function estimateCostUsd(u: Usage): number {
 export function renderUsage(u: Usage): string {
   const tok = u.input + u.output + u.cacheCreation; // fresh tokens (cache reads are cheap/repeated)
   return `~${tok.toLocaleString()} tokens this session (≈$${estimateCostUsd(u).toFixed(2)})`;
+}
+
+/** Changed-files summary for `/conduit changes`. */
+export function renderChanges(changes: GitChange[]): string {
+  if (changes.length === 0) return "No changes against HEAD.";
+  const rows = changes.slice(0, 50).map((c) => {
+    const adds = c.added > 0 ? ` +${c.added}` : "";
+    const dels = c.removed > 0 ? ` -${c.removed}` : "";
+    return `${c.status}  ${c.path}${adds}${dels}`;
+  });
+  const more = changes.length > 50 ? [`… and ${changes.length - 50} more`] : [];
+  return [`Changed files (${changes.length}):`, ...rows, ...more].join("\n");
 }
 
 // ---- session listing --------------------------------------------------------------

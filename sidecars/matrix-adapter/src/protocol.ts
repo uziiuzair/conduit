@@ -31,6 +31,22 @@ export type ChatItem =
       cacheCreationTokens: number;
     };
 
+export interface GitChange {
+  status: string;
+  path: string;
+  added: number;
+  removed: number;
+}
+
+export interface GitResult {
+  type: "gitresult";
+  action: string;
+  changes?: GitChange[];
+  path?: string;
+  diff?: string;
+  error?: string;
+}
+
 export type ServerFrame =
   | { type: "projects"; projects: BridgeProject[] }
   | { type: "size"; cols: number; rows: number }
@@ -38,7 +54,8 @@ export type ServerFrame =
   | { type: "output"; data: string }
   | { type: "status"; event: string; body: unknown }
   | { type: "chat"; item: ChatItem }
-  | { type: "error"; message: string };
+  | { type: "error"; message: string }
+  | GitResult;
 
 /** Parse one bridge text frame; null on garbage or unknown type. */
 export function parseServerFrame(text: string): ServerFrame | null {
@@ -57,7 +74,8 @@ export function parseServerFrame(text: string): ServerFrame | null {
     t === "output" ||
     t === "status" ||
     t === "chat" ||
-    t === "error"
+    t === "error" ||
+    t === "gitresult"
   ) {
     return v as ServerFrame;
   }
@@ -71,6 +89,8 @@ export const attachFrame = (sessionId: string): string =>
   JSON.stringify({ type: "attach", session_id: sessionId });
 export const inputFrame = (sessionId: string, data: string): string =>
   JSON.stringify({ type: "input", session_id: sessionId, data });
+export const gitFrame = (sessionId: string, action: string, path?: string): string =>
+  JSON.stringify({ type: "git", session_id: sessionId, action, ...(path ? { path } : {}) });
 
 /** The Enter keystroke that submits the prompt. Sent as its OWN pty write, a beat
  *  after the text — see promptToInsert. */

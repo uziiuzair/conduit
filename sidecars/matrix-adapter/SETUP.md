@@ -148,6 +148,8 @@ Leave it running alongside Conduit. Then, on your **phone**:
    | `/conduit key <name>` | Sends a control key: esc, enter, up, down, left, right, tab, ctrl-c, y, n |
    | `/conduit send <text>` | Types text into the session *without* running it |
    | `/conduit todos` | Shows the session's current plan/checklist |
+   | `/conduit changes` | Files changed vs HEAD in the session's repo |
+   | `/conduit diff <file>` | The diff of one changed file, as a code block |
    | `/conduit watch on` | Pings this room when a turn finishes while you're away |
    | `/conduit status` | Binding, live activity, tools this turn, token/cost, watch state |
    | `/conduit detach` | Unbinds this room |

@@ -47,6 +47,14 @@ pub enum ClientMsg {
         cols: u16,
         rows: u16,
     },
+    /// Read-only git query for a session's repo (phone diff review).
+    /// action = "changes" (Vec<Change>) | "diff" (unified text for `path`).
+    Git {
+        session_id: String,
+        action: String,
+        #[serde(default)]
+        path: Option<String>,
+    },
 }
 
 /// Parse one client text frame. None on malformed JSON or an unknown `type`.
@@ -101,6 +109,49 @@ fn projects_payload(
 /// Build a forwarded hook-status frame.
 fn status_payload(event: &str, body: &serde_json::Value) -> serde_json::Value {
     json!({ "type": "status", "event": event, "body": body })
+}
+
+/// Handle a `git` client message: resolve the session's repo dir from the Store,
+/// run the read-only query, and build a `gitresult` frame. Never blocks the loop
+/// (git calls are fast local reads).
+fn git_reply(
+    app: &AppHandle,
+    session_id: &str,
+    action: &str,
+    path: Option<&str>,
+) -> serde_json::Value {
+    let Some(dir) = app.state::<Arc<Store>>().session_dir(session_id) else {
+        return json!({ "type": "gitresult", "action": action, "error": "unknown session" });
+    };
+    match action {
+        "changes" => {
+            let changes = crate::git::changes(&dir);
+            json!({ "type": "gitresult", "action": "changes", "changes": changes })
+        }
+        "diff" => {
+            let Some(path) = path else {
+                return json!({ "type": "gitresult", "action": "diff", "error": "path required" });
+            };
+            // A repo-relative path from `changes` -> absolute for git::diff_text.
+            let abs = if std::path::Path::new(path).is_absolute() {
+                path.to_string()
+            } else {
+                std::path::Path::new(&dir)
+                    .join(path)
+                    .to_string_lossy()
+                    .into_owned()
+            };
+            match crate::git::diff_text(&dir, &abs) {
+                Ok(text) => {
+                    json!({ "type": "gitresult", "action": "diff", "path": path, "diff": text })
+                }
+                Err(e) => {
+                    json!({ "type": "gitresult", "action": "diff", "path": path, "error": e })
+                }
+            }
+        }
+        other => json!({ "type": "gitresult", "action": other, "error": "unknown git action" }),
+    }
 }
 
 /// Build the transcript backfill payload from raw jsonl lines.
@@ -289,6 +340,14 @@ fn handle_conn(stream: TcpStream, app: AppHandle, token: Option<String>) {
                 }) => {
                     let _ = pty.resize(&session_id, cols, rows);
                 }
+                Some(ClientMsg::Git {
+                    session_id,
+                    action,
+                    path,
+                }) => {
+                    let reply = git_reply(&app, &session_id, &action, path.as_deref());
+                    let _ = ws.send(Message::Text(reply.to_string()));
+                }
                 None => {}
             },
             Ok(Message::Close(_)) => break,
@@ -458,6 +517,28 @@ mod tests {
     fn rejects_garbage_and_unknown_type() {
         assert!(parse_client_msg("not json").is_none());
         assert!(parse_client_msg(r#"{"type":"explode"}"#).is_none());
+    }
+
+    #[test]
+    fn parses_git_changes_and_diff() {
+        assert_eq!(
+            parse_client_msg(r#"{"type":"git","session_id":"s1","action":"changes"}"#),
+            Some(ClientMsg::Git {
+                session_id: "s1".into(),
+                action: "changes".into(),
+                path: None,
+            })
+        );
+        assert_eq!(
+            parse_client_msg(
+                r#"{"type":"git","session_id":"s1","action":"diff","path":"src/a.ts"}"#
+            ),
+            Some(ClientMsg::Git {
+                session_id: "s1".into(),
+                action: "diff".into(),
+                path: Some("src/a.ts".into()),
+            })
+        );
     }
 
     #[test]

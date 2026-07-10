@@ -42,6 +42,25 @@ export async function sendMessage(
   return client.sendMessage(roomId, { msgtype, body });
 }
 
+const escapeHtml = (s: string) =>
+  s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+
+/** Send a monospace code block (a diff), rendered as a real `<pre><code>` in
+ *  Element/BadgerClaw via formatted_body, with a markdown-fenced plain fallback. */
+export async function sendCode(
+  client: MatrixClient,
+  roomId: string,
+  title: string,
+  code: string,
+): Promise<void> {
+  await client.sendMessage(roomId, {
+    "msgtype": "m.text",
+    "body": `${title}\n\n\`\`\`\n${code}\n\`\`\``,
+    "format": "org.matrix.custom.html",
+    "formatted_body": `<b>${escapeHtml(title)}</b><pre><code>${escapeHtml(code)}</code></pre>`,
+  });
+}
+
 /** Edit a previously-sent message in place (m.replace). Falls back to a fresh send
  *  if the edit fails; returns the event id to track going forward. */
 export async function editMessage(

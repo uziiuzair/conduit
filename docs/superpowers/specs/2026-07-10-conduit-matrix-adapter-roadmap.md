@@ -78,7 +78,7 @@ spec deferred these to its M5.
 - Turns the agent into "autonomous but escalates the scary 5% to your pocket" — the
   real unlock for running agents while away.
 
-## Phase 5 — Code review on the phone 🟡 (reuses Tier-3)
+## Phase 5 — Code review on the phone 🟡 ✅ SHIPPED (`changes` + `diff`)
 
 The desktop diff viewer already added `git_show_head` / `git_diff_hunks` / `changes`.
 Expose them over the bridge:
