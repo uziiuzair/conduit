@@ -55,6 +55,8 @@ export type ServerFrame =
   | { type: "status"; event: string; body: unknown }
   | { type: "chat"; item: ChatItem }
   | { type: "error"; message: string }
+  | { type: "killed"; sessionId: string }
+  | { type: "spawned"; sessionId: string; name: string; projectId: string }
   | GitResult;
 
 /** Parse one bridge text frame; null on garbage or unknown type. */
@@ -75,7 +77,9 @@ export function parseServerFrame(text: string): ServerFrame | null {
     t === "status" ||
     t === "chat" ||
     t === "error" ||
-    t === "gitresult"
+    t === "gitresult" ||
+    t === "killed" ||
+    t === "spawned"
   ) {
     return v as ServerFrame;
   }
@@ -91,6 +95,15 @@ export const inputFrame = (sessionId: string, data: string): string =>
   JSON.stringify({ type: "input", session_id: sessionId, data });
 export const gitFrame = (sessionId: string, action: string, path?: string): string =>
   JSON.stringify({ type: "git", session_id: sessionId, action, ...(path ? { path } : {}) });
+export const killFrame = (sessionId: string): string =>
+  JSON.stringify({ type: "kill", session_id: sessionId });
+export const spawnFrame = (
+  projectId: string,
+  prompt: string,
+  agent?: string,
+  worktree = false,
+): string =>
+  JSON.stringify({ type: "spawn", project_id: projectId, prompt, worktree, ...(agent ? { agent } : {}) });
 
 /** The Enter keystroke that submits the prompt. Sent as its OWN pty write, a beat
  *  after the text — see promptToInsert. */

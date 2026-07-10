@@ -4,7 +4,7 @@
 // room membership is NOT authority over the terminal.
 
 import type { MatrixClient } from "@vector-im/matrix-bot-sdk";
-import { discoverBridgeUrl, fetchProjects, SessionLink } from "./bridge.js";
+import { discoverBridgeUrl, fetchProjects, spawnSession, SessionLink } from "./bridge.js";
 import { loadSettings, saveSettings, type Settings } from "./config.js";
 import {
   activityLabel,
@@ -268,6 +268,57 @@ export class Relay {
         }
         return;
       }
+      case "kill": {
+        const state = this.rooms.get(roomId);
+        if (!state) {
+          await this.notice(roomId, "No session bound here.");
+        } else if (state.link.kill()) {
+          await this.notice(roomId, "🛑 Killed the session's agent process.");
+        } else {
+          await this.notice(roomId, "⚠️ Bridge link is down.");
+        }
+        return;
+      }
+      case "new": {
+        await this.spawnNew(roomId, command.prompt);
+        return;
+      }
+    }
+  }
+
+  /** Spawn a new session in the bound session's project, then bind THIS room to it
+   *  (one room = one task). Needs a current binding to know the target project. */
+  private async spawnNew(roomId: string, prompt: string): Promise<void> {
+    const bound = this.rooms.get(roomId);
+    if (!bound) {
+      await this.notice(
+        roomId,
+        "Bind a room to any session in the target project first (`/conduit list`, `/conduit use <n>`), then `/conduit new`.",
+      );
+      return;
+    }
+    const projects = await this.listProjects();
+    if (!projects) {
+      await this.notice(roomId, "⚠️ Conduit bridge unreachable.");
+      return;
+    }
+    const project = projects.find((p) => (p.sessions ?? []).some((s) => s.id === bound.link.sessionId));
+    if (!project || !this.bridgeUrl) {
+      await this.notice(roomId, "⚠️ Couldn't resolve the project for the bound session.");
+      return;
+    }
+    const res = await spawnSession(this.bridgeUrl, project.id, prompt);
+    if (res === null) {
+      await this.notice(roomId, "⚠️ Spawn timed out (is Conduit running on the desktop?).");
+    } else if (typeof res === "object") {
+      await this.notice(roomId, `⚠️ Spawn failed: ${res.error}`);
+    } else {
+      await this.notice(
+        roomId,
+        `🚀 Spawned a new session in ${project.name}. Binding this room to it — the prompt is running.`,
+      );
+      // Bind after a beat so the desktop has opened the tab and the PTY is up.
+      setTimeout(() => this.bind(roomId, res, { announce: false }), 1500);
     }
   }
 

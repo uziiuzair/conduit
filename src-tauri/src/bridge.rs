@@ -55,6 +55,21 @@ pub enum ClientMsg {
         #[serde(default)]
         path: Option<String>,
     },
+    /// Terminate a session's agent process (hard stop from the phone).
+    Kill {
+        session_id: String,
+    },
+    /// Spawn a NEW session in a project with an initial prompt. The frontend
+    /// actually opens the tab + spawns the PTY (Rust can't mint a terminal
+    /// Channel), mirroring the fleet-spawn path.
+    Spawn {
+        project_id: String,
+        prompt: String,
+        #[serde(default)]
+        agent: Option<String>,
+        #[serde(default)]
+        worktree: bool,
+    },
 }
 
 /// Parse one client text frame. None on malformed JSON or an unknown `type`.
@@ -152,6 +167,54 @@ fn git_reply(
         }
         other => json!({ "type": "gitresult", "action": other, "error": "unknown git action" }),
     }
+}
+
+/// Handle a `spawn` client message: create a session in the project and emit
+/// `fleet-spawn` so the frontend opens the tab, spawns the PTY, and injects the
+/// prompt (the same generic path fleet workers use — `mergeSpawnedSession` is not
+/// fleet-specific). Returns a `spawned` frame with the new session id, or `error`.
+fn spawn_reply(
+    app: &AppHandle,
+    project_id: &str,
+    prompt: &str,
+    agent: Option<&str>,
+    worktree: bool,
+) -> serde_json::Value {
+    use tauri::Emitter;
+    let agent_id: crate::agent::AgentId =
+        match serde_json::from_value(json!(agent.unwrap_or("claude"))) {
+            Ok(a) => a,
+            Err(_) => {
+                return json!({ "type": "error", "message": "unknown agent" });
+            }
+        };
+    let store = app.state::<Arc<Store>>();
+    let Some(project) = store.list().into_iter().find(|p| p.id == project_id) else {
+        return json!({ "type": "error", "message": "unknown project" });
+    };
+    // A worktree needs a git repo; refuse rather than spawn a broken session.
+    if worktree && crate::git::current_branch(&project.path).is_none() {
+        return json!({ "type": "error", "message": "worktree requested but project is not a git repo" });
+    }
+    let Some(session) = store.add_session(
+        project_id,
+        "Mobile".to_string(),
+        worktree,
+        agent_id,
+        crate::store::SessionRole::Worker,
+    ) else {
+        return json!({ "type": "error", "message": "could not create session" });
+    };
+    let _ = app.emit(
+        "fleet-spawn",
+        json!({ "projectId": project_id, "session": session, "task": prompt }),
+    );
+    json!({
+        "type": "spawned",
+        "sessionId": session.id,
+        "name": session.name,
+        "projectId": project_id,
+    })
 }
 
 /// Build the transcript backfill payload from raw jsonl lines.
@@ -348,6 +411,21 @@ fn handle_conn(stream: TcpStream, app: AppHandle, token: Option<String>) {
                     let reply = git_reply(&app, &session_id, &action, path.as_deref());
                     let _ = ws.send(Message::Text(reply.to_string()));
                 }
+                Some(ClientMsg::Kill { session_id }) => {
+                    pty.kill(&session_id);
+                    let _ = ws.send(Message::Text(
+                        json!({ "type": "killed", "sessionId": session_id }).to_string(),
+                    ));
+                }
+                Some(ClientMsg::Spawn {
+                    project_id,
+                    prompt,
+                    agent,
+                    worktree,
+                }) => {
+                    let reply = spawn_reply(&app, &project_id, &prompt, agent.as_deref(), worktree);
+                    let _ = ws.send(Message::Text(reply.to_string()));
+                }
                 None => {}
             },
             Ok(Message::Close(_)) => break,
@@ -517,6 +595,27 @@ mod tests {
     fn rejects_garbage_and_unknown_type() {
         assert!(parse_client_msg("not json").is_none());
         assert!(parse_client_msg(r#"{"type":"explode"}"#).is_none());
+    }
+
+    #[test]
+    fn parses_kill_and_spawn() {
+        assert_eq!(
+            parse_client_msg(r#"{"type":"kill","session_id":"s1"}"#),
+            Some(ClientMsg::Kill {
+                session_id: "s1".into()
+            })
+        );
+        assert_eq!(
+            parse_client_msg(
+                r#"{"type":"spawn","project_id":"p1","prompt":"fix the bug","worktree":true}"#
+            ),
+            Some(ClientMsg::Spawn {
+                project_id: "p1".into(),
+                prompt: "fix the bug".into(),
+                agent: None,
+                worktree: true,
+            })
+        );
     }
 
     #[test]

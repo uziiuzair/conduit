@@ -57,7 +57,7 @@ the terminal → it streams to your room → you reply `y`. Crude but real, toda
 - **Cost/usage meter** — the transcript already carries per-message `usage`
   (tokens + cache); surface a running total and alert at a spend cap.
 
-## Phase 3 — Session lifecycle from the phone 🟡
+## Phase 3 — Session lifecycle from the phone 🟡 ✅ SHIPPED (new + kill)
 
 Needs new bridge `ClientMsg`s (`spawn`, `stop`, `resume`) — the terminal-mirror
 spec deferred these to its M5.

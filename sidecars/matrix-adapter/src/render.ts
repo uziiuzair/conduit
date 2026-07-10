@@ -17,7 +17,9 @@ export type Command =
   | { cmd: "todos" }
   | { cmd: "watch"; on: boolean }
   | { cmd: "changes" }
-  | { cmd: "diff"; path: string };
+  | { cmd: "diff"; path: string }
+  | { cmd: "kill" }
+  | { cmd: "new"; prompt: string };
 
 /** Parse "/conduit …" (null = not a command; the text is a prompt). "/bot …" is
  *  BadgerClaw's own namespace and is treated as not-ours (also null). */
@@ -30,6 +32,9 @@ export function parseCommand(body: string): Command | null {
   if (/^detach$/i.test(rest)) return { cmd: "detach" };
   if (/^status$/i.test(rest)) return { cmd: "status" };
   if (/^stop$/i.test(rest)) return { cmd: "stop" };
+  if (/^kill$/i.test(rest)) return { cmd: "kill" };
+  const neu = /^new\s+([\s\S]+)$/i.exec(rest);
+  if (neu) return { cmd: "new", prompt: neu[1].trim() };
   if (/^todos$/i.test(rest)) return { cmd: "todos" };
   if (/^changes$/i.test(rest)) return { cmd: "changes" };
   const diff = /^diff\s+(.+)$/i.exec(rest);
@@ -51,7 +56,9 @@ export const HELP_TEXT = [
   "/conduit use <n | session-id> — bind this room to a session",
   "/conduit detach — unbind this room",
   "/conduit status — binding + bridge connectivity",
+  "/conduit new <prompt> — start a NEW session (in the bound session's project) and run this",
   "/conduit stop — interrupt the running agent (Ctrl-C)",
+  "/conduit kill — terminate the session's agent process",
   "/conduit key <name> — send a control key (esc, enter, up, down, y, n, …)",
   "/conduit send <text> — type text into the session WITHOUT running it",
   "/conduit todos — the bound session's current plan/checklist",

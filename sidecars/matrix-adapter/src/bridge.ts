@@ -7,8 +7,10 @@ import {
   attachFrame,
   gitFrame,
   inputFrame,
+  killFrame,
   listFrame,
   parseServerFrame,
+  spawnFrame,
   type BridgeProject,
   type ChatItem,
   type GitResult,
@@ -51,6 +53,43 @@ export async function discoverBridgeUrl(): Promise<string | null> {
     if (ok) return url;
   }
   return null;
+}
+
+/** One-shot: spawn a new session in a project with an initial prompt. Resolves with
+ *  the new session id, or null on error/timeout. The desktop frontend opens the tab
+ *  and spawns the PTY; the caller attaches afterwards. */
+export function spawnSession(
+  url: string,
+  projectId: string,
+  prompt: string,
+  opts: { agent?: string; worktree?: boolean } = {},
+): Promise<string | { error: string } | null> {
+  return new Promise((resolve) => {
+    const ws = new WebSocket(url, { handshakeTimeout: PROBE_TIMEOUT_MS });
+    const timer = setTimeout(() => {
+      ws.terminate();
+      resolve(null);
+    }, 6000);
+    ws.once("open", () =>
+      ws.send(spawnFrame(projectId, prompt, opts.agent, opts.worktree ?? false)),
+    );
+    ws.once("error", () => {
+      clearTimeout(timer);
+      resolve(null);
+    });
+    ws.on("message", (raw) => {
+      const f = parseServerFrame(String(raw));
+      if (f?.type === "spawned") {
+        clearTimeout(timer);
+        ws.close();
+        resolve(f.sessionId);
+      } else if (f?.type === "error") {
+        clearTimeout(timer);
+        ws.close();
+        resolve({ error: f.message });
+      }
+    });
+  });
 }
 
 /** One-shot: fetch the project/session tree over a fresh connection. */
@@ -117,6 +156,14 @@ export class SessionLink {
   send(data: string): boolean {
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return false;
     this.ws.send(inputFrame(this.sessionId, data));
+    return true;
+  }
+
+  /** Hard-kill this session's agent process on the desktop. Fire-and-forget; the
+   *  link will then drop (PTY gone) and reconnect-retry as usual. */
+  kill(): boolean {
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return false;
+    this.ws.send(killFrame(this.sessionId));
     return true;
   }
 
@@ -208,7 +255,9 @@ export class SessionLink {
       }
       case "output":
       case "projects":
-        break; // PTY bytes / unsolicited lists: not chat material
+      case "killed":
+      case "spawned":
+        break; // acks / PTY bytes / unsolicited lists: not chat material
     }
   }
 }

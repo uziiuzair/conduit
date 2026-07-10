@@ -144,7 +144,9 @@ Leave it running alongside Conduit. Then, on your **phone**:
    | `/conduit use 2` | Binds *this room* to session #2 |
    | *(anything else)* | Sent to the bound session as a prompt (and runs) |
    | `y` / `n` | Answers Claude's y/n approval prompts (they stream here) |
+   | `/conduit new <prompt>` | Starts a NEW session (in the bound session's project) and runs the prompt |
    | `/conduit stop` | Interrupts the running agent (Ctrl-C) |
+   | `/conduit kill` | Terminates the session's agent process |
    | `/conduit key <name>` | Sends a control key: esc, enter, up, down, left, right, tab, ctrl-c, y, n |
    | `/conduit send <text>` | Types text into the session *without* running it |
    | `/conduit todos` | Shows the session's current plan/checklist |

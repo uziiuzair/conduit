@@ -65,6 +65,14 @@ describe("parseCommand", () => {
     });
   });
 
+  it("parses the Phase-3 lifecycle verbs", () => {
+    expect(parseCommand("/conduit kill")).toEqual({ cmd: "kill" });
+    expect(parseCommand("/conduit new fix the checkout bug")).toEqual({
+      cmd: "new",
+      prompt: "fix the checkout bug",
+    });
+  });
+
   it("treats non-commands and /bot as not-ours", () => {
     expect(parseCommand("fix the tests")).toBeNull();
     expect(parseCommand("/bot list")).toBeNull();
