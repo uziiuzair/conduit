@@ -94,27 +94,34 @@ Mac and prints your account id + instance id. Session is saved to
 > Being signed into the **iOS app** is not the same as registering this Mac — the
 > host machine needs its own registration, which is what this step does.
 
-## 4. Create the bot in BadgerClaw and pair it
+## 4. Create the bot and connect to it
 
 1. In the **BadgerClaw app**: **Bot Management → New Bot**.
-   - Pick a name (e.g. `conduit`).
+   - Pick a name (e.g. `Conduit`).
    - **Runtime: OpenClaw.** (Not Hermes — Hermes would make BadgerClaw try to run a
      Docker container as the agent. Your adapter *is* the runtime; OpenClaw is the
      "an external client backs this bot" option. Also: don't run BadgerClaw's own
      OpenClaw plugin for this bot — the adapter owns it.)
-2. Generate a **pair code** for the bot (looks like `BCK-XXXX-XXXX`).
-3. On this Mac, redeem it:
+2. On this Mac, connect to it **by name** (no pair code needed):
 
    ```bash
-   node dist/index.js pair BCK-XXXX-XXXX
+   node dist/index.js connect Conduit
    ```
 
-   The owner defaults to your logged-in account id — that's who's allowed to command
-   the bot and type into your terminal (room membership alone grants nothing). Add
-   more owners with `--owner @someone:badger.signout.io`.
+   `connect` uses your logged-in account to mint the bot's Matrix session directly
+   (BadgerClaw's `refresh-matrix-token`). Run `node dist/index.js connect` with no
+   name to list your bots first. The owner defaults to your account id — that's who's
+   allowed to command the bot and type into your terminal (room membership alone
+   grants nothing); add more with `--owner @someone:badger.signout.io`.
 
-   Bot credentials land in `~/.conduit/matrix-adapter/` (mode 0600). Pair codes are
-   one-time and short-lived; if one expires, generate a fresh one in the app.
+   Bot credentials land in `~/.conduit/matrix-adapter/` (mode 0600). Re-running
+   `connect` for the same bot reuses its E2EE device id, so the phone won't see an
+   identity-reset warning.
+
+   > **Why `connect`, not a pair code?** The pair-code flow (`pair <BCK-…>`) routes
+   > through BadgerClaw's host-pairing backend, which currently 500s for this
+   > sidecar setup. `connect` sidesteps pairing entirely and is the supported path
+   > here. `pair` is kept only as a fallback.
 
 ---
 

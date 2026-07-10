@@ -4,7 +4,14 @@
 //   run                                                 start the relay
 // See docs/superpowers/specs/2026-07-10-conduit-matrix-adapter-design.md.
 
-import { DEFAULT_API_BASE, login as bcLogin, redeemPairCode } from "./badgerclaw.js";
+import {
+  DEFAULT_API_BASE,
+  listBots,
+  login as bcLogin,
+  redeemPairCode,
+  refreshMatrixToken,
+  type BotSummary,
+} from "./badgerclaw.js";
 import {
   loadAccount,
   loadCredentials,
@@ -25,9 +32,13 @@ function usage(): never {
       "      Sign in to BadgerClaw in the browser and register THIS Mac as a host.",
       "      Required once before pairing (the backend needs a registered instance).",
       "",
+      "  conduit-matrix connect [bot-name] [--owner <@user:server>]",
+      "      Attach to one of YOUR bots directly (no pair code needed). Lists your",
+      "      bots if the name is omitted or ambiguous. This is the recommended path.",
+      "",
       "  conduit-matrix pair <BCK-code> [--owner <@user:server>]",
-      "      Redeem a pair code minted in BadgerClaw (Bot Management → Pair).",
-      "      Owner defaults to your logged-in account; only owners can command the bot.",
+      "      Alternative: redeem a pair code (Bot Management → Pair). Needs the",
+      "      BadgerClaw host-pairing backend; use `connect` if pairing errors.",
       "",
       "  conduit-matrix run",
       "      Connect to Matrix and the local Conduit bridge, then relay.",
@@ -51,6 +62,72 @@ async function login(args: string[]): Promise<void> {
   console.log(`\nlogged in as ${account.userId}`);
   console.log(`this Mac is registered as instance ${account.instanceId}`);
   console.log("next: conduit-matrix pair <BCK-code>");
+}
+
+function matchBot(bots: BotSummary[], q: string): BotSummary | null {
+  const n = q.toLowerCase();
+  return (
+    bots.find((b) => b.id === q) ??
+    bots.find((b) => b.botName.toLowerCase() === n) ??
+    bots.find((b) => b.botUsername.toLowerCase() === n) ??
+    bots.find((b) => b.botUserId.toLowerCase() === n) ??
+    null
+  );
+}
+
+function printBots(bots: BotSummary[]): void {
+  for (const b of bots) {
+    console.log(`  ${b.botName}  (${b.botUserId})  runtime=${b.runtime}${b.active ? "" : " [inactive]"}`);
+  }
+}
+
+async function connect(args: string[]): Promise<void> {
+  const api = argValue(args, "--api") ?? DEFAULT_API_BASE;
+  const name = args.find((a) => !a.startsWith("--") && args[args.indexOf(a) - 1] !== "--owner" && args[args.indexOf(a) - 1] !== "--api");
+
+  const account = loadAccount();
+  if (!account) {
+    console.error("not logged in — run `conduit-matrix login` first.");
+    process.exit(1);
+  }
+
+  const bots = await listBots(account, api);
+  if (bots.length === 0) {
+    console.error("no bots on your account — create one in the BadgerClaw app (Bot Management → New Bot, runtime OpenClaw).");
+    process.exit(1);
+  }
+
+  let bot: BotSummary | null;
+  if (name) {
+    bot = matchBot(bots, name);
+    if (!bot) {
+      console.error(`no bot matches "${name}". Your bots:`);
+      printBots(bots);
+      process.exit(1);
+    }
+  } else if (bots.length === 1) {
+    bot = bots[0];
+  } else {
+    console.error("multiple bots — pass the name: conduit-matrix connect <name>");
+    printBots(bots);
+    process.exit(1);
+  }
+
+  // Reuse the existing device id (if we've connected this bot before) so E2EE
+  // keys survive — a new device trips identity-pin warnings on the phone.
+  const prev = loadCredentials();
+  const deviceId = prev && prev.botId === bot.id ? prev.deviceId : null;
+
+  const creds = await refreshMatrixToken(account, bot, deviceId, api);
+  saveCredentials(creds);
+
+  const owner = argValue(args, "--owner") ?? account.userId;
+  const settings = loadSettings();
+  if (!settings.owners.includes(owner)) settings.owners.push(owner);
+  saveSettings(settings);
+
+  console.log(`connected ${creds.userId}${creds.botName ? ` (${creds.botName})` : ""}; owner allowlist: ${settings.owners.join(", ")}`);
+  console.log("next: conduit-matrix run   (keep it running alongside Conduit)");
 }
 
 async function pair(args: string[]): Promise<void> {
@@ -112,11 +189,13 @@ const [, , cmd, ...rest] = process.argv;
 const main =
   cmd === "login"
     ? login(rest)
-    : cmd === "pair"
-      ? pair(rest)
-      : cmd === "run"
-        ? run()
-        : Promise.resolve(usage());
+    : cmd === "connect"
+      ? connect(rest)
+      : cmd === "pair"
+        ? pair(rest)
+        : cmd === "run"
+          ? run()
+          : Promise.resolve(usage());
 main.catch((e) => {
   console.error(`conduit-matrix: ${e instanceof Error ? e.message : e}`);
   process.exit(1);

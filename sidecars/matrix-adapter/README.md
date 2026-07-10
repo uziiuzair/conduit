@@ -19,13 +19,14 @@ Design record: `docs/superpowers/specs/2026-07-10-conduit-matrix-adapter-design.
    ```bash
    cd sidecars/matrix-adapter
    pnpm install && pnpm build
-   node dist/index.js login                  # browser sign-in + register this Mac
-   node dist/index.js pair BCK-XXXX-XXXX     # owner defaults to your account
+   node dist/index.js login              # browser sign-in (once)
+   node dist/index.js connect Conduit    # attach to your bot by name
    ```
 
-   `login` is required once — BadgerClaw only pairs bots to a registered host
-   machine. It does **not** install BadgerClaw's gateway/plugin; the adapter is the
-   runtime. See `SETUP.md` for the full walkthrough.
+   `connect` mints the bot's Matrix session directly via your account
+   (`refresh-matrix-token`) — no pair code. Run `connect` with no name to list your
+   bots. See `SETUP.md` for the full walkthrough. (`pair <BCK-code>` exists as a
+   fallback but routes through BadgerClaw's host-pairing backend.)
 
 3. Run it alongside Conduit (a LaunchAgent or `tmux` is fine):
 

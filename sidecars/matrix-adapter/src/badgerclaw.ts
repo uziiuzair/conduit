@@ -133,6 +133,94 @@ export async function login(
   return { accessToken: session.accessToken, userId: session.userId, instanceId };
 }
 
+export interface BotSummary {
+  id: string;
+  botUserId: string;
+  botName: string;
+  botUsername: string;
+  runtime: string;
+  active: boolean;
+}
+
+/** List the account's bots (GET /api/v1/bots, account-authenticated). */
+export async function listBots(
+  account: Account,
+  apiBase = DEFAULT_API_BASE,
+): Promise<BotSummary[]> {
+  const resp = await fetch(`${apiBase.replace(/\/$/, "")}/api/v1/bots`, {
+    headers: { Authorization: `Bearer ${account.accessToken}` },
+  });
+  if (resp.status === 401) throw new Error("account session expired — run `conduit-matrix login` again");
+  if (!resp.ok) {
+    const detail = await resp.text().catch(() => "");
+    throw new Error(`could not list bots (${resp.status}): ${firstError(detail) || resp.statusText}`);
+  }
+  const rows = (await resp.json()) as Array<{
+    id: string;
+    bot_user_id: string;
+    bot_name: string;
+    bot_username: string;
+    runtime?: string;
+    active: boolean;
+  }>;
+  return rows.map((r) => ({
+    id: r.id,
+    botUserId: r.bot_user_id,
+    botName: r.bot_name,
+    botUsername: r.bot_username,
+    runtime: r.runtime ?? "openclaw",
+    active: r.active,
+  }));
+}
+
+/**
+ * Mint a Matrix session for a bot directly — appservice login via the account,
+ * no pair code / instance / redeem. `deviceId` is reused across refreshes so the
+ * bot's E2EE keys survive (a new device would trip identity-pinning on the phone).
+ */
+export async function refreshMatrixToken(
+  account: Account,
+  bot: BotSummary,
+  deviceId: string | null,
+  apiBase = DEFAULT_API_BASE,
+): Promise<Credentials> {
+  const resp = await fetch(
+    `${apiBase.replace(/\/$/, "")}/api/v1/bots/${bot.id}/refresh-matrix-token`,
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${account.accessToken}`,
+      },
+      body: JSON.stringify(deviceId ? { device_id: deviceId } : {}),
+    },
+  );
+  if (resp.status === 401) throw new Error("account session expired — run `conduit-matrix login` again");
+  if (!resp.ok) {
+    const detail = await resp.text().catch(() => "");
+    throw new Error(
+      `could not get the bot's Matrix session (${resp.status}): ${firstError(detail) || resp.statusText}`,
+    );
+  }
+  const r = (await resp.json()) as {
+    access_token: string;
+    device_id?: string | null;
+    homeserver: string;
+    user_id: string;
+  };
+  if (!r.access_token || !r.homeserver || !r.user_id) {
+    throw new Error("refresh returned an incomplete Matrix session");
+  }
+  return {
+    homeserver: r.homeserver,
+    userId: r.user_id,
+    accessToken: r.access_token,
+    deviceId: r.device_id ?? deviceId,
+    botName: bot.botName,
+    botId: bot.id,
+  };
+}
+
 interface RedeemResponse {
   homeserver: string;
   access_token: string;
