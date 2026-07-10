@@ -1,0 +1,33 @@
+{
+  "name": "conduit-matrix-adapter",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Sidecar that logs Conduit sessions onto Matrix as a BadgerClaw bot — phone chat via the BadgerClaw iOS app, zero changes to either app.",
+  "type": "module",
+  "bin": {
+    "conduit-matrix": "dist/index.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsx src/index.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@matrix-org/matrix-sdk-crypto-nodejs": "^0.4.0",
+    "@vector-im/matrix-bot-sdk": "0.8.0-element.3",
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "@types/ws": "^8.5.13",
+    "tsx": "^4.19.0",
+    "typescript": "^5.7.0",
+    "vitest": "^3.0.0"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "@matrix-org/matrix-sdk-crypto-nodejs"
+    ]
+  }
+}
