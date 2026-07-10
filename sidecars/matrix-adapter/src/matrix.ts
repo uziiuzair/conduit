@@ -32,12 +32,34 @@ export async function createMatrixClient(creds: Credentials): Promise<MatrixClie
   return client;
 }
 
-/** Send with a msgtype, plain body. */
+/** Send with a msgtype, plain body. Returns the event id (for later edits). */
 export async function sendMessage(
   client: MatrixClient,
   roomId: string,
   msgtype: "m.text" | "m.notice",
   body: string,
-): Promise<void> {
-  await client.sendMessage(roomId, { msgtype, body });
+): Promise<string> {
+  return client.sendMessage(roomId, { msgtype, body });
+}
+
+/** Edit a previously-sent message in place (m.replace). Falls back to a fresh send
+ *  if the edit fails; returns the event id to track going forward. */
+export async function editMessage(
+  client: MatrixClient,
+  roomId: string,
+  eventId: string,
+  msgtype: "m.text" | "m.notice",
+  body: string,
+): Promise<string> {
+  try {
+    await client.sendEvent(roomId, "m.room.message", {
+      "msgtype": msgtype,
+      "body": `* ${body}`,
+      "m.new_content": { msgtype, body },
+      "m.relates_to": { rel_type: "m.replace", event_id: eventId },
+    });
+    return eventId;
+  } catch {
+    return client.sendMessage(roomId, { msgtype, body });
+  }
 }

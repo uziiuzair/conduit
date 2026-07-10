@@ -1,13 +1,16 @@
 import { describe, expect, it } from "vitest";
 import type { BridgeProject } from "../src/protocol.js";
 import {
+  estimateCostUsd,
   indexSessions,
   parseCommand,
   PromptEcho,
   renderChatBatch,
   renderSessionList,
+  renderTodos,
   resolveUseTarget,
 } from "../src/render.js";
+import type { TodoItem } from "../src/protocol.js";
 
 const PROJECTS: BridgeProject[] = [
   {
@@ -44,6 +47,13 @@ describe("parseCommand", () => {
       cmd: "send",
       text: "npm run build",
     });
+  });
+
+  it("parses the Phase-2 awareness verbs", () => {
+    expect(parseCommand("/conduit todos")).toEqual({ cmd: "todos" });
+    expect(parseCommand("/conduit watch")).toEqual({ cmd: "watch", on: true });
+    expect(parseCommand("/conduit watch on")).toEqual({ cmd: "watch", on: true });
+    expect(parseCommand("/conduit watch off")).toEqual({ cmd: "watch", on: false });
   });
 
   it("treats non-commands and /bot as not-ours", () => {
@@ -117,6 +127,31 @@ describe("renderChatBatch", () => {
       () => false,
     );
     expect(out).toHaveLength(0);
+  });
+});
+
+describe("renderTodos", () => {
+  it("renders a checklist with progress and in-progress activeForm", () => {
+    const todos: TodoItem[] = [
+      { content: "Write parser", status: "completed" },
+      { content: "Wire relay", status: "in_progress", activeForm: "Wiring the relay" },
+      { content: "Add tests", status: "pending" },
+    ];
+    const out = renderTodos(todos);
+    expect(out).toContain("Plan (1/3 done):");
+    expect(out).toContain("✅ Write parser");
+    expect(out).toContain("🔄 Wiring the relay");
+    expect(out).toContain("⬜ Add tests");
+    expect(renderTodos([])).toContain("No plan yet");
+  });
+});
+
+describe("estimateCostUsd", () => {
+  it("is zero for no usage and grows with output tokens", () => {
+    expect(estimateCostUsd({ input: 0, output: 0, cacheRead: 0, cacheCreation: 0 })).toBe(0);
+    const a = estimateCostUsd({ input: 1000, output: 0, cacheRead: 0, cacheCreation: 0 });
+    const b = estimateCostUsd({ input: 1000, output: 1000, cacheRead: 0, cacheCreation: 0 });
+    expect(b).toBeGreaterThan(a);
   });
 });
 

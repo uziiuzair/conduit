@@ -74,3 +74,39 @@ describe("typingForStatus", () => {
     expect(typingForStatus("sessionstart")).toBeNull();
   });
 });
+
+describe("activityLabel", () => {
+  it("labels common tools with file/command context", async () => {
+    const { activityLabel } = await import("../src/protocol.js");
+    expect(activityLabel({ tool_name: "Edit", tool_input: { file_path: "/a/store.ts" } })).toBe(
+      "✏️ editing store.ts",
+    );
+    expect(activityLabel({ tool_name: "Bash", tool_input: { command: "npm test" } })).toBe(
+      "⚙️ running npm test",
+    );
+    expect(activityLabel({ tool_name: "Grep", tool_input: {} })).toBe("🔎 searching");
+    expect(activityLabel({ tool_name: "TodoWrite", tool_input: {} })).toBeNull();
+    expect(activityLabel({})).toBeNull();
+  });
+});
+
+describe("parseHookTodos", () => {
+  it("reads the several todo shapes and normalizes status", async () => {
+    const { parseHookTodos } = await import("../src/protocol.js");
+    const todos = parseHookTodos({
+      tool_input: {
+        todos: [
+          { content: "a", status: "completed" },
+          { content: "b", status: "in_progress", activeForm: "Doing b" },
+          { content: "c", status: "weird" },
+        ],
+      },
+    });
+    expect(todos).toEqual([
+      { content: "a", status: "completed", activeForm: undefined },
+      { content: "b", status: "in_progress", activeForm: "Doing b" },
+      { content: "c", status: "pending", activeForm: undefined },
+    ]);
+    expect(parseHookTodos({ nope: 1 })).toBeNull();
+  });
+});

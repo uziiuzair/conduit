@@ -1,7 +1,7 @@
 // Pure rendering + command parsing: chat items -> Matrix message content, and
 // owner messages -> /conduit commands. No Matrix SDK imports (unit-testable).
 
-import type { BridgeProject, ChatItem } from "./protocol.js";
+import type { BridgeProject, ChatItem, TodoItem } from "./protocol.js";
 
 // ---- /conduit command parsing ---------------------------------------------------
 
@@ -13,7 +13,9 @@ export type Command =
   | { cmd: "status" }
   | { cmd: "stop" }
   | { cmd: "key"; key: string }
-  | { cmd: "send"; text: string };
+  | { cmd: "send"; text: string }
+  | { cmd: "todos" }
+  | { cmd: "watch"; on: boolean };
 
 /** Parse "/conduit …" (null = not a command; the text is a prompt). "/bot …" is
  *  BadgerClaw's own namespace and is treated as not-ours (also null). */
@@ -26,6 +28,9 @@ export function parseCommand(body: string): Command | null {
   if (/^detach$/i.test(rest)) return { cmd: "detach" };
   if (/^status$/i.test(rest)) return { cmd: "status" };
   if (/^stop$/i.test(rest)) return { cmd: "stop" };
+  if (/^todos$/i.test(rest)) return { cmd: "todos" };
+  const watch = /^watch(?:\s+(on|off))?$/i.exec(rest);
+  if (watch) return { cmd: "watch", on: (watch[1] ?? "on").toLowerCase() === "on" };
   const use = /^use\s+(.+)$/i.exec(rest);
   if (use) return { cmd: "use", target: use[1].trim() };
   const key = /^key\s+(.+)$/i.exec(rest);
@@ -44,9 +49,59 @@ export const HELP_TEXT = [
   "/conduit stop — interrupt the running agent (Ctrl-C)",
   "/conduit key <name> — send a control key (esc, enter, up, down, y, n, …)",
   "/conduit send <text> — type text into the session WITHOUT running it",
+  "/conduit todos — the bound session's current plan/checklist",
+  "/conduit watch on|off — ping this room when a turn finishes (for when you're away)",
   "Anything else you type here is sent to the bound session as a prompt.",
   "Tip: Claude's y/n approval prompts stream here — just reply y or n.",
 ].join("\n");
+
+// ---- awareness rendering (Phase 2) ----------------------------------------------
+
+const TODO_MARK: Record<TodoItem["status"], string> = {
+  completed: "✅",
+  in_progress: "🔄",
+  pending: "⬜",
+};
+
+/** Render a todo list as a checklist. Empty list -> a friendly placeholder. */
+export function renderTodos(todos: TodoItem[]): string {
+  if (todos.length === 0) return "No plan yet — the agent hasn't written todos.";
+  const done = todos.filter((t) => t.status === "completed").length;
+  const lines = todos.map((t) => {
+    const label = t.status === "in_progress" && t.activeForm ? t.activeForm : t.content;
+    return `${TODO_MARK[t.status]} ${label}`;
+  });
+  return [`Plan (${done}/${todos.length} done):`, ...lines].join("\n");
+}
+
+export interface Usage {
+  input: number;
+  output: number;
+  cacheRead: number;
+  cacheCreation: number;
+}
+
+export const emptyUsage = (): Usage => ({ input: 0, output: 0, cacheRead: 0, cacheCreation: 0 });
+
+/** Rough cost estimate — Opus-class blended rate, deliberately conservative. Cache
+ *  reads are ~10% of fresh input. Only a ballpark for "am I burning money" awareness. */
+export function estimateCostUsd(u: Usage): number {
+  const inputPerM = 15,
+    outputPerM = 75,
+    cacheReadPerM = 1.5;
+  return (
+    (u.input * inputPerM +
+      u.cacheCreation * inputPerM +
+      u.cacheRead * cacheReadPerM +
+      u.output * outputPerM) /
+    1_000_000
+  );
+}
+
+export function renderUsage(u: Usage): string {
+  const tok = u.input + u.output + u.cacheCreation; // fresh tokens (cache reads are cheap/repeated)
+  return `~${tok.toLocaleString()} tokens this session (≈$${estimateCostUsd(u).toFixed(2)})`;
+}
 
 // ---- session listing --------------------------------------------------------------
 

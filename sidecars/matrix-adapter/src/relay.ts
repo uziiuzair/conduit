@@ -7,36 +7,55 @@ import type { MatrixClient } from "@vector-im/matrix-bot-sdk";
 import { discoverBridgeUrl, fetchProjects, SessionLink } from "./bridge.js";
 import { loadSettings, saveSettings, type Settings } from "./config.js";
 import {
+  activityLabel,
   controlKeyBytes,
   CONTROL_KEY_NAMES,
   INTERRUPT_KEY,
+  parseHookTodos,
   promptToInsert,
   SUBMIT_KEY,
   typingForStatus,
   type ChatItem,
+  type TodoItem,
 } from "./protocol.js";
 import {
+  emptyUsage,
   HELP_TEXT,
   parseCommand,
   PromptEcho,
   renderChatBatch,
   renderSessionList,
+  renderTodos,
+  renderUsage,
   resolveUseTarget,
   indexSessions,
   type IndexedSession,
+  type Usage,
 } from "./render.js";
-import { sendMessage } from "./matrix.js";
+import { editMessage, sendMessage } from "./matrix.js";
 
 const TYPING_REFRESH_MS = 25_000;
 /** Gap between inserting the prompt text and sending Enter, so the TUI renders the
  *  text as field content before it sees the submit keystroke. */
 const SUBMIT_DELAY_MS = 90;
+/** Don't push a "finished" ping if the owner was typing here in the last N ms —
+ *  they're watching live, the reply already showed. */
+const AWAY_AFTER_MS = 30_000;
 
 interface RoomState {
   link: SessionLink;
   echo: PromptEcho;
   typing: boolean;
   typingTimer: NodeJS.Timeout | null;
+  // ---- awareness (Phase 2) ----
+  activity: string; // "idle" | a live label
+  toolsThisTurn: number;
+  turnActive: boolean;
+  usage: Usage;
+  todos: TodoItem[];
+  todoMsgId: string | null; // event id of the live-edited todo message
+  watch: boolean; // push a "finished" ping on turn end
+  lastOwnerMsgAt: number;
 }
 
 export class Relay {
@@ -99,6 +118,7 @@ export class Relay {
       return;
     }
     state.echo.record(body.trim());
+    state.lastOwnerMsgAt = Date.now();
     // Two writes: insert the text, then a beat later send Enter as its own
     // keystroke. Sending them together makes Claude Code's TUI treat the whole
     // thing as a paste and NOT submit (the "typed but not executed" bug).
@@ -146,9 +166,36 @@ export class Relay {
         if (!state) {
           await this.notice(roomId, "No session bound to this room.");
         } else {
+          const lines = [
+            `Session ${state.link.sessionId} — link ${state.link.isUp ? "up 🟢" : "DOWN 🔴 (retrying)"}`,
+            state.turnActive ? `Now: ${state.activity} (${state.toolsThisTurn} tool${state.toolsThisTurn === 1 ? "" : "s"} this turn)` : "Now: idle",
+            renderUsage(state.usage),
+            `Watch: ${state.watch ? "on — pings you when a turn finishes" : "off"}`,
+          ];
+          await this.notice(roomId, lines.join("\n"));
+        }
+        return;
+      }
+      case "todos": {
+        const state = this.rooms.get(roomId);
+        if (!state) {
+          await this.notice(roomId, "No session bound here.");
+        } else {
+          await this.notice(roomId, renderTodos(state.todos));
+        }
+        return;
+      }
+      case "watch": {
+        const state = this.rooms.get(roomId);
+        if (!state) {
+          await this.notice(roomId, "No session bound here.");
+        } else {
+          state.watch = command.on;
           await this.notice(
             roomId,
-            `Bound to session ${state.link.sessionId} — bridge link ${state.link.isUp ? "up" : "DOWN (retrying)"}.`,
+            command.on
+              ? "🔔 Watch on — I'll ping when a turn finishes while you're away."
+              : "🔕 Watch off.",
           );
         }
         return;
@@ -235,7 +282,20 @@ export class Relay {
         void this.notice(roomId, `⚠️ Session link down (${reason}) — retrying in the background.`);
       },
     });
-    this.rooms.set(roomId, { link, echo, typing: false, typingTimer: null });
+    this.rooms.set(roomId, {
+      link,
+      echo,
+      typing: false,
+      typingTimer: null,
+      activity: "idle",
+      toolsThisTurn: 0,
+      turnActive: false,
+      usage: emptyUsage(),
+      todos: [],
+      todoMsgId: null,
+      watch: false,
+      lastOwnerMsgAt: 0,
+    });
     this.settings.rooms[roomId] = sessionId;
     saveSettings(this.settings);
   }
@@ -257,6 +317,16 @@ export class Relay {
   private async onChat(roomId: string, items: ChatItem[]): Promise<void> {
     const state = this.rooms.get(roomId);
     if (!state) return;
+    // Accumulate token usage from transcript `usage` items (dropped from the
+    // rendered messages, but the honest cost signal).
+    for (const it of items) {
+      if (it.kind === "usage") {
+        state.usage.input += it.inputTokens;
+        state.usage.output += it.outputTokens;
+        state.usage.cacheRead += it.cacheReadTokens;
+        state.usage.cacheCreation += it.cacheCreationTokens;
+      }
+    }
     const messages = renderChatBatch(items, (text) => state.echo.matches(text.trim()));
     for (const m of messages) {
       await sendMessage(this.client, roomId, m.msgtype, m.body).catch((e) =>
@@ -266,12 +336,74 @@ export class Relay {
   }
 
   private async onStatus(roomId: string, event: string, body: unknown): Promise<void> {
+    const state = this.rooms.get(roomId);
     const typing = typingForStatus(event);
     if (typing !== null) await this.setTyping(roomId, typing);
+
     if (event === "notification") {
-      const message =
-        (body as { message?: string } | null)?.message ?? "needs your input";
+      const message = (body as { message?: string } | null)?.message ?? "needs your input";
       await sendMessage(this.client, roomId, "m.text", `⚠️ ${message}`).catch(() => {});
+      return;
+    }
+    if (!state) return;
+
+    switch (event) {
+      case "prompt":
+        state.turnActive = true;
+        state.toolsThisTurn = 0;
+        state.activity = "thinking…";
+        break;
+      case "pretool": {
+        const label = activityLabel(body);
+        if (label) {
+          state.activity = label;
+          state.toolsThisTurn += 1;
+        }
+        break;
+      }
+      case "todos":
+      case "tooluse": {
+        const todos = parseHookTodos(body);
+        if (todos) {
+          state.todos = todos;
+          await this.updateTodoMirror(roomId);
+        }
+        break;
+      }
+      case "stop":
+      case "sessionend": {
+        const wasActive = state.turnActive;
+        state.turnActive = false;
+        state.activity = "idle";
+        // Ping only when watch is on AND the owner isn't watching live (no prompt
+        // typed here recently) — otherwise the reply itself is the signal.
+        const away = Date.now() - state.lastOwnerMsgAt > AWAY_AFTER_MS;
+        if (wasActive && state.watch && away) {
+          const done = state.todos.filter((t) => t.status === "completed").length;
+          const plan = state.todos.length ? ` · plan ${done}/${state.todos.length}` : "";
+          await sendMessage(
+            this.client,
+            roomId,
+            "m.text",
+            `✅ finished a turn${plan}. ${renderUsage(state.usage)}`,
+          ).catch(() => {});
+        }
+        break;
+      }
+    }
+  }
+
+  /** Live checklist: edit one message in place as the plan changes (m.replace). */
+  private async updateTodoMirror(roomId: string): Promise<void> {
+    const state = this.rooms.get(roomId);
+    if (!state) return;
+    const body = renderTodos(state.todos);
+    try {
+      state.todoMsgId = state.todoMsgId
+        ? await editMessage(this.client, roomId, state.todoMsgId, "m.notice", body)
+        : await sendMessage(this.client, roomId, "m.notice", body);
+    } catch (e) {
+      console.error(`relay: todo mirror failed in ${roomId}: ${e}`);
     }
   }
 

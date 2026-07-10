@@ -125,6 +125,82 @@ export const CONTROL_KEY_NAMES = "esc, enter, up, down, left, right, tab, ctrl-c
 
 // ---- hook status events -> presence -------------------------------------------
 
+// ---- awareness: activity labels, todos, usage (Phase 2) -----------------------
+
+export interface TodoItem {
+  content: string;
+  status: "pending" | "in_progress" | "completed";
+  activeForm?: string;
+}
+
+/** Base filename of a path, forward-slash aware. */
+function baseName(p: string): string {
+  const i = Math.max(p.lastIndexOf("/"), p.lastIndexOf("\\"));
+  return i >= 0 ? p.slice(i + 1) : p;
+}
+
+/** Short "what it's doing now" label from a `pretool`/`tooluse` hook body, or null
+ *  when there's nothing worth showing. Mirrors App.tsx's toolActivity (claude names).
+ *  Pure. */
+export function activityLabel(body: unknown): string | null {
+  const b = body as { tool_name?: string; tool_input?: Record<string, unknown> } | null;
+  const name = b?.tool_name;
+  if (typeof name !== "string" || !name) return null;
+  const inp = b?.tool_input ?? {};
+  const file = () => {
+    const p = inp.file_path ?? inp.path ?? inp.notebook_path;
+    return typeof p === "string" && p ? baseName(p) : undefined;
+  };
+  switch (name) {
+    case "Edit":
+    case "MultiEdit":
+    case "Write":
+    case "NotebookEdit": {
+      const f = file();
+      return f ? `✏️ editing ${f}` : "✏️ editing files";
+    }
+    case "Read": {
+      const f = file();
+      return f ? `📖 reading ${f}` : "📖 reading files";
+    }
+    case "Bash": {
+      const c = inp.command;
+      return typeof c === "string" ? `⚙️ running ${c.slice(0, 60)}` : "⚙️ running a command";
+    }
+    case "Grep":
+    case "Glob":
+      return "🔎 searching";
+    case "Task":
+      return "🤖 running a subagent";
+    case "WebFetch":
+    case "WebSearch":
+      return "🌐 browsing the web";
+    case "TodoWrite":
+      return null; // shown in the todo mirror instead
+    default:
+      return name;
+  }
+}
+
+/** Extract a todo list from a `todos`/TodoWrite hook body (several shapes). Pure. */
+export function parseHookTodos(body: unknown): TodoItem[] | null {
+  const b = body as { tool_input?: unknown; todos?: unknown; todo_list?: unknown } | null;
+  const ti = b?.tool_input as { todos?: unknown } | undefined;
+  const raw = ti?.todos ?? b?.todos ?? b?.todo_list;
+  if (!Array.isArray(raw)) return null;
+  return raw
+    .filter((t) => t && typeof (t as { content?: unknown }).content === "string")
+    .map((t) => {
+      const it = t as { content: string; status?: string; activeForm?: string };
+      return {
+        content: it.content,
+        status:
+          it.status === "in_progress" || it.status === "completed" ? it.status : "pending",
+        activeForm: typeof it.activeForm === "string" ? it.activeForm : undefined,
+      };
+    });
+}
+
 /** What a hook event means for the Matrix typing indicator. */
 export function typingForStatus(event: string): boolean | null {
   switch (event) {
