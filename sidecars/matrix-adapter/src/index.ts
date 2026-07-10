@@ -4,6 +4,9 @@
 //   run                                                 start the relay
 // See docs/superpowers/specs/2026-07-10-conduit-matrix-adapter-design.md.
 
+import fs from "node:fs";
+import path from "node:path";
+
 import {
   DEFAULT_API_BASE,
   listBots,
@@ -13,6 +16,7 @@ import {
   type BotSummary,
 } from "./badgerclaw.js";
 import {
+  ensureDataDir,
   loadAccount,
   loadCredentials,
   loadSettings,
@@ -167,7 +171,44 @@ async function pair(args: string[]): Promise<void> {
   console.log("next: conduit-matrix run   (keep it running alongside Conduit)");
 }
 
+/** Refuse to start a SECOND relay: two processes share one rust-sdk crypto store,
+ *  which corrupts E2EE Megolm state and leaves the phone unable to decrypt (messages
+ *  stuck "loading"). A pidfile with a liveness check is the guard. */
+function acquireSingletonLock(): void {
+  const lock = path.join(ensureDataDir(), "relay.pid");
+  try {
+    const prev = Number(fs.readFileSync(lock, "utf8").trim());
+    if (prev && prev !== process.pid) {
+      try {
+        process.kill(prev, 0); // throws if the pid is dead
+        console.error(
+          `another conduit-matrix relay is already running (pid ${prev}). ` +
+            `Stop it first — two relays corrupt the E2EE crypto store. ` +
+            `If you're sure it's dead, delete ${lock} and retry.`,
+        );
+        process.exit(1);
+      } catch {
+        /* stale pid — fall through and take the lock */
+      }
+    }
+  } catch {
+    /* no lockfile yet */
+  }
+  fs.writeFileSync(lock, String(process.pid), { mode: 0o600 });
+  const release = () => {
+    try {
+      if (Number(fs.readFileSync(lock, "utf8").trim()) === process.pid) fs.unlinkSync(lock);
+    } catch {
+      /* already gone */
+    }
+  };
+  process.on("exit", release);
+  process.on("SIGINT", () => process.exit(0));
+  process.on("SIGTERM", () => process.exit(0));
+}
+
 async function run(): Promise<void> {
+  acquireSingletonLock();
   const creds = loadCredentials();
   if (!creds) {
     console.error("no credentials — run `conduit-matrix pair <code> --owner <mxid>` first");
