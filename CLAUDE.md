@@ -69,8 +69,10 @@ Use semantic versioning. Don't bump the version as a side effect of an unrelated
 ## Conventions
 
 - **Commits:** Conventional Commits (`feat`, `fix`, `docs`, `spike`, `chore`), scoped —
-  e.g. `feat(usage): …`. End every commit message with the
-  `Co-Authored-By: Claude …` trailer.
+  e.g. `feat(usage): …`. **Never add a `Co-Authored-By: Claude` (or any AI
+  attribution) trailer** — it makes GitHub display "claude committed" on every
+  commit. The full history was scrubbed of these on 2026-07-10; don't reintroduce
+  them.
 - **Branches:** one `feat/<topic>` branch per change; integrate to `main` with a merge
   commit: `git merge --no-ff feat/<topic> -m "Merge feat/<topic> into main"`.
 - **Never push or merge to `main` without explicit human approval.**

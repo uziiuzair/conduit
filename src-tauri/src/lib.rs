@@ -12,14 +12,18 @@ mod claude_status;
 mod claude_usage;
 mod fleet;
 mod fleet_mcp;
+mod format;
 mod fsops;
 mod git;
+mod git_mut;
 mod hookbus;
 mod hooks;
+mod hotexit;
 mod local_llm;
 mod menu;
 mod notify;
 mod pty;
+mod search;
 mod store;
 mod telemetry;
 mod transcript;
@@ -31,7 +35,7 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 use tauri::ipc::Channel;
-use tauri::{Manager, State};
+use tauri::{Emitter, Manager, State};
 
 use hooks::HookState;
 use pty::PtyManager;
@@ -55,6 +59,13 @@ impl NoWindow for std::process::Command {
         self
     }
 }
+
+/// Unsaved-buffer count pushed from the frontend (`set_dirty_count`). Rust has no
+/// other view of editor dirtiness; the quit paths (menu.rs `quit` arm and the
+/// `CloseRequested` handler below) consult it so a clean quit stays instant and
+/// webview-independent, while a dirty quit round-trips for a confirm dialog.
+#[derive(Default)]
+pub(crate) struct DirtyGuard(pub std::sync::atomic::AtomicUsize);
 
 /// SPEC-F: does a WORKER session qualify for fleet MCP via mailbox opt-in (as opposed to
 /// a fleet mission)? True iff it has no mission AND has explicitly joined at least one
@@ -674,6 +685,63 @@ fn git_graph(dir: String) -> Vec<git::GraphCommit> {
     git::graph(&dir, 80)
 }
 
+/// Diff original (left) side: file content at HEAD. `(async)`: `git show` on a big
+/// file shouldn't stall the main thread.
+#[tauri::command(async)]
+fn git_show_head(dir: String, path: String) -> Result<String, String> {
+    git::show_head(&dir, &path)
+}
+
+#[tauri::command(async)]
+fn git_diff_hunks(dir: String, path: String) -> Result<Vec<git::Hunk>, String> {
+    git::diff_hunks(&dir, &path)
+}
+
+/// Quick Open corpus: `git ls-files` in a repo, bounded walk elsewhere.
+#[tauri::command(async)]
+fn list_project_files(dir: String) -> Vec<String> {
+    match git::ls_files(&dir) {
+        Ok(files) if !files.is_empty() => files,
+        _ => fsops::walk_files(&dir, git::LS_FILES_CAP / 2),
+    }
+}
+
+/// Find in Files. `(async)`: a cold rg over a big tree can take a second.
+#[tauri::command(async)]
+fn search_content(dir: String, query: String) -> Result<search::SearchResult, String> {
+    search::search(&dir, &query)
+}
+
+// ---- Git (mutating — confirm-guarded in the UI) --------------------------------
+
+#[tauri::command(async)]
+fn git_discard_file(dir: String, path: String) -> Result<String, String> {
+    git_mut::discard_file(&dir, &path)
+}
+
+// ---- Format Document -----------------------------------------------------------
+
+#[tauri::command(async)]
+fn format_content(
+    dir: String,
+    path: String,
+    content: String,
+) -> Result<format::FormatResult, String> {
+    format::format_content(&dir, &path, &content)
+}
+
+// ---- Hot exit -------------------------------------------------------------------
+
+#[tauri::command]
+fn hotexit_save(entries: Vec<hotexit::HotExitEntry>) -> Result<(), String> {
+    hotexit::save(&entries)
+}
+
+#[tauri::command]
+fn hotexit_load() -> Vec<hotexit::HotExitEntry> {
+    hotexit::load()
+}
+
 // ---- Worktree lifecycle ------------------------------------------------------
 
 #[tauri::command]
@@ -729,8 +797,28 @@ fn delete_path(path: String) -> Result<(), String> {
 }
 
 #[tauri::command]
+fn read_file_base64(path: String) -> Result<fsops::FileBase64, String> {
+    fsops::read_file_base64(&path)
+}
+
+#[tauri::command]
 fn resolve_terminal_path(base: String, token: String) -> Option<fsops::ResolvedPath> {
     fsops::resolve_terminal_path(&base, &token)
+}
+
+// ---- Quit guard ----------------------------------------------------------------
+
+#[tauri::command]
+fn set_dirty_count(count: usize, dirty: State<DirtyGuard>) {
+    dirty.0.store(count, Ordering::SeqCst);
+}
+
+/// Actually quit, invoked by the frontend after the dirty-buffer confirm. Preserves
+/// the PTY-cleanup-before-exit ordering of the direct quit path.
+#[tauri::command]
+fn quit_app(app: tauri::AppHandle, pty: State<Arc<PtyManager>>) {
+    pty.kill_all();
+    app.exit(0);
 }
 
 // ---- Notifications -----------------------------------------------------------
@@ -931,6 +1019,61 @@ fn open_external(url: String) -> Result<(), String> {
     }
 }
 
+/// Reveal a file or directory in the OS file manager, selecting it where the
+/// platform supports selection (Finder `open -R`, Explorer `/select,`). Same
+/// shell-out doctrine as `open_external`: args passed positionally, never through
+/// a shell.
+#[tauri::command]
+fn reveal_path(path: String) -> Result<(), String> {
+    use std::process::Command;
+
+    if !Path::new(&path).exists() {
+        return Err("path does not exist".into());
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        return match Command::new("open")
+            .args(["-R", &path])
+            .no_window()
+            .status()
+        {
+            Ok(s) if s.success() => Ok(()),
+            Ok(s) => Err(format!("opener exited with {s}")),
+            Err(e) => Err(format!("failed to launch opener: {e}")),
+        };
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        // raw_arg, not arg: std would quote the WHOLE "/select,…" token when the path
+        // contains a space, and Explorer's nonstandard comma-splitting parser then
+        // fails to select (or opens Documents). Quote only the path; Windows file
+        // names cannot contain '"'. explorer.exe exits nonzero even on success, so
+        // only launch failures are reported.
+        let mut c = Command::new("explorer.exe");
+        c.raw_arg(format!("/select,\"{path}\""));
+        return c
+            .no_window()
+            .status()
+            .map(|_| ())
+            .map_err(|e| format!("failed to launch explorer: {e}"));
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        // xdg-open has no selection concept; open the containing directory.
+        let parent = Path::new(&path)
+            .parent()
+            .unwrap_or_else(|| Path::new("/"))
+            .to_path_buf();
+        return match Command::new("xdg-open").arg(parent).no_window().status() {
+            Ok(s) if s.success() => Ok(()),
+            Ok(s) => Err(format!("opener exited with {s}")),
+            Err(e) => Err(format!("failed to launch opener: {e}")),
+        };
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -967,6 +1110,22 @@ pub fn run() {
         .manage(Arc::new(hookbus::HookBus::default()))
         .manage(Arc::new(broker::Broker::default()))
         .manage(Arc::new(broker::Presence::default()))
+        .manage(DirtyGuard::default())
+        .on_window_event(|window, event| {
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                // Closing the (only) window quits the app; give dirty buffers the
+                // same confirm round-trip as Cmd+Q. Clean windows close instantly.
+                let dirty = window
+                    .app_handle()
+                    .state::<DirtyGuard>()
+                    .0
+                    .load(Ordering::SeqCst);
+                if dirty > 0 {
+                    api.prevent_close();
+                    let _ = window.app_handle().emit("menu", "quit");
+                }
+            }
+        })
         .setup(|app| {
             let fleet = app.state::<Arc<crate::fleet::FleetState>>().inner().clone();
             let board = app.state::<Arc<crate::board::BoardState>>().inner().clone();
@@ -1037,6 +1196,14 @@ pub fn run() {
             git_changes,
             git_commits,
             git_graph,
+            git_show_head,
+            git_diff_hunks,
+            git_discard_file,
+            list_project_files,
+            search_content,
+            format_content,
+            hotexit_save,
+            hotexit_load,
             worktree_is_dirty,
             worktree_remove,
             list_dir,
@@ -1047,10 +1214,14 @@ pub fn run() {
             create_dir,
             rename_path,
             delete_path,
+            read_file_base64,
+            set_dirty_count,
+            quit_app,
             resolve_terminal_path,
             notify_user,
             open_in_vscode,
             open_external,
+            reveal_path,
             claude_status::fetch_claude_status,
             claude_usage::fetch_claude_usage,
             claude_usage::connect_claude_plan_usage,

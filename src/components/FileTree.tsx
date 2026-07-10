@@ -23,6 +23,8 @@ interface TreeCtx {
   expanded: Set<string>;
   toggle: (path: string) => void;
   onOpen: (path: string) => void;
+  /** Double-click: open pinned (pins an existing preview tab). */
+  onOpenPermanent: (path: string) => void;
   onContext: (e: MouseEvent, entry: DirEntry | null) => void;
   pending: Pending;
   renaming: string | null;
@@ -52,6 +54,7 @@ export function FileTree({
     activeGroup(s.layouts[projectId])?.activeRef ?? undefined,
   );
   const rootVersion = useStore((s) => s.dirVersion[rootDir] ?? 0);
+  const reveal = useStore((s) => s.reveal);
 
   const [entries, setEntries] = useState<DirEntry[] | null>(null);
   const [expanded, setExpanded] = useState<Set<string>>(() => new Set());
@@ -103,6 +106,45 @@ export function FileTree({
       else next.add(path);
       return next;
     });
+
+  // "Reveal in tree" (store.revealInTree): expand every ancestor, then poll briefly
+  // for the row to mount — each newly-expanded ancestor loads its children via an
+  // async list_dir, so the target row appears only after that chain resolves.
+  // block:"center" keeps the row clear of the sticky branch bar above the tree.
+  useEffect(() => {
+    if (!reveal) return;
+    const { path } = reveal;
+    // Consume the request once handled — a lingering one would replay on every
+    // FileTree remount (Files/Changes toggle, Refresh, the 2.5s git poll), hijacking
+    // the user's expansion state and scroll position forever.
+    const done = () => useStore.getState().clearReveal();
+    if (!path.startsWith(rootDir + "/")) {
+      done(); // outside this tree's root (worktree case) — nothing to reveal
+      return;
+    }
+    setExpanded((prev) => {
+      const next = new Set(prev);
+      let dir = parentDir(path);
+      while (dir.length > rootDir.length) {
+        next.add(dir);
+        dir = parentDir(dir);
+      }
+      return next;
+    });
+    let tries = 0;
+    const timer = window.setInterval(() => {
+      const el = document.querySelector(`[data-path="${CSS.escape(path)}"]`);
+      if (el) {
+        el.scrollIntoView({ block: "center" });
+        done();
+        window.clearInterval(timer);
+      } else if (++tries > 40) {
+        done(); // give up after ~2s (e.g. file inside .git)
+        window.clearInterval(timer);
+      }
+    }, 50);
+    return () => window.clearInterval(timer);
+  }, [reveal, rootDir]);
 
   const startCreate = (parent: string, kind: "file" | "dir") => {
     setMenu(null);
@@ -205,7 +247,10 @@ export function FileTree({
     activePath,
     expanded,
     toggle,
-    onOpen: (p) => openFile(projectId, p),
+    // Single click opens a PREVIEW tab (italic, replaced by the next preview open);
+    // double click / editing pins it.
+    onOpen: (p) => openFile(projectId, p, { preview: true }),
+    onOpenPermanent: (p) => openFile(projectId, p),
     onContext,
     pending,
     renaming,
@@ -258,6 +303,12 @@ export function FileTree({
             setRenaming(entry.path);
           }}
           onDelete={onDelete}
+          onRevealFinder={(path) => {
+            setMenu(null);
+            void invoke("reveal_path", { path }).catch((e) => {
+              void invoke("notify_user", { title: "Conduit", body: String(e) }).catch(() => {});
+            });
+          }}
         />
       )}
     </div>
@@ -316,12 +367,16 @@ function TreeEntry({
           entry.isDir && ctx.dropTarget === entry.path ? "drop-target" : ""
         }`}
         style={{ paddingLeft: 8 + depth * 13 }}
+        data-path={entry.path}
         draggable
         onDragStart={(e) => ctx.onRowDragStart(e, entry.path)}
         onDragEnd={ctx.onRowDragEnd}
         onDragOver={(e) => ctx.onRowDragOver(e, dropTargetDir)}
         onDrop={(e) => ctx.onRowDrop(e, dropTargetDir)}
         onClick={rowClick}
+        onDoubleClick={() => {
+          if (!entry.isDir) ctx.onOpenPermanent(entry.path);
+        }}
         onContextMenu={(e) => ctx.onContext(e, entry)}
         title={entry.name}
       >
@@ -419,6 +474,7 @@ function FileTreeMenu({
   onNewFolder,
   onRename,
   onDelete,
+  onRevealFinder,
 }: {
   menu: NonNullable<Menu>;
   rootDir: string;
@@ -426,6 +482,7 @@ function FileTreeMenu({
   onNewFolder: (parent: string) => void;
   onRename: (entry: DirEntry) => void;
   onDelete: (entry: DirEntry) => void;
+  onRevealFinder: (path: string) => void;
 }) {
   const entry = menu.entry;
   // Folder -> create inside it; file -> create as sibling; empty area -> root.
@@ -457,6 +514,7 @@ function FileTreeMenu({
     >
       <button onClick={() => onNewFile(parent)}>New File</button>
       <button onClick={() => onNewFolder(parent)}>New Folder</button>
+      <button onClick={() => onRevealFinder(entry?.path ?? rootDir)}>Reveal in Finder</button>
       {entry && <button onClick={() => onRename(entry)}>Rename</button>}
       {entry && (
         <button className="danger" onClick={() => onDelete(entry)}>

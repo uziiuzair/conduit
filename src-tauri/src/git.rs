@@ -44,6 +44,142 @@ fn run(args: &[&str], dir: &str) -> String {
         .unwrap_or_default()
 }
 
+/// Like `run` but for user-invoked queries: nonzero exit / spawn failure surface as
+/// Err(stderr) instead of silently becoming "". Polling keeps `run`'s contract.
+fn run_checked(args: &[&str], dir: &str) -> Result<String, String> {
+    use crate::NoWindow;
+    let out = Command::new("git")
+        .args(args)
+        .current_dir(dir)
+        .no_window()
+        .output()
+        .map_err(|e| format!("failed to run git: {e}"))?;
+    if out.status.success() {
+        Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+    } else {
+        let err = String::from_utf8_lossy(&out.stderr).trim().to_string();
+        Err(if err.is_empty() {
+            format!("git exited with {}", out.status)
+        } else {
+            err
+        })
+    }
+}
+
+/// Absolute path -> repo-relative with forward slashes (what `git show HEAD:<p>`
+/// wants). Canonicalizes both sides so macOS /tmp-symlinks and Windows verbatim
+/// prefixes can't break the strip.
+fn repo_relative(dir: &str, path: &str) -> Result<String, String> {
+    let top = run_checked(&["rev-parse", "--show-toplevel"], dir)?
+        .trim()
+        .to_string();
+    let top = std::fs::canonicalize(&top).map_err(|e| format!("repo root: {e}"))?;
+    let abs = std::fs::canonicalize(path).map_err(|e| format!("path: {e}"))?;
+    let rel = abs
+        .strip_prefix(&top)
+        .map_err(|_| "file is outside the repository".to_string())?;
+    Ok(rel.to_string_lossy().replace('\\', "/"))
+}
+
+/// Same 24 MB bound as fsops::read_file — a diff original larger than the editor
+/// would load anyway is refused rather than truncated (a truncated original would
+/// render as a giant bogus deletion).
+const SHOW_CAP: usize = 24 * 1024 * 1024;
+
+/// Content of `HEAD:<path>` for the diff editor's original (left) side. A path that
+/// exists on disk but not in HEAD (new/untracked file) resolves to Ok("") so the
+/// diff renders as all-added instead of erroring.
+pub fn show_head(dir: &str, path: &str) -> Result<String, String> {
+    let rel = repo_relative(dir, path)?;
+    let spec = format!("HEAD:{rel}");
+    if run_checked(&["cat-file", "-e", &spec], dir).is_err() {
+        return Ok(String::new());
+    }
+    let content = run_checked(&["show", &spec], dir)?;
+    if content.len() > SHOW_CAP {
+        return Err("file at HEAD is too large to diff".into());
+    }
+    Ok(content)
+}
+
+/// One contiguous change against HEAD, expressed in NEW-file line numbers, parsed
+/// from a `git diff -U0` hunk header. `deleted` hunks have count 0 — they mark the
+/// gap AFTER line `start` (start may be 0 for a deletion at the top of the file).
+#[derive(Serialize, Clone, Debug, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct Hunk {
+    /// "added" | "modified" | "deleted"
+    pub kind: String,
+    /// First affected line in the new file (1-based; see `deleted` caveat above).
+    pub start: u32,
+    /// Affected line count in the new file (0 for pure deletions).
+    pub count: u32,
+}
+
+/// Parse `@@ -a[,b] +c[,d] @@` headers out of `git diff -U0` output. Pure so it's
+/// unit-testable; everything that isn't a hunk header is ignored.
+pub fn parse_hunks(diff: &str) -> Vec<Hunk> {
+    let mut out = Vec::new();
+    for line in diff.lines() {
+        let Some(rest) = line.strip_prefix("@@ -") else {
+            continue;
+        };
+        let Some((ranges, _)) = rest.split_once(" @@") else {
+            continue;
+        };
+        let Some((old, new)) = ranges.split_once(" +") else {
+            continue;
+        };
+        let parse_range = |r: &str| -> Option<(u32, u32)> {
+            match r.split_once(',') {
+                Some((s, c)) => Some((s.parse().ok()?, c.parse().ok()?)),
+                None => Some((r.parse().ok()?, 1)),
+            }
+        };
+        let (Some((_, old_count)), Some((new_start, new_count))) =
+            (parse_range(old), parse_range(new))
+        else {
+            continue;
+        };
+        let kind = if new_count == 0 {
+            "deleted"
+        } else if old_count == 0 {
+            "added"
+        } else {
+            "modified"
+        };
+        out.push(Hunk {
+            kind: kind.into(),
+            start: new_start,
+            count: new_count,
+        });
+    }
+    out
+}
+
+/// Gutter change stripes: hunks of the working tree vs HEAD for one file.
+/// A file not in HEAD yields no hunks — the frontend already knows it's all-new
+/// from show_head() == "".
+pub fn diff_hunks(dir: &str, path: &str) -> Result<Vec<Hunk>, String> {
+    let rel = repo_relative(dir, path)?;
+    let out = run_checked(&["diff", "-U0", "HEAD", "--", &rel], dir)?;
+    Ok(parse_hunks(&out))
+}
+
+/// Everything Quick Open can offer in a repo: tracked + untracked, gitignore-aware.
+/// Paths come back repo-relative (forward slashes) exactly as git prints them.
+pub const LS_FILES_CAP: usize = 20_000;
+
+pub fn ls_files(dir: &str) -> Result<Vec<String>, String> {
+    let out = run_checked(&["ls-files", "-co", "--exclude-standard"], dir)?;
+    Ok(out
+        .lines()
+        .filter(|l| !l.is_empty())
+        .take(LS_FILES_CAP)
+        .map(String::from)
+        .collect())
+}
+
 pub fn current_branch(dir: &str) -> Option<String> {
     let out = run(&["rev-parse", "--abbrev-ref", "HEAD"], dir)
         .trim()
@@ -140,4 +276,45 @@ pub fn graph(dir: &str, limit: usize) -> Vec<GraphCommit> {
         })
     })
     .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn h(kind: &str, start: u32, count: u32) -> Hunk {
+        Hunk {
+            kind: kind.into(),
+            start,
+            count,
+        }
+    }
+
+    #[test]
+    fn parse_hunks_classifies_add_modify_delete() {
+        let diff = "diff --git a/f b/f\nindex 111..222 100644\n--- a/f\n+++ b/f\n\
+                    @@ -0,0 +1,3 @@\n+a\n+b\n+c\n\
+                    @@ -10,2 +13,2 @@ fn ctx() {\n-x\n-y\n+x2\n+y2\n\
+                    @@ -20,4 +23,0 @@\n-gone\n";
+        assert_eq!(
+            parse_hunks(diff),
+            vec![h("added", 1, 3), h("modified", 13, 2), h("deleted", 23, 0)]
+        );
+    }
+
+    #[test]
+    fn parse_hunks_handles_singular_ranges_without_counts() {
+        // git omits ",1": "@@ -5 +5 @@" means one line each side.
+        assert_eq!(parse_hunks("@@ -5 +5 @@\n"), vec![h("modified", 5, 1)]);
+        assert_eq!(parse_hunks("@@ -0,0 +1 @@\n"), vec![h("added", 1, 1)]);
+        assert_eq!(parse_hunks("@@ -3 +2,0 @@\n"), vec![h("deleted", 2, 0)]);
+    }
+
+    #[test]
+    fn parse_hunks_ignores_non_header_noise() {
+        // Content lines that merely CONTAIN header-ish text must not parse: the
+        // "@@ -1,2 +3,4 @@" here is diff BODY (prefixed with +).
+        let diff = "+@@ -1,2 +3,4 @@\n@@ malformed @@\n@@ -x,y +1,2 @@\n";
+        assert!(parse_hunks(diff).is_empty());
+    }
 }
