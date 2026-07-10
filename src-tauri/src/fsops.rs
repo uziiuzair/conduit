@@ -346,6 +346,85 @@ pub fn delete_path(path: &str) -> Result<(), String> {
     }
 }
 
+// ---- terminal path resolution (clickable paths) ---------------------------
+
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct ResolvedPath {
+    pub abs_path: String,
+    pub line: Option<u32>,
+    pub col: Option<u32>,
+}
+
+/// Split a terminal token into its path part and optional 1-based line/col. A trailing
+/// `:<line>` or `:<line>:<col>` (all-ASCII-digit groups) is stripped; a non-numeric colon
+/// suffix (e.g. `foo:bar`) is left as part of the path. Pure — unit-tested without the fs.
+fn parse_path_token(token: &str) -> (&str, Option<u32>, Option<u32>) {
+    // Peel a single trailing `:<digits>` group off `s`, if present.
+    fn peel(s: &str) -> Option<(&str, u32)> {
+        let idx = s.rfind(':')?;
+        let (head, tail) = s.split_at(idx);
+        let num = &tail[1..]; // drop the ':'
+        if num.is_empty() || !num.bytes().all(|b| b.is_ascii_digit()) {
+            return None;
+        }
+        num.parse::<u32>().ok().map(|n| (head, n))
+    }
+    if let Some((head1, n1)) = peel(token) {
+        if let Some((head2, n2)) = peel(head1) {
+            return (head2, Some(n2), Some(n1)); // head2:line:col
+        }
+        return (head1, Some(n1), None); // head1:line
+    }
+    (token, None, None)
+}
+
+/// Expand a leading `~` or `~/` to the user's home dir (not `~user`); otherwise unchanged.
+fn expand_home(path: &str) -> String {
+    if path == "~" {
+        if let Some(h) = dirs::home_dir() {
+            return h.to_string_lossy().into_owned();
+        }
+    } else if let Some(rest) = path.strip_prefix("~/") {
+        if let Some(h) = dirs::home_dir() {
+            return h.join(rest).to_string_lossy().into_owned();
+        }
+    }
+    path.to_string()
+}
+
+/// Resolve a path token printed in a terminal into an existing regular file. `base` is the
+/// session's working directory (used for relative tokens). Returns None when the token does
+/// not resolve to an existing file (canonicalize confirms existence + resolves `..`/symlinks;
+/// directories are rejected). Never opens or reads the file.
+pub fn resolve_terminal_path(base: &str, token: &str) -> Option<ResolvedPath> {
+    let (path_part, line, col) = parse_path_token(token.trim());
+    if path_part.is_empty() {
+        return None;
+    }
+    let expanded = expand_home(path_part);
+    let joined = if Path::new(&expanded).is_absolute() {
+        std::path::PathBuf::from(&expanded)
+    } else {
+        Path::new(base).join(&expanded)
+    };
+    // Verify it's an existing regular file. `metadata` follows symlinks for the check, but we
+    // deliberately do NOT `canonicalize` the returned path: the rest of the app (FileTree,
+    // add_project) keys tabs/models by the raw, non-symlink-resolved path, so canonicalizing
+    // here would open a duplicate tab/model for a file under a symlinked ancestor (e.g. macOS
+    // /tmp -> /private/tmp). Return the lexically-normalized join (drops `.`, keeps `..` and
+    // symlinks) so the path stays in the same namespace the tree uses.
+    if !fs::metadata(&joined).ok()?.is_file() {
+        return None;
+    }
+    let normalized: std::path::PathBuf = joined.components().collect();
+    Some(ResolvedPath {
+        abs_path: normalized.to_string_lossy().into_owned(),
+        line,
+        col,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -571,5 +650,136 @@ mod crud_tests {
         // a missing path is an error
         assert!(delete_path(&s(&d.join("nope"))).is_err());
         fs::remove_dir_all(&d).ok();
+    }
+}
+
+#[cfg(test)]
+mod resolve_tests {
+    use super::*;
+
+    /// Fresh unique scratch dir under the OS temp dir (mirrors the other test modules).
+    fn tmpdir() -> std::path::PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!(
+            "conduit-fsops-resolve-{}-{nanos}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn parse_token_variants() {
+        assert_eq!(parse_path_token("src/a.ts"), ("src/a.ts", None, None));
+        assert_eq!(
+            parse_path_token("src/a.ts:45"),
+            ("src/a.ts", Some(45), None)
+        );
+        assert_eq!(
+            parse_path_token("src/a.ts:45:12"),
+            ("src/a.ts", Some(45), Some(12))
+        );
+        assert_eq!(
+            parse_path_token("/abs/a.ts:9"),
+            ("/abs/a.ts", Some(9), None)
+        );
+        assert_eq!(parse_path_token("~/a.ts"), ("~/a.ts", None, None));
+        // a non-numeric colon suffix stays part of the path (not a line number)
+        assert_eq!(parse_path_token("weird:name"), ("weird:name", None, None));
+        // an empty/trailing colon group is not a line number either
+        assert_eq!(parse_path_token("a.ts:"), ("a.ts:", None, None));
+    }
+
+    #[test]
+    fn expand_home_variants() {
+        let home = dirs::home_dir().expect("home dir");
+        // leading ~ and ~/ expand to the home dir
+        assert_eq!(expand_home("~"), home.to_string_lossy().into_owned());
+        assert_eq!(
+            expand_home("~/a/b.ts"),
+            home.join("a/b.ts").to_string_lossy().into_owned()
+        );
+        // absolute and relative paths pass through unchanged
+        assert_eq!(expand_home("/abs/x.ts"), "/abs/x.ts");
+        assert_eq!(expand_home("rel/x.ts"), "rel/x.ts");
+        // ~user is NOT expanded (only a bare ~ or ~/ prefix)
+        assert_eq!(expand_home("~bob/x.ts"), "~bob/x.ts");
+    }
+
+    #[test]
+    fn resolves_relative_against_base_with_line_col() {
+        let dir = tmpdir();
+        let f = dir.join("hello.txt");
+        fs::write(&f, b"hi").unwrap();
+        let r = resolve_terminal_path(dir.to_str().unwrap(), "hello.txt:3:2").expect("resolves");
+        // Non-canonicalizing: the returned path stays in the same (raw) namespace as `base`.
+        assert_eq!(
+            r.abs_path,
+            dir.join("hello.txt").to_string_lossy().into_owned()
+        );
+        assert_eq!(r.line, Some(3));
+        assert_eq!(r.col, Some(2));
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn resolves_absolute_ignoring_base() {
+        let dir = tmpdir();
+        let f = dir.join("x.txt");
+        fs::write(&f, b"hi").unwrap();
+        let r = resolve_terminal_path("/no/such/base", f.to_str().unwrap()).expect("resolves");
+        assert_eq!(r.abs_path, f.to_string_lossy().into_owned());
+        assert_eq!(r.line, None);
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn missing_file_is_none() {
+        let dir = tmpdir();
+        assert!(resolve_terminal_path(dir.to_str().unwrap(), "nope.txt").is_none());
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn directory_is_none() {
+        let dir = tmpdir();
+        let sub = dir.join("sub");
+        fs::create_dir(&sub).unwrap();
+        assert!(resolve_terminal_path(dir.to_str().unwrap(), "sub").is_none());
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn resolves_keep_symlink_namespace() {
+        use std::os::unix::fs::symlink;
+        let real = tmpdir();
+        fs::write(real.join("f.txt"), b"hi").unwrap();
+        // A sibling symlink pointing at the real dir.
+        let link = real
+            .parent()
+            .unwrap()
+            .join(format!("conduit-resolve-link-{}", std::process::id()));
+        let _ = fs::remove_file(&link);
+        symlink(&real, &link).unwrap();
+        // Resolve a relative token against the SYMLINK dir as base.
+        let r = resolve_terminal_path(link.to_str().unwrap(), "f.txt").expect("resolves");
+        // The returned path stays under the symlink dir (not canonicalized to the real dir).
+        assert_eq!(
+            r.abs_path,
+            link.join("f.txt").to_string_lossy().into_owned()
+        );
+        assert_ne!(
+            r.abs_path,
+            fs::canonicalize(link.join("f.txt"))
+                .unwrap()
+                .to_string_lossy()
+                .into_owned()
+        );
+        fs::remove_file(&link).ok();
+        fs::remove_dir_all(&real).ok();
     }
 }

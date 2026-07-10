@@ -34,6 +34,8 @@ export interface AgentInfo {
   binary: string;
   found: boolean;
   path?: string | null;
+  /** One-click install command for this agent, or null when there's no known installer. */
+  installCommand?: string | null;
 }
 
 /** MCP server definition — mirrors the Rust McpServer struct (serde rename_all = "camelCase"). */

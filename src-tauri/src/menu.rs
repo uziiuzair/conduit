@@ -115,8 +115,7 @@ pub fn build<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<Menu<R>> {
         .accelerator("CmdOrCtrl+Alt+B")
         .build(app)?;
     let theme_auto = MenuItemBuilder::with_id("theme:auto", "Auto").build(app)?;
-    let theme_warm_light =
-        MenuItemBuilder::with_id("theme:warm-light", "Warm Light").build(app)?;
+    let theme_warm_light = MenuItemBuilder::with_id("theme:warm-light", "Warm Light").build(app)?;
     let theme_warm_dim = MenuItemBuilder::with_id("theme:warm-dim", "Warm Dim").build(app)?;
     let theme_near_black =
         MenuItemBuilder::with_id("theme:warm-near-black", "Warm Near-Black").build(app)?;

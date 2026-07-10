@@ -3,6 +3,42 @@
 All notable changes to Conduit are documented here. This project uses
 [semantic versioning](https://semver.org/).
 
+## 0.6.0 — 2026-07-08
+
+- **Added — terminal-to-editor navigation.** Cmd-click file paths in any terminal
+  to open them in Conduit's editor, including absolute, home-relative, explicit
+  relative, and workspace-relative paths with optional `:line` or `:line:col`
+  suffixes. Matching paths reveal the target line in Monaco, and terminal
+  Cmd+Left / Cmd+Right now jump to the start/end of the input line.
+- **Added — orchestration v2.** The Conductor now coordinates a capability-aware,
+  cost-conscious fleet across agent types with project-scoped missions, structured
+  worker handback, reactive wakeups, per-session effort/model routing, worker
+  mailbox notes, and usage tallying.
+- **Added — local OpenCode models.** OpenCode sessions can run against local or
+  self-hosted OpenAI-compatible endpoints such as Ollama, LM Studio, vLLM,
+  llama.cpp, and OpenWebUI, with live server/model detection, context/output
+  limits, API-key handling, local-only pinning, and tool-calling probes.
+- **Added — one-click agent installs.** Missing agent CLIs can now be installed
+  from Settings or onboarding, using each provider's known installer and
+  re-detecting availability afterward.
+- **Added — private mode trust boundaries.** Sensitive sessions can be marked as
+  siloed so they remain visible on desktop but are withheld from remote streaming
+  and other agents, with fleet read/send policy gates and a local sensitivity
+  scanner.
+- **Changed — editor polish.** Monaco editor behavior now explicitly pins the
+  bundled editor contributions, adds themed bracket-pair guides, routes editor
+  links through the native external opener, renders selected whitespace, and adds
+  Find and Replace to the Edit menu.
+- **Changed — Settings organization.** Settings now uses grouped navigation for
+  coding agents, local models, MCP servers, accounts, privacy/security, and about
+  content as the configuration surface has grown.
+- **Fixed — OpenCode local model setup.** Hardened loopback endpoints, proxy
+  bypassing, API-key attachment, stale probe state, limit schema generation,
+  model picker stability, and theme variables for the Local Models panel.
+- **Fixed — editor reveal edge cases.** Terminal path reveals clamp invalid
+  columns, clear stale pending reveals when leaving a tab, and avoid opening a
+  path after a terminal has been disposed.
+
 ## 0.5.0 — 2026-07-03
 
 - **Added — in-app code editor (Monaco).** Open any file from the tree into a full

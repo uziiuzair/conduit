@@ -37,6 +37,9 @@ lerna-debug.log*
 .claude/settings.local.json
 .claude/*.conduit-backup
 
+# Codex local settings (not part of the project)
+.codex/
+
 # Conduit worktrees (created at runtime)
 .conduit-worktrees/
 

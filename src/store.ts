@@ -46,6 +46,7 @@ export interface Session {
   channels?: string[];
   modelTier?: string | null;
   seedMemory?: string | null;
+  effort?: string | null;
 }
 
 /** A registered Claude account (mirrors the Rust serde struct, camelCase). */
@@ -70,12 +71,57 @@ export interface SessionTrust {
   channels: string[];
   modelTier?: string | null;
   seedMemory?: string | null;
+  effort?: string | null;
 }
 
 /** A local sensitivity-scanner hit (offline; assists the manual "mark sensitive" decision). */
 export interface SensitivityHit {
   kind: string;
   hint: string;
+}
+
+// ---- OpenCode local provider — mirror the Rust serde structs (camelCase) ----
+
+/** Non-secret local-provider settings. The endpoint API key is never part of this (or of
+ * any persisted state) — it is held in backend memory and reaches OpenCode via child env. */
+export interface OpenCodeSettings {
+  enabled: boolean;
+  /** "ollama" | "lmstudio" | "vllm" | "llamacpp" | "openwebui" | "custom" ("" = unset). */
+  preset: string;
+  /** Full OpenAI-compatible base URL (e.g. http://127.0.0.1:11434/v1). */
+  baseUrl: string;
+  /** Model id exactly as the server reports it. */
+  model: string;
+  contextLimit?: number | null;
+  outputLimit?: number | null;
+  /** Allowlist the injected provider so OpenCode can't fall back to cloud providers. */
+  pinLocal: boolean;
+}
+
+/** One probed local inference server (detect_local_providers). */
+export interface LocalProviderStatus {
+  preset: string;
+  label: string;
+  baseUrl: string;
+  running: boolean;
+  detail: string;
+  needsKey: boolean;
+}
+
+/** A model the local server offers (list_local_models). */
+export interface LocalModel {
+  id: string;
+  /** Context window when the server reports it (Ollama does) — used to autofill limits. */
+  context?: number | null;
+  detail: string;
+  /** Tool-calling support (Ollama reports it; null/undefined = unknown). */
+  tools?: boolean | null;
+}
+
+/** Verdict of the live tool-calling probe (probe_tool_call). */
+export interface ToolProbeResult {
+  native: boolean;
+  detail: string;
 }
 
 export type TabKind = "session" | "file";
@@ -461,6 +507,8 @@ interface AppState {
   defaultAgent: AgentId;
   agentSetupComplete: boolean;
   setDefaultAgent: (id: AgentId) => void;
+  /** Run an agent's official installer, then re-detect. Returns an error string or null. */
+  installAgent: (id: AgentId) => Promise<string | null>;
   completeAgentSetup: () => void;
   /** Anonymous-telemetry opt-out (true = do not send). Default false (on). */
   telemetryOptOut: boolean;
@@ -486,6 +534,20 @@ interface AppState {
   setSessionTrust: (sessionId: string, trust: SessionTrust) => Promise<void>;
   /** Local, offline secret/PII scan of arbitrary text (assist for "mark sensitive"). */
   scanSensitivity: (text: string) => Promise<SensitivityHit[]>;
+
+  // ---- OpenCode local provider ----
+  opencode: OpenCodeSettings;
+  /** Whether an endpoint API key is held (in backend memory) for this app run. */
+  opencodeKeySet: boolean;
+  loadOpenCodeSettings: () => Promise<void>;
+  setOpenCodeSettings: (settings: OpenCodeSettings) => Promise<void>;
+  /** Non-empty = hold/replace the key for this run; empty = clear it. Never persisted. */
+  setOpenCodeKey: (key: string) => Promise<void>;
+  detectLocalProviders: () => Promise<LocalProviderStatus[]>;
+  /** Models the server at baseUrl offers; a string is the error message. */
+  listLocalModels: (baseUrl: string, preset: string) => Promise<LocalModel[] | string>;
+  /** Live-test native tool calling on the served model; a string is the error message. */
+  probeToolCall: (baseUrl: string, model: string) => Promise<ToolProbeResult | string>;
 
   // ---- MCP server registry ----
   mcpServers: McpServer[];
@@ -529,8 +591,13 @@ interface AppState {
   splitTab: (projectId: string, ref: string, targetGroupId: string, side: "left" | "right") => void;
   setGroupWeights: (projectId: string, weights: number[]) => void;
   /** Open a file tab. `preview: true` opens transiently: it replaces the active
-   *  group's current preview tab; a later explicit open (or an edit) pins it. */
-  openFile: (projectId: string, path: string, opts?: { preview?: boolean }) => void;
+   *  group's current preview tab; a later explicit open (or an edit) pins it.
+   *  `reveal` is a one-shot scroll target (terminal path-click's :line:col). */
+  openFile: (
+    projectId: string,
+    path: string,
+    opts?: { preview?: boolean; reveal?: { line: number; col?: number } },
+  ) => void;
   /** Clear the preview flag on any tab holding `ref` (pin). */
   pinTab: (projectId: string, ref: string) => void;
 
@@ -581,6 +648,9 @@ interface AppState {
   setConflict: (path: string, c: { mtimeMs: number; size: number } | "deleted") => void;
   saveFile: (path: string) => Promise<void>;
   requestCloseTab: (projectId: string, groupId: string, ref: string) => Promise<void>;
+  /** One-shot editor reveal target set by a terminal path Cmd+Click; consumed by CodeEditorPane. */
+  pendingReveal: { path: string; line: number; col: number } | null;
+  clearPendingReveal: () => void;
 
   setTopTab: (t: TopTab) => void;
   setBottomTab: (t: BottomTab) => void;
@@ -646,6 +716,7 @@ export const useStore = create<AppState>((set, get) => {
     pendingPrompts: {},
     dirty: {},
     conflict: {},
+    pendingReveal: null,
     claudeStatus: null,
     claudeUsage: null,
     planConnected: readPlanConnected(),
@@ -661,6 +732,16 @@ export const useStore = create<AppState>((set, get) => {
     accounts: [],
     defaultAccount: null,
     privateMode: false,
+    opencode: {
+      enabled: false,
+      preset: "",
+      baseUrl: "",
+      model: "",
+      contextLimit: null,
+      outputLimit: null,
+      pinLocal: false,
+    },
+    opencodeKeySet: false,
     agentSetupComplete: localStorage.getItem(SETUP_DONE_KEY) === "1",
     telemetryOptOut: readTelemetryOptOut(),
 
@@ -679,7 +760,7 @@ export const useStore = create<AppState>((set, get) => {
     reveal: null,
 
     load: async () => {
-      const [projects, home, accounts, defaultAccount, trust] = await Promise.all([
+      const [projects, home, accounts, defaultAccount, trust, opencode] = await Promise.all([
         invoke<Project[]>("load_projects"),
         getHomeDir().catch(() => null),
         invoke<Account[]>("list_accounts").catch(() => [] as Account[]),
@@ -687,6 +768,7 @@ export const useStore = create<AppState>((set, get) => {
         invoke<TrustSettings>("get_trust_settings").catch(
           () => ({ privateMode: false }) as TrustSettings,
         ),
+        invoke<OpenCodeSettings>("get_opencode_settings").catch(() => get().opencode),
       ]);
       const layouts: Record<string, ProjectLayout> = {};
       for (const p of projects) {
@@ -708,12 +790,24 @@ export const useStore = create<AppState>((set, get) => {
         accounts,
         defaultAccount,
         privateMode: trust.privateMode,
+        opencode,
       });
     },
 
     setDefaultAgent: (id) => {
       localStorage.setItem(DEFAULT_AGENT_KEY, id);
       set({ defaultAgent: id });
+    },
+
+    installAgent: async (id) => {
+      try {
+        await invoke<string>("install_agent", { agent: id });
+      } catch (e) {
+        return String(e);
+      }
+      // Re-detect so a freshly-installed agent flips to "ready".
+      await get().loadAgents();
+      return null;
     },
 
     loadAccounts: async () => {
@@ -785,6 +879,51 @@ export const useStore = create<AppState>((set, get) => {
         return await invoke<SensitivityHit[]>("scan_sensitivity", { text });
       } catch {
         return [];
+      }
+    },
+
+    // ---- OpenCode local provider ----
+    loadOpenCodeSettings: async () => {
+      try {
+        const [opencode, opencodeKeySet] = await Promise.all([
+          invoke<OpenCodeSettings>("get_opencode_settings"),
+          invoke<boolean>("opencode_key_set"),
+        ]);
+        set({ opencode, opencodeKeySet });
+      } catch { /* keep current */ }
+    },
+    setOpenCodeSettings: async (settings) => {
+      await invoke("set_opencode_settings", { settings }).catch(() => {});
+      set({ opencode: settings });
+    },
+    setOpenCodeKey: async (key) => {
+      if (key.trim()) {
+        await invoke("set_opencode_key", { key }).catch(() => {});
+        set({ opencodeKeySet: true });
+      } else {
+        await invoke("clear_opencode_key").catch(() => {});
+        set({ opencodeKeySet: false });
+      }
+    },
+    detectLocalProviders: async () => {
+      try {
+        return await invoke<LocalProviderStatus[]>("detect_local_providers");
+      } catch {
+        return [];
+      }
+    },
+    listLocalModels: async (baseUrl, preset) => {
+      try {
+        return await invoke<LocalModel[]>("list_local_models", { baseUrl, preset });
+      } catch (e) {
+        return String(e);
+      }
+    },
+    probeToolCall: async (baseUrl, model) => {
+      try {
+        return await invoke<ToolProbeResult>("probe_tool_call", { baseUrl, model });
+      } catch (e) {
+        return String(e);
       }
     },
     completeAgentSetup: () => {
@@ -1045,6 +1184,9 @@ export const useStore = create<AppState>((set, get) => {
         registry.release(replaced);
         registry.disposeIfUnreferenced(replaced);
       }
+      // One-shot reveal target: CodeEditorPane scrolls to it once the model is set.
+      if (opts?.reveal)
+        set({ pendingReveal: { path, line: opts.reveal.line, col: opts.reveal.col ?? 1 } });
     },
 
     pinTab: (projectId, ref) =>
@@ -1154,6 +1296,8 @@ export const useStore = create<AppState>((set, get) => {
 
     setConflict: (path, c) =>
       set((s) => ({ conflict: { ...s.conflict, [path]: c } })),
+
+    clearPendingReveal: () => set((s) => (s.pendingReveal ? { pendingReveal: null } : {})),
 
     saveFile: async (path) => {
       const entry = registry.model(path);

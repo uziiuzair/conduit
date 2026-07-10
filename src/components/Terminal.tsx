@@ -1,5 +1,5 @@
 import { useEffect, useRef } from "react";
-import { Terminal as Xterm } from "@xterm/xterm";
+import { Terminal as Xterm, type ILink } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { CanvasAddon } from "@xterm/addon-canvas";
 import { invoke, Channel } from "@tauri-apps/api/core";
@@ -19,6 +19,7 @@ const TERM_BASE_FONT = 13;
 
 interface Props {
   sessionId: string;
+  projectId: string;
   workingDirectory: string;
   visible: boolean;
   /** Slug to pass as `claude --worktree <slug>` for an isolated session. */
@@ -50,6 +51,7 @@ interface Props {
  */
 export function TerminalView({
   sessionId,
+  projectId,
   workingDirectory,
   visible,
   worktreeName,
@@ -92,6 +94,88 @@ export function TerminalView({
 
     term.onData((d) => writeSeq(d));
 
+    // --- Cmd+Click a file path -> open it in Conduit's editor (VS Code parity) ---
+    // Track whether Cmd is held so path tokens only light up / activate with the modifier;
+    // a plain click keeps normal terminal selection.
+    let cmdHeld = false;
+    const onMod = (ev: KeyboardEvent) => {
+      cmdHeld = ev.metaKey;
+    };
+    const onBlur = () => {
+      cmdHeld = false;
+    };
+    window.addEventListener("keydown", onMod, true);
+    window.addEventListener("keyup", onMod, true);
+    window.addEventListener("blur", onBlur);
+
+    const openPath = async (raw: string) => {
+      try {
+        const r = await invoke<{ absPath: string; line: number | null; col: number | null } | null>(
+          "resolve_terminal_path",
+          { base: workingDirectory, token: raw },
+        );
+        if (!r || disposedRef.current) return;
+        useStore.getState().openFile(
+          projectId,
+          r.absPath,
+          r.line != null ? { reveal: { line: r.line, col: r.col ?? 1 } } : undefined,
+        );
+      } catch {
+        /* a stale/mistyped path simply does nothing */
+      }
+    };
+
+    // Absolute (/…), home (~/…), explicit-relative (./,../) or workspace-relative
+    // (>=2 segments) path with an optional :line or :line:col suffix. Deliberately permissive —
+    // the Rust resolver verifies existence, so a false match at worst underlines a dead token.
+    const PATH_SOURCE =
+      "(?:(?:~\\/|\\.\\.?\\/|\\/)[\\w.\\-@]+(?:\\/[\\w.\\-@]+)*|[\\w.\\-@]+(?:\\/[\\w.\\-@]+)+)(?::\\d+(?::\\d+)?)?";
+
+    const linkDisposable = term.registerLinkProvider({
+      provideLinks(bufferLineNumber, callback) {
+        if (!cmdHeld) return callback(undefined);
+        const buf = term.buffer.active;
+        // Walk up to the first row of the (possibly wrapped) logical line.
+        let start = bufferLineNumber - 1;
+        while (start > 0 && buf.getLine(start)?.isWrapped) start--;
+        // Concatenate the wrapped rows at FULL width so a string index -> cell math stays exact.
+        // Caveat: a wide/CJK or combined (emoji/ZWJ) glyph earlier in the line emits a different
+        // number of JS chars than terminal columns, so a token after it can be mis-ranged — a
+        // benign missed/misplaced underline (the resolver still only opens files that exist).
+        const cols = term.cols;
+        let text = "";
+        let row = start;
+        for (;;) {
+          const line = buf.getLine(row);
+          if (!line) break;
+          text += line.translateToString(false);
+          const next = buf.getLine(row + 1);
+          if (next?.isWrapped) row++;
+          else break;
+        }
+        const re = new RegExp(PATH_SOURCE, "g");
+        const links: ILink[] = [];
+        let m: RegExpExecArray | null;
+        while ((m = re.exec(text))) {
+          const raw = m[0];
+          const s = m.index;
+          const e = s + raw.length - 1;
+          links.push({
+            range: {
+              start: { x: (s % cols) + 1, y: start + Math.floor(s / cols) + 1 },
+              end: { x: (e % cols) + 1, y: start + Math.floor(e / cols) + 1 },
+            },
+            text: raw,
+            activate: (ev: MouseEvent, matched: string) => {
+              if (!ev.metaKey) return;
+              void openPath(matched);
+            },
+          });
+        }
+        callback(links.length ? links : undefined);
+      },
+    });
+
     // VS Code-parity key chords. xterm sends a bare `\r` for Enter (Shift or not),
     // so `claude` can't tell Shift+Enter apart; and Cmd+Backspace isn't wired to a
     // delete sequence. Emit the right bytes and skip xterm's default for these two.
@@ -110,6 +194,17 @@ export function TerminalView({
       if (e.key === "Backspace" && e.metaKey && !e.altKey && !e.ctrlKey) {
         e.preventDefault();
         writeSeq("\x15");
+        return false;
+      }
+      // Cmd+Left / Cmd+Right → start / end of line (readline Ctrl-A / Ctrl-E). VS Code parity.
+      if (e.key === "ArrowLeft" && e.metaKey && !e.altKey && !e.ctrlKey && !e.shiftKey) {
+        e.preventDefault();
+        writeSeq("\x01");
+        return false;
+      }
+      if (e.key === "ArrowRight" && e.metaKey && !e.altKey && !e.ctrlKey && !e.shiftKey) {
+        e.preventDefault();
+        writeSeq("\x05");
         return false;
       }
       return true;
@@ -142,6 +237,10 @@ export function TerminalView({
       if (resizeTimer.current) window.clearTimeout(resizeTimer.current);
       window.removeEventListener("resize", onWinResize);
       ro.disconnect();
+      linkDisposable.dispose();
+      window.removeEventListener("keydown", onMod, true);
+      window.removeEventListener("keyup", onMod, true);
+      window.removeEventListener("blur", onBlur);
       term.dispose();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps

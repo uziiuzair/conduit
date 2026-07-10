@@ -176,6 +176,8 @@ export function CodeEditorPane({ projectId, groupId, visible, style }: CodeEdito
   const conflict = useStore((s) => (activePath ? s.conflict[activePath] : undefined));
   const clearConflict = useStore((s) => s.clearConflict);
   const requestCloseTab = useStore((s) => s.requestCloseTab);
+  const pendingReveal = useStore((s) => s.pendingReveal);
+  const clearPendingReveal = useStore((s) => s.clearPendingReveal);
 
   // External-change "Reload": overwrite the buffer with disk content, discarding the
   // user's edits, then clear the banner. Preserves undo via pushEditOperations.
@@ -404,6 +406,35 @@ export function CodeEditorPane({ projectId, groupId, visible, style }: CodeEdito
       if (currentPathRef.current && !previewCovers() && isActiveGroupRef.current) ed.focus();
     });
   }, [visible, previewCovers]);
+
+  // Jump to a line when a terminal Cmd+Click opened this file with a reveal target. Fires once
+  // the model for the reveal path is set (so it survives the async read_file), whether the file
+  // was freshly opened or already open, then clears the one-shot flag (even for a model-less
+  // binary/error tab). If the user leaves the target tab before its model loads, the companion
+  // effect below invalidates the pending reveal so it can't surprise-jump on a later return.
+  useEffect(() => {
+    if (!pendingReveal || pendingReveal.path !== activePath) return;
+    if (load.kind !== "ready") return;
+    const ed = editorRef.current;
+    const model = ed?.getModel();
+    if (ed && model) {
+      const line = Math.min(Math.max(pendingReveal.line, 1), model.getLineCount());
+      ed.revealLineInCenter(line);
+      ed.setPosition({ lineNumber: line, column: Math.max(pendingReveal.col, 1) });
+      ed.focus();
+    }
+    clearPendingReveal();
+  }, [pendingReveal, activePath, load, clearPendingReveal]);
+
+  // Invalidate a pending reveal if the user leaves this tab (switch/unmount) before its model
+  // loads, so a deferred reveal can't fire when they return to this file much later.
+  useEffect(() => {
+    const leavingPath = activePath;
+    return () => {
+      const s = useStore.getState();
+      if (s.pendingReveal?.path === leavingPath) s.clearPendingReveal();
+    };
+  }, [activePath]);
 
   const fc = load.kind === "ready" ? load.fc : null;
   // Binary raster images skip the banner: the ImagePreview overlay renders instead.

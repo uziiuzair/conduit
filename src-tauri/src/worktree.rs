@@ -23,7 +23,11 @@ pub fn slug(name: &str, uid: &str) -> String {
         }
     }
     let trimmed = base.trim_matches('-');
-    let base = if trimmed.is_empty() { "session" } else { trimmed };
+    let base = if trimmed.is_empty() {
+        "session"
+    } else {
+        trimmed
+    };
     // uid is always an ASCII UUID, so byte-slicing here can't split a multibyte char.
     let short = &uid[..uid.len().min(6)];
     format!("{base}-{short}")
@@ -74,6 +78,40 @@ pub fn is_dirty(worktree_path: &str) -> bool {
     {
         Ok(o) if o.status.success() => !o.stdout.is_empty(),
         _ => true,
+    }
+}
+
+/// Create a NEW worktree Conduit itself manages, for adapters with no built-in
+/// `--worktree` flag (SPEC-A, all non-Claude adapters). Runs `git worktree add -b
+/// <branch> <worktree_path> <base_ref>` from `repo_path`. Fails closed on any
+/// ambiguity rather than guessing -- mirrors `is_dirty`'s "assume the conservative
+/// outcome" philosophy, adapted to creation:
+///   - target path already exists (any kind, even non-git-worktree junk) -> Err
+///     WITHOUT touching it (never silently reuse/overwrite an existing directory).
+///   - `git worktree add` itself fails (branch collision, `base_ref` doesn't resolve,
+///     or `repo_path` isn't a repo at all) -> Err(stderr), propagated verbatim.
+///
+/// Never pass `--force` to the underlying git call: a pre-existing directory must
+/// always be rejected here, not clobbered.
+pub fn add(
+    repo_path: &str,
+    worktree_path: &str,
+    branch: &str,
+    base_ref: &str,
+) -> Result<(), String> {
+    if Path::new(worktree_path).exists() {
+        return Err("worktree-path-exists".into());
+    }
+    let out = Command::new("git")
+        .args(["worktree", "add", "-b", branch, worktree_path, base_ref])
+        .current_dir(repo_path)
+        .no_window()
+        .output()
+        .map_err(|e| format!("git worktree add: {e}"))?;
+    if out.status.success() {
+        Ok(())
+    } else {
+        Err(String::from_utf8_lossy(&out.stderr).trim().to_string())
     }
 }
 
@@ -150,8 +188,7 @@ mod tests {
     fn fresh_repo(tag: &str) -> std::path::PathBuf {
         static N: AtomicU32 = AtomicU32::new(0);
         let n = N.fetch_add(1, Ordering::SeqCst);
-        let dir = std::env::temp_dir()
-            .join(format!("conduit_wt_{tag}_{}_{n}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("conduit_wt_{tag}_{}_{n}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         git(&["init", "-q"], &dir);
@@ -167,7 +204,10 @@ mod tests {
     fn is_dirty_reflects_worktree_state() {
         let repo = fresh_repo("dirty");
         let wt = worktree_path(repo.to_str().unwrap(), "feat");
-        git(&["worktree", "add", "-q", &wt, "-b", "worktree-feat"], &repo);
+        git(
+            &["worktree", "add", "-q", &wt, "-b", "worktree-feat"],
+            &repo,
+        );
 
         assert!(!is_dirty(&wt), "fresh worktree should be clean");
         fs::write(std::path::Path::new(&wt).join("new.txt"), "x").unwrap();
@@ -196,21 +236,33 @@ mod tests {
     fn remove_deletes_clean_worktree() {
         let repo = fresh_repo("remove");
         let wt = worktree_path(repo.to_str().unwrap(), "gone");
-        git(&["worktree", "add", "-q", &wt, "-b", "worktree-gone"], &repo);
+        git(
+            &["worktree", "add", "-q", &wt, "-b", "worktree-gone"],
+            &repo,
+        );
         assert!(std::path::Path::new(&wt).exists());
 
         remove(repo.to_str().unwrap(), &wt, false).expect("clean remove should succeed");
-        assert!(!std::path::Path::new(&wt).exists(), "worktree dir should be gone");
+        assert!(
+            !std::path::Path::new(&wt).exists(),
+            "worktree dir should be gone"
+        );
     }
 
     #[test]
     fn remove_force_discards_dirty_worktree() {
         let repo = fresh_repo("force");
         let wt = worktree_path(repo.to_str().unwrap(), "dirty");
-        git(&["worktree", "add", "-q", &wt, "-b", "worktree-dirty"], &repo);
+        git(
+            &["worktree", "add", "-q", &wt, "-b", "worktree-dirty"],
+            &repo,
+        );
         fs::write(std::path::Path::new(&wt).join("new.txt"), "x").unwrap();
 
-        assert!(remove(repo.to_str().unwrap(), &wt, false).is_err(), "dirty remove without force should fail");
+        assert!(
+            remove(repo.to_str().unwrap(), &wt, false).is_err(),
+            "dirty remove without force should fail"
+        );
         remove(repo.to_str().unwrap(), &wt, true).expect("force remove should succeed");
         assert!(!std::path::Path::new(&wt).exists());
     }
@@ -227,5 +279,86 @@ mod tests {
         let (cwd, arg) = spawn_target("/repo", "feat", "/repo/.claude/worktrees/feat", false);
         assert_eq!(cwd, "/repo");
         assert_eq!(arg, Some("feat".to_string()));
+    }
+
+    // ---- SPEC-A: Conduit-driven worktree::add ----
+
+    #[test]
+    fn add_creates_worktree_on_fresh_branch() {
+        let repo = fresh_repo("add_fresh");
+        let wt = worktree_path(repo.to_str().unwrap(), "opencode-worker");
+        add(
+            repo.to_str().unwrap(),
+            &wt,
+            "worktree-opencode-worker",
+            "HEAD",
+        )
+        .expect("add should succeed");
+
+        assert!(
+            std::path::Path::new(&wt).exists(),
+            "worktree dir should exist"
+        );
+        let branches = std::process::Command::new("git")
+            .args(["branch", "--list", "worktree-opencode-worker"])
+            .current_dir(&repo)
+            .output()
+            .unwrap();
+        assert!(
+            !String::from_utf8_lossy(&branches.stdout).trim().is_empty(),
+            "branch should have been created"
+        );
+    }
+
+    #[test]
+    fn add_fails_closed_when_path_already_exists() {
+        let repo = fresh_repo("add_exists");
+        let wt = worktree_path(repo.to_str().unwrap(), "taken");
+        fs::create_dir_all(&wt).unwrap();
+        fs::write(std::path::Path::new(&wt).join("marker.txt"), "pre-existing").unwrap();
+
+        let err = add(repo.to_str().unwrap(), &wt, "worktree-taken", "HEAD").unwrap_err();
+        assert_eq!(err, "worktree-path-exists");
+        // git must never have been invoked against this path -- the pre-existing file
+        // (not something `git worktree add` would create) must still be there untouched.
+        assert!(std::path::Path::new(&wt).join("marker.txt").exists());
+    }
+
+    #[test]
+    fn add_fails_when_base_ref_does_not_resolve() {
+        let repo = fresh_repo("add_bad_ref");
+        let wt = worktree_path(repo.to_str().unwrap(), "orphan");
+        let err = add(
+            repo.to_str().unwrap(),
+            &wt,
+            "worktree-orphan",
+            "nonexistent-branch-xyz",
+        )
+        .unwrap_err();
+        assert!(!err.is_empty(), "git's stderr should be propagated");
+        assert!(
+            !std::path::Path::new(&wt).exists(),
+            "a failed add must not leave a partial directory"
+        );
+    }
+
+    #[test]
+    fn add_fails_when_repo_path_is_not_a_git_repo() {
+        static N: AtomicU32 = AtomicU32::new(0);
+        let n = N.fetch_add(1, Ordering::SeqCst);
+        let plain_dir =
+            std::env::temp_dir().join(format!("conduit_wt_not_a_repo_{}_{n}", std::process::id()));
+        let _ = fs::remove_dir_all(&plain_dir);
+        fs::create_dir_all(&plain_dir).unwrap();
+
+        let wt = plain_dir.join("wt");
+        let err = add(
+            plain_dir.to_str().unwrap(),
+            wt.to_str().unwrap(),
+            "worktree-x",
+            "HEAD",
+        )
+        .unwrap_err();
+        assert!(!err.is_empty());
     }
 }

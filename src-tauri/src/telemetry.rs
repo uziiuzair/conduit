@@ -1,21 +1,21 @@
-//! Anonymous GA4 telemetry via the Measurement Protocol, POSTed with `curl`
+//! Anonymous PostHog telemetry via the capture API, POSTed with `curl`
 //! (no HTTP-client dependency). Fire-and-forget + fail-open: any error is
 //! swallowed and never affects the app. Strict field allowlist — only the event
 //! name, session_id, engagement_time_msec, app_version, and os ever leave the
-//! device. `client_id` is a random UUIDv4, never derived from PII.
+//! device. `distinct_id` is a random UUIDv4, never derived from PII, and events
+//! opt out of PostHog person profile processing.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-// ---- Hardcoded GA4 credentials (empty either value => telemetry is a no-op) ----
-// Live GA4 "Web" data stream, used via the Measurement Protocol. Intentionally
-// public: the API secret is write-only to this one stream and revocable anytime
-// in GA4 Admin → Data Streams → Measurement Protocol API secrets (see spec).
-const GA4_MEASUREMENT_ID: &str = "G-RV52PC3JGS";
-const GA4_API_SECRET: &str = "7Zom7RiEScGSM_Zdvql3fA";
+// ---- Hardcoded PostHog project config (empty token/host => telemetry is a no-op) ----
+// The project token is intentionally public/write-only, like PostHog's client SDK
+// token. Keep all privacy guarantees in the payload allowlist below.
+const POSTHOG_PROJECT_TOKEN: &str = "phc_rjxqfDbLxqSYHh3TiX67Xc2uysqPtFNXjmDpSAy7Ezq6";
+const POSTHOG_HOST: &str = "https://us.i.posthog.com";
 
 fn creds_present() -> bool {
-    !GA4_MEASUREMENT_ID.is_empty() && !GA4_API_SECRET.is_empty()
+    !POSTHOG_PROJECT_TOKEN.is_empty() && !POSTHOG_HOST.is_empty()
 }
 
 /// Pure send-policy. Telemetry is sent only in a release build, with creds, when
@@ -27,7 +27,8 @@ fn should_send_policy(opt_out: bool, is_debug: bool, env_disabled: bool, creds: 
 
 /// Whether a dev build should suppress telemetry. Dev builds are silent by
 /// default; `CONDUIT_TELEMETRY_IN_DEV` opts a dev build in for live testing
-/// (e.g. watching GA4 Realtime) without cutting a release build. Pure for tests.
+/// (e.g. watching PostHog realtime events) without cutting a release build.
+/// Pure for tests.
 fn dev_suppressed(is_debug: bool, dev_override: bool) -> bool {
     is_debug && !dev_override
 }
@@ -66,10 +67,10 @@ fn get_or_create_client_id() -> String {
     read_or_create_client_id_at(&client_id_path())
 }
 
-/// Everything needed to build one Measurement Protocol request. Pure data.
+/// Everything needed to build one PostHog capture request. Pure data.
 pub struct PingInput {
     pub client_id: String,
-    /// "app_open" | "app_heartbeat" (GA4 custom event name)
+    /// "app_open" | "app_heartbeat"
     pub event_name: String,
     pub session_id: String,
     pub engagement_msec: u64,
@@ -77,24 +78,24 @@ pub struct PingInput {
     pub os: String,
 }
 
-/// Build the GA4 MP JSON body. Pure: same input → same output, no I/O.
+/// Build the PostHog capture JSON body. Pure: same input → same output, no I/O.
 fn build_payload(input: &PingInput) -> String {
     serde_json::json!({
-        "client_id": input.client_id,
-        "events": [{
-            "name": input.event_name,
-            "params": {
-                "session_id": input.session_id,
-                "engagement_time_msec": input.engagement_msec.to_string(),
-                "app_version": input.app_version,
-                "os": input.os,
-            }
-        }]
+        "api_key": POSTHOG_PROJECT_TOKEN,
+        "event": input.event_name,
+        "distinct_id": input.client_id,
+        "properties": {
+            "$process_person_profile": false,
+            "session_id": input.session_id,
+            "engagement_time_msec": input.engagement_msec,
+            "app_version": input.app_version,
+            "os": input.os,
+        }
     })
     .to_string()
 }
 
-const MP_ENDPOINT: &str = "https://www.google-analytics.com/mp/collect";
+const CAPTURE_PATH: &str = "/i/v0/e/";
 
 /// Redundant safe default. The opt-out is enforced in the frontend (the
 /// heartbeat hook stops pinging when the user opts out), so this is never the
@@ -117,10 +118,9 @@ fn should_send(opt_out: bool) -> bool {
 }
 
 /// Fire-and-forget POST. Mirrors claude_status.rs: `-s`, time-boxed, all output
-/// and errors ignored. GA4 MP returns 204 with no body on success.
+/// and errors ignored.
 fn send(body: &str) {
-    let url =
-        format!("{MP_ENDPOINT}?measurement_id={GA4_MEASUREMENT_ID}&api_secret={GA4_API_SECRET}");
+    let url = format!("{}{}", POSTHOG_HOST.trim_end_matches('/'), CAPTURE_PATH);
     use crate::NoWindow;
     let _ = Command::new("curl")
         .no_window()
@@ -139,10 +139,8 @@ fn send(body: &str) {
         .output();
 }
 
-/// Map the frontend's event kind to a GA4 event name. Both are CUSTOM
-/// (non-reserved): GA4's Measurement Protocol rejects reserved names like
-/// `session_start`/`user_engagement`. Session and active-user metrics come from
-/// the `session_id` + `engagement_time_msec` params, not the event name.
+/// Map the frontend's event kind to a PostHog event name. We only capture coarse
+/// app lifecycle events; no feature usage, paths, prompts, or content.
 fn event_name_for(kind: &str) -> &'static str {
     if kind == "app_open" {
         "app_open"
@@ -197,35 +195,33 @@ mod tests {
     fn build_payload_has_exact_shape_and_params() {
         let body = build_payload(&sample("app_heartbeat"));
         let v: serde_json::Value = serde_json::from_str(&body).unwrap();
-        assert_eq!(v["client_id"], "uuid-123");
-        assert_eq!(v["events"][0]["name"], "app_heartbeat");
-        let params = &v["events"][0]["params"];
-        assert_eq!(params["session_id"], "sess-1");
-        assert_eq!(params["engagement_time_msec"], "300000");
-        assert_eq!(params["app_version"], "1.2.3");
-        assert_eq!(params["os"], "macos");
-        // Allowlist: exactly these four params, nothing more.
-        assert_eq!(params.as_object().unwrap().len(), 4);
+        assert_eq!(v["api_key"], POSTHOG_PROJECT_TOKEN);
+        assert_eq!(v["distinct_id"], "uuid-123");
+        assert_eq!(v["event"], "app_heartbeat");
+        assert_eq!(v.as_object().unwrap().len(), 4);
+
+        let properties = &v["properties"];
+        assert_eq!(properties["$process_person_profile"], false);
+        assert_eq!(properties["session_id"], "sess-1");
+        assert_eq!(properties["engagement_time_msec"], 300_000);
+        assert_eq!(properties["app_version"], "1.2.3");
+        assert_eq!(properties["os"], "macos");
+        // Allowlist: exactly these five properties, nothing more.
+        assert_eq!(properties.as_object().unwrap().len(), 5);
     }
 
     #[test]
     fn build_payload_honors_event_name() {
         let body = build_payload(&sample("app_open"));
         let v: serde_json::Value = serde_json::from_str(&body).unwrap();
-        assert_eq!(v["events"][0]["name"], "app_open");
+        assert_eq!(v["event"], "app_open");
     }
 
     #[test]
-    fn event_names_are_non_reserved() {
-        // GA4's Measurement Protocol rejects reserved names; guard against it.
+    fn event_names_are_limited_to_coarse_lifecycle_events() {
         assert_eq!(event_name_for("app_open"), "app_open");
         assert_eq!(event_name_for("app_heartbeat"), "app_heartbeat");
         assert_eq!(event_name_for("anything-else"), "app_heartbeat");
-        for kind in ["app_open", "app_heartbeat", "anything-else"] {
-            let n = event_name_for(kind);
-            assert_ne!(n, "session_start");
-            assert_ne!(n, "user_engagement");
-        }
     }
 
     #[test]
@@ -286,7 +282,7 @@ mod tests {
 
     #[test]
     fn payload_never_leaks_forbidden_substrings() {
-        let body = build_payload(&sample("user_engagement"));
+        let body = build_payload(&sample("app_heartbeat"));
         for forbidden in [
             "/Users/",
             "project",
@@ -296,9 +292,15 @@ mod tests {
             "hostname",
             "password",
             "secret",
-            "token",
         ] {
             assert!(!body.contains(forbidden), "payload leaked: {forbidden}");
         }
+    }
+
+    #[test]
+    fn posthog_person_profile_processing_is_disabled() {
+        let body = build_payload(&sample("app_heartbeat"));
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(v["properties"]["$process_person_profile"], false);
     }
 }
