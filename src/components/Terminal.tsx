@@ -68,6 +68,34 @@ export function TerminalView({
   const resizeTimer = useRef<number | null>(null);
   const disposedRef = useRef(false);
 
+  const restoreOnOpen = useStore((s) => s.restoreSessionsOnOpen);
+  const selectedProjectId = useStore((s) => s.selectedProjectId);
+
+  // Spawn the PTY exactly once (guarded by spawnedRef). Shared by the reveal path and the
+  // eager restore-on-open path, so a restored session can come back live (and resume — Claude
+  // via --resume, agy via --conversation) without the user clicking its tab first.
+  const spawnPty = (cols: number, rows: number) => {
+    if (spawnedRef.current) return;
+    spawnedRef.current = true;
+    const channel = new Channel<string>();
+    channel.onmessage = (msg) => {
+      if (disposedRef.current) return;
+      termRef.current?.write(b64ToBytes(msg));
+    };
+    void invoke("pty_spawn", {
+      sessionId,
+      workingDirectory,
+      cols,
+      rows,
+      shellOnly,
+      worktreeName: worktreeName ?? null,
+      role: role ?? "worker",
+      // A backend-spawned worker carries a first prompt; consumed once here.
+      initialPrompt: useStore.getState().takePendingPrompt(sessionId) ?? null,
+      onEvent: channel,
+    }).catch((e) => termRef.current?.write(`\r\n[spawn error: ${e}]\r\n`));
+  };
+
   // Create the xterm instance exactly once.
   useEffect(() => {
     const term = new Xterm({
@@ -328,24 +356,7 @@ export function TerminalView({
       const rows = term.rows;
 
       if (!spawnedRef.current) {
-        spawnedRef.current = true;
-        const channel = new Channel<string>();
-        channel.onmessage = (msg) => {
-          if (disposedRef.current) return;
-          term.write(b64ToBytes(msg));
-        };
-        void invoke("pty_spawn", {
-          sessionId,
-          workingDirectory,
-          cols,
-          rows,
-          shellOnly,
-          worktreeName: worktreeName ?? null,
-          role: role ?? "worker",
-          // A backend-spawned worker carries a first prompt; consumed once here.
-          initialPrompt: useStore.getState().takePendingPrompt(sessionId) ?? null,
-          onEvent: channel,
-        }).catch((e) => term.write(`\r\n[spawn error: ${e}]\r\n`));
+        spawnPty(cols, rows);
       } else {
         void invoke("pty_resize", { sessionId, cols, rows }).catch(() => {});
       }
@@ -359,6 +370,19 @@ export function TerminalView({
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [visible]);
+
+  // Eager restore-on-open: bring every session of the ACTIVE project live without waiting for
+  // a click (VSCode-style — the whole project comes back where you left off). Companion shells
+  // (shellOnly) stay lazy. Spawns with fallback dims; the reveal-refit corrects the size when
+  // the tab is actually shown. Gated by the restoreSessionsOnOpen setting (default on).
+  useEffect(() => {
+    if (spawnedRef.current || shellOnly) return;
+    if (!restoreOnOpen || projectId !== selectedProjectId) return;
+    const term = termRef.current;
+    if (!term) return;
+    spawnPty(term.cols || 80, term.rows || 24);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [restoreOnOpen, selectedProjectId]);
 
   // App-wide font zoom (View menu). Setting options.fontSize changes cell metrics
   // WITHOUT firing the ResizeObserver (the host box is unchanged), so cols/rows must

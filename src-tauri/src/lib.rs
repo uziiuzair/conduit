@@ -95,6 +95,7 @@ fn pty_spawn(
     fleet: State<Arc<crate::fleet::FleetState>>,
     board: State<Arc<crate::board::BoardState>>,
     store: State<Arc<Store>>,
+    agy_resume: State<Arc<crate::agy_usage::AgyResumeState>>,
 ) -> Result<(), String> {
     let port = hook_state.port.load(Ordering::SeqCst);
     let agent = if shell_only {
@@ -128,6 +129,19 @@ fn pty_spawn(
             let enabled = crate::agy_usage::tracking_enabled(&store);
             if let Err(e) = crate::agy_usage::configure_in_home(&home, enabled) {
                 eprintln!("conduit: agy usage tracking sync failed: {e}");
+            }
+            // Resume bookkeeping. If our captured conversation id's db is gone (agy rotated /
+            // the user deleted it), clear it so we start fresh and re-capture instead of
+            // resuming a dead id forever. If there's nothing to resume, snapshot the existing
+            // conversations so the first agyusage hook can tell which new db is THIS session's
+            // (disambiguates a shared agy home -- see AgyResumeState).
+            match store.session_agent_conversation_id(&session_id) {
+                Some(id) if !crate::agy_usage::conversation_db_exists(&home, &id) => {
+                    store.clear_session_agent_conversation_id(&session_id);
+                    agy_resume.snapshot(&session_id, &home);
+                }
+                None => agy_resume.snapshot(&session_id, &home),
+                _ => {} // valid resume in flight; nothing to capture
             }
         }
     }
@@ -312,6 +326,12 @@ fn pty_spawn(
         (working_directory.clone(), None, None)
     };
 
+    // Resume token: the agent's own captured conversation id. agy resumes via
+    // `--conversation=<id>`; Claude ignores it (keys off session_id). None for shell-only
+    // companions and for a session we haven't captured an id for yet.
+    let resume_token = (!shell_only)
+        .then(|| store.session_agent_conversation_id(&session_id))
+        .flatten();
     pty.spawn(
         session_id,
         cwd,
@@ -331,6 +351,7 @@ fn pty_spawn(
         is_conductor,
         claude_model.map(str::to_string),
         claude_effort.map(str::to_string),
+        resume_token,
         on_event,
     )
 }
@@ -358,6 +379,27 @@ fn pty_kill(session_id: String, pty: State<Arc<PtyManager>>) {
 #[tauri::command]
 fn pty_is_running(session_id: String, pty: State<Arc<PtyManager>>) -> bool {
     pty.has(&session_id)
+}
+
+/// Whether any session with a LIVE PTY is currently marked running. Cross-checks the fleet
+/// status against a real process so a stale "running" (an agent killed mid-turn, or a deleted
+/// session whose status was never cleared) can't trigger a spurious quit prompt. Fed for agy by
+/// its `agent_state`, and for Claude/Codex/etc. by their lifecycle hooks.
+pub(crate) fn live_running_agent<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> bool {
+    let fleet = app.state::<Arc<crate::fleet::FleetState>>();
+    let pty = app.state::<Arc<PtyManager>>();
+    fleet.running_sessions().iter().any(|sid| pty.has(sid))
+}
+
+/// Whether any agent is actively working (live-PTY-checked). The frontend `live` map can lag
+/// the Rust hook mirror, so the shutdown confirm consults this authoritative signal too so a
+/// real running agent is never silently killed on quit.
+#[tauri::command]
+fn any_agent_running(
+    fleet: State<Arc<crate::fleet::FleetState>>,
+    pty: State<Arc<PtyManager>>,
+) -> bool {
+    fleet.running_sessions().iter().any(|sid| pty.has(sid))
 }
 
 // ---- Project / session store commands ---------------------------------------
@@ -1157,22 +1199,23 @@ pub fn run() {
         .manage(Arc::new(crate::board::BoardState::default()))
         .manage(Arc::new(claude_usage::ClaudeAuth::default()))
         .manage(Arc::new(agy_usage::AgyUsageState::default()))
+        .manage(Arc::new(agy_usage::AgyResumeState::default()))
         .manage(Arc::new(hookbus::HookBus::default()))
         .manage(Arc::new(broker::Broker::default()))
         .manage(Arc::new(broker::Presence::default()))
         .manage(DirtyGuard::default())
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
-                // Closing the (only) window quits the app; give dirty buffers the
-                // same confirm round-trip as Cmd+Q. Clean windows close instantly.
-                let dirty = window
-                    .app_handle()
-                    .state::<DirtyGuard>()
-                    .0
-                    .load(Ordering::SeqCst);
-                if dirty > 0 {
+                // Closing the (only) window quits the app; give dirty buffers AND any actively
+                // running agent the same confirm round-trip as Cmd+Q. Clean+idle windows close
+                // instantly. The frontend decides the exact prompt (unsaved files vs running
+                // agents) from the "quit" event.
+                let app = window.app_handle();
+                let dirty = app.state::<DirtyGuard>().0.load(Ordering::SeqCst);
+                let running = live_running_agent(app);
+                if dirty > 0 || running {
                     api.prevent_close();
-                    let _ = window.app_handle().emit("menu", "quit");
+                    let _ = app.emit("menu", "quit");
                 }
             }
         })
@@ -1189,6 +1232,10 @@ pub fn run() {
                 .state::<Arc<crate::agy_usage::AgyUsageState>>()
                 .inner()
                 .clone();
+            let agy_resume = app
+                .state::<Arc<crate::agy_usage::AgyResumeState>>()
+                .inner()
+                .clone();
             hooks::start(
                 app.handle().clone(),
                 hook_state,
@@ -1200,6 +1247,7 @@ pub fn run() {
                 pty.clone(),
                 board.clone(),
                 agy_usage,
+                agy_resume,
             );
             bridge::start(app.handle().clone());
             fleet_mcp::start(app.handle().clone(), store, pty, fleet, board);
@@ -1218,6 +1266,7 @@ pub fn run() {
             pty_resize,
             pty_kill,
             pty_is_running,
+            any_agent_running,
             load_projects,
             add_project,
             remove_project,

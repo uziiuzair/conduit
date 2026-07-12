@@ -11,7 +11,7 @@
 //! own documented extension mechanism. Same shape as Conduit's Codex result reporting:
 //! a helper that curls the local hook server. Fail-open throughout.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -327,6 +327,166 @@ pub fn resolve_agy_home(account_config_dir: Option<&str>) -> Option<PathBuf> {
         }
     }
     dirs_home()
+}
+
+/// Best-effort extract of agy's OWN conversation id from the status-line payload, if it carries
+/// one. When present (and validated against a real db by the caller) this is the race-free
+/// capture: the payload is keyed to THIS session's `CONDUIT_SESSION_ID`, so there's no
+/// shared-home ambiguity. The exact field name is unverified across agy versions, so we probe
+/// the likely spellings (top-level and a nested `conversation.id`).
+pub fn parse_conversation_id(v: &Value) -> Option<String> {
+    for key in [
+        "conversation_id",
+        "conversationId",
+        "conversation",
+        "session_id",
+        "sessionId",
+    ] {
+        if let Some(s) = v
+            .get(key)
+            .and_then(|x| x.as_str())
+            .filter(|s| !s.is_empty())
+        {
+            return Some(s.to_string());
+        }
+    }
+    v.get("conversation")
+        .and_then(|c| c.get("id"))
+        .and_then(|x| x.as_str())
+        .filter(|s| !s.is_empty())
+        .map(String::from)
+}
+
+/// Whether agy's `agent_state` (from its status-line payload) means "actively working", so the
+/// shutdown guard prompts before killing a busy agy session. agy does not fire Claude-style
+/// lifecycle hooks, so this is the only activity signal we get for it. Explicit idle/terminal
+/// states are NOT working; any other non-empty state agy reports mid-turn (working / thinking /
+/// generating / executing / tool_use / ...) is. `None`/empty => not working.
+pub fn agent_state_is_active(state: Option<&str>) -> bool {
+    let Some(s) = state else {
+        return false;
+    };
+    let s = s.trim().to_ascii_lowercase();
+    const IDLE: &[&str] = &[
+        "idle",
+        "ready",
+        "done",
+        "complete",
+        "completed",
+        "finished",
+        "stopped",
+        "stop",
+        "waiting",
+        "waiting_for_input",
+        "awaiting_input",
+        "needs_input",
+        "cancelled",
+        "canceled",
+        "error",
+        "failed",
+    ];
+    !s.is_empty() && !IDLE.iter().any(|i| s == *i)
+}
+
+/// `(uuid, mtime)` for every `<uuid>.db` under `<home>/.gemini/antigravity-cli/conversations/`.
+/// Ignores `.db-wal`/`.db-shm` sidecars and never reads db contents. Missing dir -> empty.
+fn list_conversations(home: &Path) -> Vec<(String, SystemTime)> {
+    let dir = home
+        .join(".gemini")
+        .join("antigravity-cli")
+        .join("conversations");
+    let mut out = Vec::new();
+    if let Ok(rd) = std::fs::read_dir(&dir) {
+        for entry in rd.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("db") {
+                continue;
+            }
+            let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
+                continue;
+            };
+            if let Ok(mtime) = entry.metadata().and_then(|m| m.modified()) {
+                out.push((stem.to_string(), mtime));
+            }
+        }
+    }
+    out
+}
+
+/// The newest agy conversation id in `home`'s store, or None. Kept for the simple case; the
+/// per-session capture uses [`AgyResumeState`] to disambiguate a shared home.
+pub fn newest_conversation_id(home: &Path) -> Option<String> {
+    list_conversations(home)
+        .into_iter()
+        .max_by_key(|(_, t)| *t)
+        .map(|(id, _)| id)
+}
+
+/// Whether `<home>/.../conversations/<id>.db` still exists (a stored resume id may have been
+/// deleted/rotated by agy; if so we re-capture instead of resuming a dead id forever).
+pub fn conversation_db_exists(home: &Path, id: &str) -> bool {
+    home.join(".gemini")
+        .join("antigravity-cli")
+        .join("conversations")
+        .join(format!("{id}.db"))
+        .is_file()
+}
+
+/// Per-session baseline of conversation ids present when an agy session spawned. Because two
+/// agy sessions can share one home (same account, or both the env default), "newest db" alone
+/// cross-captures; a session may only claim a db that did NOT exist at its own spawn (i.e. one
+/// it created). Snapshot at spawn, capture on the first agyusage hook, then forget.
+#[derive(Default)]
+pub struct AgyResumeState(Mutex<HashMap<String, HashSet<String>>>);
+
+impl AgyResumeState {
+    /// Record the conversations already in `home` for `session_id` (call at spawn, before agy
+    /// creates its own).
+    pub fn snapshot(&self, session_id: &str, home: &Path) {
+        let ids: HashSet<String> = list_conversations(home)
+            .into_iter()
+            .map(|(id, _)| id)
+            .collect();
+        self.0
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(session_id.to_string(), ids);
+    }
+
+    /// The conversation id `session_id` newly created, or None. A candidate must be absent from
+    /// this session's spawn baseline AND not already claimed by another session (`taken`). We
+    /// capture ONLY when exactly one such candidate exists -- so if two agy sessions share a
+    /// home and both spawn fresh at once (the restore-on-open path), each sees >1 candidate and
+    /// declines rather than risk assigning one session's conversation to the other (a missed
+    /// resume is recoverable on the next turn; a mis-assignment silently reopens the wrong
+    /// chat). Returns None when no baseline was recorded (e.g. the session resumed).
+    pub fn capture_new(
+        &self,
+        session_id: &str,
+        home: &Path,
+        taken: &HashSet<String>,
+    ) -> Option<String> {
+        let guard = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        let baseline = guard.get(session_id)?;
+        let mut candidates: Vec<String> = list_conversations(home)
+            .into_iter()
+            .map(|(id, _)| id)
+            .filter(|id| !baseline.contains(id) && !taken.contains(id))
+            .collect();
+        if candidates.len() == 1 {
+            candidates.pop()
+        } else {
+            None
+        }
+    }
+
+    /// Drop a session's baseline (after a successful capture, or when the session is removed).
+    pub fn forget(&self, session_id: &str) {
+        self.0
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(session_id);
+    }
 }
 
 /// Filename of the helper script Conduit writes beside agy's settings.json.
@@ -704,6 +864,98 @@ mod tests {
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
         d
+    }
+
+    #[test]
+    fn newest_conversation_id_picks_latest_db_and_ignores_sidecar() {
+        let home = tmp("conv_newest");
+        let dir = home
+            .join(".gemini")
+            .join("antigravity-cli")
+            .join("conversations");
+        std::fs::create_dir_all(&dir).unwrap();
+        // No dbs yet -> None (also covers a missing dir gracefully).
+        assert!(newest_conversation_id(&home).is_none());
+        // Two conversations; the one modified later wins. A `.db-wal` sidecar is ignored.
+        std::fs::write(dir.join("aaaa.db"), b"x").unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(25));
+        std::fs::write(dir.join("bbbb.db"), b"x").unwrap();
+        std::fs::write(dir.join("cccc.db-wal"), b"x").unwrap();
+        assert_eq!(newest_conversation_id(&home).as_deref(), Some("bbbb"));
+    }
+
+    #[test]
+    fn agent_state_active_mapping() {
+        // Not working: absent/empty and explicit idle/terminal states.
+        assert!(!agent_state_is_active(None));
+        assert!(!agent_state_is_active(Some("")));
+        assert!(!agent_state_is_active(Some("idle")));
+        assert!(!agent_state_is_active(Some("Waiting")));
+        assert!(!agent_state_is_active(Some("done")));
+        assert!(!agent_state_is_active(Some("completed")));
+        // Working: anything else agy reports mid-turn.
+        assert!(agent_state_is_active(Some("working")));
+        assert!(agent_state_is_active(Some("thinking")));
+        assert!(agent_state_is_active(Some("generating")));
+        assert!(agent_state_is_active(Some("executing_tool")));
+    }
+
+    #[test]
+    fn agy_resume_captures_only_unambiguous_new_conversation() {
+        let state = AgyResumeState::default();
+        let home = tmp("resume_baseline");
+        let dir = home
+            .join(".gemini")
+            .join("antigravity-cli")
+            .join("conversations");
+        std::fs::create_dir_all(&dir).unwrap();
+        let none: HashSet<String> = HashSet::new();
+        std::fs::write(dir.join("old-1.db"), b"x").unwrap(); // a prior session's conversation
+        state.snapshot("sess-A", &home); // spawn baseline = {old-1}
+        assert!(
+            state.capture_new("sess-A", &home, &none).is_none(),
+            "no new db yet"
+        );
+        std::fs::write(dir.join("new-A.db"), b"x").unwrap();
+        assert_eq!(
+            state.capture_new("sess-A", &home, &none).as_deref(),
+            Some("new-A"),
+            "exactly one new db -> capture it (never the pre-existing old-1)"
+        );
+        // A SECOND new db appears (a concurrent same-home session) -> ambiguous -> decline.
+        std::fs::write(dir.join("new-B.db"), b"x").unwrap();
+        assert!(
+            state.capture_new("sess-A", &home, &none).is_none(),
+            "two unclaimed new dbs -> refuse to guess"
+        );
+        // Once new-B is claimed by another session, the choice is unambiguous again.
+        let taken: HashSet<String> = ["new-B".to_string()].into_iter().collect();
+        assert_eq!(
+            state.capture_new("sess-A", &home, &taken).as_deref(),
+            Some("new-A"),
+            "excluding the claimed id leaves exactly ours"
+        );
+        // No baseline recorded (e.g. resumed) -> nothing to capture.
+        assert!(state.capture_new("sess-none", &home, &none).is_none());
+    }
+
+    #[test]
+    fn parse_conversation_id_probes_payload_spellings() {
+        use serde_json::json;
+        assert_eq!(
+            parse_conversation_id(&json!({"conversation_id": "abc"})).as_deref(),
+            Some("abc")
+        );
+        assert_eq!(
+            parse_conversation_id(&json!({"conversationId": "d1"})).as_deref(),
+            Some("d1")
+        );
+        assert_eq!(
+            parse_conversation_id(&json!({"conversation": {"id": "nested"}})).as_deref(),
+            Some("nested")
+        );
+        assert!(parse_conversation_id(&json!({"quota": {}})).is_none());
+        assert!(parse_conversation_id(&json!({"conversation_id": ""})).is_none());
     }
 
     #[test]

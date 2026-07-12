@@ -169,6 +169,7 @@ impl PtyManager {
         is_conductor: bool,
         model: Option<String>,
         effort: Option<String>,
+        resume_token: Option<String>,
         on_event: Channel<String>,
     ) -> Result<(), String> {
         // Already running → re-attach the live reader to the new channel and force
@@ -231,6 +232,7 @@ impl PtyManager {
                     projects_dir.as_deref(),
                     model.as_deref(),
                     effort.as_deref(),
+                    resume_token.as_deref(),
                 );
                 cmd.args(["/K", inner.as_str()]);
             }
@@ -262,6 +264,7 @@ impl PtyManager {
                     projects_dir.as_deref(),
                     model.as_deref(),
                     effort.as_deref(),
+                    resume_token.as_deref(),
                 )
             };
             let mut cmd = CommandBuilder::new(&shell);
@@ -695,6 +698,7 @@ fn build_script(
     projects_dir: Option<&Path>,
     model: Option<&str>,
     effort: Option<&str>,
+    resume_token: Option<&str>,
 ) -> String {
     let mut flags = String::new();
     if let Some(name) = worktree {
@@ -724,7 +728,13 @@ fn build_script(
     if let Some(e) = effort {
         flags.push_str(&format!(" --effort {}", shell_quote(e)));
     }
-    let invocation = adapter.build_invocation(session_id, projects_dir, &flags, initial_prompt);
+    let invocation = adapter.build_invocation(
+        session_id,
+        projects_dir,
+        &flags,
+        initial_prompt,
+        resume_token,
+    );
     format!(
         "export CONDUIT_SESSION_ID={sid} CONDUIT_HOOK_PORT={port}; cd {dir} && {invocation}; exec {shell} -i -l",
         sid = shell_quote(session_id),
@@ -754,6 +764,7 @@ fn build_script_win(
     projects_dir: Option<&Path>,
     model: Option<&str>,
     effort: Option<&str>,
+    resume_token: Option<&str>,
 ) -> String {
     let mut flags = String::new();
     if let Some(name) = worktree {
@@ -778,7 +789,13 @@ fn build_script_win(
     if let Some(e) = effort {
         flags.push_str(&format!(" --effort {}", quote_arg(e)));
     }
-    adapter.build_invocation(session_id, projects_dir, &flags, initial_prompt)
+    adapter.build_invocation(
+        session_id,
+        projects_dir,
+        &flags,
+        initial_prompt,
+        resume_token,
+    )
 }
 
 #[cfg(test)]
@@ -883,6 +900,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         );
         assert!(script.contains("export CONDUIT_SESSION_ID='sid-1' CONDUIT_HOOK_PORT=7777"));
         assert!(script.contains("claude --session-id 'sid-1' || claude"));
@@ -907,6 +925,7 @@ mod tests {
             None,                     // projects_dir
             None,                     // model
             None,                     // effort
+            None,
         );
         assert!(script.contains("--settings '/cfg/hooks.json'"), "{script}");
         assert!(script.contains("--mcp-config '/cfg/mcp.json'"), "{script}");
@@ -937,6 +956,7 @@ mod tests {
             None,
             None,
             Some("implement the parser"),
+            None,
             None,
             None,
             None,
@@ -1033,6 +1053,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         );
         assert_eq!(script, format!("claude --session-id {ID} || claude"));
         assert!(!script.contains("cd "));
@@ -1049,6 +1070,7 @@ mod tests {
             Some(r"C:\cfg dir\hooks.json"),
             None,
             Some(r"C:\cfg dir\persona.txt"),
+            None,
             None,
             None,
             None,
@@ -1088,6 +1110,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         );
         assert!(script.len() < 8000, "len={}: {script}", script.len());
         // Sanity: inlining the real persona twice (the OLD behavior) WOULD have overflowed
@@ -1113,6 +1136,7 @@ mod tests {
             None,
             Some("claude-opus-4-8"),
             Some("high"),
+            None,
         );
         assert!(script.contains("--model claude-opus-4-8"), "{script}");
         assert!(script.contains("--effort high"), "{script}");
@@ -1132,6 +1156,7 @@ mod tests {
             None,
             Some("claude-opus-4-8"),
             Some("high"),
+            None,
         );
         assert!(script.contains("--model claude-opus-4-8"), "{script}");
         assert!(script.contains("--effort high"), "{script}");

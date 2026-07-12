@@ -364,6 +364,39 @@ impl FleetState {
             .clone()
     }
 
+    /// Whether any session's agent is actively working (`status == "running"`). Read by the
+    /// shutdown guard to decide whether to prompt before killing agents. This mirror is fed by
+    /// the same hook events as the frontend `live` map, for every hooked session.
+    pub fn any_running(&self) -> bool {
+        self.status
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .values()
+            .any(|s| s.status == "running")
+    }
+
+    /// Session ids currently marked `running`. The shutdown guard cross-checks these against a
+    /// live PTY so a stale status (e.g. an agent killed mid-turn, or a deleted session) can't
+    /// cause a spurious quit prompt.
+    pub fn running_sessions(&self) -> Vec<String> {
+        self.status
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .filter(|(_, s)| s.status == "running")
+            .map(|(id, _)| id.clone())
+            .collect()
+    }
+
+    /// Directly set a session's running/idle status. Used to mirror an agent's own activity
+    /// signal into the shutdown-guard status when that agent does NOT fire Claude-style
+    /// lifecycle hooks (agy reports `agent_state` via its status-line payload instead).
+    pub fn set_running(&self, session: &str, running: bool) {
+        let mut map = self.status.lock().unwrap_or_else(|e| e.into_inner());
+        let entry = map.entry(session.to_string()).or_default();
+        entry.status = if running { "running" } else { "idle" }.to_string();
+    }
+
     /// SPEC-D: whether enough time has passed since `conductor_id` was last woken.
     /// Records the attempt regardless of outcome, so a dense burst of stop events
     /// collapses to one real wake per debounce window rather than one per event.
@@ -484,6 +517,19 @@ mod tests {
 
         apply_event(&mut s, "sessionend", &serde_json::json!({}));
         assert_eq!(s.status, "idle");
+    }
+
+    #[test]
+    fn any_running_reflects_active_agents() {
+        let fleet = FleetState::default();
+        assert!(!fleet.any_running(), "empty = nothing running");
+        fleet.record("s1", "prompt", &serde_json::json!({}));
+        assert!(fleet.any_running(), "a session mid-turn is running");
+        fleet.record("s1", "stop", &serde_json::json!({}));
+        assert!(!fleet.any_running(), "stopped = not running");
+        // A second session running keeps the guard true regardless of the first.
+        fleet.record("s2", "pretool", &serde_json::json!({"tool_name":"Bash"}));
+        assert!(fleet.any_running());
     }
 
     #[test]

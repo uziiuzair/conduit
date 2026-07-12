@@ -234,12 +234,14 @@ pub fn on_event<R: Runtime>(app: &AppHandle<R>, id: &str) {
                 .spawn();
         }
         "quit" => {
-            // With unsaved buffers (count pushed from the frontend via
-            // `set_dirty_count`), forward quit for a confirm round-trip — the
-            // frontend calls back `quit_app` on approval. A clean quit exits
-            // immediately, webview-independent. PTYs die before exit either way,
-            // mirroring `RunEvent::ExitRequested`.
-            if app.state::<DirtyGuard>().0.load(Ordering::SeqCst) > 0 {
+            // With unsaved buffers (count pushed from the frontend via `set_dirty_count`) OR an
+            // actively running agent, forward quit for a confirm round-trip — the frontend calls
+            // back `quit_app` on approval. A clean+idle quit exits immediately,
+            // webview-independent. PTYs die before exit either way, mirroring
+            // `RunEvent::ExitRequested`.
+            let dirty = app.state::<DirtyGuard>().0.load(Ordering::SeqCst) > 0;
+            let running = crate::live_running_agent(app);
+            if dirty || running {
                 let _ = app.emit("menu", "quit");
             } else {
                 app.state::<Arc<PtyManager>>().kill_all();

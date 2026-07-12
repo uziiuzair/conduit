@@ -269,12 +269,29 @@ export default function App() {
           break;
         }
         case "quit": {
-          // Rust forwards quit here only when it saw a nonzero dirty count
-          // (menu.rs quit arm / CloseRequested handler). Hot exit: back up the
-          // dirty buffers and quit silently — they restore as dirty on relaunch.
-          // Only when the backup WRITE fails does the Tier-2 confirm dialog
-          // reappear as the data-loss gate.
+          // Rust forwards quit here when it saw a nonzero dirty count OR a running agent
+          // (menu.rs quit arm / CloseRequested handler). Two gates: (1) a running-agent confirm
+          // (killing them interrupts in-progress work — history is safe, but ask first), then
+          // (2) hot exit for dirty editor buffers (silent backup; the data-loss dialog only
+          // appears if the backup WRITE fails).
           void (async () => {
+            const cur = useStore.getState();
+            const running = cur.projects
+              .flatMap((p) => p.sessions)
+              .filter((s) => cur.live[s.id]?.status === "running");
+            // The frontend `live` map can lag the Rust hook mirror; consult the authoritative
+            // Rust signal too so a real running agent never gets silently killed on quit.
+            const rustRunning = await invoke<boolean>("any_agent_running").catch(() => false);
+            if (running.length > 0 || rustRunning) {
+              const names = running.map((s) => s.name).join(", ");
+              const who = names || "an agent";
+              const plural = running.length > 1;
+              const okRun = await ask(
+                `${plural ? `${running.length} sessions are` : `${who} is`} still working${names && plural ? ` (${names})` : ""}. Quit and stop ${plural ? "them" : "it"}? Conversation history is kept.`,
+                { title: "Conduit", kind: "warning", okLabel: "Quit Anyway", cancelLabel: "Cancel" },
+              );
+              if (!okRun) return; // cancel — window stays open (prevent_close already held it)
+            }
             const flushed = await st.flushHotExit();
             const n = Object.keys(st.dirty).length;
             const ok =
