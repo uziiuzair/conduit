@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { NewSessionDialog } from "./NewSessionDialog";
 import { open } from "@tauri-apps/plugin-dialog";
 import { invoke } from "@tauri-apps/api/core";
@@ -11,6 +11,7 @@ import {
   worktreeIsDirty,
   worktreeRemove,
   globalSelectedSessionId,
+  resolvedAccountKey,
   type Project,
   type Session,
 } from "../store";
@@ -25,8 +26,7 @@ import {
 import { AgentGlyph } from "./AgentGlyph";
 import { ThemeSwitcher } from "./ThemeSwitcher";
 import { ClaudeStatusPill } from "./ClaudeStatusPill";
-import { ClaudeUsagePanel } from "./ClaudeUsagePanel";
-import { AgyUsagePanel } from "./AgyUsagePanel";
+import { UsagePanel } from "./UsagePanel";
 import { ClaudeStatusWarning } from "./ClaudeStatusWarning";
 
 // Collapsed projects persist as a list of project ids in localStorage — a pure
@@ -100,7 +100,6 @@ export function Sidebar() {
     return findSession(s.projects, id)?.session.agent ?? "claude";
   });
   const showClaudeAmbient = selectedAgent === "claude";
-  const showAgyAmbient = selectedAgent === "antigravity";
 
   async function pickProject() {
     const dir = await open({
@@ -121,8 +120,7 @@ export function Sidebar() {
           <ProjectBlock key={p.id} project={p} />
         ))}
       </div>
-      {showClaudeAmbient && <ClaudeUsagePanel />}
-      {showAgyAmbient && <AgyUsagePanel />}
+      <UsagePanel />
       <div className="add-bar">
         <button onClick={pickProject}>
           <FolderPlusIcon size={12} />
@@ -228,6 +226,16 @@ function SessionRow({
   const editing = useStore((s) => s.editingSessionId === session.id);
   const selectSession = useStore((s) => s.selectSession);
   const openMenu = useStore((s) => s.openMenu);
+  const accounts = useStore((s) => s.accounts);
+  const defaultAccounts = useStore((s) => s.defaultAccounts);
+  // Which registered account this session resolves to (null = the env default / unconfigured).
+  // Only shown once the user actually has accounts, so single-account users see no clutter.
+  const accountLabel = useMemo(() => {
+    if (accounts.length === 0) return null;
+    const key = resolvedAccountKey(defaultAccounts, project, session);
+    if (key === "default") return null;
+    return accounts.find((a) => a.id === key)?.label ?? null;
+  }, [accounts, defaultAccounts, project, session]);
 
   // When the project is collapsed, keep "active work" in view: the selected session
   // and any row that shows a live status accessory (running / needs-you / compacting /
@@ -272,6 +280,11 @@ function SessionRow({
       {!editing && session.branch && (
         <span className="branch-chip" title={session.branch}>
           {session.branch}
+        </span>
+      )}
+      {!editing && accountLabel && (
+        <span className="account-chip" title={`Account: ${accountLabel}`}>
+          {accountLabel}
         </span>
       )}
       {!editing && <TrustChip session={session} />}
@@ -384,6 +397,14 @@ function SessionContextMenu() {
   const openToSide = useStore((s) => s.openToSide);
   const setSessionTrust = useStore((s) => s.setSessionTrust);
   const privateMode = useStore((s) => s.privateMode);
+  const accounts = useStore((s) => s.accounts);
+  const setSessionAccount = useStore((s) => s.setSessionAccount);
+  const [accountOpen, setAccountOpen] = useState(false);
+
+  // Reset the inline account expander whenever the menu target changes.
+  useEffect(() => {
+    setAccountOpen(false);
+  }, [menu?.sessionId]);
 
   useEffect(() => {
     if (!menu) return;
@@ -433,6 +454,14 @@ function SessionContextMenu() {
   if (!menu.sessionId) return null;
   const sid = menu.sessionId;
   const menuSession = findSession(projects, sid)?.session;
+  // Accounts eligible for this session's agent (empty = don't show the Account entry, so
+  // single-account users' menu is unchanged).
+  const eligibleAccounts = menuSession
+    ? accounts.filter((a) => a.agents.includes(menuSession.agent))
+    : [];
+  const accountLabel = menuSession?.accountId
+    ? accounts.find((a) => a.id === menuSession.accountId)?.label ?? null
+    : null;
   const siloed = !!menuSession?.silo;
   const toggleSensitive = () => {
     if (menuSession) {
@@ -513,6 +542,42 @@ function SessionContextMenu() {
       >
         {sharedInProject ? "Stop sharing in project" : "Share in project"}
       </button>
+      {eligibleAccounts.length > 0 && (
+        <>
+          <button
+            onClick={() => setAccountOpen((v) => !v)}
+            title="Run this session under a specific account (applies on next launch)"
+          >
+            Account{accountLabel ? `: ${accountLabel}` : ""} {accountOpen ? "▾" : "▸"}
+          </button>
+          {accountOpen && (
+            <div className="context-submenu">
+              <button
+                className={!menuSession?.accountId ? "sel" : ""}
+                onClick={() => {
+                  void setSessionAccount(sid, null);
+                  closeMenu();
+                }}
+              >
+                {!menuSession?.accountId ? "✓ " : ""}Use project / global default
+              </button>
+              {eligibleAccounts.map((a) => (
+                <button
+                  key={a.id}
+                  className={menuSession?.accountId === a.id ? "sel" : ""}
+                  onClick={() => {
+                    void setSessionAccount(sid, a.id);
+                    closeMenu();
+                  }}
+                >
+                  {menuSession?.accountId === a.id ? "✓ " : ""}
+                  {a.label}
+                </button>
+              ))}
+            </div>
+          )}
+        </>
+      )}
       <button
         onClick={() => {
           const found = findSession(projects, sid);

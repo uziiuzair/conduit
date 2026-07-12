@@ -64,7 +64,21 @@ After editing `Cargo.toml`, run `cargo build --manifest-path src-tauri/Cargo.tom
 grep -E '"?version"?\s*[:=]\s*"[0-9]' package.json src-tauri/tauri.conf.json; sed -n '3p' src-tauri/Cargo.toml
 ```
 
-Use semantic versioning. Don't bump the version as a side effect of an unrelated change.
+### When to bump (SemVer, pre-1.0)
+
+Conduit is `0.MINOR.PATCH` until its first stable public release. Bump **once per release
+that reaches a user** (one bump covers every change in that release), not per commit:
+
+- **MINOR** (`0.X.0`) — a shipped, user-facing **feature or feature set** (e.g. multi-account
+  accounts, the usage bar). Reset PATCH to `0`.
+- **PATCH** (`0.x.Y`) — bug fixes, polish, perf, refactors, docs: **no** new user-facing
+  capability.
+- **MAJOR** stays `0` until the first stable public release, which is `1.0.0`; after that,
+  breaking changes bump MAJOR.
+
+A `-N` build suffix (e.g. `0.5.0-3`) is only for iterating installers of the *same* target
+during testing — a real feature release gets a clean `0.x.0`. Don't bump as a side effect of
+an unrelated change; do bump when the release adds or fixes something a user would notice.
 
 ## Conventions
 
@@ -102,9 +116,24 @@ Use semantic versioning. Don't bump the version as a side effect of an unrelated
 Service status + subscription/local usage (distinct from per-session hook status):
 
 - Rust: `src-tauri/src/claude_status.rs` (status.claude.com), `src-tauri/src/claude_usage.rs`
-  (local consumption + best-effort plan limits via `/api/oauth/usage`).
-- UI: `src/components/Claude{StatusPill,Popover,UsagePanel,StatusWarning}.tsx`, polled by
-  `src/hooks/useClaudeAmbient.ts`, state in the Claude slice of `src/store.ts`.
+  (local consumption + best-effort plan limits via `/api/oauth/usage`; returns usage per
+  account -- `Vec<ClaudeAccountUsage>`), `src-tauri/src/agy_usage.rs` (agy quota per account).
+- UI: `src/components/Claude{StatusPill,Popover,StatusWarning}.tsx` for service status;
+  the usage meter itself is the unified `src/components/UsagePanel.tsx` (all accounts, both
+  agents, driven by `usagePrefs`; configured in `UsagePrefsPanel.tsx` under Settings ->
+  Usage display). Polled by `src/hooks/useClaudeAmbient.ts`; state in `src/store.ts`
+  (`claudeUsage` array + `agyUsageByAccount` map + `usagePrefs`).
+
+## Where multi-account assignment lives
+
+Accounts are per-agent profile pointers (`Account { agents, configDir }`, `store.rs`), assigned
+per session (`Session.account_id`) or per project (`Project.default_accounts`), resolved at
+spawn by `session_account_config_dir` (session -> project default -> global default -> env).
+The account->env redirect is the `ProviderAdapter::account_env` seam (`agent.rs`) -- Claude +
+agy override it; a future agent implements only that method. UI: `AccountList.tsx` (registry,
+agent tags, per-agent + per-project defaults), the new-session dialog picker, and the
+right-click "Account" submenu in `Sidebar.tsx`. Design:
+`docs/superpowers/specs/2026-07-12-multi-account-orchestration-design.md`.
 
 ## Where the fleet/Conductor orchestration lives
 

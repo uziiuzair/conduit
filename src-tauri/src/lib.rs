@@ -435,9 +435,12 @@ fn list_accounts(store: State<Arc<Store>>) -> Vec<crate::store::Account> {
     store.list_accounts()
 }
 
+/// Per-agent global default accounts (agent -> account id), e.g. `{ "claude": "…" }`.
 #[tauri::command]
-fn get_default_account(store: State<Arc<Store>>) -> Option<String> {
-    store.default_account()
+fn get_default_accounts(
+    store: State<Arc<Store>>,
+) -> std::collections::HashMap<crate::agent::AgentId, String> {
+    store.default_accounts()
 }
 
 /// Auto-detected candidate accounts (not yet registered), for the "Detect" button.
@@ -456,13 +459,44 @@ fn add_account(
 }
 
 #[tauri::command]
-fn remove_account(account_id: String, store: State<Arc<Store>>) {
+fn remove_account(
+    account_id: String,
+    store: State<Arc<Store>>,
+    agy_usage: State<Arc<crate::agy_usage::AgyUsageState>>,
+    auth: State<Arc<crate::claude_usage::ClaudeAuth>>,
+) {
     store.remove_account(&account_id);
+    // Evict the removed account's cached usage/token so its row/limits don't linger.
+    agy_usage.evict(&account_id);
+    auth.evict(&account_id);
 }
 
 #[tauri::command]
-fn set_default_account(account_id: Option<String>, store: State<Arc<Store>>) {
-    store.set_default_account(account_id);
+fn set_default_account(
+    agent: crate::agent::AgentId,
+    account_id: Option<String>,
+    store: State<Arc<Store>>,
+) {
+    store.set_default_account(agent, account_id);
+}
+
+#[tauri::command]
+fn set_project_default_account(
+    project_id: String,
+    agent: crate::agent::AgentId,
+    account_id: Option<String>,
+    store: State<Arc<Store>>,
+) {
+    store.set_project_default_account(&project_id, agent, account_id);
+}
+
+#[tauri::command]
+fn set_account_agents(
+    account_id: String,
+    agents: Vec<crate::agent::AgentId>,
+    store: State<Arc<Store>>,
+) {
+    store.set_account_agents(&account_id, agents);
 }
 
 #[tauri::command]
@@ -1193,11 +1227,13 @@ pub fn run() {
             conductor_confirm_response,
             set_project_layout,
             list_accounts,
-            get_default_account,
+            get_default_accounts,
             discover_accounts,
             add_account,
             remove_account,
             set_default_account,
+            set_project_default_account,
+            set_account_agents,
             set_session_account,
             get_trust_settings,
             set_trust_settings,

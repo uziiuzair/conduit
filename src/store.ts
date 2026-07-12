@@ -49,12 +49,17 @@ export interface Session {
   effort?: string | null;
 }
 
-/** A registered Claude account (mirrors the Rust serde struct, camelCase). */
+/** A registered agent account (mirrors the Rust serde struct, camelCase). */
 export interface Account {
   id: string;
   label: string;
   configDir: string;
+  /** Which agents this account is signed in for (assignment eligibility + usage bar). */
+  agents: AgentId[];
 }
+
+/** Per-agent default account map: agent id -> account id (mirrors the Rust HashMap). */
+export type DefaultAccounts = Partial<Record<AgentId, string>>;
 
 // ---- Trust boundaries (Feature 4) — mirror the Rust serde structs (camelCase) ----
 export type Clearance = "public" | "internal" | "confidential";
@@ -187,6 +192,8 @@ export interface Project {
   path: string;
   sessions: Session[];
   layout?: ProjectLayout | null;
+  /** Per-agent default account for this project's sessions (beats the global default). */
+  defaultAccounts?: DefaultAccounts;
 }
 
 export type SessionStatus = "idle" | "running" | "needsInput" | "done";
@@ -246,6 +253,12 @@ export interface ClaudeUsage {
   plan: PlanWindow[] | null;
   planSource: "live" | "unavailable" | "disconnected";
 }
+/** One account's Claude usage (mirrors Rust ClaudeAccountUsage). accountId null = env default. */
+export interface ClaudeAccountUsage {
+  accountId: string | null;
+  label: string;
+  usage: ClaudeUsage;
+}
 
 // ---- Antigravity (agy) usage — mirror Rust agy_usage.rs (camelCase) ----
 export interface AgyBucket {
@@ -266,12 +279,58 @@ export interface AgyContext {
   totalOutputTokens: number;
 }
 export interface AgyUsage {
+  /** Resolved account this snapshot belongs to; null = env default. Keys agyUsageByAccount. */
+  accountId: string | null;
   planTier: string | null;
   email: string | null;
   groups: AgyGroup[];
   context: AgyContext | null;
   agentState: string | null;
   updatedAt: number; // epoch ms
+}
+/** The map key for an account snapshot (env default has no id). */
+export function accountKey(accountId: string | null | undefined): string {
+  return accountId ?? "default";
+}
+
+// ---- Usage bar view preferences (user-configurable; persisted in localStorage) ----
+export interface UsagePrefs {
+  /** How the usage bar renders. "selected" reproduces the pre-multi-account single panel. */
+  layout: "selected" | "stacked" | "summary" | "lowAlertOnly";
+  /** Which windows to show. Off-by-one agents just skip the windows they don't have. */
+  windows: { fiveHour: boolean; weekly: boolean; weeklyOpus: boolean; context: boolean };
+  /** Row order: most-critical (least remaining) first, or alphabetical by label. */
+  sort: "critical" | "label";
+  /** A window at or below this % remaining is "low" (drives the hot color + lowAlertOnly). */
+  lowThresholdPct: number;
+}
+export const DEFAULT_USAGE_PREFS: UsagePrefs = {
+  layout: "selected",
+  windows: { fiveHour: true, weekly: true, weeklyOpus: true, context: true },
+  sort: "critical",
+  lowThresholdPct: 20,
+};
+const USAGE_PREFS_KEY = "conduit.usagePrefs";
+function readUsagePrefs(): UsagePrefs {
+  try {
+    const raw = localStorage.getItem(USAGE_PREFS_KEY);
+    if (!raw) return DEFAULT_USAGE_PREFS;
+    const p = JSON.parse(raw);
+    return {
+      ...DEFAULT_USAGE_PREFS,
+      ...p,
+      windows: { ...DEFAULT_USAGE_PREFS.windows, ...(p?.windows ?? {}) },
+    };
+  } catch {
+    return DEFAULT_USAGE_PREFS;
+  }
+}
+function writeUsagePrefs(p: UsagePrefs): void {
+  try {
+    localStorage.setItem(USAGE_PREFS_KEY, JSON.stringify(p));
+  } catch {
+    /* quota — non-fatal */
+  }
 }
 
 const DEFAULT_AGENT_KEY = "conduit.defaultAgent";
@@ -299,11 +358,25 @@ function persistMcp(servers: McpServer[], enabled: Record<string, AgentId[]>): v
 }
 
 const PLAN_CONNECTED_KEY = "conduit.planConnected";
-export function readPlanConnected(): boolean {
-  try { return localStorage.getItem(PLAN_CONNECTED_KEY) === "1"; } catch { return false; }
+/** Per-account "plan usage connected" flags, keyed by accountKey (env default = "default").
+ *  Migrates the legacy boolean ("1") to `{ default: true }`. */
+export function readPlanConnected(): Record<string, boolean> {
+  try {
+    const raw = localStorage.getItem(PLAN_CONNECTED_KEY);
+    if (raw === "1") return { default: true };
+    if (raw === "0" || raw == null) return {};
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === "object" ? (parsed as Record<string, boolean>) : {};
+  } catch {
+    return {};
+  }
 }
-function writePlanConnected(v: boolean): void {
-  try { localStorage.setItem(PLAN_CONNECTED_KEY, v ? "1" : "0"); } catch { /* quota — non-fatal */ }
+function writePlanConnected(v: Record<string, boolean>): void {
+  try {
+    localStorage.setItem(PLAN_CONNECTED_KEY, JSON.stringify(v));
+  } catch {
+    /* quota — non-fatal */
+  }
 }
 
 // Sidebar / right-panel collapse state (native menu: View > Toggle Sidebar / Toggle
@@ -463,6 +536,21 @@ export function globalSelectedSessionId(state: {
   return activeSessionIdOf(state.layouts[state.selectedProjectId]);
 }
 
+/** The account key a session resolves to (session → project default → global default →
+ *  env default), mirroring the Rust resolver. Used by the usage bar's "selected" layout. */
+export function resolvedAccountKey(
+  defaultAccounts: DefaultAccounts,
+  project: Project,
+  session: Session,
+): string {
+  const id =
+    session.accountId ??
+    project.defaultAccounts?.[session.agent] ??
+    defaultAccounts[session.agent] ??
+    null;
+  return accountKey(id);
+}
+
 // ---- whitespace-on-save ----
 /** Apply "Clean Whitespace on Save" as ONE undoable model edit, just before the
  *  write, so the post-cleanup version id becomes the saved baseline (saveFile's
@@ -518,10 +606,16 @@ interface AppState {
   activeThemeId: ThemeId;
 
   claudeStatus: ClaudeStatus | null;
-  claudeUsage: ClaudeUsage | null;
-  planConnected: boolean;
-  agyUsage: AgyUsage | null;
+  /** Claude usage per account (env default + every registered Claude account). */
+  claudeUsage: ClaudeAccountUsage[];
+  /** Per-account "plan usage connected" flags, keyed by accountKey. */
+  planConnected: Record<string, boolean>;
+  /** agy usage per account, keyed by accountKey (accountId ?? "default"). */
+  agyUsageByAccount: Record<string, AgyUsage>;
   agyUsageTracking: boolean;
+  /** Usage-bar view preferences (layout, window filters, sort, low threshold). */
+  usagePrefs: UsagePrefs;
+  setUsagePrefs: (patch: Partial<UsagePrefs>) => void;
 
   // ---- panel collapse + Settings dialog (native menu-driven, App-level) ----
   /** Persisted. When true, the sidebar (and its resizer) is hidden. */
@@ -551,15 +645,27 @@ interface AppState {
   setTelemetryOptOut: (v: boolean) => void;
   loadAgents: () => Promise<void>;
 
-  // ---- Claude account registry (Feature 2) ----
+  // ---- Agent account registry (Feature 2 + multi-account) ----
   accounts: Account[];
-  defaultAccount: string | null;
+  /** Per-agent global default account (agent -> account id). */
+  defaultAccounts: DefaultAccounts;
   loadAccounts: () => Promise<void>;
   discoverAccounts: () => Promise<Account[]>;
   /** Returns an error string (duplicate / missing dir) or null on success. */
   addAccount: (label: string, configDir: string) => Promise<string | null>;
   removeAccount: (id: string) => Promise<void>;
-  setDefaultAccount: (id: string | null) => Promise<void>;
+  /** Set (id) or clear (null) the global default account for one agent. */
+  setDefaultAccount: (agent: AgentId, id: string | null) => Promise<void>;
+  /** Set (id) or clear (null) a project's default account for one agent. */
+  setProjectDefaultAccount: (
+    projectId: string,
+    agent: AgentId,
+    id: string | null,
+  ) => Promise<void>;
+  /** Overwrite which agents an account is signed in for. */
+  setAccountAgents: (accountId: string, agents: AgentId[]) => Promise<void>;
+  /** Pin (id) or clear (null) a single session's account. */
+  setSessionAccount: (sessionId: string, id: string | null) => Promise<void>;
 
   // ---- Trust boundaries (Feature 4) ----
   /** Master switch for the trust-boundary regime. When false the whole thing is inert. */
@@ -598,7 +704,7 @@ interface AppState {
   setMcpEnabled: (name: string, agent: AgentId, on: boolean) => Promise<void>;
   addProject: (path: string) => Promise<void>;
   removeProject: (id: string) => Promise<void>;
-  addSession: (projectId: string, opts?: { name?: string; useWorktree?: boolean; agent?: AgentId; role?: SessionRole }) => Promise<void>;
+  addSession: (projectId: string, opts?: { name?: string; useWorktree?: boolean; agent?: AgentId; role?: SessionRole; account?: string | null }) => Promise<void>;
   renameSession: (projectId: string, sessionId: string, name: string) => Promise<void>;
   removeSession: (projectId: string, sessionId: string) => Promise<void>;
 
@@ -727,7 +833,10 @@ interface AppState {
 
   refreshClaudeStatus: () => Promise<void>;
   refreshClaudeUsage: () => Promise<void>;
-  connectPlanUsage: () => Promise<boolean>;
+  /** Connect plan usage for one account (null = env default). */
+  connectPlanUsage: (accountId: string | null) => Promise<boolean>;
+  /** One click: enable agy push-tracking + connect plan usage for every Claude account. */
+  connectAllUsage: () => Promise<void>;
   setAgyUsage: (u: AgyUsage) => void;
   refreshAgyUsage: () => Promise<void>;
   refreshAgyUsageTracking: () => Promise<void>;
@@ -782,10 +891,11 @@ export const useStore = create<AppState>((set, get) => {
     conflict: {},
     pendingReveal: null,
     claudeStatus: null,
-    claudeUsage: null,
+    claudeUsage: [],
     planConnected: readPlanConnected(),
-    agyUsage: null,
+    agyUsageByAccount: {},
     agyUsageTracking: false,
+    usagePrefs: readUsagePrefs(),
     sidebarCollapsed: readSidebarCollapsed(),
     rightCollapsed: readRightCollapsed(),
     showSettings: false,
@@ -796,7 +906,7 @@ export const useStore = create<AppState>((set, get) => {
     agents: null,
     defaultAgent: readDefaultAgent(),
     accounts: [],
-    defaultAccount: null,
+    defaultAccounts: {},
     privateMode: false,
     opencode: {
       enabled: false,
@@ -829,12 +939,12 @@ export const useStore = create<AppState>((set, get) => {
     hotExit: {},
 
     load: async () => {
-      const [projects, home, accounts, defaultAccount, trust, opencode, hotExitEntries] =
+      const [projects, home, accounts, defaultAccounts, trust, opencode, hotExitEntries] =
         await Promise.all([
           invoke<Project[]>("load_projects"),
           getHomeDir().catch(() => null),
           invoke<Account[]>("list_accounts").catch(() => [] as Account[]),
-          invoke<string | null>("get_default_account").catch(() => null),
+          invoke<DefaultAccounts>("get_default_accounts").catch(() => ({}) as DefaultAccounts),
           invoke<TrustSettings>("get_trust_settings").catch(
             () => ({ privateMode: false }) as TrustSettings,
           ),
@@ -863,7 +973,7 @@ export const useStore = create<AppState>((set, get) => {
         layouts,
         selectedProjectId: projects[0]?.id ?? null,
         accounts,
-        defaultAccount,
+        defaultAccounts,
         privateMode: trust.privateMode,
         opencode,
         hotExit,
@@ -887,11 +997,11 @@ export const useStore = create<AppState>((set, get) => {
     },
 
     loadAccounts: async () => {
-      const [accounts, defaultAccount] = await Promise.all([
+      const [accounts, defaultAccounts] = await Promise.all([
         invoke<Account[]>("list_accounts").catch(() => [] as Account[]),
-        invoke<string | null>("get_default_account").catch(() => null),
+        invoke<DefaultAccounts>("get_default_accounts").catch(() => ({}) as DefaultAccounts),
       ]);
-      set({ accounts, defaultAccount });
+      set({ accounts, defaultAccounts });
     },
     discoverAccounts: async () => {
       try {
@@ -912,10 +1022,46 @@ export const useStore = create<AppState>((set, get) => {
     removeAccount: async (id) => {
       await invoke("remove_account", { accountId: id }).catch(() => {});
       await get().loadAccounts();
+      // A removed account also detaches from any project defaults; refresh the tree.
+      await get().load();
     },
-    setDefaultAccount: async (id) => {
-      await invoke("set_default_account", { accountId: id }).catch(() => {});
-      set({ defaultAccount: id });
+    setDefaultAccount: async (agent, id) => {
+      await invoke("set_default_account", { agent, accountId: id }).catch(() => {});
+      set((s) => {
+        const next = { ...s.defaultAccounts };
+        if (id) next[agent] = id;
+        else delete next[agent];
+        return { defaultAccounts: next };
+      });
+    },
+    setProjectDefaultAccount: async (projectId, agent, id) => {
+      await invoke("set_project_default_account", { projectId, agent, accountId: id }).catch(
+        () => {},
+      );
+      set((s) => ({
+        projects: s.projects.map((p) => {
+          if (p.id !== projectId) return p;
+          const next: DefaultAccounts = { ...(p.defaultAccounts ?? {}) };
+          if (id) next[agent] = id;
+          else delete next[agent];
+          return { ...p, defaultAccounts: next };
+        }),
+      }));
+    },
+    setAccountAgents: async (accountId, agents) => {
+      await invoke("set_account_agents", { accountId, agents }).catch(() => {});
+      await get().loadAccounts();
+    },
+    setSessionAccount: async (sessionId, id) => {
+      await invoke("set_session_account", { sessionId, accountId: id }).catch(() => {});
+      set((s) => ({
+        projects: s.projects.map((p) => ({
+          ...p,
+          sessions: p.sessions.map((sess) =>
+            sess.id === sessionId ? { ...sess, accountId: id } : sess,
+          ),
+        })),
+      }));
     },
 
     // ---- Trust boundaries (Feature 4) ----
@@ -1118,6 +1264,13 @@ export const useStore = create<AppState>((set, get) => {
       const role = opts?.role ?? "worker";
       const session = await invoke<Session | null>("add_session", { projectId, name, useWorktree, agent, role });
       if (!session) return;
+      // Pin an explicitly-chosen account (blank = inherit the project/global default).
+      if (opts?.account) {
+        session.accountId = opts.account;
+        await invoke("set_session_account", { sessionId: session.id, accountId: opts.account }).catch(
+          () => {},
+        );
+      }
       set((s) => ({
         projects: s.projects.map((p) =>
           p.id === projectId ? { ...p, sessions: [...p.sessions, session] } : p,
@@ -1764,35 +1917,67 @@ export const useStore = create<AppState>((set, get) => {
 
     refreshClaudeUsage: async () => {
       try {
-        const u = await invoke<ClaudeUsage>("fetch_claude_usage");
+        const u = await invoke<ClaudeAccountUsage[]>("fetch_claude_usage");
         set({ claudeUsage: u });
       } catch { /* fail-open: keep last-known */ }
     },
 
-    connectPlanUsage: async () => {
+    connectPlanUsage: async (accountId) => {
+      const key = accountKey(accountId);
       try {
-        const ok = await invoke<boolean>("connect_claude_plan_usage");
-        writePlanConnected(ok);
-        set({ planConnected: ok });
+        const ok = await invoke<boolean>("connect_claude_plan_usage", { accountId });
+        const next = { ...get().planConnected, [key]: ok };
+        writePlanConnected(next);
+        set({ planConnected: next });
         if (ok) await get().refreshClaudeUsage();
         return ok;
       } catch {
-        writePlanConnected(false);
-        set({ planConnected: false });
+        const next = { ...get().planConnected, [key]: false };
+        writePlanConnected(next);
+        set({ planConnected: next });
         return false;
       }
     },
 
+    connectAllUsage: async () => {
+      // Enable agy push-tracking (installs the status-line helper for agy sessions) so agy
+      // accounts populate once a session runs.
+      if (!get().agyUsageTracking) await get().setAgyUsageTracking(true);
+      // Make sure the Claude account list is populated before we iterate it (it may be empty
+      // if the poll hasn't run yet), then connect every account's plan usage.
+      await get().refreshClaudeUsage();
+      for (const t of get().claudeUsage) {
+        // eslint-disable-next-line no-await-in-loop
+        await get().connectPlanUsage(t.accountId);
+      }
+    },
+
     // agy usage arrives pushed from Rust (the status-line helper POSTs on each agy state
-    // change); this setter is called by App's "agyusage" event listener.
-    setAgyUsage: (u) => set({ agyUsage: u }),
+    // change); this setter is called by App's "agyusage" event listener. Keyed by account.
+    setAgyUsage: (u) =>
+      set((s) => ({
+        agyUsageByAccount: { ...s.agyUsageByAccount, [accountKey(u.accountId)]: u },
+      })),
 
     refreshAgyUsage: async () => {
       try {
-        const u = await invoke<AgyUsage | null>("fetch_agy_usage");
-        if (u) set({ agyUsage: u });
+        const list = await invoke<AgyUsage[]>("fetch_agy_usage");
+        const next: Record<string, AgyUsage> = {};
+        for (const u of list) next[accountKey(u.accountId)] = u;
+        set({ agyUsageByAccount: next });
       } catch { /* fail-open: keep last-known */ }
     },
+
+    setUsagePrefs: (patch) =>
+      set((s) => {
+        const next = {
+          ...s.usagePrefs,
+          ...patch,
+          windows: { ...s.usagePrefs.windows, ...(patch.windows ?? {}) },
+        };
+        writeUsagePrefs(next);
+        return { usagePrefs: next };
+      }),
 
     refreshAgyUsageTracking: async () => {
       try {

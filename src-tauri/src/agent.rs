@@ -4,7 +4,10 @@ use std::path::Path;
 
 /// Which coding-agent CLI a session runs. Persisted on each Session; serializes
 /// as a lowercase string ("claude"/"codex"/"gemini"/"opencode"). Unknown/absent → Claude (back-compat).
-#[derive(serde::Serialize, serde::Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
+/// `Hash`/`Eq` let it key the per-agent default-account maps (serde emits it as a JSON string key).
+#[derive(
+    serde::Serialize, serde::Deserialize, Clone, Copy, Debug, PartialEq, Eq, Hash, Default,
+)]
 #[serde(rename_all = "lowercase")]
 pub enum AgentId {
     #[default]
@@ -43,6 +46,36 @@ fn sh_quote(s: &str) -> String {
     }
 }
 
+/// The HOME-redirect env for a `.claude`-style account profile, shared by the Claude and
+/// Antigravity adapters (agy reads `.gemini/antigravity-cli` under the same profile root).
+///
+/// A `.claude` account set up via a HOME-redirect launcher (e.g. a `claude-personal` shim)
+/// keeps its `.claude.json` -- the record of the logged-in account, onboarding, and trust
+/// state -- at the PROFILE ROOT, not inside `.claude`. `CLAUDE_CONFIG_DIR` only redirects the
+/// `.claude` dir, so an interactive session would find the credentials but re-prompt
+/// login/onboarding. Redirect HOME/USERPROFILE to the profile root instead (exactly what the
+/// launcher does) so the full account state is read. Fall back to `CLAUDE_CONFIG_DIR` for a
+/// non-`.claude` custom directory. Existence-guarded: a missing dir yields no env (inherit).
+///
+/// This is a faithful move of the block that used to live inline in `pty.rs`; keeping it a
+/// free fn lets both adapters share it and lets a unit test assert byte-identical output.
+pub fn claude_profile_env(config_dir: &str) -> Vec<(String, String)> {
+    let p = Path::new(config_dir);
+    if !p.exists() {
+        return Vec::new();
+    }
+    let root = (p.file_name().and_then(|f| f.to_str()) == Some(".claude"))
+        .then(|| p.parent().and_then(|r| r.to_str()))
+        .flatten();
+    match root {
+        Some(root) => vec![
+            ("USERPROFILE".to_string(), root.to_string()),
+            ("HOME".to_string(), root.to_string()),
+        ],
+        None => vec![("CLAUDE_CONFIG_DIR".to_string(), config_dir.to_string())],
+    }
+}
+
 /// Knows how to launch one agent CLI inside Conduit's `sh -c` cold-spawn script.
 pub trait ProviderAdapter {
     fn id(&self) -> AgentId;
@@ -54,6 +87,17 @@ pub trait ProviderAdapter {
     }
     /// Extra env vars to set on the child process for this agent.
     fn env_overrides(&self) -> Vec<(&'static str, &'static str)> {
+        Vec::new()
+    }
+    /// Env vars that make this agent run under the registered account whose config dir is
+    /// `config_dir`. Empty vec = this agent has no account concept (the default), so a
+    /// pinned account is a no-op for it. Called once at spawn from `pty.rs`; the returned
+    /// values are applied to the child env and MUST NOT be logged (they are path-derived,
+    /// not secret, but they identify the account). This is the single seam a future
+    /// multi-account agent implements -- nothing in `pty.rs`, the resolver, or the usage
+    /// plumbing needs to change to add one. Claude and Antigravity override it; every other
+    /// adapter inherits the empty default. See the multi-account design doc.
+    fn account_env(&self, _config_dir: &str) -> Vec<(String, String)> {
         Vec::new()
     }
     /// The lifecycle hooks this adapter installs at session spawn.
@@ -115,6 +159,9 @@ impl ProviderAdapter for ClaudeAdapter {
     fn env_overrides(&self) -> Vec<(&'static str, &'static str)> {
         // Disables the Task-tool migration that breaks the TodoWrite hook (see CLAUDE.md).
         vec![("CLAUDE_CODE_ENABLE_TASKS", "0")]
+    }
+    fn account_env(&self, config_dir: &str) -> Vec<(String, String)> {
+        claude_profile_env(config_dir)
     }
     fn build_invocation(
         &self,
@@ -511,6 +558,11 @@ impl ProviderAdapter for AntigravityAdapter {
     ) -> String {
         "agy || agy".to_string()
     }
+    fn account_env(&self, config_dir: &str) -> Vec<(String, String)> {
+        // agy reads its config from `.gemini/antigravity-cli` under the SAME profile root a
+        // `.claude` account redirects to, so the HOME redirect is identical to Claude's.
+        claude_profile_env(config_dir)
+    }
 }
 
 /// The per-spawn OpenCode local-provider payload: an inline config for the
@@ -904,6 +956,48 @@ fn probe_path<'a>(stdout: &'a str, binary: &str) -> &'a str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn account_env_redirects_claude_profile_root() {
+        // A `.claude` dir under a temp profile root: HOME/USERPROFILE point at the ROOT (the
+        // behavior the pty.rs inline block used to produce). Claude and Antigravity agree.
+        let root = std::env::temp_dir().join(format!("conduit_acctenv_{}", std::process::id()));
+        let claude = root.join(".claude");
+        let _ = std::fs::create_dir_all(&claude);
+        let dir = claude.to_string_lossy().into_owned();
+        let root_str = root.to_string_lossy().into_owned();
+        let expected = vec![
+            ("USERPROFILE".to_string(), root_str.clone()),
+            ("HOME".to_string(), root_str),
+        ];
+        assert_eq!(ClaudeAdapter.account_env(&dir), expected);
+        assert_eq!(AntigravityAdapter.account_env(&dir), expected);
+        // Other adapters have no account concept -> no env.
+        assert!(CodexAdapter.account_env(&dir).is_empty());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn account_env_falls_back_to_config_dir_for_custom_path() {
+        // A non-`.claude` custom dir uses CLAUDE_CONFIG_DIR, not a HOME redirect.
+        let custom =
+            std::env::temp_dir().join(format!("conduit_acctcustom_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&custom);
+        let dir = custom.to_string_lossy().into_owned();
+        assert_eq!(
+            ClaudeAdapter.account_env(&dir),
+            vec![("CLAUDE_CONFIG_DIR".to_string(), dir.clone())]
+        );
+        let _ = std::fs::remove_dir_all(&custom);
+    }
+
+    #[test]
+    fn account_env_empty_for_missing_dir() {
+        // Nonexistent path -> no env (inherit), matching the old existence guard.
+        assert!(ClaudeAdapter
+            .account_env("/no/such/conduit/account/dir")
+            .is_empty());
+    }
 
     #[test]
     fn detect_one_marks_found_when_path_nonempty() {

@@ -1813,6 +1813,20 @@ button {
   flex-shrink: 0;
 }
 
+/* Which account a session runs under (only shown when >1 account is configured). */
+.account-chip {
+  font-size: 9px;
+  color: var(--text-dim);
+  background: color-mix(in srgb, var(--text-dim) 14%, transparent);
+  border-radius: 999px;
+  padding: 1px 6px;
+  max-width: 80px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
 /* Conductor session marker in the sidebar row. */
 .conductor-chip {
   font-size: 9px;
@@ -1952,6 +1966,206 @@ button {
   font-size: 11px; color: var(--text-mid); cursor: pointer; user-select: none;
 }
 .agy-track-toggle input { accent-color: var(--agy); cursor: pointer; }
+
+/* ---- Unified multi-account usage bar (replaces the per-agent panels) ---- */
+.usage-panel {
+  padding: 8px 10px;
+  border-top: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-height: 42vh;
+  overflow-y: auto;
+}
+.usage-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-dim);
+}
+.usage-head-actions {
+  display: inline-flex;
+  gap: 2px;
+}
+.usage-icon-btn {
+  font-size: 11px;
+  color: var(--text-dim);
+  padding: 1px 4px;
+  border-radius: 4px;
+  cursor: pointer;
+  background: transparent;
+}
+.usage-icon-btn:hover {
+  color: var(--text-bright);
+  background: var(--selection-bg);
+}
+.usage-row {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.usage-row-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  color: var(--text-bright);
+}
+.usage-row-label {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.usage-tier-chip {
+  font-size: 9px;
+  padding: 1px 5px;
+  border-radius: 999px;
+  color: var(--agy);
+  background: color-mix(in srgb, var(--agy) 16%, transparent);
+}
+.usage-meter {
+  margin: 2px 0;
+}
+.usage-meter-head {
+  display: flex;
+  justify-content: space-between;
+  font-size: 10px;
+  color: var(--text-mid);
+}
+.usage-meter-bar {
+  height: 5px;
+  border-radius: 3px;
+  margin-top: 2px;
+  overflow: hidden;
+  background: color-mix(in srgb, var(--text-mid) 18%, transparent);
+}
+/* Claude rows tint with the accent; agy rows tint violet. Health colors always win. */
+.usage-row.claude .usage-meter-fill {
+  background: var(--accent);
+}
+.usage-row.antigravity .usage-meter-fill {
+  background: var(--agy);
+}
+.usage-meter-fill {
+  height: 100%;
+  transition: width 0.3s ease;
+}
+.usage-meter-fill.warn {
+  background: var(--amber) !important;
+}
+.usage-meter-fill.hot {
+  background: var(--red) !important;
+}
+.usage-meter-fill.disabled {
+  background: var(--text-mid) !important;
+  opacity: 0.5;
+}
+.usage-meter-fill.ctx {
+  opacity: 0.7;
+}
+.usage-hint {
+  font-size: 11px;
+  color: var(--text-mid);
+}
+.usage-local {
+  font-size: 10px;
+  color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
+}
+.usage-connect-btn {
+  margin-top: 2px;
+  padding: 4px;
+  font-size: 11px;
+  border: 1px solid color-mix(in srgb, var(--accent) 40%, transparent);
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+  color: var(--accent);
+  cursor: pointer;
+}
+.usage-connect-btn:hover {
+  background: color-mix(in srgb, var(--accent) 20%, transparent);
+}
+.usage-connect-all {
+  padding: 5px;
+  font-size: 11px;
+  font-weight: 600;
+  border: 1px solid color-mix(in srgb, var(--accent) 45%, transparent);
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+  color: var(--accent);
+  cursor: pointer;
+}
+.usage-connect-all:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--accent) 24%, transparent);
+}
+.usage-connect-all:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+.usage-summary-label {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* Tint the agent glyph in summary rows so Claude vs agy reads at a glance. */
+.usage-summary-item.antigravity {
+  color: var(--agy);
+}
+.usage-summary {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  cursor: pointer;
+}
+.usage-summary-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  color: var(--text-mid);
+  font-variant-numeric: tabular-nums;
+}
+.usage-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+.usage-dot.ok {
+  background: var(--green);
+}
+.usage-dot.warn {
+  background: var(--amber);
+}
+.usage-dot.hot {
+  background: var(--red);
+}
+/* Settings → Usage display */
+.usage-prefs {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+.usage-prefs-section {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.usage-prefs-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-bright);
+}
+.usage-prefs-checks {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
 
 /* ---- Claude service-status warning banner (sidebar top, only when degraded) ---- */
 .claude-warning {
@@ -2388,6 +2602,86 @@ button {
   text-transform: uppercase;
   letter-spacing: 0.06em;
   color: var(--text-dim);
+}
+
+/* ---- Multi-account: agent tags, per-agent + per-project defaults ---- */
+.account-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-top: 5px;
+}
+.account-tag-check {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+  color: var(--text-mid);
+  cursor: pointer;
+}
+.account-defaults {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding-top: 10px;
+  border-top: 1px solid var(--border);
+}
+.account-defaults-title {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-dim);
+}
+.account-defaults-hint {
+  font-size: 11px;
+  color: var(--text-dim);
+  margin: -2px 0 2px;
+}
+.account-default-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+.account-default-label {
+  font-size: 12px;
+  color: var(--text-mid);
+}
+.account-select {
+  flex: 1;
+  max-width: 60%;
+  font-size: 12px;
+  color: var(--text-bright);
+  background: var(--sidebar-bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 4px 6px;
+}
+.account-project-block {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 6px 0;
+}
+.account-project-name {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-bright);
+}
+
+/* Inline account expander inside the session context menu. */
+.context-submenu {
+  display: flex;
+  flex-direction: column;
+  margin: 2px 0 2px 8px;
+  padding-left: 6px;
+  border-left: 1px solid var(--border);
+}
+.context-submenu button {
+  font-size: 12px;
+}
+.context-menu button.sel {
+  color: var(--accent, var(--text-bright));
 }
 
 /* ---- Agent detection list (shared by Settings + Onboarding) ---- */

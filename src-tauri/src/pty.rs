@@ -301,30 +301,15 @@ impl PtyManager {
                     cmd.env("CONDUIT_OC_APIKEY", key);
                 }
             }
-            // Select a Claude account (Feature 1/2) without disturbing the user's default
-            // `claude`. A `.claude` account set up via a HOME-redirect launcher (e.g. a
-            // `claude-personal` shim) keeps its `.claude.json` -- the record of the
-            // logged-in account, onboarding, and trust state -- at the PROFILE ROOT, not
-            // inside `.claude`. CLAUDE_CONFIG_DIR only redirects the `.claude` dir, so an
-            // interactive session finds the credentials but re-prompts login/onboarding.
-            // Redirect HOME/USERPROFILE to the profile root instead (exactly what the
-            // launcher does) so the full account state is read. Fall back to
-            // CLAUDE_CONFIG_DIR for a non-`.claude` custom directory. Existence-guarded.
+            // Select the pinned account (Feature 1/2) without disturbing the user's default
+            // agent. The account->env mapping now lives behind `ProviderAdapter::account_env`
+            // (the multi-account extension seam): Claude and Antigravity redirect
+            // HOME/USERPROFILE to the profile root (see `agent::claude_profile_env` for why),
+            // every other adapter returns nothing. Behavior is byte-identical to the block
+            // this replaced. Values are path-derived account identifiers -- never logged.
             if let Some(dir) = account_config_dir.as_deref() {
-                let p = Path::new(dir);
-                if p.exists() {
-                    let root = (p.file_name().and_then(|f| f.to_str()) == Some(".claude"))
-                        .then(|| p.parent().and_then(|r| r.to_str()))
-                        .flatten();
-                    match root {
-                        Some(root) => {
-                            cmd.env("USERPROFILE", root);
-                            cmd.env("HOME", root);
-                        }
-                        None => {
-                            cmd.env("CLAUDE_CONFIG_DIR", dir);
-                        }
-                    }
+                for (k, v) in adapter.account_env(dir) {
+                    cmd.env(k, v);
                 }
             }
         }
