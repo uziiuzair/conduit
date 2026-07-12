@@ -158,19 +158,22 @@ function agyRow(u: AgyUsage): URow {
   };
 }
 
-/** Health class for a remaining-mode window given the low threshold (fraction). */
-function healthClass(w: UWindow, threshold: number): string {
-  if (w.disabled) return "disabled";
-  if (w.mode === "used") return "ctx";
-  if (w.value <= threshold) return "hot";
-  if (w.value <= Math.min(0.5, threshold * 2)) return "warn";
-  return "";
-}
-
 function Meter({ w, threshold }: { w: UWindow; threshold: number }) {
   const pct = Math.round(w.value * 100);
   const reset = shortReset(w.resetsAt);
   const text = w.disabled ? "disabled" : w.mode === "used" ? `${pct}% used` : `${pct}% left`;
+  // Bar fills with consumption: "remaining" windows show the used amount (100 - remaining),
+  // "used"/context windows already track consumption. Label still reads "% left".
+  const fillPct = w.disabled ? 0 : w.mode === "remaining" ? 100 - pct : pct;
+  // Smooth ramp: tint the fill from the agent's base color (var(--meter-base)) toward muted
+  // red as it approaches full. Ramp begins where the amber warn tier used to (100 - 2*threshold)
+  // and hits full red at 100%, so the Settings low-threshold slider still steers the onset.
+  const rampStart = Math.max(0, 100 - Math.min(50, threshold * 200));
+  const redWeight = w.disabled
+    ? 0
+    : Math.round(Math.max(0, Math.min(1, (fillPct - rampStart) / (100 - rampStart || 1))) * 100);
+  // disabled keeps its gray (via the class); ctx keeps its dimmed opacity.
+  const fillClass = w.disabled ? "disabled" : w.mode === "used" ? "ctx" : "";
   return (
     <div className="usage-meter">
       <div className="usage-meter-head">
@@ -182,8 +185,11 @@ function Meter({ w, threshold }: { w: UWindow; threshold: number }) {
       </div>
       <div className="usage-meter-bar">
         <div
-          className={`usage-meter-fill ${healthClass(w, threshold)}`}
-          style={{ width: `${w.disabled ? 0 : pct}%` }}
+          className={`usage-meter-fill ${fillClass}`}
+          style={{
+            width: `${fillPct}%`,
+            background: `color-mix(in srgb, var(--red) ${redWeight}%, var(--meter-base))`,
+          }}
         />
       </div>
     </div>

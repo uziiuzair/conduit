@@ -2043,22 +2043,18 @@ button {
   overflow: hidden;
   background: color-mix(in srgb, var(--text-mid) 18%, transparent);
 }
-/* Claude rows tint with the accent; agy rows tint violet. Health colors always win. */
+/* Claude rows tint with the accent; agy rows tint violet. The fill ramps from this base
+   color toward muted red as it approaches full (weight set inline via color-mix). */
 .usage-row.claude .usage-meter-fill {
-  background: var(--accent);
+  --meter-base: var(--accent);
 }
 .usage-row.antigravity .usage-meter-fill {
-  background: var(--agy);
+  --meter-base: var(--agy);
 }
 .usage-meter-fill {
   height: 100%;
-  transition: width 0.3s ease;
-}
-.usage-meter-fill.warn {
-  background: var(--amber) !important;
-}
-.usage-meter-fill.hot {
-  background: var(--red) !important;
+  background: var(--meter-base, var(--accent));
+  transition: width 0.3s ease, background 0.3s ease;
 }
 .usage-meter-fill.disabled {
   background: var(--text-mid) !important;
