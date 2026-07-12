@@ -80,6 +80,26 @@ A `-N` build suffix (e.g. `0.5.0-3`) is only for iterating installers of the *sa
 during testing — a real feature release gets a clean `0.x.0`. Don't bump as a side effect of
 an unrelated change; do bump when the release adds or fixes something a user would notice.
 
+### Keeping the changelog (do this every version bump)
+
+`CHANGELOG.md` is the source of truth for what shipped when, and **every version bump must
+add a matching entry in the same change** — never bump the three version files without one.
+The top entry's version must equal the version in the three files above; a bump that leaves
+the changelog behind is incomplete work.
+
+- **One entry per increment, granular.** Each user-facing feature or feature set gets its own
+  **MINOR** entry; each fix/polish batch gets its own **PATCH** entry. Do **not** bucket
+  several people's unrelated features under one version — split them into separate increments
+  so the log reads as a logical timeline.
+- **Header format:** `## X.Y.Z — YYYY-MM-DD`, newest first. **No contributor names**, no
+  author attribution — describe the change, not who made it.
+- **Bullets:** `- **Added|Changed|Fixed — short title.** user-facing description.` Write for
+  someone using the app, not reading the diff.
+- **Reconstructing history:** when commits landed without changelog updates, derive each
+  release's contents from the git range between version-bump commits (`git log
+  <prev-bump>..<next-bump>`), **not** from commit dates — feature branches merge after their
+  commit dates, so a commit can belong to a later release than its date suggests.
+
 ## Conventions
 
 - **Commits:** Conventional Commits (`feat`, `fix`, `docs`, `spike`, `chore`), scoped —
