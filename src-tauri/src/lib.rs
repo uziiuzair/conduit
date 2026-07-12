@@ -11,6 +11,7 @@ mod bridge;
 mod broker;
 mod claude_status;
 mod claude_usage;
+mod clipboard;
 mod fleet;
 mod fleet_mcp;
 mod format;
@@ -1192,6 +1193,7 @@ pub fn run() {
         .plugin(tauri_plugin_window_state::Builder::default().build())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_notification::init())
+        .plugin(tauri_plugin_clipboard_manager::init())
         .manage(Arc::new(PtyManager::new()))
         .manage(Arc::new(Store::new()))
         .manage(Arc::new(HookState::default()))
@@ -1337,6 +1339,7 @@ pub fn run() {
             mcp_apply,
             install_agent,
             telemetry::telemetry_ping,
+            clipboard::clipboard_read_for_paste,
         ])
         .build(tauri::generate_context!())
         .expect("error while building Conduit")

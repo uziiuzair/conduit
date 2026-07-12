@@ -224,11 +224,19 @@ export function TerminalView({
       if (sel) void navigator.clipboard.writeText(sel).catch(() => {});
       term.clearSelection();
     };
+    // Read the clipboard on the Rust side, not via `navigator.clipboard.readText()`:
+    // WKWebView gates browser clipboard reads behind a native "Paste" consent popup
+    // (macOS 26+) and the canvas terminal has no editable target for it, so the browser
+    // path silently fails. Rust reads the OS clipboard directly. A clipboard image comes
+    // back as a temp-PNG path, which Claude Code's TUI attaches as a file.
     const pasteClipboard = () => {
-      void navigator.clipboard
-        .readText()
-        .then((t) => {
-          if (t && !disposedRef.current) term.paste(t);
+      void invoke<{ kind: "text" | "image" | "empty"; text?: string; path?: string }>(
+        "clipboard_read_for_paste",
+      )
+        .then((r) => {
+          if (disposedRef.current) return;
+          if (r.kind === "text" && r.text) term.paste(r.text);
+          else if (r.kind === "image" && r.path) term.paste(r.path);
         })
         .catch(() => {});
     };
