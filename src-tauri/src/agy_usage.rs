@@ -11,6 +11,7 @@
 //! own documented extension mechanism. Same shape as Conduit's Codex result reporting:
 //! a helper that curls the local hook server. Fail-open throughout.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -23,6 +24,10 @@ use serde_json::Value;
 #[derive(Serialize, Clone, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct AgyUsage {
+    /// Resolved account this snapshot belongs to (None = the environment default). Set by the
+    /// hook handler from the posting session's account so multiple agy accounts key separately
+    /// instead of clobbering one global slot. The TS store maps by `accountId ?? "default"`.
+    pub account_id: Option<String>,
     /// "Pro" | "Ultra" | "Standard" | ... (from `plan_tier`). None if absent.
     pub plan_tier: Option<String>,
     pub email: Option<String>,
@@ -68,17 +73,35 @@ pub struct AgyContext {
     pub total_output_tokens: i64,
 }
 
-/// Latest snapshot, replaced on every `agyusage` POST. Account-global (agy quota is
-/// per Google account, not per session), matching the global Claude usage panel.
+/// Latest agy snapshot per account (keyed by `accountId ?? "default"`). agy quota is per
+/// Google account, so two sessions on the same account dedupe to one entry, while two
+/// different accounts each keep their own -- the all-accounts usage bar reads them all.
 #[derive(Default)]
-pub struct AgyUsageState(pub Mutex<Option<AgyUsage>>);
+pub struct AgyUsageState(pub Mutex<HashMap<String, AgyUsage>>);
 
 impl AgyUsageState {
-    pub fn set(&self, u: AgyUsage) {
-        *self.0.lock().unwrap_or_else(|e| e.into_inner()) = Some(u);
+    /// Replace the snapshot for `key` (the resolved account, or "default").
+    pub fn set(&self, key: String, u: AgyUsage) {
+        self.0
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(key, u);
     }
-    pub fn get(&self) -> Option<AgyUsage> {
-        self.0.lock().unwrap_or_else(|e| e.into_inner()).clone()
+    /// All current per-account snapshots (order unspecified; the UI sorts).
+    pub fn all(&self) -> Vec<AgyUsage> {
+        self.0
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .values()
+            .cloned()
+            .collect()
+    }
+    /// Drop a removed account's snapshot so its row vanishes without an app restart.
+    pub fn evict(&self, account_id: &str) {
+        self.0
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(account_id);
     }
 }
 
@@ -475,8 +498,8 @@ pub fn tracking_enabled(store: &crate::store::Store) -> bool {
 // ---- Tauri commands ----
 
 #[tauri::command]
-pub fn fetch_agy_usage(state: tauri::State<'_, std::sync::Arc<AgyUsageState>>) -> Option<AgyUsage> {
-    state.get()
+pub fn fetch_agy_usage(state: tauri::State<'_, std::sync::Arc<AgyUsageState>>) -> Vec<AgyUsage> {
+    state.all()
 }
 
 #[tauri::command]
@@ -573,6 +596,24 @@ mod tests {
         }))
         .has_data());
         assert!(parse_statusline_payload(&sample()).has_data());
+    }
+
+    #[test]
+    fn state_keys_snapshots_per_account() {
+        // Two different accounts keep separate slots; the same key is replaced in place.
+        let state = AgyUsageState::default();
+        let mut a = parse_statusline_payload(&sample());
+        a.account_id = Some("acc-a".into());
+        let mut b = parse_statusline_payload(&sample());
+        b.account_id = Some("acc-b".into());
+        state.set("acc-a".into(), a);
+        state.set("acc-b".into(), b);
+        assert_eq!(state.all().len(), 2, "two accounts, two snapshots");
+        // Re-setting an existing key replaces, not appends.
+        let mut a2 = parse_statusline_payload(&sample());
+        a2.account_id = Some("acc-a".into());
+        state.set("acc-a".into(), a2);
+        assert_eq!(state.all().len(), 2, "same key replaces in place");
     }
 
     #[test]

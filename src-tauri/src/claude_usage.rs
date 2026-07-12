@@ -19,6 +19,16 @@ pub struct ClaudeUsage {
     pub plan_source: String,
 }
 
+/// One account's Claude usage, for the all-accounts usage bar. `accountId` is None for the
+/// environment default (`~/.claude`); `label` is the account's display name.
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct ClaudeAccountUsage {
+    pub account_id: Option<String>,
+    pub label: String,
+    pub usage: ClaudeUsage,
+}
+
 #[derive(Serialize, Clone, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct LocalUsage {
@@ -185,33 +195,67 @@ fn read_local_usage(config_dir: Option<&str>) -> LocalUsage {
 
 // ---- Plan-limit token cache (populated by connect; see plan-limit section) ----
 
+/// Per-account cached OAuth tokens, keyed by `accountId` (or "default" for the env account).
+/// Held in memory only; never persisted or logged.
 #[derive(Default)]
 pub struct ClaudeAuth {
-    pub token: Mutex<Option<String>>,
+    pub tokens: Mutex<HashMap<String, String>>,
 }
 
-/// Tauri command: local usage always; plan limits when a token is cached. Reads from the
-/// selected (default) account's config dir, not a hardcoded `~/.claude`, so a multi-account
-/// user sees the account they actually chose.
+/// The map key for an account (the env default has no id).
+fn account_key(account_id: Option<&str>) -> String {
+    account_id
+        .map(String::from)
+        .unwrap_or_else(|| "default".into())
+}
+
+impl ClaudeAuth {
+    /// Drop a removed account's cached token so it isn't reused if the id is ever recycled.
+    pub fn evict(&self, account_id: &str) {
+        self.tokens
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(account_id);
+    }
+}
+
+/// Tauri command: usage for EVERY registered Claude account plus the environment default.
+/// Local usage (stats-cache.json) always; plan limits per account when that account's token
+/// has been connected. With no registered accounts this returns a single "Default" entry
+/// reading `~/.claude`, exactly as the single-account panel did.
 #[tauri::command]
 pub async fn fetch_claude_usage(
     auth: tauri::State<'_, std::sync::Arc<ClaudeAuth>>,
     store: tauri::State<'_, std::sync::Arc<crate::store::Store>>,
-) -> Result<ClaudeUsage, String> {
-    let token = auth.token.lock().unwrap_or_else(|e| e.into_inner()).clone();
-    let config_dir = store.default_account_config_dir();
-    let usage = tauri::async_runtime::spawn_blocking(move || {
-        let local = read_local_usage(config_dir.as_deref());
-        let (plan, plan_source) = fetch_plan(token);
-        ClaudeUsage {
-            local,
-            plan,
-            plan_source,
-        }
+) -> Result<Vec<ClaudeAccountUsage>, String> {
+    let targets = store.usage_targets(crate::agent::AgentId::Claude);
+    let tokens = auth
+        .tokens
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone();
+    let out = tauri::async_runtime::spawn_blocking(move || {
+        targets
+            .into_iter()
+            .map(|(account_id, label, config_dir)| {
+                let token = tokens.get(&account_key(account_id.as_deref())).cloned();
+                let local = read_local_usage(config_dir.as_deref());
+                let (plan, plan_source) = fetch_plan(token);
+                ClaudeAccountUsage {
+                    account_id,
+                    label,
+                    usage: ClaudeUsage {
+                        local,
+                        plan,
+                        plan_source,
+                    },
+                }
+            })
+            .collect::<Vec<_>>()
     })
     .await
     .map_err(|e| e.to_string())?;
-    Ok(usage)
+    Ok(out)
 }
 
 // ---- Plan limits (best-effort) ----
@@ -313,6 +357,30 @@ fn parse_oauth_token(raw: &str) -> Option<String> {
     }
 }
 
+/// Look for `.credentials.json` inside `dir`, then in its parent (the profile root). Account
+/// layouts vary: a HOME-redirect profile keeps the token at `<root>/.claude/.credentials.json`,
+/// but some keep it beside `.claude` at the root. Checking both makes plan-connect work across
+/// layouts without the user telling us where their token lives. Never returns/logs the token
+/// itself, only whether one parsed.
+fn read_credentials_file(dir: &std::path::Path) -> Option<String> {
+    let inside = dir.join(".credentials.json");
+    if let Some(t) = std::fs::read_to_string(&inside)
+        .ok()
+        .and_then(|raw| parse_oauth_token(&raw))
+    {
+        return Some(t);
+    }
+    if let Some(parent) = dir.parent() {
+        if let Some(t) = std::fs::read_to_string(parent.join(".credentials.json"))
+            .ok()
+            .and_then(|raw| parse_oauth_token(&raw))
+        {
+            return Some(t);
+        }
+    }
+    None
+}
+
 /// Read the Claude Code OAuth access token for the selected account. A non-default account
 /// selected via `CLAUDE_CONFIG_DIR` stores its credentials as a plain `.credentials.json`
 /// in that dir, so prefer that when `config_dir` points at one; only fall back to the login
@@ -322,13 +390,20 @@ fn parse_oauth_token(raw: &str) -> Option<String> {
 #[cfg(target_os = "macos")]
 fn read_oauth_token(config_dir: Option<&str>) -> Option<String> {
     if let Some(dir) = config_dir.filter(|d| !d.trim().is_empty()) {
-        let file = std::path::Path::new(dir).join(".credentials.json");
-        if let Ok(raw) = std::fs::read_to_string(&file) {
-            return parse_oauth_token(&raw);
-        }
+        // A registered account keeps its own `.credentials.json`; read ONLY that (config dir
+        // or its profile root) and never fall back to the login Keychain -- that would prompt
+        // for, and cache under this account's key, the DEFAULT account's token. Absent =>
+        // not connected.
+        return read_credentials_file(std::path::Path::new(dir));
     }
+    // Env-default account only: the login Keychain (this is the read that prompts).
     let out = Command::new("security")
-        .args(["find-generic-password", "-s", "Claude Code-credentials", "-w"])
+        .args([
+            "find-generic-password",
+            "-s",
+            "Claude Code-credentials",
+            "-w",
+        ])
         .output()
         .ok()?;
     if !out.status.success() {
@@ -347,16 +422,14 @@ fn read_oauth_token(config_dir: Option<&str>) -> Option<String> {
 /// so `parse_oauth_token` is shared unmodified. No prompt/elevation needed to read it.
 #[cfg(windows)]
 fn read_oauth_token(config_dir: Option<&str>) -> Option<String> {
-    let path = claude_config_dir(config_dir)?.join(".credentials.json");
-    parse_oauth_token(&std::fs::read_to_string(path).ok()?)
+    read_credentials_file(&claude_config_dir(config_dir)?)
 }
 
 /// Other platforms (Linux): Claude Code stores `.credentials.json` as a plain file in the
-/// config dir, same shape as Windows -- read it from the selected account's dir.
+/// config dir, same shape as Windows -- read it from the selected account's dir (or root).
 #[cfg(not(any(target_os = "macos", windows)))]
 fn read_oauth_token(config_dir: Option<&str>) -> Option<String> {
-    let path = claude_config_dir(config_dir)?.join(".credentials.json");
-    parse_oauth_token(&std::fs::read_to_string(path).ok()?)
+    read_credentials_file(&claude_config_dir(config_dir)?)
 }
 
 /// Tauri command: connect plan usage. Reads the OAuth token from wherever this platform
@@ -364,17 +437,27 @@ fn read_oauth_token(config_dir: Option<&str>) -> Option<String> {
 /// memory, and returns whether a live plan fetch then succeeded.
 #[tauri::command]
 pub async fn connect_claude_plan_usage(
+    account_id: Option<String>,
     auth: tauri::State<'_, std::sync::Arc<ClaudeAuth>>,
     store: tauri::State<'_, std::sync::Arc<crate::store::Store>>,
 ) -> Result<bool, String> {
     let auth = auth.inner().clone();
-    let config_dir = store.default_account_config_dir();
+    // The account's config dir holds its `.credentials.json`; None (env default) reads
+    // `~/.claude` (or the login Keychain on macOS).
+    let config_dir = match account_id.as_deref() {
+        Some(id) => store.account_config_dir_by_id(id),
+        None => None,
+    };
+    let key = account_key(account_id.as_deref());
     let ok = tauri::async_runtime::spawn_blocking(move || {
         let token = match read_oauth_token(config_dir.as_deref()) {
             Some(t) => t,
             None => return false,
         };
-        *auth.token.lock().unwrap_or_else(|e| e.into_inner()) = Some(token.clone());
+        auth.tokens
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(key, token.clone());
         let (plan, _src) = fetch_plan(Some(token));
         plan.is_some()
     })

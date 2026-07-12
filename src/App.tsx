@@ -15,6 +15,7 @@ import {
 } from "./store";
 import { type AgentId } from "./agents";
 import { type ThemePref } from "./themes";
+import { useClaudeAmbient } from "./hooks/useClaudeAmbient";
 import { getLastFocusedEditor } from "./monaco/setup";
 import { Sidebar } from "./components/Sidebar";
 import { WorkspaceCenter } from "./components/WorkspaceCenter";
@@ -44,6 +45,10 @@ function runEditorAction(id: string): void {
 }
 
 export default function App() {
+  // Poll Claude + agy usage at the app root so it refreshes for every account regardless of
+  // which agent is selected or whether the sidebar is collapsed (both would unmount a
+  // sidebar-hosted poller).
+  useClaudeAmbient();
   const projects = useStore((s) => s.projects);
   const selectedProjectId = useStore((s) => s.selectedProjectId);
   const home = useStore((s) => s.homeDir);

@@ -12,6 +12,7 @@ const POLL_MS = 60_000;
 export function useClaudeAmbient(): void {
   const refreshStatus = useStore((s) => s.refreshClaudeStatus);
   const refreshUsage = useStore((s) => s.refreshClaudeUsage);
+  const refreshAgy = useStore((s) => s.refreshAgyUsage);
   const connectPlan = useStore((s) => s.connectPlanUsage);
   const planConnected = useStore((s) => s.planConnected);
 
@@ -21,6 +22,9 @@ export function useClaudeAmbient(): void {
     const tick = () => {
       void refreshStatus();
       void refreshUsage();
+      // agy usage is mostly pushed via the hook event, but re-pull the snapshot map too so a
+      // refresh (e.g. after enabling tracking) shows without waiting for the next agy tick.
+      void refreshAgy();
     };
 
     const start = () => {
@@ -40,8 +44,11 @@ export function useClaudeAmbient(): void {
       else start();
     };
 
-    // Rehydrate plan-usage token cache once on mount if previously connected.
-    if (planConnected) void connectPlan();
+    // Rehydrate each previously-connected account's plan-usage token cache once on mount
+    // (the Rust token cache is memory-only, so it's empty after a restart).
+    for (const [key, ok] of Object.entries(planConnected)) {
+      if (ok) void connectPlan(key === "default" ? null : key);
+    }
 
     if (!document.hidden) start();
     document.addEventListener("visibilitychange", onVisibility);

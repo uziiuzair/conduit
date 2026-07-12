@@ -115,7 +115,12 @@ pub fn start(
             // cosmetic meter, so a spoofed post at worst shows wrong numbers.
             if event == "agyusage" {
                 let parsed: Value = serde_json::from_str(&body).unwrap_or(Value::Null);
-                let usage = crate::agy_usage::parse_statusline_payload(&parsed);
+                let mut usage = crate::agy_usage::parse_statusline_payload(&parsed);
+                // Key the snapshot by the posting session's resolved account so multiple agy
+                // accounts don't clobber one slot (None = the environment default).
+                usage.account_id = session
+                    .as_deref()
+                    .and_then(|sid| store.session_account_id(sid));
                 let line = crate::agy_usage::format_status_line(&usage);
                 // Only replace the snapshot when this tick carried real quota data; a
                 // quota-less tick would otherwise clobber a good snapshot (see has_data).
@@ -123,12 +128,17 @@ pub fn start(
                     if std::env::var("CONDUIT_HOOK_LOG").as_deref() == Ok("1") {
                         // Summary only -- never log the raw body (it carries the account email).
                         eprintln!(
-                            "[hook] agyusage groups={} tier={:?}",
+                            "[hook] agyusage account={:?} groups={} tier={:?}",
+                            usage.account_id,
                             usage.groups.len(),
                             usage.plan_tier
                         );
                     }
-                    agy_usage.set(usage.clone());
+                    let key = usage
+                        .account_id
+                        .clone()
+                        .unwrap_or_else(|| "default".to_string());
+                    agy_usage.set(key, usage.clone());
                     let _ = app.emit("agyusage", &usage);
                 }
                 // Always answer agy so its status line still renders.

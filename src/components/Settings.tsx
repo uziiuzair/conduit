@@ -4,6 +4,7 @@ import { McpMatrix } from "./McpMatrix";
 import { TelemetryToggle } from "./TelemetryToggle";
 import { AboutPanel } from "./AboutPanel";
 import { AccountList } from "./AccountList";
+import { UsagePrefsPanel } from "./UsagePrefsPanel";
 import { TrustPanel } from "./TrustPanel";
 import { OpenCodePanel } from "./OpenCodePanel";
 
@@ -11,6 +12,7 @@ import { OpenCodePanel } from "./OpenCodePanel";
 export type SettingsTab =
   | "agents"
   | "accounts"
+  | "usage"
   | "mcp"
   | "localmodels"
   | "security"
@@ -27,7 +29,13 @@ const NAV: Array<{ group: string; items: Array<{ id: SettingsTab; label: string 
       { id: "mcp", label: "MCP servers" },
     ],
   },
-  { group: "Accounts", items: [{ id: "accounts", label: "Claude accounts" }] },
+  {
+    group: "Accounts",
+    items: [
+      { id: "accounts", label: "Agent accounts" },
+      { id: "usage", label: "Usage display" },
+    ],
+  },
   {
     group: "Privacy & security",
     items: [
@@ -101,6 +109,7 @@ export function Settings({
                 </>
               )}
               {tab === "accounts" && <AccountList />}
+              {tab === "usage" && <UsagePrefsPanel />}
               {tab === "mcp" && <McpMatrix />}
               {tab === "localmodels" && (
                 <>
