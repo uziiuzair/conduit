@@ -47,6 +47,8 @@ export interface Session {
   modelTier?: string | null;
   seedMemory?: string | null;
   effort?: string | null;
+  /** The agent's own captured conversation id (agy), for resume. Set by the backend. */
+  agentConversationId?: string | null;
 }
 
 /** A registered agent account (mirrors the Rust serde struct, camelCase). */
@@ -379,6 +381,24 @@ function writePlanConnected(v: Record<string, boolean>): void {
   }
 }
 
+// Restore-on-open: eagerly spawn (and resume) every session of the ACTIVE project on launch /
+// project switch, instead of waiting for a click. Default ON. Same persisted-pref pattern.
+const RESTORE_SESSIONS_KEY = "conduit.restoreSessionsOnOpen";
+function readRestoreSessionsOnOpen(): boolean {
+  try {
+    return localStorage.getItem(RESTORE_SESSIONS_KEY) !== "0"; // default on (absent => true)
+  } catch {
+    return true;
+  }
+}
+function writeRestoreSessionsOnOpen(v: boolean): void {
+  try {
+    localStorage.setItem(RESTORE_SESSIONS_KEY, v ? "1" : "0");
+  } catch {
+    /* quota — non-fatal */
+  }
+}
+
 // Sidebar / right-panel collapse state (native menu: View > Toggle Sidebar / Toggle
 // Right Panel). Small persisted UI prefs, same pattern as telemetryOptOut above.
 // Default: both expanded (false).
@@ -618,6 +638,10 @@ interface AppState {
   setUsagePrefs: (patch: Partial<UsagePrefs>) => void;
 
   // ---- panel collapse + Settings dialog (native menu-driven, App-level) ----
+  /** Persisted. When true (default), opening/switching to a project eagerly spawns and
+   *  resumes all its sessions instead of waiting for a click. */
+  restoreSessionsOnOpen: boolean;
+  setRestoreSessionsOnOpen: (v: boolean) => void;
   /** Persisted. When true, the sidebar (and its resizer) is hidden. */
   sidebarCollapsed: boolean;
   toggleSidebar: () => void;
@@ -896,6 +920,7 @@ export const useStore = create<AppState>((set, get) => {
     agyUsageByAccount: {},
     agyUsageTracking: false,
     usagePrefs: readUsagePrefs(),
+    restoreSessionsOnOpen: readRestoreSessionsOnOpen(),
     sidebarCollapsed: readSidebarCollapsed(),
     rightCollapsed: readRightCollapsed(),
     showSettings: false,
@@ -1863,6 +1888,11 @@ export const useStore = create<AppState>((set, get) => {
 
     setTopTab: (t) => set({ topTab: t }),
     setBottomTab: (t) => set({ bottomTab: t }),
+
+    setRestoreSessionsOnOpen: (v) => {
+      writeRestoreSessionsOnOpen(v);
+      set({ restoreSessionsOnOpen: v });
+    },
 
     toggleSidebar: () =>
       set((s) => {

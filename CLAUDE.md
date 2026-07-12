@@ -135,6 +135,22 @@ agent tags, per-agent + per-project defaults), the new-session dialog picker, an
 right-click "Account" submenu in `Sidebar.tsx`. Design:
 `docs/superpowers/specs/2026-07-12-multi-account-orchestration-design.md`.
 
+## Where session restore + safe shutdown lives
+
+VSCode-style "reopen where I left off" + a running-agent quit guard (Claude + agy; others
+deferred). Opening a project eagerly spawns all its sessions (`Terminal.tsx`'s
+`spawnPty`/eager effect, gated by `restoreSessionsOnOpen`; Settings -> General). Resume:
+Claude via `claude --resume <id>` (already), agy via `agy --conversation=<uuid>` threaded as
+`resume_token` through `spawn` -> `build_invocation`. agy won't let us pin our own id, so the
+`agyusage` hook captures the id agy chose from `~/.gemini/antigravity-cli/conversations/<uuid>.db`,
+disambiguated by a spawn-time baseline (`agy_usage::AgyResumeState`) so two sessions sharing an
+agy home don't cross-capture (`Session.agent_conversation_id`). Shutdown: `lib.rs`
+`live_running_agent` (fleet `running_sessions` cross-checked against a live PTY) gates
+`CloseRequested`/`menu.rs` quit; `App.tsx` shows the confirm. agy activity reaches the guard via
+its status-line `agent_state` (`agy_usage::agent_state_is_active` -> `FleetState::set_running`),
+since agy fires no Claude-style lifecycle hooks. Design:
+`docs/superpowers/specs/2026-07-12-session-restore-and-safe-shutdown-design.md`.
+
 ## Where the fleet/Conductor orchestration lives
 
 A per-project **Conductor** (a Claude session flagged `role: Conductor`) observes and

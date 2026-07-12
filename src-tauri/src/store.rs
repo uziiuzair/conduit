@@ -4,7 +4,7 @@
 //! namespaced away from the Swift app's `Conduit/state.json` so the two apps can run
 //! side by side without trampling each other's (different-shaped) state.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::PathBuf;
 use std::sync::Mutex;
@@ -86,6 +86,13 @@ pub struct Session {
     /// but don't act on it (`agent::clamp_effort`'s doc comment explains why).
     #[serde(default)]
     pub effort: Option<String>,
+    /// The agent's own conversation id, for agents whose resume id we can't pin the way we pin
+    /// Claude's (which reuses `id`). Captured after the first launch (agy: the newest
+    /// `conversations/<uuid>.db`) and passed back on the next spawn to reopen that exact
+    /// conversation (agy: `--conversation=<id>`). None = start fresh + capture. A pointer, not
+    /// a secret.
+    #[serde(default)]
+    pub agent_conversation_id: Option<String>,
 }
 
 /// Directed READ policy: may `caller` read `target`'s output? The single source of truth for
@@ -950,6 +957,82 @@ impl Store {
         self.save(&projects);
     }
 
+    /// Persist the agent's captured conversation id (agy) so the next spawn can resume it.
+    /// No-op if unchanged (avoids churning state.json on every capture attempt).
+    pub fn set_session_agent_conversation_id(&self, session_id: &str, conversation_id: &str) {
+        let mut projects = self.projects.lock().unwrap_or_else(|e| e.into_inner());
+        let mut changed = false;
+        for p in projects.iter_mut() {
+            if let Some(s) = p.sessions.iter_mut().find(|s| s.id == session_id) {
+                if s.agent_conversation_id.as_deref() != Some(conversation_id) {
+                    s.agent_conversation_id = Some(conversation_id.to_string());
+                    changed = true;
+                }
+                break;
+            }
+        }
+        if changed {
+            self.save(&projects);
+        }
+    }
+
+    /// The already-captured conversation id for a session, if any (None for Claude, which
+    /// keys resume off `Session.id`, and for an agy session not yet captured).
+    pub fn session_agent_conversation_id(&self, session_id: &str) -> Option<String> {
+        self.projects
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .flat_map(|p| &p.sessions)
+            .find(|s| s.id == session_id)
+            .and_then(|s| s.agent_conversation_id.clone())
+    }
+
+    /// Clear a stale/dead captured conversation id (its db was deleted) so the next spawn
+    /// starts fresh and re-captures instead of resuming a dead id forever.
+    pub fn clear_session_agent_conversation_id(&self, session_id: &str) {
+        let mut projects = self.projects.lock().unwrap_or_else(|e| e.into_inner());
+        let mut changed = false;
+        for p in projects.iter_mut() {
+            if let Some(s) = p.sessions.iter_mut().find(|s| s.id == session_id) {
+                if s.agent_conversation_id.take().is_some() {
+                    changed = true;
+                }
+                break;
+            }
+        }
+        if changed {
+            self.save(&projects);
+        }
+    }
+
+    /// Every conversation id already claimed by a session OTHER than `except_session`. Passed to
+    /// the agy capture so it never re-picks a conversation another session owns.
+    pub fn all_agent_conversation_ids_except(&self, except_session: &str) -> HashSet<String> {
+        self.projects
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .flat_map(|p| &p.sessions)
+            .filter(|s| s.id != except_session)
+            .filter_map(|s| s.agent_conversation_id.clone())
+            .collect()
+    }
+
+    /// Whether some OTHER session already claims this conversation id. Guards against pointing
+    /// two sessions at the same agy conversation (which would open one SQLite db concurrently).
+    pub fn conversation_id_in_use(&self, conversation_id: &str, except_session: &str) -> bool {
+        self.projects
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .flat_map(|p| &p.sessions)
+            .any(|s| {
+                s.id != except_session
+                    && s.agent_conversation_id.as_deref() == Some(conversation_id)
+            })
+    }
+
     // ---- Trust boundaries (Feature 4: multi-agent silo / controlled sharing) -----
 
     pub fn trust_settings(&self) -> TrustSettings {
@@ -1444,6 +1527,34 @@ mod tests {
         assert_eq!(
             store.session_account_id(&s.id).as_deref(),
             Some(a.id.as_str())
+        );
+    }
+
+    #[test]
+    fn agent_conversation_id_round_trips_and_is_idempotent() {
+        let dir = temp_dir("agent_conv_id");
+        let store = Store::for_test(&dir);
+        let p = store.add_project("/repo".into());
+        let s = store
+            .add_session(
+                &p.id,
+                "s".into(),
+                false,
+                AgentId::Antigravity,
+                SessionRole::Worker,
+            )
+            .unwrap();
+        assert_eq!(store.session_agent_conversation_id(&s.id), None);
+        store.set_session_agent_conversation_id(&s.id, "conv-uuid-1");
+        assert_eq!(
+            store.session_agent_conversation_id(&s.id).as_deref(),
+            Some("conv-uuid-1")
+        );
+        // Re-setting the same value is a no-op (short-circuits the save) but stays correct.
+        store.set_session_agent_conversation_id(&s.id, "conv-uuid-1");
+        assert_eq!(
+            store.session_agent_conversation_id(&s.id).as_deref(),
+            Some("conv-uuid-1")
         );
     }
 

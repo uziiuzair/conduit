@@ -65,7 +65,12 @@ async function deleteSession(
   const found = findSession(projects, sessionId);
   const session = found?.session;
   if (!session) return;
-  if (!confirm(`Delete session "${session.name}"?`)) return;
+  // Warn louder when the agent is mid-task (deleting hard-kills it; history is still kept).
+  const running = useStore.getState().live[sessionId]?.status === "running";
+  const prompt = running
+    ? `Session "${session.name}" is still working. Delete and stop it?\n\nIts conversation history is kept.`
+    : `Delete session "${session.name}"?`;
+  if (!confirm(prompt)) return;
 
   if (session.useWorktree && session.worktreePath) {
     const dirty = await worktreeIsDirty(session.worktreePath);
