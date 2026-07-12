@@ -1903,6 +1903,56 @@ button {
 }
 .claude-usage-panel .claude-connect-btn { margin-top: 6px; padding: 5px; font-size: 11px; }
 
+/* ---- Antigravity (agy) usage panel — violet, to distinguish it from Claude ---- */
+:root { --agy: #a78bfa; }
+.agy-usage-panel {
+  padding: 8px 12px 10px;
+  border-top: 1px solid color-mix(in srgb, var(--agy) 22%, transparent);
+  font-size: 11.5px;
+  display: flex; flex-direction: column; gap: 2px;
+}
+.agy-usage-head {
+  font-size: 9.5px; text-transform: uppercase; letter-spacing: 0.04em;
+  color: var(--text-mid); margin-bottom: 4px;
+  display: flex; align-items: center; justify-content: space-between; gap: 6px;
+}
+.agy-tier-chip {
+  text-transform: none; letter-spacing: 0; font-size: 9.5px;
+  padding: 1px 6px; border-radius: 8px;
+  color: var(--agy);
+  background: color-mix(in srgb, var(--agy) 16%, transparent);
+}
+.agy-group { margin-top: 2px; }
+.agy-group-label {
+  font-size: 10px; opacity: 0.75; margin: 4px 0 1px;
+}
+.agy-meter { margin: 4px 0; }
+.agy-meter-head { display: flex; justify-content: space-between; opacity: 0.9; }
+.agy-meter-bar {
+  height: 6px; border-radius: 3px;
+  background: color-mix(in srgb, var(--agy) 14%, transparent);
+  margin-top: 3px; overflow: hidden;
+}
+.agy-meter-fill { height: 100%; background: var(--agy); transition: width 0.3s ease; }
+.agy-meter-fill.warn { background: var(--amber); }
+.agy-meter-fill.hot { background: var(--red); }
+.agy-meter-fill.disabled { background: var(--text-mid); opacity: 0.5; }
+.agy-meter-fill.ctx { background: color-mix(in srgb, var(--agy) 70%, var(--text-mid)); }
+.agy-context { margin-top: 6px; opacity: 0.9; }
+.agy-usage-hint { color: var(--text-mid); font-size: 11px; margin-top: 2px; }
+.agy-enable-btn {
+  margin-top: 6px; padding: 5px; font-size: 11px;
+  border: 1px solid color-mix(in srgb, var(--agy) 40%, transparent);
+  border-radius: 6px; background: color-mix(in srgb, var(--agy) 12%, transparent);
+  color: var(--agy); cursor: pointer;
+}
+.agy-enable-btn:hover { background: color-mix(in srgb, var(--agy) 20%, transparent); }
+.agy-track-toggle {
+  display: inline-flex; align-items: center; gap: 6px; margin-top: 4px;
+  font-size: 11px; color: var(--text-mid); cursor: pointer; user-select: none;
+}
+.agy-track-toggle input { accent-color: var(--agy); cursor: pointer; }
+
 /* ---- Claude service-status warning banner (sidebar top, only when degraded) ---- */
 .claude-warning {
   display: flex; align-items: center; gap: 6px;

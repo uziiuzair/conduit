@@ -61,6 +61,7 @@ pub fn start(
     store: Arc<crate::store::Store>,
     pty: Arc<crate::pty::PtyManager>,
     board: Arc<crate::board::BoardState>,
+    agy_usage: Arc<crate::agy_usage::AgyUsageState>,
 ) {
     thread::spawn(move || {
         let mut server: Option<Server> = None;
@@ -104,6 +105,37 @@ pub fn start(
                 .as_reader()
                 .take(1024 * 1024)
                 .read_to_string(&mut body);
+
+            // agy usage: the status-line helper POSTs agy's payload here and echoes our
+            // response as its status line. Handle before the generic "ok" respond so the
+            // reply carries the formatted line, and before the session gate (a usage
+            // snapshot is account-global, not tied to a fleet session). This body is
+            // UNTRUSTED, unauthenticated, localhost display-data (same trust model as the
+            // other hook events) -- no security decision keys off it; it only drives a
+            // cosmetic meter, so a spoofed post at worst shows wrong numbers.
+            if event == "agyusage" {
+                let parsed: Value = serde_json::from_str(&body).unwrap_or(Value::Null);
+                let usage = crate::agy_usage::parse_statusline_payload(&parsed);
+                let line = crate::agy_usage::format_status_line(&usage);
+                // Only replace the snapshot when this tick carried real quota data; a
+                // quota-less tick would otherwise clobber a good snapshot (see has_data).
+                if usage.has_data() {
+                    if std::env::var("CONDUIT_HOOK_LOG").as_deref() == Ok("1") {
+                        // Summary only -- never log the raw body (it carries the account email).
+                        eprintln!(
+                            "[hook] agyusage groups={} tier={:?}",
+                            usage.groups.len(),
+                            usage.plan_tier
+                        );
+                    }
+                    agy_usage.set(usage.clone());
+                    let _ = app.emit("agyusage", &usage);
+                }
+                // Always answer agy so its status line still renders.
+                let _ = request.respond(Response::from_string(line));
+                continue;
+            }
+
             let _ = request.respond(Response::from_string("ok"));
 
             let Some(session) = session else { continue };

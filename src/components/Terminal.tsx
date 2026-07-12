@@ -94,12 +94,18 @@ export function TerminalView({
 
     term.onData((d) => writeSeq(d));
 
-    // --- Cmd+Click a file path -> open it in Conduit's editor (VS Code parity) ---
-    // Track whether Cmd is held so path tokens only light up / activate with the modifier;
+    // The open-path / clipboard modifier is Cmd on macOS, Ctrl on Windows & Linux (VS Code parity).
+    // `navigator.platform` is deprecated and occasionally empty in webviews, so fall back to UA.
+    const isMac = /Mac|iPhone|iPod|iPad/i.test(navigator.platform || navigator.userAgent);
+    const openModHeld = (ev: { metaKey: boolean; ctrlKey: boolean }) =>
+      isMac ? ev.metaKey : ev.ctrlKey;
+
+    // --- Cmd/Ctrl+Click a file path -> open it in Conduit's editor (VS Code parity) ---
+    // Track whether the modifier is held so path tokens only light up / activate with it;
     // a plain click keeps normal terminal selection.
     let cmdHeld = false;
     const onMod = (ev: KeyboardEvent) => {
-      cmdHeld = ev.metaKey;
+      cmdHeld = openModHeld(ev);
     };
     const onBlur = () => {
       cmdHeld = false;
@@ -167,7 +173,7 @@ export function TerminalView({
             },
             text: raw,
             activate: (ev: MouseEvent, matched: string) => {
-              if (!ev.metaKey) return;
+              if (!openModHeld(ev)) return;
               void openPath(matched);
             },
           });
@@ -181,8 +187,55 @@ export function TerminalView({
     // delete sequence. Emit the right bytes and skip xterm's default for these two.
     // (Option+Backspace is left to xterm's native macOptionIsMeta handling, which
     // already produces delete-word.)
+    // Clipboard: xterm's canvas isn't a text input, so copy/paste must be wired by hand.
+    // macOS uses Cmd+C / Cmd+V; Windows & Linux use Ctrl+Shift+C / Ctrl+Shift+V, plus the
+    // "smart" Ctrl+C that copies the current selection (then releases it so a second
+    // Ctrl+C still sends SIGINT) and Ctrl+V to paste — matching Windows Terminal.
+    const copySelection = () => {
+      const sel = term.getSelection();
+      if (sel) void navigator.clipboard.writeText(sel).catch(() => {});
+      term.clearSelection();
+    };
+    const pasteClipboard = () => {
+      void navigator.clipboard
+        .readText()
+        .then((t) => {
+          if (t && !disposedRef.current) term.paste(t);
+        })
+        .catch(() => {});
+    };
+
     term.attachCustomKeyEventHandler((e) => {
       if (e.type !== "keydown") return true;
+      const k = e.key.toLowerCase();
+      // Copy
+      if (k === "c" && !e.altKey) {
+        const macCopy = isMac && e.metaKey && !e.ctrlKey;
+        const winCopyShift = !isMac && e.ctrlKey && e.shiftKey;
+        const winCopySmart = !isMac && e.ctrlKey && !e.shiftKey && term.hasSelection();
+        if (macCopy || winCopyShift || winCopySmart) {
+          if (term.hasSelection()) {
+            copySelection();
+            e.preventDefault();
+            return false;
+          }
+          // No selection on Windows Ctrl+C → fall through so it sends SIGINT.
+          if (winCopyShift) {
+            e.preventDefault();
+            return false;
+          }
+        }
+      }
+      // Paste (Ctrl+V and Ctrl+Shift+V both paste on Windows/Linux; Cmd+V on macOS)
+      if (k === "v" && !e.altKey) {
+        const macPaste = isMac && e.metaKey && !e.ctrlKey;
+        const winPaste = !isMac && e.ctrlKey;
+        if (macPaste || winPaste) {
+          e.preventDefault();
+          pasteClipboard();
+          return false;
+        }
+      }
       const plain = !e.ctrlKey && !e.metaKey;
       // Shift+Enter → newline (same ESC CR that the working Option+Enter sends)
       if (e.key === "Enter" && e.shiftKey && !e.altKey && plain) {
@@ -209,6 +262,15 @@ export function TerminalView({
       }
       return true;
     });
+
+    // Right-click: copy the selection if there is one, otherwise paste — the classic
+    // terminal convention (and the discoverable path for users without the key chords).
+    const onContextMenu = (ev: MouseEvent) => {
+      ev.preventDefault();
+      if (term.hasSelection()) copySelection();
+      else pasteClipboard();
+    };
+    innerRef.current?.addEventListener("contextmenu", onContextMenu);
 
     termRef.current = term;
     const unregister = registerTerminal(term);
@@ -241,6 +303,7 @@ export function TerminalView({
       window.removeEventListener("keydown", onMod, true);
       window.removeEventListener("keyup", onMod, true);
       window.removeEventListener("blur", onBlur);
+      innerRef.current?.removeEventListener("contextmenu", onContextMenu);
       term.dispose();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps

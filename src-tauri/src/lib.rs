@@ -5,6 +5,7 @@
 //! and exposes them to the React frontend as Tauri commands.
 
 mod agent;
+mod agy_usage;
 mod board;
 mod bridge;
 mod broker;
@@ -116,6 +117,20 @@ fn pty_spawn(
                 .filter(|s| !s.is_empty())
         })
     };
+
+    // agy usage tracking: sync the status-line hook into the home THIS agy session will
+    // actually read from (respecting the per-account HOME redirect pty.rs applies below).
+    // The global toggle writes to the default account's home, but a session bound to a
+    // different account uses a different `.gemini` — so install/remove per-spawn where
+    // agy looks, or the panel silently never populates under the two-account split.
+    if !shell_only && agent == crate::agent::AgentId::Antigravity {
+        if let Some(home) = crate::agy_usage::resolve_agy_home(account_config_dir.as_deref()) {
+            let enabled = crate::agy_usage::tracking_enabled(&store);
+            if let Err(e) = crate::agy_usage::configure_in_home(&home, enabled) {
+                eprintln!("conduit: agy usage tracking sync failed: {e}");
+            }
+        }
+    }
 
     // A Conductor session gets the fleet MCP server (scoped to it via --mcp-config) and
     // the full orchestration persona. A WORKER gets the SAME MCP server, scoped to its own
@@ -1107,6 +1122,7 @@ pub fn run() {
         .manage(Arc::new(crate::fleet::FleetState::default()))
         .manage(Arc::new(crate::board::BoardState::default()))
         .manage(Arc::new(claude_usage::ClaudeAuth::default()))
+        .manage(Arc::new(agy_usage::AgyUsageState::default()))
         .manage(Arc::new(hookbus::HookBus::default()))
         .manage(Arc::new(broker::Broker::default()))
         .manage(Arc::new(broker::Presence::default()))
@@ -1135,6 +1151,10 @@ pub fn run() {
             let presence = app.state::<Arc<broker::Presence>>().inner().clone();
             let pty = app.state::<Arc<PtyManager>>().inner().clone();
             let store = app.state::<Arc<Store>>().inner().clone();
+            let agy_usage = app
+                .state::<Arc<crate::agy_usage::AgyUsageState>>()
+                .inner()
+                .clone();
             hooks::start(
                 app.handle().clone(),
                 hook_state,
@@ -1145,6 +1165,7 @@ pub fn run() {
                 store.clone(),
                 pty.clone(),
                 board.clone(),
+                agy_usage,
             );
             bridge::start(app.handle().clone());
             fleet_mcp::start(app.handle().clone(), store, pty, fleet, board);
@@ -1225,6 +1246,9 @@ pub fn run() {
             claude_status::fetch_claude_status,
             claude_usage::fetch_claude_usage,
             claude_usage::connect_claude_plan_usage,
+            agy_usage::fetch_agy_usage,
+            agy_usage::agy_usage_tracking_enabled,
+            agy_usage::set_agy_usage_tracking,
             mcp_apply,
             install_agent,
             telemetry::telemetry_ping,
