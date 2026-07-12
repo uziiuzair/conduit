@@ -26,6 +26,7 @@ import { AgentGlyph } from "./AgentGlyph";
 import { ThemeSwitcher } from "./ThemeSwitcher";
 import { ClaudeStatusPill } from "./ClaudeStatusPill";
 import { ClaudeUsagePanel } from "./ClaudeUsagePanel";
+import { AgyUsagePanel } from "./AgyUsagePanel";
 import { ClaudeStatusWarning } from "./ClaudeStatusWarning";
 
 // Collapsed projects persist as a list of project ids in localStorage — a pure
@@ -99,6 +100,7 @@ export function Sidebar() {
     return findSession(s.projects, id)?.session.agent ?? "claude";
   });
   const showClaudeAmbient = selectedAgent === "claude";
+  const showAgyAmbient = selectedAgent === "antigravity";
 
   async function pickProject() {
     const dir = await open({
@@ -120,6 +122,7 @@ export function Sidebar() {
         ))}
       </div>
       {showClaudeAmbient && <ClaudeUsagePanel />}
+      {showAgyAmbient && <AgyUsagePanel />}
       <div className="add-bar">
         <button onClick={pickProject}>
           <FolderPlusIcon size={12} />

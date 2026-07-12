@@ -11,6 +11,7 @@ import {
   type Session,
   type TodoItem,
   type TodoStatus,
+  type AgyUsage,
 } from "./store";
 import { type AgentId } from "./agents";
 import { type ThemePref } from "./themes";
@@ -165,6 +166,19 @@ export default function App() {
           break;
         }
       }
+    });
+    return () => {
+      void unlisten.then((f) => f());
+    };
+  }, []);
+
+  // agy usage snapshots pushed by the status-line helper via the Rust hook server.
+  useEffect(() => {
+    const st = useStore.getState();
+    void st.refreshAgyUsage();
+    void st.refreshAgyUsageTracking();
+    const unlisten = listen<AgyUsage>("agyusage", ({ payload }) => {
+      useStore.getState().setAgyUsage(payload);
     });
     return () => {
       void unlisten.then((f) => f());

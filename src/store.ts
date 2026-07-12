@@ -247,6 +247,33 @@ export interface ClaudeUsage {
   planSource: "live" | "unavailable" | "disconnected";
 }
 
+// ---- Antigravity (agy) usage — mirror Rust agy_usage.rs (camelCase) ----
+export interface AgyBucket {
+  bucketId: string;
+  label: string; // "Weekly" | "5-hour"
+  remainingFraction: number; // 0..1
+  resetsAt: string | null;
+  disabled: boolean;
+}
+export interface AgyGroup {
+  displayName: string; // "Gemini Models" | "Claude & GPT Models"
+  buckets: AgyBucket[];
+}
+export interface AgyContext {
+  usedPercentage: number;
+  contextWindowSize: number;
+  totalInputTokens: number;
+  totalOutputTokens: number;
+}
+export interface AgyUsage {
+  planTier: string | null;
+  email: string | null;
+  groups: AgyGroup[];
+  context: AgyContext | null;
+  agentState: string | null;
+  updatedAt: number; // epoch ms
+}
+
 const DEFAULT_AGENT_KEY = "conduit.defaultAgent";
 const SETUP_DONE_KEY = "conduit.agentSetupComplete";
 const TELEMETRY_OPTOUT_KEY = "conduit.telemetryOptOut";
@@ -493,6 +520,8 @@ interface AppState {
   claudeStatus: ClaudeStatus | null;
   claudeUsage: ClaudeUsage | null;
   planConnected: boolean;
+  agyUsage: AgyUsage | null;
+  agyUsageTracking: boolean;
 
   // ---- panel collapse + Settings dialog (native menu-driven, App-level) ----
   /** Persisted. When true, the sidebar (and its resizer) is hidden. */
@@ -699,6 +728,10 @@ interface AppState {
   refreshClaudeStatus: () => Promise<void>;
   refreshClaudeUsage: () => Promise<void>;
   connectPlanUsage: () => Promise<boolean>;
+  setAgyUsage: (u: AgyUsage) => void;
+  refreshAgyUsage: () => Promise<void>;
+  refreshAgyUsageTracking: () => Promise<void>;
+  setAgyUsageTracking: (enabled: boolean) => Promise<boolean>;
 }
 
 export const useStore = create<AppState>((set, get) => {
@@ -751,6 +784,8 @@ export const useStore = create<AppState>((set, get) => {
     claudeStatus: null,
     claudeUsage: null,
     planConnected: readPlanConnected(),
+    agyUsage: null,
+    agyUsageTracking: false,
     sidebarCollapsed: readSidebarCollapsed(),
     rightCollapsed: readRightCollapsed(),
     showSettings: false,
@@ -1748,6 +1783,37 @@ export const useStore = create<AppState>((set, get) => {
       }
     },
 
+    // agy usage arrives pushed from Rust (the status-line helper POSTs on each agy state
+    // change); this setter is called by App's "agyusage" event listener.
+    setAgyUsage: (u) => set({ agyUsage: u }),
+
+    refreshAgyUsage: async () => {
+      try {
+        const u = await invoke<AgyUsage | null>("fetch_agy_usage");
+        if (u) set({ agyUsage: u });
+      } catch { /* fail-open: keep last-known */ }
+    },
+
+    refreshAgyUsageTracking: async () => {
+      try {
+        const on = await invoke<boolean>("agy_usage_tracking_enabled");
+        set({ agyUsageTracking: on });
+      } catch { /* leave as-is */ }
+    },
+
+    setAgyUsageTracking: async (enabled) => {
+      try {
+        await invoke<boolean>("set_agy_usage_tracking", { enabled });
+        set({ agyUsageTracking: enabled });
+        return true;
+      } catch {
+        // Refresh from disk so the toggle reflects reality (e.g. a foreign statusLine
+        // blocked the write).
+        await get().refreshAgyUsageTracking();
+        return false;
+      }
+    },
+
     applySystemDark: (dark) => {
       if (get().themePref !== "auto") return;
       const id = resolveThemeId("auto", dark);
@@ -1786,17 +1852,21 @@ export function prettyPath(path: string, home: string | null): string {
   return path;
 }
 
-/** Last path component of a path. */
+/** Last path component of a path. Splits on both `/` and `\` so Windows-native
+ *  paths (which the Rust side emits via `Path::join`, e.g. worktree paths) resolve
+ *  correctly — otherwise the whole backslash path is returned as one segment. */
 export function baseName(path: string): string {
-  const parts = path.replace(/\/+$/, "").split("/");
+  const parts = path.replace(/[/\\]+$/, "").split(/[/\\]/);
   return parts[parts.length - 1] || path;
 }
 
-/** Parent directory of an absolute path (no trailing slash). Root stays "/". */
+/** Parent directory of an absolute path (no trailing separator). Handles both `/`
+ *  and `\` separators. POSIX root stays "/". */
 export function parentDir(path: string): string {
-  const p = path.replace(/\/+$/, "");
-  const i = p.lastIndexOf("/");
-  return i <= 0 ? "/" : p.slice(0, i);
+  const p = path.replace(/[/\\]+$/, "");
+  const i = Math.max(p.lastIndexOf("/"), p.lastIndexOf("\\"));
+  if (i < 0) return p;
+  return i === 0 ? "/" : p.slice(0, i);
 }
 
 /** Open a directory in VS Code (Rust handles the launch + fallbacks). */
