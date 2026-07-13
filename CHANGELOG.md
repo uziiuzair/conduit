@@ -3,6 +3,21 @@
 All notable changes to Conduit are documented here. This project uses
 [semantic versioning](https://semver.org/).
 
+## 0.11.0 — 2026-07-13
+
+- **Added — sidebar drag-and-drop reordering.** Drag a project header to reorder
+  projects, or drag a session row to reorder sessions within their project; an
+  accent line previews the drop position and the order persists across launches.
+  Project headers also got a clearer visual hierarchy: a header slab, bolder
+  names, group separators, and an indent guide nesting sessions under their
+  project.
+- **Fixed — plan-usage connections self-heal.** "Connect plan usage" no longer
+  reports a missing sign-in when the saved token is merely expired or the network
+  blips: connecting now just verifies credentials exist, and the usage poll
+  re-reads the on-disk token (never the macOS Keychain) and retries, so bars
+  recover on their own after Claude Code refreshes a token. Transient failures no
+  longer disconnect an account or block reconnection on the next launch.
+
 ## 0.10.3 — 2026-07-13
 
 - **Changed — Settings control polish.** The glossy native macOS checkboxes, range
