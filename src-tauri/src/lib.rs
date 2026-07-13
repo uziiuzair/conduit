@@ -451,6 +451,11 @@ fn rename_session(project_id: String, session_id: String, name: String, store: S
 }
 
 #[tauri::command]
+fn rename_project(project_id: String, name: String, store: State<Arc<Store>>) {
+    store.rename_project(&project_id, name);
+}
+
+#[tauri::command]
 fn reorder_project(project_id: String, to_index: usize, store: State<Arc<Store>>) {
     store.reorder_project(&project_id, to_index);
 }
@@ -1293,6 +1298,7 @@ pub fn run() {
             add_session,
             detect_agents,
             rename_session,
+            rename_project,
             reorder_project,
             reorder_session,
             conductor_confirm_response,

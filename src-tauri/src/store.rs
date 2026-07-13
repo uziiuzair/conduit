@@ -597,6 +597,15 @@ impl Store {
         self.save(&projects);
     }
 
+    /// Rename a project's display label only. Does not touch `path` or anything on disk.
+    pub fn rename_project(&self, project_id: &str, name: String) {
+        let mut projects = self.projects.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(project) = projects.iter_mut().find(|p| p.id == project_id) {
+            project.name = name;
+        }
+        self.save(&projects);
+    }
+
     /// Move a project to `to_index` in the sidebar order. `to_index` is the insertion
     /// index in the list WITHOUT the moved project (clamped to the end). Returns false
     /// for an unknown project id.

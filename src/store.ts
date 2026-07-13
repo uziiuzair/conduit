@@ -636,6 +636,7 @@ interface AppState {
 
   menu: ContextMenuState | null;
   editingSessionId: string | null;
+  editingProjectId: string | null;
   homeDir: string | null;
   topTab: TopTab;
   bottomTab: BottomTab;
@@ -759,6 +760,8 @@ interface AppState {
   removeProject: (id: string) => Promise<void>;
   addSession: (projectId: string, opts?: { name?: string; useWorktree?: boolean; agent?: AgentId; role?: SessionRole; account?: string | null }) => Promise<void>;
   renameSession: (projectId: string, sessionId: string, name: string) => Promise<void>;
+  /** Rename a project's display label only (not the directory on disk). */
+  renameProject: (projectId: string, name: string) => Promise<void>;
   /** Move a project / session in the sidebar. `toIndex` is the insertion index in the
    *  list WITHOUT the moved item (sessions reorder within their own project only). */
   reorderProject: (projectId: string, toIndex: number) => Promise<void>;
@@ -881,6 +884,8 @@ interface AppState {
   closeMenu: () => void;
   startRename: (sessionId: string) => void;
   cancelRename: () => void;
+  startProjectRename: (projectId: string) => void;
+  cancelProjectRename: () => void;
   setStatus: (id: string, status: SessionStatus) => void;
   setTodos: (id: string, todos: TodoItem[]) => void;
   setActivity: (id: string, activity: string | undefined) => void;
@@ -964,6 +969,7 @@ export const useStore = create<AppState>((set, get) => {
     settingsTab: "agents",
     menu: null,
     editingSessionId: null,
+    editingProjectId: null,
     homeDir: null,
     agents: null,
     defaultAgent: readDefaultAgent(),
@@ -1386,6 +1392,21 @@ export const useStore = create<AppState>((set, get) => {
                 ),
               }
             : p,
+        ),
+      }));
+    },
+
+    renameProject: async (projectId, name) => {
+      const clean = name.trim();
+      if (!clean) {
+        set({ editingProjectId: null });
+        return;
+      }
+      await invoke("rename_project", { projectId, name: clean });
+      set((s) => ({
+        editingProjectId: null,
+        projects: s.projects.map((p) =>
+          p.id === projectId ? { ...p, name: clean } : p,
         ),
       }));
     },
@@ -1979,6 +2000,8 @@ export const useStore = create<AppState>((set, get) => {
     closeMenu: () => set({ menu: null }),
     startRename: (sessionId) => set({ editingSessionId: sessionId, menu: null }),
     cancelRename: () => set({ editingSessionId: null }),
+    startProjectRename: (projectId) => set({ editingProjectId: projectId, menu: null }),
+    cancelProjectRename: () => set({ editingProjectId: null }),
 
     setStatus: (id, status) =>
       set((s) => ({
