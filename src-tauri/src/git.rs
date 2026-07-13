@@ -103,10 +103,6 @@ pub fn diff_text(dir: &str, path: &str) -> Result<String, String> {
         out.push_str("\n… (diff truncated — review the rest on the desktop)");
     }
     Ok(out)
-    let rel = abs
-        .strip_prefix(&top)
-        .map_err(|_| "file is outside the repository".to_string())?;
-    Ok(rel.to_string_lossy().replace('\\', "/"))
 }
 
 /// Same 24 MB bound as fsops::read_file — a diff original larger than the editor
