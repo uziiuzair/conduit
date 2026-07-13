@@ -54,6 +54,26 @@ function persistCollapsed(projectId: string, collapsed: boolean): void {
   }
 }
 
+// ---- Sidebar drag-reorder ----
+// The active drag payload lives here (module scope) because dataTransfer contents are
+// unreadable during dragover — only on drop — and the indicator needs it on hover.
+type SidebarDrag =
+  | { kind: "project"; projectId: string }
+  | { kind: "session"; projectId: string; sessionId: string };
+let sidebarDrag: SidebarDrag | null = null;
+
+/** Insertion index (in the post-removal list) for dropping before/after `targetIdx`. */
+function dropIndex(fromIdx: number, targetIdx: number, after: boolean): number {
+  const to = after ? targetIdx + 1 : targetIdx;
+  return fromIdx < to ? to - 1 : to;
+}
+
+/** "before" (top half) or "after" (bottom half) from the pointer position over a row. */
+function dropHalf(e: React.DragEvent<HTMLDivElement>): "before" | "after" {
+  const r = e.currentTarget.getBoundingClientRect();
+  return e.clientY < r.top + r.height / 2 ? "before" : "after";
+}
+
 async function deleteSession(
   projects: Project[],
   projectId: string,
@@ -143,8 +163,11 @@ export function Sidebar() {
 function ProjectBlock({ project }: { project: Project }) {
   const addSession = useStore((s) => s.addSession);
   const openMenu = useStore((s) => s.openMenu);
+  const reorderProject = useStore((s) => s.reorderProject);
   const [showNew, setShowNew] = useState(false);
   const [collapsed, setCollapsed] = useState(() => loadCollapsed().has(project.id));
+  const [dragSelf, setDragSelf] = useState(false);
+  const [drop, setDrop] = useState<null | "before" | "after">(null);
 
   const openProjectMenu = (x: number, y: number) =>
     openMenu({ x, y, kind: "project", projectId: project.id });
@@ -157,12 +180,54 @@ function ProjectBlock({ project }: { project: Project }) {
     });
 
   return (
-    <div className={`project-block ${collapsed ? "collapsed" : ""}`}>
+    <div
+      className={`project-block ${collapsed ? "collapsed" : ""} ${dragSelf ? "dragging" : ""} ${
+        drop ? `drop-${drop}` : ""
+      }`}
+      onDragOver={(e) => {
+        if (sidebarDrag?.kind !== "project" || sidebarDrag.projectId === project.id) return;
+        e.preventDefault();
+        e.dataTransfer.dropEffect = "move";
+        setDrop(dropHalf(e));
+      }}
+      onDragLeave={(e) => {
+        // Ignore moves into our own children — only clear when truly leaving the block.
+        if (!e.currentTarget.contains(e.relatedTarget as Node | null)) setDrop(null);
+      }}
+      onDrop={(e) => {
+        const src = sidebarDrag;
+        // Recompute the half from the event: on WKWebView, dragleave's relatedTarget is
+        // always null (WebKit bug 66547), so the `drop` indicator state may have been
+        // spuriously cleared by a child-boundary crossing right before the drop.
+        const pos = dropHalf(e);
+        setDrop(null);
+        if (src?.kind !== "project" || src.projectId === project.id) return;
+        e.preventDefault();
+        sidebarDrag = null;
+        const list = useStore.getState().projects;
+        const fromIdx = list.findIndex((p) => p.id === src.projectId);
+        const targetIdx = list.findIndex((p) => p.id === project.id);
+        if (fromIdx < 0 || targetIdx < 0) return;
+        void reorderProject(src.projectId, dropIndex(fromIdx, targetIdx, pos === "after"));
+      }}
+    >
       <div
         className="project-head"
         role="button"
         aria-expanded={!collapsed}
         title={collapsed ? "Expand project" : "Collapse project"}
+        draggable
+        onDragStart={(e) => {
+          sidebarDrag = { kind: "project", projectId: project.id };
+          // Some engines (WebKit/Gecko) won't start a drag with an empty data store.
+          e.dataTransfer.setData("text/plain", project.id);
+          e.dataTransfer.effectAllowed = "move";
+          setDragSelf(true);
+        }}
+        onDragEnd={() => {
+          sidebarDrag = null;
+          setDragSelf(false);
+        }}
         onClick={toggleCollapsed}
         onContextMenu={(e) => {
           e.preventDefault();
@@ -231,6 +296,9 @@ function SessionRow({
   const editing = useStore((s) => s.editingSessionId === session.id);
   const selectSession = useStore((s) => s.selectSession);
   const openMenu = useStore((s) => s.openMenu);
+  const reorderSession = useStore((s) => s.reorderSession);
+  const [dragSelf, setDragSelf] = useState(false);
+  const [drop, setDrop] = useState<null | "before" | "after">(null);
   const accounts = useStore((s) => s.accounts);
   const defaultAccounts = useStore((s) => s.defaultAccounts);
   // Which registered account this session resolves to (null = the env default / unconfigured).
@@ -251,7 +319,54 @@ function SessionRow({
 
   return (
     <div
-      className={`session-row ${selected ? "selected" : ""} ${hidden ? "collapsed-hidden" : ""}`}
+      className={`session-row ${selected ? "selected" : ""} ${hidden ? "collapsed-hidden" : ""} ${
+        dragSelf ? "dragging" : ""
+      } ${drop ? `drop-${drop}` : ""}`}
+      draggable={!editing}
+      onDragStart={(e) => {
+        e.stopPropagation();
+        sidebarDrag = { kind: "session", projectId: project.id, sessionId: session.id };
+        e.dataTransfer.setData("text/plain", session.id);
+        e.dataTransfer.effectAllowed = "move";
+        setDragSelf(true);
+      }}
+      onDragEnd={() => {
+        sidebarDrag = null;
+        setDragSelf(false);
+      }}
+      onDragOver={(e) => {
+        // Sessions reorder within their own project only (a session's cwd/worktree/
+        // transcript are rooted there); a foreign-project drag gets no drop target.
+        if (
+          sidebarDrag?.kind !== "session" ||
+          sidebarDrag.projectId !== project.id ||
+          sidebarDrag.sessionId === session.id
+        )
+          return;
+        e.preventDefault();
+        e.stopPropagation();
+        e.dataTransfer.dropEffect = "move";
+        setDrop(dropHalf(e));
+      }}
+      onDragLeave={(e) => {
+        if (!e.currentTarget.contains(e.relatedTarget as Node | null)) setDrop(null);
+      }}
+      onDrop={(e) => {
+        const src = sidebarDrag;
+        // From the event, not `drop` state — see the project-block onDrop note.
+        const pos = dropHalf(e);
+        setDrop(null);
+        if (src?.kind !== "session" || src.projectId !== project.id) return;
+        e.preventDefault();
+        e.stopPropagation();
+        sidebarDrag = null;
+        const proj = useStore.getState().projects.find((p) => p.id === project.id);
+        if (!proj) return;
+        const fromIdx = proj.sessions.findIndex((s) => s.id === src.sessionId);
+        const targetIdx = proj.sessions.findIndex((s) => s.id === session.id);
+        if (fromIdx < 0 || targetIdx < 0 || fromIdx === targetIdx) return;
+        void reorderSession(project.id, src.sessionId, dropIndex(fromIdx, targetIdx, pos === "after"));
+      }}
       onClick={() => {
         if (!editing) selectSession(project.id, session.id);
       }}

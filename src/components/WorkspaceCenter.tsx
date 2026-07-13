@@ -182,9 +182,13 @@ export function WorkspaceCenter({
     document.body.style.userSelect = "none";
   };
 
-  const allSessions = projects.flatMap((p) =>
-    p.sessions.map((s) => ({ project: p, session: s })),
-  );
+  // Stable id order, deliberately decoupled from sidebar order: layout is pure CSS
+  // (absolute positioning), so DOM order is visually irrelevant — but if it followed the
+  // sidebar, a drag-reorder there would make React physically move every keep-alive
+  // terminal node (detach + reattach), blurring the focused xterm and dropping selections.
+  const allSessions = projects
+    .flatMap((p) => p.sessions.map((s) => ({ project: p, session: s })))
+    .sort((a, b) => a.session.id.localeCompare(b.session.id));
 
   return (
     <div className="center">
