@@ -30,6 +30,17 @@ jobs:
       - name: Install frontend dependencies
         run: pnpm install --frozen-lockfile
 
+      # Notarization uses an App Store Connect API key. The bundler auto-discovers
+      # the private key at ~/private_keys/AuthKey_<APPLE_API_KEY>.p8, so we write it
+      # there from a base64-encoded secret (keeps newlines intact, nothing on disk
+      # in the repo).
+      - name: Provision App Store Connect API key
+        env:
+          APPLE_API_KEY_P8_BASE64: ${{ secrets.APPLE_API_KEY_P8_BASE64 }}
+        run: |
+          mkdir -p ~/private_keys
+          echo "$APPLE_API_KEY_P8_BASE64" | base64 --decode > ~/private_keys/AuthKey_${{ secrets.APPLE_API_KEY }}.p8
+
       - name: Build, sign, notarize, and publish release
         uses: tauri-apps/tauri-action@v0
         env:
@@ -39,9 +50,10 @@ jobs:
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
           APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          # App Store Connect API key notarization (replaces APPLE_ID/APPLE_PASSWORD).
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
         with:
           args: --target universal-apple-darwin
           tagName: ${{ github.ref_name }}
