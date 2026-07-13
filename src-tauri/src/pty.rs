@@ -17,7 +17,7 @@ use std::collections::VecDeque;
 use std::fs;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU16, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU64, Ordering};
 use std::sync::mpsc::{sync_channel, Receiver, SyncSender, TrySendError};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -124,6 +124,10 @@ struct PtySession {
     size: Arc<(AtomicU16, AtomicU16)>,
     /// Recent raw output, for the Conductor's `fleet_peek`.
     output: Arc<RingBuffer>,
+    /// Feature 4 silo: when true (a siloed session under private mode), output is NOT fanned
+    /// out to remote (mobile-bridge) subscribers and new subscriptions are refused. Kept as an
+    /// atomic so marking a *running* session sensitive can cut its remote stream immediately.
+    suppress_remote: Arc<AtomicBool>,
 }
 
 #[derive(Default)]
@@ -156,10 +160,16 @@ impl PtyManager {
         worktree_name: Option<String>,
         settings_path: Option<String>,
         mcp_config_path: Option<String>,
-        system_prompt: Option<String>,
+        system_prompt_file: Option<String>,
         initial_prompt: Option<String>,
         account_config_dir: Option<String>,
         agent: crate::agent::AgentId,
+        suppress_remote: bool,
+        opencode: Option<crate::agent::OpenCodeSpawnConfig>,
+        is_conductor: bool,
+        model: Option<String>,
+        effort: Option<String>,
+        resume_token: Option<String>,
         on_event: Channel<String>,
     ) -> Result<(), String> {
         // Already running → re-attach the live reader to the new channel and force
@@ -217,9 +227,12 @@ impl PtyManager {
                     worktree_name.as_deref(),
                     settings_path.as_deref(),
                     mcp_config_path.as_deref(),
-                    system_prompt.as_deref(),
+                    system_prompt_file.as_deref(),
                     initial_prompt.as_deref(),
                     projects_dir.as_deref(),
+                    model.as_deref(),
+                    effort.as_deref(),
+                    resume_token.as_deref(),
                 );
                 cmd.args(["/K", inner.as_str()]);
             }
@@ -246,9 +259,12 @@ impl PtyManager {
                     worktree_name.as_deref(),
                     settings_path.as_deref(),
                     mcp_config_path.as_deref(),
-                    system_prompt.as_deref(),
+                    system_prompt_file.as_deref(),
                     initial_prompt.as_deref(),
                     projects_dir.as_deref(),
+                    model.as_deref(),
+                    effort.as_deref(),
+                    resume_token.as_deref(),
                 )
             };
             let mut cmd = CommandBuilder::new(&shell);
@@ -265,36 +281,38 @@ impl PtyManager {
         // variable") and `claude` falls off PATH. Strip it from the child env so the
         // shell's nvm works regardless of how Conduit itself was launched.
         cmd.env_remove("npm_config_prefix");
+        // §7.3 research lever: route the CONDUCTOR's native Task subagents (the
+        // §3-preferred path over fleet_spawn for homogeneous Claude parallelism) to Haiku
+        // -- a documented 40-70% saving on multi-agent workflows. Scoped to the Conductor
+        // only; a worker that is itself a specialist may need a stronger subagent model.
+        if let Some((k, v)) = subagent_model_env(is_conductor) {
+            cmd.env(k, v);
+        }
         if !shell_only {
             cmd.env("CONDUIT_SESSION_ID", &session_id);
             cmd.env("CONDUIT_HOOK_PORT", hook_port.to_string());
             for (k, v) in adapter.env_overrides() {
                 cmd.env(k, v);
             }
-            // Select a Claude account (Feature 1/2) without disturbing the user's default
-            // `claude`. A `.claude` account set up via a HOME-redirect launcher (e.g. a
-            // `claude-personal` shim) keeps its `.claude.json` -- the record of the
-            // logged-in account, onboarding, and trust state -- at the PROFILE ROOT, not
-            // inside `.claude`. CLAUDE_CONFIG_DIR only redirects the `.claude` dir, so an
-            // interactive session finds the credentials but re-prompts login/onboarding.
-            // Redirect HOME/USERPROFILE to the profile root instead (exactly what the
-            // launcher does) so the full account state is read. Fall back to
-            // CLAUDE_CONFIG_DIR for a non-`.claude` custom directory. Existence-guarded.
+            // Route OpenCode to the configured local/self-hosted provider:
+            // an inline config env var that outranks the user's opencode.json files, plus
+            // the endpoint key in its own env var (referenced from the config as
+            // {env:CONDUIT_OC_APIKEY}). Env-only by design — never written to disk.
+            if let Some(oc) = &opencode {
+                cmd.env("OPENCODE_CONFIG_CONTENT", &oc.config_json);
+                if let Some(key) = &oc.api_key {
+                    cmd.env("CONDUIT_OC_APIKEY", key);
+                }
+            }
+            // Select the pinned account (Feature 1/2) without disturbing the user's default
+            // agent. The account->env mapping now lives behind `ProviderAdapter::account_env`
+            // (the multi-account extension seam): Claude and Antigravity redirect
+            // HOME/USERPROFILE to the profile root (see `agent::claude_profile_env` for why),
+            // every other adapter returns nothing. Behavior is byte-identical to the block
+            // this replaced. Values are path-derived account identifiers -- never logged.
             if let Some(dir) = account_config_dir.as_deref() {
-                let p = Path::new(dir);
-                if p.exists() {
-                    let root = (p.file_name().and_then(|f| f.to_str()) == Some(".claude"))
-                        .then(|| p.parent().and_then(|r| r.to_str()))
-                        .flatten();
-                    match root {
-                        Some(root) => {
-                            cmd.env("USERPROFILE", root);
-                            cmd.env("HOME", root);
-                        }
-                        None => {
-                            cmd.env("CLAUDE_CONFIG_DIR", dir);
-                        }
-                    }
+                for (k, v) in adapter.account_env(dir) {
+                    cmd.env(k, v);
                 }
             }
         }
@@ -322,6 +340,8 @@ impl PtyManager {
         let sink: Sink = Arc::new(Mutex::new(on_event));
         let output = Arc::new(RingBuffer::new(OUTPUT_RING_BYTES));
         let output_for_reader = output.clone();
+        let suppress_flag = Arc::new(AtomicBool::new(suppress_remote));
+        let suppress_for_reader = suppress_flag.clone();
 
         self.sessions.insert(
             session_id.clone(),
@@ -334,6 +354,7 @@ impl PtyManager {
                 next_sub_id: Arc::new(AtomicU64::new(0)),
                 size: Arc::new((AtomicU16::new(cols), AtomicU16::new(rows))),
                 output,
+                suppress_remote: suppress_flag,
             }),
         );
 
@@ -367,8 +388,13 @@ impl PtyManager {
                     Ok(n) => {
                         output_for_reader.push(&buf[..n]);
                         let encoded = engine.encode(&buf[..n]);
-                        if let Ok(mut subs) = subs_for_reader.lock() {
-                            broadcast(&mut subs, &encoded);
+                        // Remote (bridge) fan-out is suppressed for a siloed session so its
+                        // output never leaves the machine via a paired phone; the desktop sink
+                        // below still receives everything (the human reads the silo directly).
+                        if !suppress_for_reader.load(Ordering::Relaxed) {
+                            if let Ok(mut subs) = subs_for_reader.lock() {
+                                broadcast(&mut subs, &encoded);
+                            }
                         }
                         let ok = sink
                             .lock()
@@ -391,8 +417,10 @@ impl PtyManager {
             }
             let notice = "\r\n\u{1b}[90m[process exited]\u{1b}[0m\r\n";
             let enc_notice = engine.encode(notice);
-            if let Ok(mut subs) = subs_for_reader.lock() {
-                broadcast(&mut subs, &enc_notice);
+            if !suppress_for_reader.load(Ordering::Relaxed) {
+                if let Ok(mut subs) = subs_for_reader.lock() {
+                    broadcast(&mut subs, &enc_notice);
+                }
             }
             if let Ok(s) = sink.lock() {
                 let _ = s.send(enc_notice);
@@ -464,10 +492,30 @@ impl PtyManager {
     pub fn subscribe(&self, session_id: &str) -> Option<(u64, Receiver<String>)> {
         let entry = self.sessions.get(session_id)?;
         let session = entry.lock().ok()?;
+        // A siloed session is never streamed to a remote (mobile-bridge) viewer.
+        if session.suppress_remote.load(Ordering::Relaxed) {
+            return None;
+        }
         let id = session.next_sub_id.fetch_add(1, Ordering::SeqCst);
         let (tx, rx) = sync_channel(SUBSCRIBER_BUFFER);
         session.subscribers.lock().ok()?.push((id, tx));
         Some((id, rx))
+    }
+
+    /// Flip a running session's remote-stream suppression (Feature 4 silo). Setting it true
+    /// also drops any existing bridge subscribers, so marking a *running* session sensitive
+    /// immediately stops a paired phone from receiving further output. No-op if not running.
+    pub fn set_remote_suppressed(&self, session_id: &str, suppress: bool) {
+        if let Some(entry) = self.sessions.get(session_id) {
+            if let Ok(session) = entry.lock() {
+                session.suppress_remote.store(suppress, Ordering::Relaxed);
+                if suppress {
+                    if let Ok(mut subs) = session.subscribers.lock() {
+                        subs.clear();
+                    }
+                }
+            }
+        }
     }
 
     /// Detach a previously-subscribed consumer. No-op if the session or id is gone.
@@ -550,6 +598,14 @@ pub(crate) fn transcript_path(session_id: &str, projects_dir: &Path) -> Option<P
         })
 }
 
+/// §7.3: the env var/value pair to set on a Conductor spawn (`None` for a worker or any
+/// non-Conductor session). Pulled out as a pure function since `CommandBuilder` has no
+/// way to read its env back afterward, so this is the only part of the wiring that's
+/// actually unit-testable -- the call site just applies whatever this returns.
+pub(crate) fn subagent_model_env(is_conductor: bool) -> Option<(&'static str, &'static str)> {
+    is_conductor.then_some(("CLAUDE_CODE_SUBAGENT_MODEL", "claude-haiku-4-5-20251001"))
+}
+
 /// Resolve Claude's transcript store: `$CLAUDE_CONFIG_DIR/projects` if set,
 /// else `~/.claude/projects`. None when no home dir is available.
 pub(crate) fn claude_projects_dir() -> Option<PathBuf> {
@@ -572,6 +628,17 @@ pub(crate) fn shell_quote(s: &str) -> String {
 /// Note: a compound command passed as a single `cmd /K` argument that contains embedded
 /// double quotes is not fully robust under cmd's re-parse; normal (quote-free) sessions
 /// are the supported path -- see `build_script_win`.
+///
+/// cmd.exe expands `%VAR%` sequences during command-line parsing even *inside* double
+/// quotes -- quoting alone does not stop it. A mission/prompt string that happens to
+/// contain e.g. `%CONDUIT_OC_APIKEY%` would otherwise have that secret substituted into
+/// the literal, OS-visible process command line before the target CLI ever runs.
+/// `%` (and the caret used to escape it) are excluded from the "simple" bare charset
+/// above, so any such string already falls into this quoted branch. `^` must be escaped
+/// *before* `%` -- escaping `%` first would double the very carets meant to guard it,
+/// and an even number of carets in front of a `%` cancels the escape and lets it expand
+/// again (empirically verified against a real cmd.exe: `^^%FOO%` still substitutes,
+/// `^%FOO^%` does not, regardless of whether the text sits inside quotes).
 #[cfg(windows)]
 pub(crate) fn win_quote(s: &str) -> String {
     let simple = !s.is_empty()
@@ -580,7 +647,8 @@ pub(crate) fn win_quote(s: &str) -> String {
     if simple {
         s.to_string()
     } else {
-        format!("\"{}\"", s.replace('"', "\"\""))
+        let escaped = s.replace('^', "^^").replace('%', "^%");
+        format!("\"{}\"", escaped.replace('"', "\"\""))
     }
 }
 
@@ -625,9 +693,12 @@ fn build_script(
     worktree: Option<&str>,
     settings: Option<&str>,
     mcp_config: Option<&str>,
-    system_prompt: Option<&str>,
+    system_prompt_file: Option<&str>,
     initial_prompt: Option<&str>,
     projects_dir: Option<&Path>,
+    model: Option<&str>,
+    effort: Option<&str>,
+    resume_token: Option<&str>,
 ) -> String {
     let mut flags = String::new();
     if let Some(name) = worktree {
@@ -639,10 +710,31 @@ fn build_script(
     if let Some(cfg) = mcp_config {
         flags.push_str(&format!(" --mcp-config {}", shell_quote(cfg)));
     }
-    if let Some(sp) = system_prompt {
-        flags.push_str(&format!(" --append-system-prompt {}", shell_quote(sp)));
+    // File, not inline text: see `fleet::write_persona_file` for the Windows
+    // command-line-length reason. `flags` is duplicated by build_invocation's `||`
+    // fallback, so keeping the persona out of it is what stays under cmd.exe's 8191 limit.
+    if let Some(path) = system_prompt_file {
+        flags.push_str(&format!(
+            " --append-system-prompt-file {}",
+            shell_quote(path)
+        ));
     }
-    let invocation = adapter.build_invocation(session_id, projects_dir, &flags, initial_prompt);
+    // SPEC-B: only ever populated for Claude (the caller in lib.rs gates on
+    // agent == AgentId::Claude before resolving these) -- verified real flags, not a guess
+    // (`claude --help` lists both `--model <model>` and `--effort <level>`).
+    if let Some(m) = model {
+        flags.push_str(&format!(" --model {}", shell_quote(m)));
+    }
+    if let Some(e) = effort {
+        flags.push_str(&format!(" --effort {}", shell_quote(e)));
+    }
+    let invocation = adapter.build_invocation(
+        session_id,
+        projects_dir,
+        &flags,
+        initial_prompt,
+        resume_token,
+    );
     format!(
         "export CONDUIT_SESSION_ID={sid} CONDUIT_HOOK_PORT={port}; cd {dir} && {invocation}; exec {shell} -i -l",
         sid = shell_quote(session_id),
@@ -667,9 +759,12 @@ fn build_script_win(
     worktree: Option<&str>,
     settings: Option<&str>,
     mcp_config: Option<&str>,
-    system_prompt: Option<&str>,
+    system_prompt_file: Option<&str>,
     initial_prompt: Option<&str>,
     projects_dir: Option<&Path>,
+    model: Option<&str>,
+    effort: Option<&str>,
+    resume_token: Option<&str>,
 ) -> String {
     let mut flags = String::new();
     if let Some(name) = worktree {
@@ -681,10 +776,26 @@ fn build_script_win(
     if let Some(cfg) = mcp_config {
         flags.push_str(&format!(" --mcp-config {}", quote_arg(cfg)));
     }
-    if let Some(sp) = system_prompt {
-        flags.push_str(&format!(" --append-system-prompt {}", quote_arg(sp)));
+    // File, not inline text -- this is the actual fix for the Windows "command line is too
+    // long" Conductor failure (see `fleet::write_persona_file`): the ~5 KB persona must not
+    // ride on the cmd.exe command line, doubly so because build_invocation repeats `flags`.
+    if let Some(path) = system_prompt_file {
+        flags.push_str(&format!(" --append-system-prompt-file {}", quote_arg(path)));
     }
-    adapter.build_invocation(session_id, projects_dir, &flags, initial_prompt)
+    // SPEC-B: only ever populated for Claude -- see build_script's matching comment.
+    if let Some(m) = model {
+        flags.push_str(&format!(" --model {}", quote_arg(m)));
+    }
+    if let Some(e) = effort {
+        flags.push_str(&format!(" --effort {}", quote_arg(e)));
+    }
+    adapter.build_invocation(
+        session_id,
+        projects_dir,
+        &flags,
+        initial_prompt,
+        resume_token,
+    )
 }
 
 #[cfg(test)]
@@ -695,6 +806,19 @@ mod tests {
     use std::sync::atomic::{AtomicU32, Ordering};
 
     const ID: &str = "11111111-2222-3333-4444-555555555555";
+
+    #[test]
+    fn conductor_spawn_sets_subagent_model_env() {
+        assert_eq!(
+            subagent_model_env(true),
+            Some(("CLAUDE_CODE_SUBAGENT_MODEL", "claude-haiku-4-5-20251001"))
+        );
+    }
+
+    #[test]
+    fn worker_spawn_does_not_set_subagent_model_env() {
+        assert_eq!(subagent_model_env(false), None);
+    }
 
     #[test]
     fn strip_ansi_removes_csi_and_osc_sequences() {
@@ -774,6 +898,9 @@ mod tests {
             None,
             None,
             None,
+            None,
+            None,
+            None,
         );
         assert!(script.contains("export CONDUIT_SESSION_ID='sid-1' CONDUIT_HOOK_PORT=7777"));
         assert!(script.contains("claude --session-id 'sid-1' || claude"));
@@ -790,18 +917,27 @@ mod tests {
             8423,
             "/repo",
             "/bin/zsh",
-            None,                      // worktree
-            Some("/cfg/hooks.json"),   // settings
-            Some("/cfg/mcp.json"),     // mcp_config
-            Some("Be the conductor."), // system_prompt
-            None,                      // initial_prompt
-            None,                      // projects_dir
+            None,                     // worktree
+            Some("/cfg/hooks.json"),  // settings
+            Some("/cfg/mcp.json"),    // mcp_config
+            Some("/cfg/persona.txt"), // system_prompt_file
+            None,                     // initial_prompt
+            None,                     // projects_dir
+            None,                     // model
+            None,                     // effort
+            None,
         );
         assert!(script.contains("--settings '/cfg/hooks.json'"), "{script}");
         assert!(script.contains("--mcp-config '/cfg/mcp.json'"), "{script}");
+        // The persona rides as a FILE path, never inline text (see write_persona_file):
+        // the bare `--append-system-prompt` (no `-file`) must not appear.
         assert!(
-            script.contains("--append-system-prompt 'Be the conductor.'"),
+            script.contains("--append-system-prompt-file '/cfg/persona.txt'"),
             "{script}"
+        );
+        assert!(
+            !script.contains("--append-system-prompt "),
+            "persona must never be inlined: {script}"
         );
     }
 
@@ -820,6 +956,9 @@ mod tests {
             None,
             None,
             Some("implement the parser"),
+            None,
+            None,
+            None,
             None,
         );
         assert!(
@@ -876,12 +1015,39 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
+    fn win_quote_neutralizes_percent_expansion() {
+        // cmd.exe expands %VAR% even inside double quotes -- a mission/prompt string
+        // containing e.g. "%CONDUIT_OC_APIKEY%" must never reach the command line
+        // un-escaped. Verified empirically against a real cmd.exe (see the doc comment
+        // on win_quote): '^' before '%' blocks expansion; escaping '%' alone does not.
+        assert_eq!(
+            win_quote("leak %CONDUIT_OC_APIKEY% here"),
+            "\"leak ^%CONDUIT_OC_APIKEY^% here\""
+        );
+        // An attacker-supplied caret placed right before a '%' must not be able to
+        // cancel the escape by pairing up with it (an even number of carets in front
+        // of a '%' un-escapes it) -- caret must be escaped before percent is.
+        assert_eq!(
+            win_quote("leak ^%CONDUIT_OC_APIKEY% here"),
+            "\"leak ^^^%CONDUIT_OC_APIKEY^% here\""
+        );
+        assert_eq!(
+            win_quote("leak ^^%CONDUIT_OC_APIKEY% here"),
+            "\"leak ^^^^^%CONDUIT_OC_APIKEY^% here\""
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
     fn build_script_win_is_bare_invocation_for_normal_session() {
         // No cd / export / exec: cwd + CONDUIT env are applied natively by CommandBuilder,
         // so a normal session's command line is quote-free.
         let script = build_script_win(
             &crate::agent::ClaudeAdapter,
             ID,
+            None,
+            None,
+            None,
             None,
             None,
             None,
@@ -903,7 +1069,10 @@ mod tests {
             None,
             Some(r"C:\cfg dir\hooks.json"),
             None,
-            Some("Be the conductor."),
+            Some(r"C:\cfg dir\persona.txt"),
+            None,
+            None,
+            None,
             None,
             None,
         );
@@ -911,9 +1080,85 @@ mod tests {
             script.contains("--settings \"C:\\cfg dir\\hooks.json\""),
             "{script}"
         );
+        // Persona rides as a (double-quoted, spaced) FILE path -- never inline text. This
+        // is the guard for the Windows "command line is too long" Conductor-spawn fix.
         assert!(
-            script.contains("--append-system-prompt \"Be the conductor.\""),
+            script.contains("--append-system-prompt-file \"C:\\cfg dir\\persona.txt\""),
             "{script}"
         );
+        assert!(
+            !script.contains("--append-system-prompt \""),
+            "persona must never be inlined: {script}"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn build_script_win_conductor_stays_under_cmd_line_limit() {
+        // The actual regression guard for "The command line is too long." The persona
+        // rides as a FILE path, so the doubled (`||` fallback) invocation stays far under
+        // cmd.exe's hard 8191-char ceiling even though the persona itself is ~5 KB.
+        let persona_path = r"C:\Users\u\AppData\Roaming\ConduitTauri\conductor-persona-11111111-2222-3333-4444-555555555555.txt";
+        let script = build_script_win(
+            &*crate::agent::adapter_for(crate::agent::AgentId::Claude),
+            ID,
+            None,
+            None,
+            Some(r"C:\Users\u\AppData\Roaming\ConduitTauri\conductor-mcp-x.json"),
+            Some(persona_path),
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
+        assert!(script.len() < 8000, "len={}: {script}", script.len());
+        // Sanity: inlining the real persona twice (the OLD behavior) WOULD have overflowed
+        // the limit -- i.e. this test would be meaningless if the persona were tiny.
+        assert!(crate::fleet::CONDUCTOR_PERSONA.len() * 2 > 8191);
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn build_script_appends_model_and_effort_flags() {
+        let adapter = crate::agent::adapter_for(crate::agent::AgentId::Claude);
+        let script = build_script(
+            &*adapter,
+            "sid-1",
+            8423,
+            "/repo",
+            "/bin/zsh",
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some("claude-opus-4-8"),
+            Some("high"),
+            None,
+        );
+        assert!(script.contains("--model 'claude-opus-4-8'"), "{script}");
+        assert!(script.contains("--effort 'high'"), "{script}");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn build_script_win_appends_model_and_effort_flags() {
+        let script = build_script_win(
+            &*crate::agent::adapter_for(crate::agent::AgentId::Claude),
+            "sid-1",
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some("claude-opus-4-8"),
+            Some("high"),
+            None,
+        );
+        assert!(script.contains("--model claude-opus-4-8"), "{script}");
+        assert!(script.contains("--effort high"), "{script}");
     }
 }

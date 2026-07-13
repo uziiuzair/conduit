@@ -2,7 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { useEffect, useRef } from "react";
 
 const HEARTBEAT_MS = 5 * 60 * 1000; // ping every 5 min while focused
-const SESSION_TIMEOUT_MS = 30 * 60 * 1000; // new GA4 session after 30 min idle
+const SESSION_TIMEOUT_MS = 30 * 60 * 1000; // new analytics session after 30 min idle
 
 function send(
   kind: "app_open" | "app_heartbeat",

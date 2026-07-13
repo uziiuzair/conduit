@@ -48,6 +48,20 @@ pub fn parse_line(line: &str) -> Vec<Value> {
             }
         }
         "assistant" => {
+            // SPEC-G, §7.6: real token usage per line, including cache-read vs fresh
+            // input -- the honest signal that prompt caching (90% off cache reads) is
+            // actually working. `message.usage` is a standard field on Claude API
+            // responses; this doesn't disturb the existing bubble/tool_use items below.
+            if let Some(usage) = v.pointer("/message/usage") {
+                out.push(json!({
+                    "kind": "usage",
+                    "model": v.pointer("/message/model").and_then(|m| m.as_str()),
+                    "inputTokens": usage.get("input_tokens").and_then(|x| x.as_i64()).unwrap_or(0),
+                    "outputTokens": usage.get("output_tokens").and_then(|x| x.as_i64()).unwrap_or(0),
+                    "cacheReadTokens": usage.get("cache_read_input_tokens").and_then(|x| x.as_i64()).unwrap_or(0),
+                    "cacheCreationTokens": usage.get("cache_creation_input_tokens").and_then(|x| x.as_i64()).unwrap_or(0),
+                }));
+            }
             if let Some(arr) = content.and_then(|c| c.as_array()) {
                 for block in arr {
                     match block.get("type").and_then(|t| t.as_str()) {
@@ -108,6 +122,45 @@ mod tests {
         assert_eq!(items[1]["kind"], "event");
         assert_eq!(items[1]["event"], "bash");
         assert_eq!(items[1]["mono"], "npm test");
+    }
+
+    #[test]
+    fn parse_line_captures_usage_kind_on_assistant_lines() {
+        let line = json!({"type":"assistant","message":{
+            "model": "claude-opus-4-8",
+            "usage": {
+                "input_tokens": 120,
+                "output_tokens": 45,
+                "cache_read_input_tokens": 900,
+                "cache_creation_input_tokens": 30
+            },
+            "content":[{"type":"text","text":"On it."}]
+        }})
+        .to_string();
+        let items = parse_line(&line);
+        let usage = items
+            .iter()
+            .find(|i| i["kind"] == "usage")
+            .expect("usage item present");
+        assert_eq!(usage["model"], "claude-opus-4-8");
+        assert_eq!(usage["inputTokens"], 120);
+        assert_eq!(usage["outputTokens"], 45);
+        assert_eq!(usage["cacheReadTokens"], 900);
+        assert_eq!(usage["cacheCreationTokens"], 30);
+        // The existing bubble item for the same line is unaffected (regression guard).
+        let bubble = items
+            .iter()
+            .find(|i| i["kind"] == "bubble")
+            .expect("bubble item still present");
+        assert_eq!(bubble["text"], "On it.");
+    }
+
+    #[test]
+    fn parse_line_has_no_usage_item_when_message_usage_is_absent() {
+        let line = json!({"type":"assistant","message":{"content":[{"type":"text","text":"hi"}]}})
+            .to_string();
+        let items = parse_line(&line);
+        assert!(!items.iter().any(|i| i["kind"] == "usage"));
     }
 
     #[test]

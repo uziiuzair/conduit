@@ -19,6 +19,16 @@ pub struct ClaudeUsage {
     pub plan_source: String,
 }
 
+/// One account's Claude usage, for the all-accounts usage bar. `accountId` is None for the
+/// environment default (`~/.claude`); `label` is the account's display name.
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct ClaudeAccountUsage {
+    pub account_id: Option<String>,
+    pub label: String,
+    pub usage: ClaudeUsage,
+}
+
 #[derive(Serialize, Clone, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct LocalUsage {
@@ -50,10 +60,32 @@ pub struct PlanWindow {
 
 #[derive(Deserialize, Default)]
 struct StatsCache {
+    #[serde(default, rename = "lastComputedDate")]
+    last_computed_date: String,
+    #[serde(default, rename = "firstSessionDate")]
+    first_session_date: String,
+    #[serde(default, rename = "modelUsage")]
+    model_usage: HashMap<String, ModelUsage>,
+    #[serde(default, rename = "totalMessages")]
+    total_messages: i64,
+    #[serde(default, rename = "totalSessions")]
+    total_sessions: i64,
     #[serde(default, rename = "dailyModelTokens")]
     daily_model_tokens: Vec<DailyModelTokens>,
     #[serde(default, rename = "dailyActivity")]
     daily_activity: Vec<DailyActivity>,
+}
+
+#[derive(Deserialize, Default)]
+struct ModelUsage {
+    #[serde(default, rename = "inputTokens")]
+    input_tokens: i64,
+    #[serde(default, rename = "outputTokens")]
+    output_tokens: i64,
+    #[serde(default, rename = "cacheReadInputTokens")]
+    cache_read_input_tokens: i64,
+    #[serde(default, rename = "cacheCreationInputTokens")]
+    cache_creation_input_tokens: i64,
 }
 
 #[derive(Deserialize)]
@@ -74,8 +106,9 @@ struct DailyActivity {
     session_count: i64,
 }
 
-/// Parse stats-cache.json into the latest day's local usage. Uses the LAST entry
-/// of each array (most recent) so we never need the current date. Empty on error.
+/// Parse stats-cache.json into local usage. Prefer the cumulative `modelUsage` /
+/// `totalMessages` fields when present; older cache shapes fall back to the latest
+/// daily entry so we never need the current date. Empty on error.
 pub fn parse_stats_cache(body: &str) -> LocalUsage {
     let cache: StatsCache = match serde_json::from_str(body) {
         Ok(v) => v,
@@ -84,12 +117,41 @@ pub fn parse_stats_cache(body: &str) -> LocalUsage {
 
     let mut out = LocalUsage::default();
 
+    if !cache.model_usage.is_empty() {
+        let mut models: Vec<ModelTokens> = cache
+            .model_usage
+            .iter()
+            .map(|(m, u)| ModelTokens {
+                model: m.clone(),
+                tokens: u.input_tokens
+                    + u.output_tokens
+                    + u.cache_read_input_tokens
+                    + u.cache_creation_input_tokens,
+            })
+            .filter(|m| m.tokens > 0)
+            .collect();
+        models.sort_by(|a, b| b.tokens.cmp(&a.tokens));
+        out.total_tokens = models.iter().map(|m| m.tokens).sum();
+        out.tokens_by_model = models;
+        out.messages = cache.total_messages;
+        out.sessions = cache.total_sessions;
+        out.date = if !cache.last_computed_date.is_empty() {
+            cache.last_computed_date
+        } else {
+            cache.first_session_date
+        };
+        return out;
+    }
+
     if let Some(day) = cache.daily_model_tokens.last() {
         out.date = day.date.clone();
         let mut models: Vec<ModelTokens> = day
             .tokens_by_model
             .iter()
-            .map(|(m, t)| ModelTokens { model: m.clone(), tokens: *t })
+            .map(|(m, t)| ModelTokens {
+                model: m.clone(),
+                tokens: *t,
+            })
             .collect();
         models.sort_by(|a, b| b.tokens.cmp(&a.tokens));
         out.total_tokens = models.iter().map(|m| m.tokens).sum();
@@ -107,12 +169,25 @@ pub fn parse_stats_cache(body: &str) -> LocalUsage {
     out
 }
 
-fn stats_cache_path() -> Option<std::path::PathBuf> {
-    dirs::home_dir().map(|h| h.join(".claude").join("stats-cache.json"))
+/// The Claude config dir to read usage/credentials from: the selected account's dir when
+/// one is set, else `~/.claude`. `config_dir` is the global default account's `config_dir`
+/// (resolved by the Tauri command from the store) -- passing it here is what makes the
+/// usage panel follow the account the user actually selected instead of always reading the
+/// first/only `~/.claude`. Bug: a multi-account user who selected "personal" saw "work"
+/// usage because both reads below hardcoded `~/.claude`.
+fn claude_config_dir(config_dir: Option<&str>) -> Option<std::path::PathBuf> {
+    match config_dir {
+        Some(d) if !d.trim().is_empty() => Some(std::path::PathBuf::from(d)),
+        _ => dirs::home_dir().map(|h| h.join(".claude")),
+    }
 }
 
-fn read_local_usage() -> LocalUsage {
-    stats_cache_path()
+fn stats_cache_path(config_dir: Option<&str>) -> Option<std::path::PathBuf> {
+    claude_config_dir(config_dir).map(|d| d.join("stats-cache.json"))
+}
+
+fn read_local_usage(config_dir: Option<&str>) -> LocalUsage {
+    stats_cache_path(config_dir)
         .and_then(|p| std::fs::read_to_string(p).ok())
         .map(|body| parse_stats_cache(&body))
         .unwrap_or_default()
@@ -120,25 +195,88 @@ fn read_local_usage() -> LocalUsage {
 
 // ---- Plan-limit token cache (populated by connect; see plan-limit section) ----
 
+/// Per-account cached OAuth tokens, keyed by `accountId` (or "default" for the env account).
+/// Held in memory only; never persisted or logged.
 #[derive(Default)]
 pub struct ClaudeAuth {
-    pub token: Mutex<Option<String>>,
+    pub tokens: Mutex<HashMap<String, String>>,
 }
 
-/// Tauri command: local usage always; plan limits when a token is cached.
+/// The map key for an account (the env default has no id).
+fn account_key(account_id: Option<&str>) -> String {
+    account_id
+        .map(String::from)
+        .unwrap_or_else(|| "default".into())
+}
+
+impl ClaudeAuth {
+    /// Drop a removed account's cached token so it isn't reused if the id is ever recycled.
+    pub fn evict(&self, account_id: &str) {
+        self.tokens
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(account_id);
+    }
+}
+
+/// Tauri command: usage for EVERY registered Claude account plus the environment default.
+/// Local usage (stats-cache.json) always; plan limits per account when that account's token
+/// has been connected. With no registered accounts this returns a single "Default" entry
+/// reading `~/.claude`, exactly as the single-account panel did.
 #[tauri::command]
 pub async fn fetch_claude_usage(
     auth: tauri::State<'_, std::sync::Arc<ClaudeAuth>>,
-) -> Result<ClaudeUsage, String> {
-    let token = auth.token.lock().unwrap_or_else(|e| e.into_inner()).clone();
-    let usage = tauri::async_runtime::spawn_blocking(move || {
-        let local = read_local_usage();
-        let (plan, plan_source) = fetch_plan(token);
-        ClaudeUsage { local, plan, plan_source }
+    store: tauri::State<'_, std::sync::Arc<crate::store::Store>>,
+) -> Result<Vec<ClaudeAccountUsage>, String> {
+    let targets = store.usage_targets(crate::agent::AgentId::Claude);
+    let auth = auth.inner().clone();
+    let out = tauri::async_runtime::spawn_blocking(move || {
+        let tokens = auth
+            .tokens
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        targets
+            .into_iter()
+            .map(|(account_id, label, config_dir)| {
+                let key = account_key(account_id.as_deref());
+                let token = tokens.get(&key).cloned();
+                let local = read_local_usage(config_dir.as_deref());
+                let (mut plan, mut plan_source) = fetch_plan(token.clone());
+                // A connected account whose fetch didn't come back live may just hold a
+                // stale token: Claude Code rotates the on-disk credentials whenever one of
+                // its sessions runs, and this cache is memory-only. Re-read the file (never
+                // the Keychain -- that prompts) and retry once with the fresh token.
+                if token.is_some() && plan.is_none() {
+                    if let Some(fresh) = reread_token_file(config_dir.as_deref()) {
+                        if Some(&fresh) != token.as_ref() {
+                            auth.tokens
+                                .lock()
+                                .unwrap_or_else(|e| e.into_inner())
+                                .insert(key, fresh.clone());
+                            let (p, s) = fetch_plan(Some(fresh));
+                            if p.is_some() {
+                                plan = p;
+                                plan_source = s;
+                            }
+                        }
+                    }
+                }
+                ClaudeAccountUsage {
+                    account_id,
+                    label,
+                    usage: ClaudeUsage {
+                        local,
+                        plan,
+                        plan_source,
+                    },
+                }
+            })
+            .collect::<Vec<_>>()
     })
     .await
     .map_err(|e| e.to_string())?;
-    Ok(usage)
+    Ok(out)
 }
 
 // ---- Plan limits (best-effort) ----
@@ -164,7 +302,9 @@ pub fn parse_plan(body: &str) -> Option<Vec<PlanWindow>> {
         ("seven_day_opus", "Weekly (Opus)"),
     ] {
         let Some(w) = obj.get(key) else { continue };
-        let Some(util) = w.get("utilization").and_then(|u| u.as_f64()) else { continue };
+        let Some(util) = w.get("utilization").and_then(|u| u.as_f64()) else {
+            continue;
+        };
         // utilization may be a 0..1 fraction or a 0..100 percentage.
         let pct = if util > 1.0 { util / 100.0 } else { util };
         let resets_at = w.get("resets_at").and_then(|r| {
@@ -215,20 +355,13 @@ fn fetch_plan(token: Option<String>) -> (Option<Vec<PlanWindow>>, String) {
     }
 }
 
-/// Read the Claude Code OAuth access token from the macOS login Keychain.
-/// `-w` prints only the secret (a JSON blob). This triggers the macOS allow
-/// prompt; it runs only on explicit user action (the "Connect plan usage" button).
-fn read_keychain_token() -> Option<String> {
-    let out = Command::new("security")
-        .args(["find-generic-password", "-s", "Claude Code-credentials", "-w"])
-        .output()
-        .ok()?;
-    if !out.status.success() {
-        return None;
-    }
-    let raw = String::from_utf8_lossy(&out.stdout);
+/// Extract the Claude Code OAuth access token from the credentials blob, wherever it
+/// came from (macOS Keychain secret, or the Windows plain-file store below). Pure, so
+/// it's testable without touching the Keychain/filesystem. The blob is JSON like
+/// `{"claudeAiOauth":{"accessToken":"...", ...}}`; falls back to a bare token string for
+/// older/other formats.
+fn parse_oauth_token(raw: &str) -> Option<String> {
     let trimmed = raw.trim();
-    // The blob is JSON like {"claudeAiOauth":{"accessToken":"...", ...}}.
     if let Ok(v) = serde_json::from_str::<serde_json::Value>(trimmed) {
         if let Some(tok) = v
             .get("claudeAiOauth")
@@ -238,7 +371,6 @@ fn read_keychain_token() -> Option<String> {
             return Some(tok.to_string());
         }
     }
-    // Fallback: some versions may store the bare token string.
     if trimmed.starts_with("sk-") || trimmed.starts_with("eyJ") {
         Some(trimmed.to_string())
     } else {
@@ -246,21 +378,129 @@ fn read_keychain_token() -> Option<String> {
     }
 }
 
-/// Tauri command: connect plan usage. Reads the Keychain token (macOS prompt),
-/// caches it in memory, and returns whether a live plan fetch then succeeded.
+/// Look for `.credentials.json` inside `dir`, then in its parent (the profile root). Account
+/// layouts vary: a HOME-redirect profile keeps the token at `<root>/.claude/.credentials.json`,
+/// but some keep it beside `.claude` at the root. Checking both makes plan-connect work across
+/// layouts without the user telling us where their token lives. Never returns/logs the token
+/// itself, only whether one parsed.
+fn read_credentials_file(dir: &std::path::Path) -> Option<String> {
+    let inside = dir.join(".credentials.json");
+    if let Some(t) = std::fs::read_to_string(&inside)
+        .ok()
+        .and_then(|raw| parse_oauth_token(&raw))
+    {
+        return Some(t);
+    }
+    if let Some(parent) = dir.parent() {
+        if let Some(t) = std::fs::read_to_string(parent.join(".credentials.json"))
+            .ok()
+            .and_then(|raw| parse_oauth_token(&raw))
+        {
+            return Some(t);
+        }
+    }
+    None
+}
+
+/// Read the Claude Code OAuth access token for the selected account. A non-default account
+/// selected via `CLAUDE_CONFIG_DIR` stores its credentials as a plain `.credentials.json`
+/// in that dir, so prefer that when `config_dir` points at one; only fall back to the login
+/// Keychain (the DEFAULT account's store on macOS) when no per-dir file exists. `-w` prints
+/// only the secret; it triggers the macOS allow prompt, so this runs only on explicit user
+/// action (the "Connect plan usage" button).
+#[cfg(target_os = "macos")]
+fn read_oauth_token(config_dir: Option<&str>) -> Option<String> {
+    if let Some(dir) = config_dir.filter(|d| !d.trim().is_empty()) {
+        // A registered account keeps its own `.credentials.json`; read ONLY that (config dir
+        // or its profile root) and never fall back to the login Keychain -- that would prompt
+        // for, and cache under this account's key, the DEFAULT account's token. Absent =>
+        // not connected.
+        return read_credentials_file(std::path::Path::new(dir));
+    }
+    // Env-default account only: the login Keychain (this is the read that prompts).
+    let out = Command::new("security")
+        .args([
+            "find-generic-password",
+            "-s",
+            "Claude Code-credentials",
+            "-w",
+        ])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    parse_oauth_token(&String::from_utf8_lossy(&out.stdout))
+}
+
+/// Read the Claude Code OAuth access token from its plain-file store on Windows.
+/// **Verified against a real file on this dev machine (2026-07-05):**
+/// `~/.claude/.credentials.json` exists with exactly the same top-level shape the macOS
+/// Keychain blob has (`{"claudeAiOauth": {"accessToken": ..., "refreshToken": ...,
+/// "expiresAt": ..., "scopes": [...], ...}, "organizationUuid": ...}`), confirmed by
+/// reading the real file's key structure (never its values). No Windows Credential
+/// Manager / DPAPI involved -- Claude Code itself stores this as a plain JSON file here,
+/// so `parse_oauth_token` is shared unmodified. No prompt/elevation needed to read it.
+#[cfg(windows)]
+fn read_oauth_token(config_dir: Option<&str>) -> Option<String> {
+    read_credentials_file(&claude_config_dir(config_dir)?)
+}
+
+/// Other platforms (Linux): Claude Code stores `.credentials.json` as a plain file in the
+/// config dir, same shape as Windows -- read it from the selected account's dir (or root).
+#[cfg(not(any(target_os = "macos", windows)))]
+fn read_oauth_token(config_dir: Option<&str>) -> Option<String> {
+    read_credentials_file(&claude_config_dir(config_dir)?)
+}
+
+/// Poll-time credentials re-read: file stores only. On macOS the env-default account
+/// lives in the login Keychain, and reading THAT prompts the user -- a background poll
+/// must never trigger it, so the default account stays connect-time only there.
+#[cfg(target_os = "macos")]
+fn reread_token_file(config_dir: Option<&str>) -> Option<String> {
+    let dir = config_dir.filter(|d| !d.trim().is_empty())?;
+    read_credentials_file(std::path::Path::new(dir))
+}
+
+/// Windows/Linux keep every account's credentials as a plain file, so re-reading is
+/// always prompt-free.
+#[cfg(not(target_os = "macos"))]
+fn reread_token_file(config_dir: Option<&str>) -> Option<String> {
+    read_oauth_token(config_dir)
+}
+
+/// Tauri command: connect plan usage. Reads the OAuth token from wherever this platform
+/// stores it (macOS Keychain prompt, or the Windows plain-file store), caches it in
+/// memory, and returns whether a token was FOUND. Deliberately NOT gated on a live plan
+/// fetch succeeding: the on-disk token may be momentarily expired (Claude Code rotates it
+/// whenever a session runs) or the network may be down -- both transient. The usage poll
+/// re-reads the file and retries, so "connected" means "credentials exist", and `false`
+/// reliably means "no sign-in found" (which is what the UI tells the user).
 #[tauri::command]
 pub async fn connect_claude_plan_usage(
+    account_id: Option<String>,
     auth: tauri::State<'_, std::sync::Arc<ClaudeAuth>>,
+    store: tauri::State<'_, std::sync::Arc<crate::store::Store>>,
 ) -> Result<bool, String> {
     let auth = auth.inner().clone();
+    // The account's config dir holds its `.credentials.json`; None (env default) reads
+    // `~/.claude` (or the login Keychain on macOS).
+    let config_dir = match account_id.as_deref() {
+        Some(id) => store.account_config_dir_by_id(id),
+        None => None,
+    };
+    let key = account_key(account_id.as_deref());
     let ok = tauri::async_runtime::spawn_blocking(move || {
-        let token = match read_keychain_token() {
-            Some(t) => t,
-            None => return false,
-        };
-        *auth.token.lock().unwrap_or_else(|e| e.into_inner()) = Some(token.clone());
-        let (plan, _src) = fetch_plan(Some(token));
-        plan.is_some()
+        match read_oauth_token(config_dir.as_deref()) {
+            Some(token) => {
+                auth.tokens
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .insert(key, token);
+                true
+            }
+            None => false,
+        }
     })
     .await
     .map_err(|e| e.to_string())?;
@@ -283,6 +523,59 @@ mod tests {
       ]
     }"#;
 
+    const CUMULATIVE_FIXTURE: &str = r#"{
+      "version": 1,
+      "firstSessionDate": "2026-06-01",
+      "lastComputedDate": "2026-06-26",
+      "totalMessages": 42,
+      "totalSessions": 7,
+      "modelUsage": {
+        "claude-opus-4-8": {
+          "inputTokens": 100,
+          "outputTokens": 25,
+          "cacheReadInputTokens": 1000,
+          "cacheCreationInputTokens": 250
+        },
+        "claude-sonnet-4-6": {
+          "inputTokens": 50,
+          "outputTokens": 10,
+          "cacheReadInputTokens": 0,
+          "cacheCreationInputTokens": 5
+        }
+      },
+      "dailyModelTokens": [
+        {"date": "2026-06-26", "tokensByModel": {"claude-opus-4-8": 10}}
+      ],
+      "dailyActivity": [
+        {"date": "2026-06-26", "messageCount": 1, "sessionCount": 1, "toolCallCount": 9}
+      ]
+    }"#;
+
+    #[test]
+    fn config_dir_prefers_selected_account_over_home() {
+        // The account-usage bug: a selected (non-default-home) account dir must win, so the
+        // usage panel follows the account the user chose instead of always reading ~/.claude.
+        let selected = claude_config_dir(Some(r"C:\Users\u\.claude-personal\.claude")).unwrap();
+        assert_eq!(
+            selected,
+            std::path::Path::new(r"C:\Users\u\.claude-personal\.claude")
+        );
+        assert_eq!(
+            stats_cache_path(Some(r"C:\Users\u\.claude-personal\.claude")).unwrap(),
+            std::path::Path::new(r"C:\Users\u\.claude-personal\.claude").join("stats-cache.json")
+        );
+        // Empty/absent selection falls back to the home ~/.claude dir (single-account users).
+        let home_fallback = stats_cache_path(None);
+        let home_empty = stats_cache_path(Some("   "));
+        assert_eq!(home_fallback, home_empty);
+        if let Some(h) = dirs::home_dir() {
+            assert_eq!(
+                home_fallback.unwrap(),
+                h.join(".claude").join("stats-cache.json")
+            );
+        }
+    }
+
     #[test]
     fn parses_latest_day_tokens_sorted_desc() {
         let u = parse_stats_cache(FIXTURE);
@@ -293,6 +586,59 @@ mod tests {
         assert_eq!(u.total_tokens, 1_230_000);
         assert_eq!(u.messages, 320);
         assert_eq!(u.sessions, 14);
+    }
+
+    #[test]
+    fn prefers_cumulative_model_usage_when_present() {
+        let u = parse_stats_cache(CUMULATIVE_FIXTURE);
+        assert_eq!(u.date, "2026-06-26");
+        assert_eq!(u.total_tokens, 1_440);
+        assert_eq!(u.messages, 42);
+        assert_eq!(u.sessions, 7);
+        assert_eq!(u.tokens_by_model.len(), 2);
+        assert_eq!(u.tokens_by_model[0].model, "claude-opus-4-8");
+        assert_eq!(u.tokens_by_model[0].tokens, 1_375);
+        assert_eq!(u.tokens_by_model[1].model, "claude-sonnet-4-6");
+        assert_eq!(u.tokens_by_model[1].tokens, 65);
+    }
+
+    #[test]
+    fn parse_oauth_token_extracts_from_claude_ai_oauth_shape() {
+        // Shape verified against a real ~/.claude/.credentials.json on Windows
+        // (2026-07-05) -- values here are synthetic, never the real token.
+        let body = r#"{
+          "claudeAiOauth": {
+            "accessToken": "sk-ant-oat-FAKE-TOKEN-FOR-TESTS-ONLY",
+            "refreshToken": "sk-ant-ort-FAKE-REFRESH-FOR-TESTS-ONLY",
+            "expiresAt": 1234567890,
+            "scopes": ["user:inference", "user:profile"],
+            "subscriptionType": "max",
+            "rateLimitTier": "default_claude_max_20x"
+          },
+          "organizationUuid": "00000000-0000-0000-0000-000000000000"
+        }"#;
+        assert_eq!(
+            parse_oauth_token(body).as_deref(),
+            Some("sk-ant-oat-FAKE-TOKEN-FOR-TESTS-ONLY")
+        );
+    }
+
+    #[test]
+    fn parse_oauth_token_falls_back_to_bare_token_string() {
+        assert_eq!(
+            parse_oauth_token(" sk-ant-bare-fake-token \n").as_deref(),
+            Some("sk-ant-bare-fake-token")
+        );
+        assert_eq!(
+            parse_oauth_token("eyJhbGciOiJIUzI1NiJ9.fake.jwt").as_deref(),
+            Some("eyJhbGciOiJIUzI1NiJ9.fake.jwt")
+        );
+    }
+
+    #[test]
+    fn parse_oauth_token_none_on_unrecognized_shape() {
+        assert!(parse_oauth_token("{}").is_none());
+        assert!(parse_oauth_token("not json, not a token").is_none());
     }
 
     #[test]
@@ -317,7 +663,10 @@ mod tests {
         assert_eq!(w.len(), 3);
         assert_eq!(w[0].label, "5-hour window");
         assert!((w[0].pct_used - 0.02).abs() < 1e-9, "got {}", w[0].pct_used);
-        assert_eq!(w[0].resets_at.as_deref(), Some("2026-06-26T14:40:00.997918+00:00"));
+        assert_eq!(
+            w[0].resets_at.as_deref(),
+            Some("2026-06-26T14:40:00.997918+00:00")
+        );
         assert_eq!(w[2].label, "Weekly (Opus)");
         assert!((w[2].pct_used - 0.79).abs() < 1e-9);
     }

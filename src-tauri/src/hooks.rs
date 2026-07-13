@@ -50,6 +50,7 @@ fn forward_to_bus(bus: &HookBus, session: Option<String>, event: String, body: V
 }
 
 /// Boot the listener on the first free port in 8423..=8443 (same range as Swift).
+#[allow(clippy::too_many_arguments)]
 pub fn start(
     app: AppHandle,
     state: Arc<HookState>,
@@ -57,6 +58,11 @@ pub fn start(
     broker: Arc<Broker>,
     presence: Arc<Presence>,
     fleet: Arc<crate::fleet::FleetState>,
+    store: Arc<crate::store::Store>,
+    pty: Arc<crate::pty::PtyManager>,
+    board: Arc<crate::board::BoardState>,
+    agy_usage: Arc<crate::agy_usage::AgyUsageState>,
+    agy_resume: Arc<crate::agy_usage::AgyResumeState>,
 ) {
     thread::spawn(move || {
         let mut server: Option<Server> = None;
@@ -100,6 +106,91 @@ pub fn start(
                 .as_reader()
                 .take(1024 * 1024)
                 .read_to_string(&mut body);
+
+            // agy usage: the status-line helper POSTs agy's payload here and echoes our
+            // response as its status line. Handle before the generic "ok" respond so the
+            // reply carries the formatted line, and before the session gate (a usage
+            // snapshot is account-global, not tied to a fleet session). This body is
+            // UNTRUSTED, unauthenticated, localhost display-data (same trust model as the
+            // other hook events) -- no security decision keys off it; it only drives a
+            // cosmetic meter, so a spoofed post at worst shows wrong numbers.
+            if event == "agyusage" {
+                let parsed: Value = serde_json::from_str(&body).unwrap_or(Value::Null);
+                let mut usage = crate::agy_usage::parse_statusline_payload(&parsed);
+                // Key the snapshot by the posting session's resolved account so multiple agy
+                // accounts don't clobber one slot (None = the environment default).
+                usage.account_id = session
+                    .as_deref()
+                    .and_then(|sid| store.session_account_id(sid));
+                // Mirror agy's own activity into the shutdown-guard status: agy doesn't fire
+                // Claude-style lifecycle hooks, so without this a busy agy session is invisible
+                // to the "an agent is working" quit confirm. Runs on EVERY tick (even
+                // quota-less ones) so a working state registers before quota loads.
+                if let Some(sid) = session.as_deref() {
+                    fleet.set_running(
+                        sid,
+                        crate::agy_usage::agent_state_is_active(usage.agent_state.as_deref()),
+                    );
+                }
+                let line = crate::agy_usage::format_status_line(&usage);
+                // Only replace the snapshot when this tick carried real quota data; a
+                // quota-less tick would otherwise clobber a good snapshot (see has_data).
+                if usage.has_data() {
+                    if std::env::var("CONDUIT_HOOK_LOG").as_deref() == Ok("1") {
+                        // Summary only -- never log the raw body (it carries the account email).
+                        eprintln!(
+                            "[hook] agyusage account={:?} groups={} tier={:?}",
+                            usage.account_id,
+                            usage.groups.len(),
+                            usage.plan_tier
+                        );
+                    }
+                    let key = usage
+                        .account_id
+                        .clone()
+                        .unwrap_or_else(|| "default".to_string());
+                    agy_usage.set(key, usage.clone());
+                    let _ = app.emit("agyusage", &usage);
+
+                    // Capture this session's agy conversation id ONCE, so the next spawn can
+                    // reopen it via `--conversation=<id>`. agy won't let us pin our own id, so we
+                    // discover the one it chose -- but only a db NOT present at this session's
+                    // spawn (via the AgyResumeState baseline), so two sessions sharing an agy
+                    // home don't cross-capture. Refuse an id already claimed by another session
+                    // (never point two sessions at one conversation). Skip if already captured.
+                    if let Some(sid) = session.as_deref() {
+                        if store.session_agent_conversation_id(sid).is_none() {
+                            let config_dir = store.session_account_config_dir(sid);
+                            if let Some(home) =
+                                crate::agy_usage::resolve_agy_home(config_dir.as_deref())
+                            {
+                                // Primary: agy's own conversation id from the payload (keyed to
+                                // THIS session -> race-free), accepted only if it names a real
+                                // conversation db. Fallback: the spawn-baseline heuristic, which
+                                // declines when a shared home makes the choice ambiguous.
+                                let captured = crate::agy_usage::parse_conversation_id(&parsed)
+                                    .filter(|id| {
+                                        crate::agy_usage::conversation_db_exists(&home, id)
+                                    })
+                                    .or_else(|| {
+                                        let taken = store.all_agent_conversation_ids_except(sid);
+                                        agy_resume.capture_new(sid, &home, &taken)
+                                    });
+                                if let Some(cid) = captured {
+                                    if !store.conversation_id_in_use(&cid, sid) {
+                                        store.set_session_agent_conversation_id(sid, &cid);
+                                        agy_resume.forget(sid);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                // Always answer agy so its status line still renders.
+                let _ = request.respond(Response::from_string(line));
+                continue;
+            }
+
             let _ = request.respond(Response::from_string("ok"));
 
             let Some(session) = session else { continue };
@@ -107,6 +198,48 @@ pub fn start(
 
             // Mirror status into the fleet map so the Conductor can read it (fleet_list).
             fleet.record(&session, &event, &parsed);
+
+            // SPEC-D: reactively wake the project's Conductor instead of making it poll
+            // fleet_list on a timer. Only for a wake-eligible event (worker stop /
+            // needsInput), only when the Conductor is not mid-turn, and debounced so a
+            // burst of near-simultaneous worker events collapses into one nudge.
+            if crate::fleet::is_wake_event(&event) {
+                if let Some(snap) = store.fleet_snapshot(&session) {
+                    if let Some(conductor) = crate::fleet::resolve_wake_target(&snap, &session) {
+                        let status = fleet
+                            .snapshot()
+                            .get(&conductor.id)
+                            .map(|s| s.status.clone())
+                            .unwrap_or_default();
+                        if crate::fleet::conductor_wakeable(&status)
+                            && fleet.should_wake_now(&conductor.id)
+                        {
+                            let nudge = format!(
+                                "[Conduit] worker {session} reported \"{event}\" -- check fleet_list / fleet_results.\r"
+                            );
+                            let _ = pty.write(&conductor.id, &nudge);
+                        }
+                    }
+                }
+            }
+
+            // SPEC-A Tier 2 / SPEC-F (shared hook-channel infra): `result`/`note` are
+            // HIGH-STAKES verbs -- data another session or the Conductor may act on --
+            // unlike the other lifecycle verbs, which only ever move a cosmetic status
+            // dot. An unknown session posting one is dropped entirely -- not mirrored,
+            // not forwarded to the bus/webview either (the `continue`) -- unlike the
+            // other verbs (prompt/pretool/todos/stop/notification/sessionstart/
+            // sessionend), which stay exactly as forgeable as before: a conscious scope
+            // line, not an oversight (Audit Finding 2).
+            if (event == "result" || event == "note")
+                && ingest_high_stakes_verb(&store, &board, &fleet, &session, &event, &parsed)
+                    .is_err()
+            {
+                if std::env::var("CONDUIT_HOOK_LOG").as_deref() == Ok("1") {
+                    eprintln!("[hook] rejected {event} from unknown session={session}");
+                }
+                continue;
+            }
 
             // Dev-only raw capture so we can inspect undocumented payloads
             // (Task*, SessionStart, Subagent*). Enable with CONDUIT_HOOK_LOG=1.
@@ -127,6 +260,65 @@ pub fn start(
             );
         }
     });
+}
+
+/// Build the board record a `result`/`note` hook event should append, from the
+/// already-parsed body. Pure (no I/O), so it's directly unit-testable.
+fn hook_record_for(
+    session: &str,
+    project_id: &str,
+    event: &str,
+    parsed: &Value,
+) -> crate::board::BoardRecord {
+    if event == "result" {
+        crate::board::BoardRecord::result(session, project_id, parsed.clone())
+    } else {
+        let channel = parsed.get("channel").and_then(|v| v.as_str()).unwrap_or("");
+        // Enforced at this ingestion point too, not only in fleet_note's MCP arm
+        // (Phase 5) -- a Tier-2 body is attacker-shaped-if-forged, so cap it the same
+        // way regardless of write path. Truncated (not rejected) since the hook channel
+        // is fire-and-forget -- there's no response value for a Tier-2 worker to react to.
+        let raw = parsed.get("text").and_then(|v| v.as_str()).unwrap_or("");
+        let text = crate::board::truncate_utf8(raw, crate::board::NOTE_MAX_BYTES);
+        crate::board::BoardRecord::note(session, project_id, channel, text)
+    }
+}
+
+/// SPEC-A Tier 2 / SPEC-F: resolve project ownership via `fleet_snapshot`
+/// (deny-by-default, the same primitive SPEC-0 uses for `fleet_peek`/`fleet_send`)
+/// before ever writing to the board. `Err(())` for an unknown session id -- the caller
+/// decides whether to log and always `continue`s the request either way.
+///
+/// A `note` additionally gets the same two guardrails `fleet_note`'s MCP arm enforces
+/// (`fleet_mcp.rs`'s `on_channel` + `FleetState::note_rate_ok`) -- an audit found this
+/// hook-ingestion path originally skipped both, letting a Tier-2 worker's hook body
+/// (attacker-shaped if forged) post to a channel it never joined, or flood the board at
+/// unlimited rate since only the MCP path was rate-limited.
+fn ingest_high_stakes_verb(
+    store: &crate::store::Store,
+    board: &crate::board::BoardState,
+    fleet: &crate::fleet::FleetState,
+    session: &str,
+    event: &str,
+    parsed: &Value,
+) -> Result<(), ()> {
+    let snap = store.fleet_snapshot(session).ok_or(())?;
+    if event == "note" {
+        if !fleet.note_rate_ok(session) {
+            return Err(());
+        }
+        let channel = parsed.get("channel").and_then(|v| v.as_str()).unwrap_or("");
+        let is_member = snap
+            .sessions
+            .iter()
+            .find(|s| s.id == session)
+            .is_some_and(|s| s.channels.iter().any(|c| c == channel));
+        if !is_member {
+            return Err(());
+        }
+    }
+    board.append(hook_record_for(session, &snap.project_id, event, parsed));
+    Ok(())
 }
 
 /// Blocking approval handler. With no phone attached to the session it returns no
@@ -276,6 +468,84 @@ export const ConduitStatus = async () => ({
 });
 "#;
     TEMPLATE.replace("__PORT__", &port.to_string())
+}
+
+/// The JSON Schema `codex exec --output-schema` is asked to constrain its structured
+/// result to. Field names deliberately match the CAMEL-CASE shape `fleet_result`'s MCP
+/// payload already uses (`artifactPaths`, not `artifact_paths`) so a `Result` record is
+/// shaped identically regardless of whether Tier 1 (MCP) or Tier 2 (this hook channel)
+/// produced it -- `fleet_results()` never has to special-case which channel a record
+/// came from. Cross-platform -- both the POSIX and Windows `CodexAdapter::
+/// build_invocation` branches pass `--output-schema .conduit/result.schema.json`.
+const CODEX_RESULT_SCHEMA: &str = r#"{
+  "type": "object",
+  "properties": {
+    "status": { "type": "string", "enum": ["success", "failure", "partial"] },
+    "summary": { "type": "string" },
+    "artifactPaths": { "type": "array", "items": { "type": "string" } },
+    "tokens": { "type": "object" }
+  },
+  "required": ["status", "summary"]
+}
+"#;
+
+/// Write `.conduit/result.schema.json` into a Codex fleet worker's worktree, so
+/// `codex exec --output-schema` has something to constrain its result to. Called once at
+/// worktree-provisioning time, cross-platform.
+pub fn write_codex_result_schema(worktree_path: &str) -> std::io::Result<()> {
+    let dir = Path::new(worktree_path).join(".conduit");
+    fs::create_dir_all(&dir)?;
+    fs::write(dir.join("result.schema.json"), CODEX_RESULT_SCHEMA)
+}
+
+/// Windows-only: write `.conduit\result.cmd`, the helper script `CodexAdapter::
+/// build_invocation`'s Windows branch `call`s. Exists because embedding a quote-heavy curl
+/// command directly inside a single `cmd /K` argument is fragile under cmd's re-parse
+/// (see `pty.rs`'s own doc comment on `win_quote`) -- writing the bytes straight to a file
+/// sidesteps that entirely. The port is baked in directly (stable for the app's lifetime,
+/// same convention as `command()`'s Windows branch above); the session id is read from
+/// `%CONDUIT_SESSION_ID%` at run time since it varies per spawn.
+#[cfg(windows)]
+pub fn write_codex_result_script(worktree_path: &str, port: u16) -> std::io::Result<()> {
+    let dir = Path::new(worktree_path).join(".conduit");
+    fs::create_dir_all(&dir)?;
+    let content = format!(
+        "@echo off\r\ncurl -s -m 5 -X POST -H \"Content-Type: application/json\" --data-binary @.conduit\\result.json \"http://127.0.0.1:{port}/hook?session=%CONDUIT_SESSION_ID%&event=result\" >NUL 2>&1\r\n"
+    );
+    fs::write(dir.join("result.cmd"), content)
+}
+
+/// §7.4 research lever: write the mission's objective/outputShape/boundaries into the
+/// worktree's context file, so a Tier-2/3 worker (no MCP, no `fleet_result`) still gets a
+/// real brief. `AGENTS.md` for every adapter Codex/Gemini/OpenCode/Antigravity all read;
+/// Claude uses `CLAUDE.md` instead and ignores AGENTS.md -- but Claude's OWN worktree is
+/// created asynchronously by the `claude` process itself, after this point in `pty_spawn`,
+/// so there's no reliable synchronous window to inject into it here. This is therefore
+/// only called from the Conduit-driven worktree path (non-Claude adapters), where Rust
+/// itself calls `worktree::add` synchronously first and the directory is guaranteed to
+/// exist. Appends if the file already exists (e.g. inherited via the worktree), creates
+/// otherwise. Only ever called for a session with a real Mission record -- a manual
+/// session's context file is never touched.
+pub fn write_mission_context(worktree_path: &str, mission: &Value) {
+    let path = Path::new(worktree_path).join("AGENTS.md");
+    let objective = mission
+        .get("objective")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let mut block = format!("\n## Fleet mission\n\n**Objective:** {objective}\n");
+    if let Some(shape) = mission.get("outputShape").and_then(|v| v.as_str()) {
+        block.push_str(&format!("\n**Output shape:** {shape}\n"));
+    }
+    if let Some(b) = mission.get("boundaries").and_then(|v| v.as_str()) {
+        block.push_str(&format!("\n**Boundaries:** {b}\n"));
+    }
+
+    let mut content = fs::read_to_string(&path).unwrap_or_default();
+    if !content.is_empty() && !content.ends_with('\n') {
+        content.push('\n');
+    }
+    content.push_str(&block);
+    let _ = fs::write(&path, content);
 }
 
 /// Write the OpenCode status plugin into <dir>/<config_rel_path>. Conduit-owned file:
@@ -447,9 +717,8 @@ fn command(event: &str, port: u16) -> Value {
     // `is_conduit_entry` idempotency matching. Elsewhere keep the POSIX form.
     #[cfg(windows)]
     let cmd = {
-        let url = format!(
-            "http://127.0.0.1:{port}/hook?session=%CONDUIT_SESSION_ID%&event={event}"
-        );
+        let url =
+            format!("http://127.0.0.1:{port}/hook?session=%CONDUIT_SESSION_ID%&event={event}");
         format!(
             "curl -s -m 2 -X POST -H \"Content-Type: application/json\" --data-binary @- \"{url}\" >NUL 2>&1 || ver >NUL"
         )
@@ -805,6 +1074,213 @@ mod tests {
             "pretool mapping missing: {js}"
         );
         assert!(js.contains("chat.message"), "prompt mapping missing: {js}");
+    }
+
+    // ---- SPEC-A Tier 2 / SPEC-F: shared hook-channel infra ----
+
+    fn store_with_one_session(tag: &str) -> (crate::store::Store, String, String) {
+        use crate::store::{SessionRole, Store};
+        let dir =
+            std::env::temp_dir().join(format!("conduit_hooks_store_{tag}_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let store = Store::for_test(&dir);
+        let proj = store.add_project("/repo".into());
+        let worker = store
+            .add_session(
+                &proj.id,
+                "Worker".into(),
+                true,
+                crate::agent::AgentId::Codex,
+                SessionRole::Worker,
+            )
+            .unwrap();
+        (store, proj.id, worker.id)
+    }
+
+    #[test]
+    fn rejects_result_from_unknown_session() {
+        let (store, project_id, _worker_id) = store_with_one_session("reject");
+        let board = crate::board::BoardState::default();
+        let fleet = crate::fleet::FleetState::default();
+        let res = ingest_high_stakes_verb(
+            &store,
+            &board,
+            &fleet,
+            "totally-unknown-session-id",
+            "result",
+            &json!({"status": "success", "summary": "done"}),
+        );
+        assert!(res.is_err());
+        assert!(
+            board.query(&project_id, None).is_empty(),
+            "a forged result from an unknown session must never reach the board"
+        );
+    }
+
+    #[test]
+    fn accepts_result_from_known_session() {
+        let (store, project_id, worker_id) = store_with_one_session("accept");
+        let board = crate::board::BoardState::default();
+        let fleet = crate::fleet::FleetState::default();
+        let res = ingest_high_stakes_verb(
+            &store,
+            &board,
+            &fleet,
+            &worker_id,
+            "result",
+            &json!({"status": "success", "summary": "done"}),
+        );
+        assert!(res.is_ok());
+        let records = board.query(&project_id, Some(crate::board::BoardKind::Result));
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].author_session, worker_id);
+        assert_eq!(records[0].payload["summary"], "done");
+    }
+
+    #[test]
+    fn note_verb_enforces_512_byte_cap() {
+        let (store, project_id, worker_id) = store_with_one_session("note_cap");
+        store.set_session_trust(
+            &worker_id,
+            crate::store::SessionTrust {
+                channels: vec!["project".into()],
+                ..Default::default()
+            },
+        );
+        let board = crate::board::BoardState::default();
+        let fleet = crate::fleet::FleetState::default();
+        let oversized = "x".repeat(1000);
+        ingest_high_stakes_verb(
+            &store,
+            &board,
+            &fleet,
+            &worker_id,
+            "note",
+            &json!({"channel": "project", "text": oversized}),
+        )
+        .unwrap();
+        let notes = board.query(&project_id, Some(crate::board::BoardKind::Note));
+        assert_eq!(notes.len(), 1);
+        let text = notes[0].payload["text"].as_str().unwrap();
+        assert!(text.len() <= crate::board::NOTE_MAX_BYTES);
+    }
+
+    #[test]
+    fn note_verb_rejects_a_channel_the_session_never_joined() {
+        // Regression test for an audit finding: the hook-ingestion path originally
+        // wrote any `note` to the board regardless of the poster's own `channels`,
+        // unlike `fleet_note`'s MCP arm which gates on `on_channel`.
+        let (store, project_id, worker_id) = store_with_one_session("note_no_membership");
+        let board = crate::board::BoardState::default();
+        let fleet = crate::fleet::FleetState::default();
+        let res = ingest_high_stakes_verb(
+            &store,
+            &board,
+            &fleet,
+            &worker_id,
+            "note",
+            &json!({"channel": "project", "text": "hi"}),
+        );
+        assert!(res.is_err());
+        assert!(board
+            .query(&project_id, Some(crate::board::BoardKind::Note))
+            .is_empty());
+    }
+
+    #[test]
+    fn note_verb_enforces_rate_limit() {
+        // Regression test for an audit finding: only `fleet_note`'s MCP arm enforced
+        // MAX_NOTES_PER_MINUTE_PER_SESSION -- the hook-ingestion path had no volume
+        // throttle at all, letting a forged/buggy Tier-2 worker flood the board.
+        let (store, project_id, worker_id) = store_with_one_session("note_rate_limit");
+        store.set_session_trust(
+            &worker_id,
+            crate::store::SessionTrust {
+                channels: vec!["project".into()],
+                ..Default::default()
+            },
+        );
+        let board = crate::board::BoardState::default();
+        let fleet = crate::fleet::FleetState::default();
+        for i in 0..crate::fleet::MAX_NOTES_PER_MINUTE_PER_SESSION {
+            assert!(
+                ingest_high_stakes_verb(
+                    &store,
+                    &board,
+                    &fleet,
+                    &worker_id,
+                    "note",
+                    &json!({"channel": "project", "text": format!("note {i}")}),
+                )
+                .is_ok(),
+                "note {i} should be allowed"
+            );
+        }
+        let res = ingest_high_stakes_verb(
+            &store,
+            &board,
+            &fleet,
+            &worker_id,
+            "note",
+            &json!({"channel": "project", "text": "one too many"}),
+        );
+        assert!(
+            res.is_err(),
+            "note over the per-minute cap must be rejected"
+        );
+        assert_eq!(
+            board
+                .query(&project_id, Some(crate::board::BoardKind::Note))
+                .len(),
+            crate::fleet::MAX_NOTES_PER_MINUTE_PER_SESSION
+        );
+    }
+
+    // ---- §7.4: AGENTS.md mission block ----
+
+    #[test]
+    fn write_mission_context_creates_agents_md_with_the_brief() {
+        let dir = fresh_test_dir("mission_new");
+        let mission = json!({
+            "objective": "implement rate limiting",
+            "outputShape": "a passing test suite",
+            "boundaries": "do not touch the auth module",
+        });
+        write_mission_context(dir.to_str().unwrap(), &mission);
+
+        let content = fs::read_to_string(dir.join("AGENTS.md")).unwrap();
+        assert!(content.contains("## Fleet mission"));
+        assert!(content.contains("implement rate limiting"));
+        assert!(content.contains("a passing test suite"));
+        assert!(content.contains("do not touch the auth module"));
+    }
+
+    #[test]
+    fn write_mission_context_appends_to_an_inherited_file() {
+        let dir = fresh_test_dir("mission_append");
+        fs::write(dir.join("AGENTS.md"), "# Project rules\n\nBe nice.\n").unwrap();
+
+        write_mission_context(dir.to_str().unwrap(), &json!({"objective": "do X"}));
+
+        let content = fs::read_to_string(dir.join("AGENTS.md")).unwrap();
+        assert!(
+            content.contains("# Project rules"),
+            "inherited content must survive"
+        );
+        assert!(content.contains("Be nice."));
+        assert!(content.contains("## Fleet mission"));
+        assert!(content.contains("do X"));
+    }
+
+    #[test]
+    fn write_mission_context_omits_optional_fields_when_absent() {
+        let dir = fresh_test_dir("mission_minimal");
+        write_mission_context(dir.to_str().unwrap(), &json!({"objective": "just this"}));
+        let content = fs::read_to_string(dir.join("AGENTS.md")).unwrap();
+        assert!(content.contains("just this"));
+        assert!(!content.contains("Output shape"));
+        assert!(!content.contains("Boundaries"));
     }
 
     #[test]
