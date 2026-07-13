@@ -44,6 +44,64 @@ fn run(args: &[&str], dir: &str) -> String {
         .unwrap_or_default()
 }
 
+/// Like `run` but user-invoked: nonzero exit / spawn failure surface as Err(stderr).
+fn run_checked(args: &[&str], dir: &str) -> Result<String, String> {
+    use crate::NoWindow;
+    let out = Command::new("git")
+        .args(args)
+        .current_dir(dir)
+        .no_window()
+        .output()
+        .map_err(|e| format!("failed to run git: {e}"))?;
+    if out.status.success() {
+        Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+    } else {
+        let err = String::from_utf8_lossy(&out.stderr).trim().to_string();
+        Err(if err.is_empty() {
+            format!("git exited with {}", out.status)
+        } else {
+            err
+        })
+    }
+}
+
+/// Absolute path -> repo-relative (forward slashes), for `git diff -- <p>`.
+fn repo_relative(dir: &str, path: &str) -> Result<String, String> {
+    let top = run_checked(&["rev-parse", "--show-toplevel"], dir)?
+        .trim()
+        .to_string();
+    let top = std::fs::canonicalize(&top).map_err(|e| format!("repo root: {e}"))?;
+    let abs = std::fs::canonicalize(path).map_err(|e| format!("path: {e}"))?;
+    abs.strip_prefix(&top)
+        .map_err(|_| "file is outside the repository".to_string())
+        .map(|rel| rel.to_string_lossy().replace('\\', "/"))
+}
+
+/// Max diff text returned to a phone — a big diff is unreadable there anyway.
+const DIFF_TEXT_CAP: usize = 48 * 1024;
+
+/// Unified diff of one file against HEAD, for phone review. An untracked file (not
+/// in HEAD) is shown as all-added via `--no-index` against /dev/null. Output is
+/// capped with a truncation marker.
+pub fn diff_text(dir: &str, path: &str) -> Result<String, String> {
+    let rel = repo_relative(dir, path)?;
+    let mut out = run_checked(&["diff", "HEAD", "--", &rel], dir)?;
+    if out.trim().is_empty() {
+        // `--no-index` exits 1 when the files differ, so use the unchecked `run`.
+        let added = run(&["diff", "--no-index", "--", "/dev/null", &rel], dir);
+        out = if added.trim().is_empty() {
+            format!("(no changes to {rel} against HEAD)")
+        } else {
+            added
+        };
+    }
+    if out.len() > DIFF_TEXT_CAP {
+        out.truncate(DIFF_TEXT_CAP);
+        out.push_str("\n… (diff truncated — review the rest on the desktop)");
+    }
+    Ok(out)
+}
+
 pub fn current_branch(dir: &str) -> Option<String> {
     let out = run(&["rev-parse", "--abbrev-ref", "HEAD"], dir)
         .trim()
