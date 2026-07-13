@@ -1,7 +1,7 @@
 {
   "name": "conduit",
   "private": true,
-  "version": "0.12.0",
+  "version": "0.12.1",
   "type": "module",
   "description": "A desktop app for running multiple real Claude Code terminals across projects, in one window.",
   "license": "MIT",
