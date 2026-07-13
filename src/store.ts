@@ -730,6 +730,10 @@ interface AppState {
   removeProject: (id: string) => Promise<void>;
   addSession: (projectId: string, opts?: { name?: string; useWorktree?: boolean; agent?: AgentId; role?: SessionRole; account?: string | null }) => Promise<void>;
   renameSession: (projectId: string, sessionId: string, name: string) => Promise<void>;
+  /** Move a project / session in the sidebar. `toIndex` is the insertion index in the
+   *  list WITHOUT the moved item (sessions reorder within their own project only). */
+  reorderProject: (projectId: string, toIndex: number) => Promise<void>;
+  reorderSession: (projectId: string, sessionId: string, toIndex: number) => Promise<void>;
   removeSession: (projectId: string, sessionId: string) => Promise<void>;
 
   /** A session created by the backend (Conductor fleet_spawn): merge it in + open it. */
@@ -1353,6 +1357,35 @@ export const useStore = create<AppState>((set, get) => {
       }));
     },
 
+    reorderProject: async (projectId, toIndex) => {
+      // Mirror optimistically (the move is local-first UX), then persist; a persist
+      // failure only costs the order on next launch, never the projects themselves.
+      set((s) => {
+        const from = s.projects.findIndex((p) => p.id === projectId);
+        if (from < 0) return {};
+        const projects = [...s.projects];
+        const [moved] = projects.splice(from, 1);
+        projects.splice(Math.min(toIndex, projects.length), 0, moved);
+        return { projects };
+      });
+      await invoke("reorder_project", { projectId, toIndex }).catch(() => {});
+    },
+
+    reorderSession: async (projectId, sessionId, toIndex) => {
+      set((s) => ({
+        projects: s.projects.map((p) => {
+          if (p.id !== projectId) return p;
+          const from = p.sessions.findIndex((x) => x.id === sessionId);
+          if (from < 0) return p;
+          const sessions = [...p.sessions];
+          const [moved] = sessions.splice(from, 1);
+          sessions.splice(Math.min(toIndex, sessions.length), 0, moved);
+          return { ...p, sessions };
+        }),
+      }));
+      await invoke("reorder_session", { projectId, sessionId, toIndex }).catch(() => {});
+    },
+
     removeSession: async (projectId, sessionId) => {
       await invoke("remove_session", { projectId, sessionId });
       set((s) => {
@@ -1962,9 +1995,9 @@ export const useStore = create<AppState>((set, get) => {
         if (ok) await get().refreshClaudeUsage();
         return ok;
       } catch {
-        const next = { ...get().planConnected, [key]: false };
-        writePlanConnected(next);
-        set({ planConnected: next });
+        // An invoke-level failure is transient plumbing, not "no credentials" -- keep the
+        // previous connected state so one blip can't flip a working account to
+        // disconnected (persisted false blocks rehydrate on the next launch).
         return false;
       }
     },

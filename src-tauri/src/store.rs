@@ -597,6 +597,44 @@ impl Store {
         self.save(&projects);
     }
 
+    /// Move a project to `to_index` in the sidebar order. `to_index` is the insertion
+    /// index in the list WITHOUT the moved project (clamped to the end). Returns false
+    /// for an unknown project id.
+    pub fn reorder_project(&self, project_id: &str, to_index: usize) -> bool {
+        let mut projects = self.projects.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(from) = projects.iter().position(|p| p.id == project_id) else {
+            return false;
+        };
+        let project = projects.remove(from);
+        let to = to_index.min(projects.len());
+        projects.insert(to, project);
+        // A no-op move (dropped back where it was) needs no disk write.
+        if to != from {
+            self.save(&projects);
+        }
+        true
+    }
+
+    /// Move a session to `to_index` within its own project (same post-removal insertion
+    /// semantics as `reorder_project`). Cross-project moves are deliberately unsupported:
+    /// a session's cwd, worktree and resume transcript are all rooted in its project.
+    pub fn reorder_session(&self, project_id: &str, session_id: &str, to_index: usize) -> bool {
+        let mut projects = self.projects.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(project) = projects.iter_mut().find(|p| p.id == project_id) else {
+            return false;
+        };
+        let Some(from) = project.sessions.iter().position(|s| s.id == session_id) else {
+            return false;
+        };
+        let session = project.sessions.remove(from);
+        let to = to_index.min(project.sessions.len());
+        project.sessions.insert(to, session);
+        if to != from {
+            self.save(&projects);
+        }
+        true
+    }
+
     pub fn add_session(
         &self,
         project_id: &str,
@@ -1265,6 +1303,64 @@ mod tests {
         assert!(!s.use_worktree);
         assert!(s.worktree_path.is_none());
         assert!(s.branch.is_none());
+    }
+
+    #[test]
+    fn reorder_project_moves_and_clamps() {
+        let dir = temp_dir("reorder_p");
+        let store = Store::for_test(&dir);
+        let a = store.add_project("/a".into());
+        let b = store.add_project("/b".into());
+        let c = store.add_project("/c".into());
+        // Move first to the middle (post-removal insertion index).
+        assert!(store.reorder_project(&a.id, 1));
+        let order: Vec<_> = store.list().iter().map(|p| p.id.clone()).collect();
+        assert_eq!(order, vec![b.id.clone(), a.id.clone(), c.id.clone()]);
+        // Out-of-range clamps to the end; unknown id is a no-op returning false.
+        assert!(store.reorder_project(&b.id, 99));
+        let order: Vec<_> = store.list().iter().map(|p| p.id.clone()).collect();
+        assert_eq!(order, vec![a.id, c.id, b.id]);
+        assert!(!store.reorder_project("nope", 0));
+    }
+
+    #[test]
+    fn reorder_session_moves_within_project_only() {
+        let dir = temp_dir("reorder_s");
+        let store = Store::for_test(&dir);
+        let p = store.add_project("/repo".into());
+        let mk = |name: &str| {
+            store
+                .add_session(
+                    &p.id,
+                    name.into(),
+                    false,
+                    crate::agent::AgentId::Claude,
+                    SessionRole::Worker,
+                )
+                .unwrap()
+        };
+        let s1 = mk("S1");
+        let s2 = mk("S2");
+        let s3 = mk("S3");
+        assert!(store.reorder_session(&p.id, &s3.id, 0));
+        let names: Vec<_> = store.list()[0]
+            .sessions
+            .iter()
+            .map(|s| s.name.clone())
+            .collect();
+        assert_eq!(names, vec!["S3", "S1", "S2"]);
+        // Clamp past the end.
+        assert!(store.reorder_session(&p.id, &s3.id, 42));
+        let names: Vec<_> = store.list()[0]
+            .sessions
+            .iter()
+            .map(|s| s.name.clone())
+            .collect();
+        assert_eq!(names, vec!["S1", "S2", "S3"]);
+        // Unknown project or session: no-op, false.
+        assert!(!store.reorder_session("nope", &s1.id, 0));
+        assert!(!store.reorder_session(&p.id, "nope", 0));
+        let _ = s2;
     }
 
     #[test]

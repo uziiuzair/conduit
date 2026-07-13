@@ -449,6 +449,21 @@ fn rename_session(project_id: String, session_id: String, name: String, store: S
     store.rename_session(&project_id, &session_id, name);
 }
 
+#[tauri::command]
+fn reorder_project(project_id: String, to_index: usize, store: State<Arc<Store>>) {
+    store.reorder_project(&project_id, to_index);
+}
+
+#[tauri::command]
+fn reorder_session(
+    project_id: String,
+    session_id: String,
+    to_index: usize,
+    store: State<Arc<Store>>,
+) {
+    store.reorder_session(&project_id, &session_id, to_index);
+}
+
 /// The frontend's reply to a Conductor `fleet_stop` confirmation prompt.
 #[tauri::command]
 fn conductor_confirm_response(
@@ -1275,6 +1290,8 @@ pub fn run() {
             add_session,
             detect_agents,
             rename_session,
+            reorder_project,
+            reorder_session,
             conductor_confirm_response,
             set_project_layout,
             list_accounts,

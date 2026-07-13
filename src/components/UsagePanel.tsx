@@ -225,12 +225,18 @@ function RowBlock({
           <button className="usage-connect-btn" onClick={() => void connectPlanUsage(row.accountId)}>
             {connectFailed || row.planSource === "unavailable" ? "Retry plan usage" : "Connect plan usage"}
           </button>
-          {connectFailed && (
+          {connectFailed ? (
             <div className="usage-local">
               No sign-in found for this account. Open a session on it and run claude to sign in,
               or re-add the correct .claude folder.
             </div>
-          )}
+          ) : row.planSource === "unavailable" ? (
+            <div className="usage-local">
+              Plan limits unreachable (offline, or the saved sign-in expired). Running a Claude
+              session on this account refreshes its sign-in; if it doesn't recover on its own,
+              click Retry plan usage.
+            </div>
+          ) : null}
         </>
       ) : wins.length === 0 ? (
         <div className="usage-hint">No windows match your filter.</div>

@@ -191,10 +191,12 @@ export function RightColumn({
     ? `worktree · ${selected.session.branch ?? "session"}`
     : branch ?? "no branch";
 
-  // All sessions' plain shells stay mounted (keep-alive).
-  const allSessions = projects.flatMap((p) =>
-    p.sessions.map((s) => ({ session: s, project: p })),
-  );
+  // All sessions' plain shells stay mounted (keep-alive). Stable id order, decoupled
+  // from sidebar order — a sidebar drag-reorder must not make React physically move
+  // these nodes (same reasoning as WorkspaceCenter's term-stack).
+  const allSessions = projects
+    .flatMap((p) => p.sessions.map((s) => ({ session: s, project: p })))
+    .sort((a, b) => a.session.id.localeCompare(b.session.id));
 
   return (
     <div className="right-col">
