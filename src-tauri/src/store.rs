@@ -572,6 +572,21 @@ impl Store {
             .unwrap_or_default()
     }
 
+    /// A session's working directory: its worktree path if it has one, else the
+    /// containing project's path. Used by the mobile bridge to run git queries
+    /// (diff review) against the right repo. None if the session is unknown.
+    pub fn session_dir(&self, session_id: &str) -> Option<String> {
+        let projects = self.projects.lock().unwrap_or_else(|e| e.into_inner());
+        projects.iter().find_map(|p| {
+            p.sessions.iter().find(|s| s.id == session_id).map(|s| {
+                s.worktree_path
+                    .clone()
+                    .filter(|w| !w.is_empty())
+                    .unwrap_or_else(|| p.path.clone())
+            })
+        })
+    }
+
     // ---- Account registry (Feature 2: Claude account switching) ----------------
 
     /// Re-serialize the full state to disk after an account/default change. Callers must

@@ -47,6 +47,29 @@ pub enum ClientMsg {
         cols: u16,
         rows: u16,
     },
+    /// Read-only git query for a session's repo (phone diff review).
+    /// action = "changes" (Vec<Change>) | "diff" (unified text for `path`).
+    Git {
+        session_id: String,
+        action: String,
+        #[serde(default)]
+        path: Option<String>,
+    },
+    /// Terminate a session's agent process (hard stop from the phone).
+    Kill {
+        session_id: String,
+    },
+    /// Spawn a NEW session in a project with an initial prompt. The frontend
+    /// actually opens the tab + spawns the PTY (Rust can't mint a terminal
+    /// Channel), mirroring the fleet-spawn path.
+    Spawn {
+        project_id: String,
+        prompt: String,
+        #[serde(default)]
+        agent: Option<String>,
+        #[serde(default)]
+        worktree: bool,
+    },
 }
 
 /// Parse one client text frame. None on malformed JSON or an unknown `type`.
@@ -101,6 +124,105 @@ fn projects_payload(
 /// Build a forwarded hook-status frame.
 fn status_payload(event: &str, body: &serde_json::Value) -> serde_json::Value {
     json!({ "type": "status", "event": event, "body": body })
+}
+
+/// Handle a `git` client message: resolve the session's repo dir from the Store,
+/// run the read-only query, and build a `gitresult` frame. Never blocks the loop
+/// (git calls are fast local reads).
+fn git_reply(
+    app: &AppHandle,
+    session_id: &str,
+    action: &str,
+    path: Option<&str>,
+) -> serde_json::Value {
+    let Some(dir) = app.state::<Arc<Store>>().session_dir(session_id) else {
+        return json!({ "type": "gitresult", "action": action, "error": "unknown session" });
+    };
+    match action {
+        "changes" => {
+            let changes = crate::git::changes(&dir);
+            json!({ "type": "gitresult", "action": "changes", "changes": changes })
+        }
+        "diff" => {
+            let Some(path) = path else {
+                return json!({ "type": "gitresult", "action": "diff", "error": "path required" });
+            };
+            // A repo-relative path from `changes` -> absolute for git::diff_text.
+            let abs = if std::path::Path::new(path).is_absolute() {
+                path.to_string()
+            } else {
+                std::path::Path::new(&dir)
+                    .join(path)
+                    .to_string_lossy()
+                    .into_owned()
+            };
+            match crate::git::diff_text(&dir, &abs) {
+                Ok(text) => {
+                    json!({ "type": "gitresult", "action": "diff", "path": path, "diff": text })
+                }
+                Err(e) => {
+                    json!({ "type": "gitresult", "action": "diff", "path": path, "error": e })
+                }
+            }
+        }
+        other => json!({ "type": "gitresult", "action": other, "error": "unknown git action" }),
+    }
+}
+
+/// Handle a `spawn` client message: create a session in the project and emit
+/// `fleet-spawn` so the frontend opens the tab, spawns the PTY, and injects the
+/// prompt (the same generic path fleet workers use — `mergeSpawnedSession` is not
+/// fleet-specific). Returns a `spawned` frame with the new session id, or `error`.
+fn spawn_reply(
+    app: &AppHandle,
+    project_id: &str,
+    prompt: &str,
+    agent: Option<&str>,
+    worktree: bool,
+) -> serde_json::Value {
+    use tauri::Emitter;
+    let agent_id: crate::agent::AgentId =
+        match serde_json::from_value(json!(agent.unwrap_or("claude"))) {
+            Ok(a) => a,
+            Err(_) => {
+                return json!({ "type": "error", "message": "unknown agent" });
+            }
+        };
+    let store = app.state::<Arc<Store>>();
+    let Some(project) = store.list().into_iter().find(|p| p.id == project_id) else {
+        return json!({ "type": "error", "message": "unknown project" });
+    };
+    // A worktree needs a git repo; refuse rather than spawn a broken session.
+    if worktree && crate::git::current_branch(&project.path).is_none() {
+        return json!({ "type": "error", "message": "worktree requested but project is not a git repo" });
+    }
+    let Some(session) = store.add_session(
+        project_id,
+        "Mobile".to_string(),
+        worktree,
+        agent_id,
+        crate::store::SessionRole::Worker,
+    ) else {
+        return json!({ "type": "error", "message": "could not create session" });
+    };
+    let _ = app.emit(
+        "fleet-spawn",
+        json!({ "projectId": project_id, "session": session, "task": prompt }),
+    );
+    json!({
+        "type": "spawned",
+        "sessionId": session.id,
+        "name": session.name,
+        "projectId": project_id,
+    })
+}
+
+/// Ask the desktop to open (activate) a session's tab, which spawns its PTY — the
+/// frontend owns the terminal Channel, so Rust can't spawn it directly. The
+/// frontend's `bridge-open-session` listener resolves the project and selects it.
+fn wake_session(app: &AppHandle, session_id: &str) {
+    use tauri::Emitter;
+    let _ = app.emit("bridge-open-session", json!({ "sessionId": session_id }));
 }
 
 /// Build the transcript backfill payload from raw jsonl lines.
@@ -244,8 +366,8 @@ fn handle_conn(stream: TcpStream, app: AppHandle, token: Option<String>) {
                 Some(ClientMsg::List) => {
                     // Real project tree (names + branches) with a per-session running flag.
                     let running: HashSet<String> = pty.session_ids().into_iter().collect();
-                    // Store is managed as `Arc<Store>` (see lib.rs `.manage(Arc::new(...))`),
-                    // so `state::<Store>()` panics the connection thread on the first `list`.
+                    // Store is managed as Arc<Store> (lib.rs .manage(Arc::new(Store::new()))) —
+                    // state::<Store>() panics the connection thread on the first `list`.
                     let projects = serde_json::to_value(app.state::<Arc<Store>>().list())
                         .ok()
                         .and_then(|v| v.as_array().cloned())
@@ -255,7 +377,22 @@ fn handle_conn(stream: TcpStream, app: AppHandle, token: Option<String>) {
                     ));
                 }
                 Some(ClientMsg::Attach { session_id }) => {
-                    if let Some((sub_id, rx)) = pty.subscribe(&session_id) {
+                    // Auto-wake: an idle session has no live PTY (Conduit spawns it
+                    // lazily when its tab is shown). Ask the desktop to open it, then
+                    // poll briefly for the PTY to come up before giving up — so
+                    // `/conduit use` works on ANY session, not just running ones.
+                    let mut sub = pty.subscribe(&session_id);
+                    if sub.is_none() {
+                        wake_session(&app, &session_id);
+                        for _ in 0..25 {
+                            std::thread::sleep(Duration::from_millis(200));
+                            sub = pty.subscribe(&session_id);
+                            if sub.is_some() {
+                                break;
+                            }
+                        }
+                    }
+                    if let Some((sub_id, rx)) = sub {
                         // Desktop-authoritative sizing: tell the new viewer the PTY's
                         // current size so it renders at the desktop's dimensions rather
                         // than resizing the shared TTY out from under the desktop.
@@ -288,6 +425,29 @@ fn handle_conn(stream: TcpStream, app: AppHandle, token: Option<String>) {
                     rows,
                 }) => {
                     let _ = pty.resize(&session_id, cols, rows);
+                }
+                Some(ClientMsg::Git {
+                    session_id,
+                    action,
+                    path,
+                }) => {
+                    let reply = git_reply(&app, &session_id, &action, path.as_deref());
+                    let _ = ws.send(Message::Text(reply.to_string()));
+                }
+                Some(ClientMsg::Kill { session_id }) => {
+                    pty.kill(&session_id);
+                    let _ = ws.send(Message::Text(
+                        json!({ "type": "killed", "sessionId": session_id }).to_string(),
+                    ));
+                }
+                Some(ClientMsg::Spawn {
+                    project_id,
+                    prompt,
+                    agent,
+                    worktree,
+                }) => {
+                    let reply = spawn_reply(&app, &project_id, &prompt, agent.as_deref(), worktree);
+                    let _ = ws.send(Message::Text(reply.to_string()));
                 }
                 None => {}
             },
@@ -458,6 +618,49 @@ mod tests {
     fn rejects_garbage_and_unknown_type() {
         assert!(parse_client_msg("not json").is_none());
         assert!(parse_client_msg(r#"{"type":"explode"}"#).is_none());
+    }
+
+    #[test]
+    fn parses_kill_and_spawn() {
+        assert_eq!(
+            parse_client_msg(r#"{"type":"kill","session_id":"s1"}"#),
+            Some(ClientMsg::Kill {
+                session_id: "s1".into()
+            })
+        );
+        assert_eq!(
+            parse_client_msg(
+                r#"{"type":"spawn","project_id":"p1","prompt":"fix the bug","worktree":true}"#
+            ),
+            Some(ClientMsg::Spawn {
+                project_id: "p1".into(),
+                prompt: "fix the bug".into(),
+                agent: None,
+                worktree: true,
+            })
+        );
+    }
+
+    #[test]
+    fn parses_git_changes_and_diff() {
+        assert_eq!(
+            parse_client_msg(r#"{"type":"git","session_id":"s1","action":"changes"}"#),
+            Some(ClientMsg::Git {
+                session_id: "s1".into(),
+                action: "changes".into(),
+                path: None,
+            })
+        );
+        assert_eq!(
+            parse_client_msg(
+                r#"{"type":"git","session_id":"s1","action":"diff","path":"src/a.ts"}"#
+            ),
+            Some(ClientMsg::Git {
+                session_id: "s1".into(),
+                action: "diff".into(),
+                path: Some("src/a.ts".into()),
+            })
+        );
     }
 
     #[test]
