@@ -1,6 +1,5 @@
 import { useEffect, useRef, useState } from "react";
 import { useStore } from "../store";
-import { useClaudeAmbient } from "../hooks/useClaudeAmbient";
 import { ClaudePopover } from "./ClaudePopover";
 
 /** Maps a Statuspage indicator to a dot class + a short human label. */
@@ -22,8 +21,8 @@ export function fmtTokens(n: number): string {
 }
 
 export function ClaudeStatusPill() {
-  useClaudeAmbient(); // pill is always mounted → drives polling
-
+  // Polling now lives in the always-mounted UsagePanel (the pill only shows for Claude
+  // sessions, but usage must refresh for every account regardless of what's selected).
   const status = useStore((s) => s.claudeStatus);
   const [open, setOpen] = useState(false);
   const wrapRef = useRef<HTMLDivElement>(null);

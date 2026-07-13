@@ -11,9 +11,18 @@ import {
   writeStoredPref,
 } from "./themes";
 import { AGENTS, type AgentId, type AgentInfo, DEFAULT_AGENT, type McpServer } from "./agents";
+import { check, type Update } from "@tauri-apps/plugin-updater";
+import { relaunch } from "@tauri-apps/plugin-process";
 import { ask } from "@tauri-apps/plugin-dialog";
 import * as registry from "./monaco/registry";
-import { moveTab as reduceMoveTab, splitTab as reduceSplitTab } from "./layout";
+import {
+  cycleTabRef,
+  moveTab as reduceMoveTab,
+  reopenTabAt as reduceReopenTabAt,
+  splitTab as reduceSplitTab,
+} from "./layout";
+import { cleanupEdits } from "./trim";
+import type * as Monaco from "monaco-editor";
 import type { SettingsTab } from "./components/Settings";
 
 // ---- Types (mirror the Rust serde structs, rename_all = "camelCase") ----
@@ -40,14 +49,21 @@ export interface Session {
   modelTier?: string | null;
   seedMemory?: string | null;
   effort?: string | null;
+  /** The agent's own captured conversation id (agy), for resume. Set by the backend. */
+  agentConversationId?: string | null;
 }
 
-/** A registered Claude account (mirrors the Rust serde struct, camelCase). */
+/** A registered agent account (mirrors the Rust serde struct, camelCase). */
 export interface Account {
   id: string;
   label: string;
   configDir: string;
+  /** Which agents this account is signed in for (assignment eligibility + usage bar). */
+  agents: AgentId[];
 }
+
+/** Per-agent default account map: agent id -> account id (mirrors the Rust HashMap). */
+export type DefaultAccounts = Partial<Record<AgentId, string>>;
 
 // ---- Trust boundaries (Feature 4) — mirror the Rust serde structs (camelCase) ----
 export type Clearance = "public" | "internal" | "confidential";
@@ -122,6 +138,18 @@ export type TabKind = "session" | "file";
 export interface WsTab {
   kind: TabKind;
   ref: string; // sessionId (session) | absolute file path (file)
+  /** Preview (transient, italic) tab: the next preview open in its group replaces it.
+   *  Pinned by editing, double-click, or an explicit (non-preview) open. Mirrored in
+   *  the Rust WsTab struct so it survives layout persistence. */
+  preview?: boolean;
+}
+
+/** A recently closed file tab, restorable via ⌘⇧T (explicit closes only). */
+export interface ClosedTab {
+  projectId: string;
+  groupId: string;
+  index: number;
+  ref: string;
 }
 
 /** Mirror of fsops::FileContent (serde camelCase). read_file resolves (never rejects);
@@ -143,6 +171,13 @@ export interface FileStat {
   exists: boolean;
 }
 
+/** Mirror of hotexit::HotExitEntry (serde camelCase). */
+export interface HotExitEntry {
+  path: string;
+  content: string;
+  mtimeMs: number;
+}
+
 export interface EditorGroup {
   id: string;
   tabs: WsTab[];
@@ -161,6 +196,8 @@ export interface Project {
   path: string;
   sessions: Session[];
   layout?: ProjectLayout | null;
+  /** Per-agent default account for this project's sessions (beats the global default). */
+  defaultAccounts?: DefaultAccounts;
 }
 
 export type SessionStatus = "idle" | "running" | "needsInput" | "done";
@@ -220,6 +257,100 @@ export interface ClaudeUsage {
   plan: PlanWindow[] | null;
   planSource: "live" | "unavailable" | "disconnected";
 }
+/** One account's Claude usage (mirrors Rust ClaudeAccountUsage). accountId null = env default. */
+export interface ClaudeAccountUsage {
+  accountId: string | null;
+  label: string;
+  usage: ClaudeUsage;
+}
+
+// ---- Antigravity (agy) usage — mirror Rust agy_usage.rs (camelCase) ----
+export interface AgyBucket {
+  bucketId: string;
+  label: string; // "Weekly" | "5-hour"
+  remainingFraction: number; // 0..1
+  resetsAt: string | null;
+  disabled: boolean;
+}
+export interface AgyGroup {
+  displayName: string; // "Gemini Models" | "Claude & GPT Models"
+  buckets: AgyBucket[];
+}
+export interface AgyContext {
+  usedPercentage: number;
+  contextWindowSize: number;
+  totalInputTokens: number;
+  totalOutputTokens: number;
+}
+export interface AgyUsage {
+  /** Resolved account this snapshot belongs to; null = env default. Keys agyUsageByAccount. */
+  accountId: string | null;
+  planTier: string | null;
+  email: string | null;
+  groups: AgyGroup[];
+  context: AgyContext | null;
+  agentState: string | null;
+  updatedAt: number; // epoch ms
+}
+/** The map key for an account snapshot (env default has no id). */
+export function accountKey(accountId: string | null | undefined): string {
+  return accountId ?? "default";
+}
+
+// ---- Usage bar view preferences (user-configurable; persisted in localStorage) ----
+export interface UsagePrefs {
+  /** How the usage bar renders. "selected" reproduces the pre-multi-account single panel. */
+  layout: "selected" | "stacked" | "summary" | "lowAlertOnly";
+  /** Which windows to show. Off-by-one agents just skip the windows they don't have. */
+  windows: { fiveHour: boolean; weekly: boolean; weeklyOpus: boolean; context: boolean };
+  /** Row order: most-critical (least remaining) first, or alphabetical by label. */
+  sort: "critical" | "label";
+  /** A window at or below this % remaining is "low" (drives the hot color + lowAlertOnly). */
+  lowThresholdPct: number;
+}
+export const DEFAULT_USAGE_PREFS: UsagePrefs = {
+  layout: "selected",
+  windows: { fiveHour: true, weekly: true, weeklyOpus: true, context: true },
+  sort: "critical",
+  lowThresholdPct: 20,
+};
+const USAGE_PREFS_KEY = "conduit.usagePrefs";
+function readUsagePrefs(): UsagePrefs {
+  try {
+    const raw = localStorage.getItem(USAGE_PREFS_KEY);
+    if (!raw) return DEFAULT_USAGE_PREFS;
+    const p = JSON.parse(raw);
+    return {
+      ...DEFAULT_USAGE_PREFS,
+      ...p,
+      windows: { ...DEFAULT_USAGE_PREFS.windows, ...(p?.windows ?? {}) },
+    };
+  } catch {
+    return DEFAULT_USAGE_PREFS;
+  }
+}
+function writeUsagePrefs(p: UsagePrefs): void {
+  try {
+    localStorage.setItem(USAGE_PREFS_KEY, JSON.stringify(p));
+  } catch {
+    /* quota — non-fatal */
+  }
+}
+
+// ---- Auto-update ----
+export interface UpdateInfo {
+  version: string;
+  currentVersion: string;
+  notes: string;
+  date?: string;
+}
+export type UpdatePhase = "idle" | "checking" | "available" | "downloading" | "error";
+
+const SKIPPED_VERSION_KEY = "conduit.skippedVersion";
+
+/** The live Update handle from the updater plugin. Not serializable, so it lives
+ *  outside the store; the store holds only the display metadata + phase. */
+let pendingUpdate: Update | null = null;
 
 const DEFAULT_AGENT_KEY = "conduit.defaultAgent";
 const SETUP_DONE_KEY = "conduit.agentSetupComplete";
@@ -246,11 +377,43 @@ function persistMcp(servers: McpServer[], enabled: Record<string, AgentId[]>): v
 }
 
 const PLAN_CONNECTED_KEY = "conduit.planConnected";
-export function readPlanConnected(): boolean {
-  try { return localStorage.getItem(PLAN_CONNECTED_KEY) === "1"; } catch { return false; }
+/** Per-account "plan usage connected" flags, keyed by accountKey (env default = "default").
+ *  Migrates the legacy boolean ("1") to `{ default: true }`. */
+export function readPlanConnected(): Record<string, boolean> {
+  try {
+    const raw = localStorage.getItem(PLAN_CONNECTED_KEY);
+    if (raw === "1") return { default: true };
+    if (raw === "0" || raw == null) return {};
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === "object" ? (parsed as Record<string, boolean>) : {};
+  } catch {
+    return {};
+  }
 }
-function writePlanConnected(v: boolean): void {
-  try { localStorage.setItem(PLAN_CONNECTED_KEY, v ? "1" : "0"); } catch { /* quota — non-fatal */ }
+function writePlanConnected(v: Record<string, boolean>): void {
+  try {
+    localStorage.setItem(PLAN_CONNECTED_KEY, JSON.stringify(v));
+  } catch {
+    /* quota — non-fatal */
+  }
+}
+
+// Restore-on-open: eagerly spawn (and resume) every session of the ACTIVE project on launch /
+// project switch, instead of waiting for a click. Default ON. Same persisted-pref pattern.
+const RESTORE_SESSIONS_KEY = "conduit.restoreSessionsOnOpen";
+function readRestoreSessionsOnOpen(): boolean {
+  try {
+    return localStorage.getItem(RESTORE_SESSIONS_KEY) !== "0"; // default on (absent => true)
+  } catch {
+    return true;
+  }
+}
+function writeRestoreSessionsOnOpen(v: boolean): void {
+  try {
+    localStorage.setItem(RESTORE_SESSIONS_KEY, v ? "1" : "0");
+  } catch {
+    /* quota — non-fatal */
+  }
 }
 
 // Sidebar / right-panel collapse state (native menu: View > Toggle Sidebar / Toggle
@@ -269,6 +432,37 @@ function readRightCollapsed(): boolean {
 }
 function writeRightCollapsed(v: boolean): void {
   try { localStorage.setItem(RIGHT_COLLAPSED_KEY, v ? "1" : "0"); } catch { /* quota — non-fatal */ }
+}
+
+// Editor UX prefs (native View menu). Same localStorage pattern as the collapse flags;
+// fontZoom follows the width prefs' validate-else-default idiom (never clamp a bad read).
+const WORD_WRAP_KEY = "conduit.wordWrap";
+const TRIM_ON_SAVE_KEY = "conduit.trimOnSave";
+const FONT_ZOOM_KEY = "conduit.fontZoom";
+export const FONT_ZOOM_MIN = -4;
+export const FONT_ZOOM_MAX = 8;
+function readWordWrap(): boolean {
+  try { return localStorage.getItem(WORD_WRAP_KEY) === "1"; } catch { return false; }
+}
+function writeWordWrap(v: boolean): void {
+  try { localStorage.setItem(WORD_WRAP_KEY, v ? "1" : "0"); } catch { /* quota — non-fatal */ }
+}
+function readTrimOnSave(): boolean {
+  try { return localStorage.getItem(TRIM_ON_SAVE_KEY) === "1"; } catch { return false; }
+}
+function writeTrimOnSave(v: boolean): void {
+  try { localStorage.setItem(TRIM_ON_SAVE_KEY, v ? "1" : "0"); } catch { /* quota — non-fatal */ }
+}
+function readFontZoom(): number {
+  try {
+    const v = Number(localStorage.getItem(FONT_ZOOM_KEY));
+    return Number.isInteger(v) && v >= FONT_ZOOM_MIN && v <= FONT_ZOOM_MAX ? v : 0;
+  } catch {
+    return 0;
+  }
+}
+function writeFontZoom(v: number): void {
+  try { localStorage.setItem(FONT_ZOOM_KEY, String(v)); } catch { /* quota — non-fatal */ }
 }
 
 // ---- helpers ----
@@ -379,6 +573,52 @@ export function globalSelectedSessionId(state: {
   return activeSessionIdOf(state.layouts[state.selectedProjectId]);
 }
 
+/** The account key a session resolves to (session → project default → global default →
+ *  env default), mirroring the Rust resolver. Used by the usage bar's "selected" layout. */
+export function resolvedAccountKey(
+  defaultAccounts: DefaultAccounts,
+  project: Project,
+  session: Session,
+): string {
+  const id =
+    session.accountId ??
+    project.defaultAccounts?.[session.agent] ??
+    defaultAccounts[session.agent] ??
+    null;
+  return accountKey(id);
+}
+
+// ---- whitespace-on-save ----
+/** Apply "Clean Whitespace on Save" as ONE undoable model edit, just before the
+ *  write, so the post-cleanup version id becomes the saved baseline (saveFile's
+ *  setSaved captures it after the write). Cast precedent: CodeEditorPane's onReload —
+ *  RegistryModel deliberately hides edit APIs. Markdown keeps trailing spaces (hard
+ *  line breaks) but still gains the final newline. */
+function applyWhitespaceCleanup(m: Monaco.editor.ITextModel): void {
+  const lines = m.getLinesContent();
+  const { trims, appendFinalNewline } = cleanupEdits(lines, {
+    trimTrailing: m.getLanguageId() !== "markdown",
+  });
+  const edits: Monaco.editor.IIdentifiedSingleEditOperation[] = trims.map((t) => ({
+    range: {
+      startLineNumber: t.lineNumber,
+      startColumn: t.fromColumn,
+      endLineNumber: t.lineNumber,
+      endColumn: t.endColumn,
+    },
+    text: "",
+  }));
+  if (appendFinalNewline) {
+    const line = lines.length;
+    const col = (lines[line - 1]?.length ?? 0) + 1;
+    edits.push({
+      range: { startLineNumber: line, startColumn: col, endLineNumber: line, endColumn: col },
+      text: m.getEOL(),
+    });
+  }
+  if (edits.length) m.pushEditOperations([], edits, () => null);
+}
+
 // ---- debounced persistence ----
 const writeTimers: Record<string, ReturnType<typeof setTimeout>> = {};
 function persistLayout(projectId: string, layout: ProjectLayout) {
@@ -403,10 +643,22 @@ interface AppState {
   activeThemeId: ThemeId;
 
   claudeStatus: ClaudeStatus | null;
-  claudeUsage: ClaudeUsage | null;
-  planConnected: boolean;
+  /** Claude usage per account (env default + every registered Claude account). */
+  claudeUsage: ClaudeAccountUsage[];
+  /** Per-account "plan usage connected" flags, keyed by accountKey. */
+  planConnected: Record<string, boolean>;
+  /** agy usage per account, keyed by accountKey (accountId ?? "default"). */
+  agyUsageByAccount: Record<string, AgyUsage>;
+  agyUsageTracking: boolean;
+  /** Usage-bar view preferences (layout, window filters, sort, low threshold). */
+  usagePrefs: UsagePrefs;
+  setUsagePrefs: (patch: Partial<UsagePrefs>) => void;
 
   // ---- panel collapse + Settings dialog (native menu-driven, App-level) ----
+  /** Persisted. When true (default), opening/switching to a project eagerly spawns and
+   *  resumes all its sessions instead of waiting for a click. */
+  restoreSessionsOnOpen: boolean;
+  setRestoreSessionsOnOpen: (v: boolean) => void;
   /** Persisted. When true, the sidebar (and its resizer) is hidden. */
   sidebarCollapsed: boolean;
   toggleSidebar: () => void;
@@ -421,6 +673,18 @@ interface AppState {
   settingsTab: SettingsTab;
   setSettingsTab: (t: SettingsTab) => void;
 
+  // ---- Auto-update ----
+  updateInfo: UpdateInfo | null;
+  updatePhase: UpdatePhase;
+  updateProgress: number; // 0..1 while downloading
+  updateError: string | null;
+  /** Check for updates. `manual` = user-initiated (surface "up to date" and ignore skip). */
+  checkForUpdates: (opts?: { manual?: boolean }) => Promise<void>;
+  /** Download + install the pending update, then relaunch. */
+  installUpdate: () => Promise<void>;
+  /** "Later" — hide the notice and remember this version so we don't re-nag. */
+  dismissUpdate: () => void;
+
   load: () => Promise<void>;
   agents: AgentInfo[] | null;
   defaultAgent: AgentId;
@@ -434,15 +698,27 @@ interface AppState {
   setTelemetryOptOut: (v: boolean) => void;
   loadAgents: () => Promise<void>;
 
-  // ---- Claude account registry (Feature 2) ----
+  // ---- Agent account registry (Feature 2 + multi-account) ----
   accounts: Account[];
-  defaultAccount: string | null;
+  /** Per-agent global default account (agent -> account id). */
+  defaultAccounts: DefaultAccounts;
   loadAccounts: () => Promise<void>;
   discoverAccounts: () => Promise<Account[]>;
   /** Returns an error string (duplicate / missing dir) or null on success. */
   addAccount: (label: string, configDir: string) => Promise<string | null>;
   removeAccount: (id: string) => Promise<void>;
-  setDefaultAccount: (id: string | null) => Promise<void>;
+  /** Set (id) or clear (null) the global default account for one agent. */
+  setDefaultAccount: (agent: AgentId, id: string | null) => Promise<void>;
+  /** Set (id) or clear (null) a project's default account for one agent. */
+  setProjectDefaultAccount: (
+    projectId: string,
+    agent: AgentId,
+    id: string | null,
+  ) => Promise<void>;
+  /** Overwrite which agents an account is signed in for. */
+  setAccountAgents: (accountId: string, agents: AgentId[]) => Promise<void>;
+  /** Pin (id) or clear (null) a single session's account. */
+  setSessionAccount: (sessionId: string, id: string | null) => Promise<void>;
 
   // ---- Trust boundaries (Feature 4) ----
   /** Master switch for the trust-boundary regime. When false the whole thing is inert. */
@@ -481,8 +757,12 @@ interface AppState {
   setMcpEnabled: (name: string, agent: AgentId, on: boolean) => Promise<void>;
   addProject: (path: string) => Promise<void>;
   removeProject: (id: string) => Promise<void>;
-  addSession: (projectId: string, opts?: { name?: string; useWorktree?: boolean; agent?: AgentId; role?: SessionRole }) => Promise<void>;
+  addSession: (projectId: string, opts?: { name?: string; useWorktree?: boolean; agent?: AgentId; role?: SessionRole; account?: string | null }) => Promise<void>;
   renameSession: (projectId: string, sessionId: string, name: string) => Promise<void>;
+  /** Move a project / session in the sidebar. `toIndex` is the insertion index in the
+   *  list WITHOUT the moved item (sessions reorder within their own project only). */
+  reorderProject: (projectId: string, toIndex: number) => Promise<void>;
+  reorderSession: (projectId: string, sessionId: string, toIndex: number) => Promise<void>;
   removeSession: (projectId: string, sessionId: string) => Promise<void>;
 
   /** A session created by the backend (Conductor fleet_spawn): merge it in + open it. */
@@ -509,7 +789,67 @@ interface AppState {
   ) => void;
   splitTab: (projectId: string, ref: string, targetGroupId: string, side: "left" | "right") => void;
   setGroupWeights: (projectId: string, weights: number[]) => void;
-  openFile: (projectId: string, path: string, reveal?: { line: number; col?: number }) => void;
+  /** Open a file tab. `preview: true` opens transiently: it replaces the active
+   *  group's current preview tab; a later explicit open (or an edit) pins it.
+   *  `reveal` is a one-shot scroll target (terminal path-click's :line:col). */
+  openFile: (
+    projectId: string,
+    path: string,
+    opts?: { preview?: boolean; reveal?: { line: number; col?: number } },
+  ) => void;
+  /** Clear the preview flag on any tab holding `ref` (pin). */
+  pinTab: (projectId: string, ref: string) => void;
+
+  // ---- Tier-2 editor UX ----
+  /** Recently closed file tabs (explicit closes only), most recent last. Session-only. */
+  closedTabs: ClosedTab[];
+  reopenClosedTab: () => void;
+  saveAll: () => Promise<void>;
+  /** ⌃Tab / ⌃⇧Tab within the active group (wrapping). */
+  cycleTab: (delta: 1 | -1) => void;
+  /** ⌘1..9 — 1-based tab index in the active group; 9 = last (browser convention). */
+  activateTabAt: (index: number) => void;
+  /** projectId -> maximized groupId. Ephemeral by design: validateLayout and the Rust
+   *  ProjectLayout struct would both strip it from the persisted layout. */
+  maximized: Record<string, string>;
+  toggleMaximizeGroup: (projectId: string) => void;
+  /** Persisted editor prefs (View menu). */
+  wordWrap: boolean;
+  toggleWordWrap: () => void;
+  trimOnSave: boolean;
+  toggleTrimOnSave: () => void;
+  fontZoom: number;
+  setFontZoom: (z: number) => void;
+  /** Ask the file tree to expand to + scroll to a path (nonce forces re-trigger). */
+  reveal: { path: string; nonce: number } | null;
+  revealInTree: (path: string) => void;
+  /** Consume the reveal request (FileTree calls this once handled) — without it a
+   *  stale request would replay on every FileTree remount (refresh, git poll, …). */
+  clearReveal: () => void;
+
+  // ---- Tier-3 editor UX ----
+  /** projectId -> MRU absolute file paths, most recent first (Quick Open's empty-
+   *  query list). Session-only. */
+  recentFiles: Record<string, string[]>;
+  /** One-shot request that the pane showing `path` enter ("on") or flip ("toggle")
+   *  its diff-with-HEAD view. Consumed by CodeEditorPane like pendingReveal. */
+  pendingDiff: { path: string; nonce: number; mode: "on" | "toggle" } | null;
+  requestDiff: (path: string, mode: "on" | "toggle") => void;
+  clearPendingDiff: () => void;
+  /** Format the active file tab through the project's formatter (Rust shell-out);
+   *  applies the result as one undo-preserving edit. Errors surface as toasts. */
+  formatActiveDocument: () => Promise<void>;
+  /** Overwrite an open buffer with current disk content (undo-preserving), settle
+   *  its dirty/conflict state. Used after an explicit discard-to-HEAD; no-op when
+   *  the path has no live editable model. */
+  reloadBufferFromDisk: (path: string) => Promise<void>;
+  /** Hot exit: path -> backed-up content from the previous run, loaded once at
+   *  startup and consumed (one-shot) as panes create models for those paths. */
+  hotExit: Record<string, string>;
+  consumeHotExit: (path: string) => string | undefined;
+  /** Write the current dirty set to the hot-exit backup. True on success —
+   *  the quit path quits silently only when this succeeds. */
+  flushHotExit: () => Promise<boolean>;
 
   // ---- Phase 3: file-tree CRUD (all non-persisted) ----
   /** dirPath -> bump counter; a FileTree entry re-lists when its counter changes. */
@@ -550,7 +890,14 @@ interface AppState {
 
   refreshClaudeStatus: () => Promise<void>;
   refreshClaudeUsage: () => Promise<void>;
-  connectPlanUsage: () => Promise<boolean>;
+  /** Connect plan usage for one account (null = env default). */
+  connectPlanUsage: (accountId: string | null) => Promise<boolean>;
+  /** One click: enable agy push-tracking + connect plan usage for every Claude account. */
+  connectAllUsage: () => Promise<void>;
+  setAgyUsage: (u: AgyUsage) => void;
+  refreshAgyUsage: () => Promise<void>;
+  refreshAgyUsageTracking: () => Promise<void>;
+  setAgyUsageTracking: (enabled: boolean) => Promise<boolean>;
 }
 
 export const useStore = create<AppState>((set, get) => {
@@ -564,7 +911,18 @@ export const useStore = create<AppState>((set, get) => {
       const project = s.projects.find((p) => p.id === projectId);
       const next = validateLayout(fn(clone(cur)), project);
       persistLayout(projectId, next);
-      return { layouts: { ...s.layouts, [projectId]: next } };
+      const patch: Partial<AppState> = { layouts: { ...s.layouts, [projectId]: next } };
+      // Maximize follows the active group: any layout action that activates a
+      // DIFFERENT group (open/select/split/reopen/…) — or prunes the maximized one —
+      // restores the split view. Without this, the newly active pane would stay
+      // hidden behind the `gi === maxIdx` visibility gate: an invisible active group.
+      const maxId = s.maximized[projectId];
+      if (maxId && (next.activeGroupId !== maxId || !next.groups.some((g) => g.id === maxId))) {
+        const m = { ...s.maximized };
+        delete m[projectId];
+        patch.maximized = m;
+      }
+      return patch;
     });
   };
 
@@ -590,8 +948,16 @@ export const useStore = create<AppState>((set, get) => {
     conflict: {},
     pendingReveal: null,
     claudeStatus: null,
-    claudeUsage: null,
+    claudeUsage: [],
     planConnected: readPlanConnected(),
+    updateInfo: null,
+    updatePhase: "idle",
+    updateProgress: 0,
+    updateError: null,
+    agyUsageByAccount: {},
+    agyUsageTracking: false,
+    usagePrefs: readUsagePrefs(),
+    restoreSessionsOnOpen: readRestoreSessionsOnOpen(),
     sidebarCollapsed: readSidebarCollapsed(),
     rightCollapsed: readRightCollapsed(),
     showSettings: false,
@@ -602,7 +968,7 @@ export const useStore = create<AppState>((set, get) => {
     agents: null,
     defaultAgent: readDefaultAgent(),
     accounts: [],
-    defaultAccount: null,
+    defaultAccounts: {},
     privateMode: false,
     opencode: {
       enabled: false,
@@ -624,18 +990,29 @@ export const useStore = create<AppState>((set, get) => {
     bottomTab: "terminal",
     themePref: readStoredPref(),
     activeThemeId: resolveThemeId(readStoredPref(), systemPrefersDark()),
+    closedTabs: [],
+    maximized: {},
+    wordWrap: readWordWrap(),
+    trimOnSave: readTrimOnSave(),
+    fontZoom: readFontZoom(),
+    reveal: null,
+    recentFiles: {},
+    pendingDiff: null,
+    hotExit: {},
 
     load: async () => {
-      const [projects, home, accounts, defaultAccount, trust, opencode] = await Promise.all([
-        invoke<Project[]>("load_projects"),
-        getHomeDir().catch(() => null),
-        invoke<Account[]>("list_accounts").catch(() => [] as Account[]),
-        invoke<string | null>("get_default_account").catch(() => null),
-        invoke<TrustSettings>("get_trust_settings").catch(
-          () => ({ privateMode: false }) as TrustSettings,
-        ),
-        invoke<OpenCodeSettings>("get_opencode_settings").catch(() => get().opencode),
-      ]);
+      const [projects, home, accounts, defaultAccounts, trust, opencode, hotExitEntries] =
+        await Promise.all([
+          invoke<Project[]>("load_projects"),
+          getHomeDir().catch(() => null),
+          invoke<Account[]>("list_accounts").catch(() => [] as Account[]),
+          invoke<DefaultAccounts>("get_default_accounts").catch(() => ({}) as DefaultAccounts),
+          invoke<TrustSettings>("get_trust_settings").catch(
+            () => ({ privateMode: false }) as TrustSettings,
+          ),
+          invoke<OpenCodeSettings>("get_opencode_settings").catch(() => get().opencode),
+          invoke<HotExitEntry[]>("hotexit_load").catch(() => [] as HotExitEntry[]),
+        ]);
       const layouts: Record<string, ProjectLayout> = {};
       for (const p of projects) {
         layouts[p.id] = validateLayout(p.layout ?? defaultLayout(p), p);
@@ -648,15 +1025,20 @@ export const useStore = create<AppState>((set, get) => {
           }
         }
       }
+      // Hot-exit backups from the previous run: stashed keyed by path, consumed
+      // one-shot as panes create models. Never blocks load.
+      const hotExit: Record<string, string> = {};
+      for (const e of hotExitEntries) hotExit[e.path] = e.content;
       set({
         projects,
         homeDir: home,
         layouts,
         selectedProjectId: projects[0]?.id ?? null,
         accounts,
-        defaultAccount,
+        defaultAccounts,
         privateMode: trust.privateMode,
         opencode,
+        hotExit,
       });
     },
 
@@ -677,11 +1059,11 @@ export const useStore = create<AppState>((set, get) => {
     },
 
     loadAccounts: async () => {
-      const [accounts, defaultAccount] = await Promise.all([
+      const [accounts, defaultAccounts] = await Promise.all([
         invoke<Account[]>("list_accounts").catch(() => [] as Account[]),
-        invoke<string | null>("get_default_account").catch(() => null),
+        invoke<DefaultAccounts>("get_default_accounts").catch(() => ({}) as DefaultAccounts),
       ]);
-      set({ accounts, defaultAccount });
+      set({ accounts, defaultAccounts });
     },
     discoverAccounts: async () => {
       try {
@@ -702,10 +1084,46 @@ export const useStore = create<AppState>((set, get) => {
     removeAccount: async (id) => {
       await invoke("remove_account", { accountId: id }).catch(() => {});
       await get().loadAccounts();
+      // A removed account also detaches from any project defaults; refresh the tree.
+      await get().load();
     },
-    setDefaultAccount: async (id) => {
-      await invoke("set_default_account", { accountId: id }).catch(() => {});
-      set({ defaultAccount: id });
+    setDefaultAccount: async (agent, id) => {
+      await invoke("set_default_account", { agent, accountId: id }).catch(() => {});
+      set((s) => {
+        const next = { ...s.defaultAccounts };
+        if (id) next[agent] = id;
+        else delete next[agent];
+        return { defaultAccounts: next };
+      });
+    },
+    setProjectDefaultAccount: async (projectId, agent, id) => {
+      await invoke("set_project_default_account", { projectId, agent, accountId: id }).catch(
+        () => {},
+      );
+      set((s) => ({
+        projects: s.projects.map((p) => {
+          if (p.id !== projectId) return p;
+          const next: DefaultAccounts = { ...(p.defaultAccounts ?? {}) };
+          if (id) next[agent] = id;
+          else delete next[agent];
+          return { ...p, defaultAccounts: next };
+        }),
+      }));
+    },
+    setAccountAgents: async (accountId, agents) => {
+      await invoke("set_account_agents", { accountId, agents }).catch(() => {});
+      await get().loadAccounts();
+    },
+    setSessionAccount: async (sessionId, id) => {
+      await invoke("set_session_account", { sessionId, accountId: id }).catch(() => {});
+      set((s) => ({
+        projects: s.projects.map((p) => ({
+          ...p,
+          sessions: p.sessions.map((sess) =>
+            sess.id === sessionId ? { ...sess, accountId: id } : sess,
+          ),
+        })),
+      }));
     },
 
     // ---- Trust boundaries (Feature 4) ----
@@ -881,17 +1299,22 @@ export const useStore = create<AppState>((set, get) => {
       }
       await invoke("remove_project", { id });
       for (const ref of fileTabs) {
-        s.setDirty(ref, false);
+        // Clear dirty only when this was the model's last reference — the same
+        // absolute path can be open under another project, whose buffer (and its
+        // unsaved edits) survives this release.
+        if ((registry.model(ref)?.refCount ?? 1) <= 1) s.setDirty(ref, false);
         registry.release(ref);
         registry.disposeIfUnreferenced(ref);
       }
       set((st) => {
         const layouts = { ...st.layouts };
         delete layouts[id];
+        const maximized = { ...st.maximized };
+        delete maximized[id];
         const projects = st.projects.filter((p) => p.id !== id);
         const selectedProjectId =
           st.selectedProjectId === id ? projects[0]?.id ?? null : st.selectedProjectId;
-        return { projects, layouts, selectedProjectId };
+        return { projects, layouts, selectedProjectId, maximized };
       });
     },
 
@@ -903,6 +1326,13 @@ export const useStore = create<AppState>((set, get) => {
       const role = opts?.role ?? "worker";
       const session = await invoke<Session | null>("add_session", { projectId, name, useWorktree, agent, role });
       if (!session) return;
+      // Pin an explicitly-chosen account (blank = inherit the project/global default).
+      if (opts?.account) {
+        session.accountId = opts.account;
+        await invoke("set_session_account", { sessionId: session.id, accountId: opts.account }).catch(
+          () => {},
+        );
+      }
       set((s) => ({
         projects: s.projects.map((p) =>
           p.id === projectId ? { ...p, sessions: [...p.sessions, session] } : p,
@@ -960,6 +1390,35 @@ export const useStore = create<AppState>((set, get) => {
       }));
     },
 
+    reorderProject: async (projectId, toIndex) => {
+      // Mirror optimistically (the move is local-first UX), then persist; a persist
+      // failure only costs the order on next launch, never the projects themselves.
+      set((s) => {
+        const from = s.projects.findIndex((p) => p.id === projectId);
+        if (from < 0) return {};
+        const projects = [...s.projects];
+        const [moved] = projects.splice(from, 1);
+        projects.splice(Math.min(toIndex, projects.length), 0, moved);
+        return { projects };
+      });
+      await invoke("reorder_project", { projectId, toIndex }).catch(() => {});
+    },
+
+    reorderSession: async (projectId, sessionId, toIndex) => {
+      set((s) => ({
+        projects: s.projects.map((p) => {
+          if (p.id !== projectId) return p;
+          const from = p.sessions.findIndex((x) => x.id === sessionId);
+          if (from < 0) return p;
+          const sessions = [...p.sessions];
+          const [moved] = sessions.splice(from, 1);
+          sessions.splice(Math.min(toIndex, sessions.length), 0, moved);
+          return { ...p, sessions };
+        }),
+      }));
+      await invoke("reorder_session", { projectId, sessionId, toIndex }).catch(() => {});
+    },
+
     removeSession: async (projectId, sessionId) => {
       await invoke("remove_session", { projectId, sessionId });
       set((s) => {
@@ -971,13 +1430,22 @@ export const useStore = create<AppState>((set, get) => {
             : p,
         );
         let layouts = s.layouts;
+        let maximized = s.maximized;
         const cur = s.layouts[projectId];
         if (cur) {
           const next = validateLayout(cur, projects.find((p) => p.id === projectId));
           persistLayout(projectId, next);
           layouts = { ...s.layouts, [projectId]: next };
+          // Same maximize hygiene as applyLayout (this path commits a layout
+          // directly): a pruned/deactivated maximized group must drop the flag or
+          // the next ⇧⌘M is a silent no-op on a stale id.
+          const maxId = s.maximized[projectId];
+          if (maxId && (next.activeGroupId !== maxId || !next.groups.some((g) => g.id === maxId))) {
+            maximized = { ...s.maximized };
+            delete maximized[projectId];
+          }
         }
-        return { projects, live, layouts };
+        return { projects, live, layouts, maximized };
       });
     },
 
@@ -995,15 +1463,66 @@ export const useStore = create<AppState>((set, get) => {
       applyLayout(projectId, (l) => rOpenToSide(l, tab));
       if (tab.kind === "session") clearNeeds(tab.ref);
     },
-    openFile: (projectId, path, reveal) => {
+    openFile: (projectId, path, opts) => {
       const l = get().layouts[projectId];
       // Only a genuinely new tab bumps the ref (rOpenTab just re-activates an existing one).
       const already = !!l && l.groups.some((g) => g.tabs.some((t) => t.ref === path));
-      applyLayout(projectId, (l2) => rOpenTab(l2, { kind: "file", ref: path }));
+      const preview = !!opts?.preview && !already;
+      // A preview open replaces the active group's current preview tab in place.
+      let replaced: string | null = null;
+      if (preview && l) {
+        const g = activeGroup(l);
+        replaced = g?.tabs.find((t) => t.preview && t.ref !== path)?.ref ?? null;
+      }
+      applyLayout(projectId, (l2) => {
+        if (!opts?.preview) {
+          // An explicit open of an existing preview tab pins it.
+          for (const g of l2.groups) {
+            const t = g.tabs.find((x) => x.ref === path && x.preview);
+            if (t) delete t.preview;
+          }
+        }
+        const tab: WsTab = preview
+          ? { kind: "file", ref: path, preview: true }
+          : { kind: "file", ref: path };
+        if (replaced) {
+          const g = l2.groups.find((x) => x.id === l2.activeGroupId) ?? l2.groups[0];
+          const i = g ? g.tabs.findIndex((t) => t.ref === replaced) : -1;
+          if (g && i !== -1) {
+            g.tabs.splice(i, 1, tab);
+            g.activeRef = path;
+            l2.activeGroupId = g.id;
+            return l2;
+          }
+        }
+        return rOpenTab(l2, tab);
+      });
       if (!already) registry.acquire(path);
+      if (replaced) {
+        // Same release pair as requestCloseTab. A preview tab pins on its first edit,
+        // so the replaced buffer is never dirty.
+        registry.release(replaced);
+        registry.disposeIfUnreferenced(replaced);
+      }
       // One-shot reveal target: CodeEditorPane scrolls to it once the model is set.
-      if (reveal) set({ pendingReveal: { path, line: reveal.line, col: reveal.col ?? 1 } });
+      if (opts?.reveal)
+        set({ pendingReveal: { path, line: opts.reveal.line, col: opts.reveal.col ?? 1 } });
+      // Quick Open's MRU: most recent first, deduped, capped.
+      set((s) => {
+        const prev = s.recentFiles[projectId] ?? [];
+        const next = [path, ...prev.filter((p) => p !== path)].slice(0, 30);
+        return { recentFiles: { ...s.recentFiles, [projectId]: next } };
+      });
     },
+
+    pinTab: (projectId, ref) =>
+      applyLayout(projectId, (l) => {
+        for (const g of l.groups) {
+          const t = g.tabs.find((x) => x.ref === ref);
+          if (t) delete t.preview;
+        }
+        return l;
+      }),
 
     bumpDir: (dirPath) =>
       set((s) => ({
@@ -1070,13 +1589,28 @@ export const useStore = create<AppState>((set, get) => {
       get().bumpDir(parentDir(path));
     },
 
-    setDirty: (path, dirty) =>
+    setDirty: (path, dirty) => {
       set((s) => {
         const next = { ...s.dirty };
         if (dirty) next[path] = true;
         else delete next[path];
         return { dirty: next };
-      }),
+      });
+      // Editing pins a preview tab (VS Code semantics) — this also guarantees a
+      // preview tab replaced by openFile is never dirty.
+      if (dirty) {
+        const s = get();
+        for (const p of s.projects) {
+          const hasPreview = s.layouts[p.id]?.groups.some((g) =>
+            g.tabs.some((t) => t.ref === path && t.preview),
+          );
+          if (hasPreview) s.pinTab(p.id, path);
+        }
+      }
+      // Rust consults this count on quit/window-close (DirtyGuard) so clean quits
+      // stay instant while dirty ones round-trip for a confirm.
+      void invoke("set_dirty_count", { count: Object.keys(get().dirty).length }).catch(() => {});
+    },
 
     clearConflict: (path) =>
       set((s) => {
@@ -1094,13 +1628,26 @@ export const useStore = create<AppState>((set, get) => {
     saveFile: async (path) => {
       const entry = registry.model(path);
       // Hard guard: no model, read-only buffer, or unrevealed => never write.
-      if (!entry || entry.readOnly || !entry.model) return;
-      const value = entry.model.getValue();
+      // The saving.has guard also makes the window re-entrancy-safe: a second ⌘S
+      // while a write is in flight must not run (its finally would tear down the
+      // first save's suppression window — the shared Set doesn't nest).
+      if (!entry || entry.readOnly || !entry.model || registry.saving.has(path)) return;
+      // Enter the saving window BEFORE any cleanup edit: it silences both the file
+      // watcher and the pane's dirty dispatch for these transitional events — the
+      // store is settled explicitly in the finally below.
       registry.saving.add(path);
+      if (get().trimOnSave) {
+        applyWhitespaceCleanup(entry.model as unknown as Monaco.editor.ITextModel);
+      }
+      const value = entry.model.getValue();
+      // The version whose content is being written — snapshotted NEXT TO getValue().
+      // setSaved must record this, not the post-write current id: a keystroke landing
+      // during the awaited write would otherwise be absorbed into the saved point and
+      // the buffer would read clean while differing from disk.
+      const writtenVersion = entry.model.getAlternativeVersionId();
       try {
         const stat = await invoke<FileStat>("write_file", { path, content: value });
-        registry.setSaved(path, { mtimeMs: stat.mtimeMs, size: stat.size });
-        get().setDirty(path, false);
+        registry.setSaved(path, { mtimeMs: stat.mtimeMs, size: stat.size }, writtenVersion);
         get().clearConflict(path);
       } catch (e) {
         void invoke("notify_user", { title: "Conduit", body: `Save failed: ${String(e)}` }).catch(
@@ -1108,6 +1655,10 @@ export const useStore = create<AppState>((set, get) => {
         );
       } finally {
         registry.saving.delete(path);
+        // Settle the store on BOTH outcomes: success leaves it clean unless a
+        // keystroke landed mid-write; a failed write after suppressed trim edits
+        // must re-arm the dirty dot / Save All / quit guard.
+        get().setDirty(path, registry.dirtyOf(path));
       }
     },
 
@@ -1116,18 +1667,227 @@ export const useStore = create<AppState>((set, get) => {
       const group = s.layouts[projectId]?.groups.find((g) => g.id === groupId);
       const tab = group?.tabs.find((t) => t.ref === ref);
       const isFile = tab?.kind === "file";
-      if (isFile && s.dirty[ref]) {
+      // Guard/clear dirty only when this tab is the model's LAST reference (the same
+      // absolute path can be open under another project): otherwise nothing is
+      // discarded — the buffer lives on elsewhere — and force-clearing store.dirty
+      // would strand it clean while the surviving tab still holds unsaved edits.
+      const lastRef = isFile && (registry.model(ref)?.refCount ?? 1) <= 1;
+      if (isFile && lastRef && s.dirty[ref]) {
         const ok = await ask(`Discard unsaved changes to ${baseName(ref)}?`, {
           title: "Conduit",
           kind: "warning",
         });
         if (!ok) return;
       }
+      // Record explicit file closes for ⌘⇧T (rename/delete closes bypass this path —
+      // their old ref is gone from disk and shouldn't be restorable).
+      if (isFile && group) {
+        const index = group.tabs.findIndex((t) => t.ref === ref);
+        set((st) => ({
+          closedTabs: [...st.closedTabs, { projectId, groupId, index, ref }].slice(-20),
+        }));
+      }
       s.closeTab(projectId, groupId, ref);
       if (isFile) {
-        s.setDirty(ref, false);
+        if (lastRef) s.setDirty(ref, false);
         registry.release(ref);
         registry.disposeIfUnreferenced(ref);
+      }
+    },
+
+    reopenClosedTab: () => {
+      const stack = [...get().closedTabs];
+      while (stack.length) {
+        const c = stack.pop()!;
+        if (!get().projects.some((p) => p.id === c.projectId)) continue;
+        set({ closedTabs: stack, selectedProjectId: c.projectId });
+        const l = get().layouts[c.projectId];
+        const already = !!l && l.groups.some((g) => g.tabs.some((t) => t.ref === c.ref));
+        applyLayout(c.projectId, (l2) =>
+          reduceReopenTabAt(l2, c.groupId, c.index, { kind: "file", ref: c.ref }),
+        );
+        if (!already) registry.acquire(c.ref);
+        return;
+      }
+      set({ closedTabs: [] });
+    },
+
+    saveAll: async () => {
+      const s = get();
+      await Promise.all(Object.keys(s.dirty).map((p) => s.saveFile(p)));
+    },
+
+    cycleTab: (delta) => {
+      const s = get();
+      if (!s.selectedProjectId) return;
+      const g = activeGroup(s.layouts[s.selectedProjectId]);
+      if (!g) return;
+      const ref = cycleTabRef(g, delta);
+      if (ref) s.setActiveTab(s.selectedProjectId, g.id, ref);
+    },
+
+    activateTabAt: (index) => {
+      const s = get();
+      if (!s.selectedProjectId) return;
+      const g = activeGroup(s.layouts[s.selectedProjectId]);
+      if (!g || g.tabs.length === 0) return;
+      const i = index >= 9 ? g.tabs.length - 1 : index - 1;
+      if (i >= g.tabs.length) return;
+      s.setActiveTab(s.selectedProjectId, g.id, g.tabs[i].ref);
+    },
+
+    toggleMaximizeGroup: (projectId) =>
+      set((s) => {
+        const next = { ...s.maximized };
+        const l = s.layouts[projectId];
+        const g = activeGroup(l);
+        if (next[projectId] || !l || !g || l.groups.length < 2) {
+          delete next[projectId];
+        } else {
+          next[projectId] = g.id;
+        }
+        return { maximized: next };
+      }),
+
+    toggleWordWrap: () =>
+      set((s) => {
+        const next = !s.wordWrap;
+        writeWordWrap(next);
+        return { wordWrap: next };
+      }),
+
+    toggleTrimOnSave: () =>
+      set((s) => {
+        const next = !s.trimOnSave;
+        writeTrimOnSave(next);
+        return { trimOnSave: next };
+      }),
+
+    setFontZoom: (z) => {
+      const v = Math.max(FONT_ZOOM_MIN, Math.min(FONT_ZOOM_MAX, Math.round(z)));
+      writeFontZoom(v);
+      set({ fontZoom: v });
+    },
+
+    revealInTree: (path) =>
+      set((s) => {
+        if (s.rightCollapsed) writeRightCollapsed(false);
+        return {
+          rightCollapsed: false,
+          topTab: "files" as TopTab,
+          reveal: { path, nonce: (s.reveal?.nonce ?? 0) + 1 },
+        };
+      }),
+
+    clearReveal: () => set({ reveal: null }),
+
+    requestDiff: (path, mode) =>
+      set((s) => ({
+        pendingDiff: { path, nonce: (s.pendingDiff?.nonce ?? 0) + 1, mode },
+      })),
+    clearPendingDiff: () => set((s) => (s.pendingDiff ? { pendingDiff: null } : {})),
+
+    formatActiveDocument: async () => {
+      const s = get();
+      const toast = (body: string) =>
+        void invoke("notify_user", { title: "Format Document", body }).catch(() => {});
+      const pid = s.selectedProjectId;
+      const project = s.projects.find((p) => p.id === pid);
+      const g = pid ? activeGroup(s.layouts[pid]) : null;
+      const tab = g?.tabs.find((t) => t.ref === g.activeRef);
+      if (!project || !tab || tab.kind !== "file") return;
+      const path = tab.ref;
+      const entry = registry.model(path);
+      if (!entry?.model || entry.readOnly || registry.saving.has(path)) return;
+      const content = entry.model.getValue();
+      let formatted: string;
+      try {
+        const r = await invoke<{ formatted: string; formatter: string }>("format_content", {
+          dir: project.path,
+          path,
+          content,
+        });
+        formatted = r.formatted;
+      } catch (e) {
+        toast(String(e));
+        return;
+      }
+      // The buffer may have moved while the formatter ran; formatting a stale
+      // snapshot would silently revert those keystrokes.
+      if (entry.model.getValue() !== content) {
+        toast("Buffer changed while formatting — try again.");
+        return;
+      }
+      if (formatted === content) return;
+      const m = entry.model as unknown as Monaco.editor.ITextModel;
+      m.pushEditOperations(
+        [],
+        [{ range: m.getFullModelRange(), text: formatted }],
+        () => null,
+      );
+    },
+
+    reloadBufferFromDisk: async (path) => {
+      const entry = registry.model(path);
+      if (!entry?.model || entry.readOnly || registry.saving.has(path)) return;
+      const fc = await invoke<FileContent>("read_file", { path });
+      // Same post-await re-check + reconciliation window as CodeEditorPane.onReload:
+      // an own save that started mid-read owns the buffer, and the pane's contentSub
+      // must not dispatch for this transitional edit.
+      if (registry.saving.has(path)) return;
+      if (fc.error !== null || fc.binary || fc.readOnly) return;
+      const m = entry.model as unknown as Monaco.editor.ITextModel;
+      registry.saving.add(path);
+      try {
+        m.pushEditOperations([], [{ range: m.getFullModelRange(), text: fc.content }], () => null);
+        registry.setSaved(path, { mtimeMs: fc.mtimeMs, size: fc.size });
+      } finally {
+        registry.saving.delete(path);
+      }
+      get().setDirty(path, registry.dirtyOf(path));
+      get().clearConflict(path);
+    },
+
+    consumeHotExit: (path) => {
+      const content = get().hotExit[path];
+      if (content === undefined) return undefined;
+      set((s) => {
+        const hotExit = { ...s.hotExit };
+        delete hotExit[path];
+        return { hotExit };
+      });
+      return content;
+    },
+
+    flushHotExit: async () => {
+      const entries: HotExitEntry[] = [];
+      const covered = new Set<string>();
+      for (const path of Object.keys(get().dirty)) {
+        const entry = registry.model(path);
+        if (!entry?.model || entry.readOnly) continue;
+        covered.add(path);
+        entries.push({ path, content: entry.model.getValue(), mtimeMs: Date.now() });
+      }
+      // Backups not yet consumed (their tab exists but was never revealed, so no
+      // model was created) MUST ride along — models are lazy, and dropping these
+      // here would destroy the only copy of the previous run's edits. A backup
+      // whose tab no longer exists anywhere is dropped: nothing will ever consume it.
+      const openRefs = new Set<string>();
+      for (const layout of Object.values(get().layouts)) {
+        for (const g of layout.groups) {
+          for (const t of g.tabs) if (t.kind === "file") openRefs.add(t.ref);
+        }
+      }
+      for (const [path, content] of Object.entries(get().hotExit)) {
+        if (!covered.has(path) && openRefs.has(path)) {
+          entries.push({ path, content, mtimeMs: Date.now() });
+        }
+      }
+      try {
+        await invoke("hotexit_save", { entries });
+        return true;
+      } catch {
+        return false;
       }
     },
 
@@ -1163,10 +1923,28 @@ export const useStore = create<AppState>((set, get) => {
       }),
 
     moveTab: (projectId, fromGroupId, ref, toGroupId, toIndex) =>
-      applyLayout(projectId, (l) => reduceMoveTab(l, fromGroupId, ref, toGroupId, toIndex)),
+      applyLayout(projectId, (l) => {
+        const next = reduceMoveTab(l, fromGroupId, ref, toGroupId, toIndex);
+        // Dragging a tab is a deliberate placement — it pins a preview tab (VS Code
+        // semantics), which also keeps the one-preview-per-group invariant: without
+        // this, a dragged-in preview could be silently replaced by the next
+        // single-click open in its new group.
+        for (const g of next.groups) {
+          const t = g.tabs.find((x) => x.ref === ref);
+          if (t) delete t.preview;
+        }
+        return next;
+      }),
 
     splitTab: (projectId, ref, targetGroupId, side) =>
-      applyLayout(projectId, (l) => reduceSplitTab(l, ref, targetGroupId, side, uid())),
+      applyLayout(projectId, (l) => {
+        const next = reduceSplitTab(l, ref, targetGroupId, side, uid());
+        for (const g of next.groups) {
+          const t = g.tabs.find((x) => x.ref === ref);
+          if (t) delete t.preview; // splitting out is a deliberate placement too
+        }
+        return next;
+      }),
 
     setGroupWeights: (projectId, weights) =>
       applyLayout(projectId, (l) => {
@@ -1176,6 +1954,11 @@ export const useStore = create<AppState>((set, get) => {
 
     setTopTab: (t) => set({ topTab: t }),
     setBottomTab: (t) => set({ bottomTab: t }),
+
+    setRestoreSessionsOnOpen: (v) => {
+      writeRestoreSessionsOnOpen(v);
+      set({ restoreSessionsOnOpen: v });
+    },
 
     toggleSidebar: () =>
       set((s) => {
@@ -1230,21 +2013,174 @@ export const useStore = create<AppState>((set, get) => {
 
     refreshClaudeUsage: async () => {
       try {
-        const u = await invoke<ClaudeUsage>("fetch_claude_usage");
+        const u = await invoke<ClaudeAccountUsage[]>("fetch_claude_usage");
         set({ claudeUsage: u });
       } catch { /* fail-open: keep last-known */ }
     },
 
-    connectPlanUsage: async () => {
+    checkForUpdates: async (opts) => {
+      // Don't interfere with an install already in progress.
+      if (get().updatePhase === "downloading") return;
+      const manual = opts?.manual ?? false;
+      // Only show the transient "checking" state when there's no live banner to
+      // disturb — otherwise a background poll would flicker an "available" notice.
+      const showChecking =
+        manual || get().updatePhase === "idle" || get().updatePhase === "error";
+      if (showChecking) set({ updatePhase: "checking", updateError: null });
       try {
-        const ok = await invoke<boolean>("connect_claude_plan_usage");
-        writePlanConnected(ok);
-        set({ planConnected: ok });
+        const update = await check();
+        if (!update) {
+          void pendingUpdate?.close();
+          pendingUpdate = null;
+          set({ updateInfo: null, updatePhase: "idle" });
+          return;
+        }
+        // Respect a prior "Later" unless this is a manual check.
+        const skipped = localStorage.getItem(SKIPPED_VERSION_KEY);
+        const shouldNotify = manual
+          ? true
+          : await invoke<boolean>("update_should_notify", {
+              remoteVersion: update.version,
+              skippedVersion: skipped,
+            });
+        // Release any previously-held handle (Update is a Rust-side Resource).
+        if (pendingUpdate && pendingUpdate !== update) void pendingUpdate.close();
+        pendingUpdate = null;
+        if (!shouldNotify) {
+          void update.close();
+          set({ updateInfo: null, updatePhase: "idle" });
+          return;
+        }
+        pendingUpdate = update;
+        set({
+          updateInfo: {
+            version: update.version,
+            currentVersion: update.currentVersion,
+            notes: update.body ?? "",
+            date: update.date ?? undefined,
+          },
+          updatePhase: "available",
+        });
+      } catch (e) {
+        // Fail open. A background check that errors leaves any existing pending
+        // update untouched and stays quiet; only a manual check surfaces the error.
+        if (manual) {
+          set({ updatePhase: "error", updateError: String(e) });
+        } else if (get().updatePhase === "checking") {
+          set({ updatePhase: "idle" });
+        }
+      }
+    },
+
+    installUpdate: async () => {
+      if (!pendingUpdate) return;
+      set({ updatePhase: "downloading", updateProgress: 0, updateError: null });
+      try {
+        let downloaded = 0;
+        let total = 0;
+        await pendingUpdate.downloadAndInstall((ev) => {
+          switch (ev.event) {
+            case "Started":
+              total = ev.data.contentLength ?? 0;
+              break;
+            case "Progress":
+              downloaded += ev.data.chunkLength;
+              set({ updateProgress: total > 0 ? downloaded / total : 0 });
+              break;
+            case "Finished":
+              set({ updateProgress: 1 });
+              break;
+          }
+        });
+        // Installed to disk; restart into the new version. This tears down PTYs —
+        // the notice copy warns about that before the user clicks Install.
+        await relaunch();
+      } catch (e) {
+        set({ updatePhase: "error", updateError: String(e) });
+      }
+    },
+
+    dismissUpdate: () => {
+      const v = get().updateInfo?.version;
+      if (v) localStorage.setItem(SKIPPED_VERSION_KEY, v);
+      void pendingUpdate?.close();
+      pendingUpdate = null;
+      set({ updateInfo: null, updatePhase: "idle" });
+    },
+
+    connectPlanUsage: async (accountId) => {
+      const key = accountKey(accountId);
+      try {
+        const ok = await invoke<boolean>("connect_claude_plan_usage", { accountId });
+        const next = { ...get().planConnected, [key]: ok };
+        writePlanConnected(next);
+        set({ planConnected: next });
         if (ok) await get().refreshClaudeUsage();
         return ok;
       } catch {
-        writePlanConnected(false);
-        set({ planConnected: false });
+        // An invoke-level failure is transient plumbing, not "no credentials" -- keep the
+        // previous connected state so one blip can't flip a working account to
+        // disconnected (persisted false blocks rehydrate on the next launch).
+        return false;
+      }
+    },
+
+    connectAllUsage: async () => {
+      // Enable agy push-tracking (installs the status-line helper for agy sessions) so agy
+      // accounts populate once a session runs.
+      if (!get().agyUsageTracking) await get().setAgyUsageTracking(true);
+      // Make sure the Claude account list is populated before we iterate it (it may be empty
+      // if the poll hasn't run yet), then connect every account's plan usage.
+      await get().refreshClaudeUsage();
+      for (const t of get().claudeUsage) {
+        // eslint-disable-next-line no-await-in-loop
+        await get().connectPlanUsage(t.accountId);
+      }
+    },
+
+    // agy usage arrives pushed from Rust (the status-line helper POSTs on each agy state
+    // change); this setter is called by App's "agyusage" event listener. Keyed by account.
+    setAgyUsage: (u) =>
+      set((s) => ({
+        agyUsageByAccount: { ...s.agyUsageByAccount, [accountKey(u.accountId)]: u },
+      })),
+
+    refreshAgyUsage: async () => {
+      try {
+        const list = await invoke<AgyUsage[]>("fetch_agy_usage");
+        const next: Record<string, AgyUsage> = {};
+        for (const u of list) next[accountKey(u.accountId)] = u;
+        set({ agyUsageByAccount: next });
+      } catch { /* fail-open: keep last-known */ }
+    },
+
+    setUsagePrefs: (patch) =>
+      set((s) => {
+        const next = {
+          ...s.usagePrefs,
+          ...patch,
+          windows: { ...s.usagePrefs.windows, ...(patch.windows ?? {}) },
+        };
+        writeUsagePrefs(next);
+        return { usagePrefs: next };
+      }),
+
+    refreshAgyUsageTracking: async () => {
+      try {
+        const on = await invoke<boolean>("agy_usage_tracking_enabled");
+        set({ agyUsageTracking: on });
+      } catch { /* leave as-is */ }
+    },
+
+    setAgyUsageTracking: async (enabled) => {
+      try {
+        await invoke<boolean>("set_agy_usage_tracking", { enabled });
+        set({ agyUsageTracking: enabled });
+        return true;
+      } catch {
+        // Refresh from disk so the toggle reflects reality (e.g. a foreign statusLine
+        // blocked the write).
+        await get().refreshAgyUsageTracking();
         return false;
       }
     },
@@ -1287,17 +2223,21 @@ export function prettyPath(path: string, home: string | null): string {
   return path;
 }
 
-/** Last path component of a path. */
+/** Last path component of a path. Splits on both `/` and `\` so Windows-native
+ *  paths (which the Rust side emits via `Path::join`, e.g. worktree paths) resolve
+ *  correctly — otherwise the whole backslash path is returned as one segment. */
 export function baseName(path: string): string {
-  const parts = path.replace(/\/+$/, "").split("/");
+  const parts = path.replace(/[/\\]+$/, "").split(/[/\\]/);
   return parts[parts.length - 1] || path;
 }
 
-/** Parent directory of an absolute path (no trailing slash). Root stays "/". */
+/** Parent directory of an absolute path (no trailing separator). Handles both `/`
+ *  and `\` separators. POSIX root stays "/". */
 export function parentDir(path: string): string {
-  const p = path.replace(/\/+$/, "");
-  const i = p.lastIndexOf("/");
-  return i <= 0 ? "/" : p.slice(0, i);
+  const p = path.replace(/[/\\]+$/, "");
+  const i = Math.max(p.lastIndexOf("/"), p.lastIndexOf("\\"));
+  if (i < 0) return p;
+  return i === 0 ? "/" : p.slice(0, i);
 }
 
 /** Open a directory in VS Code (Rust handles the launch + fallbacks). */

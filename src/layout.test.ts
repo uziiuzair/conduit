@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { moveTab, splitTab } from "./layout";
+import { cycleTabRef, moveTab, reopenTabAt, splitTab } from "./layout";
 import type { ProjectLayout } from "./store";
 
 const L = (): ProjectLayout => ({
@@ -53,5 +53,47 @@ describe("splitTab", () => {
   it("is a no-op for an unknown target group", () => {
     const base = L();
     expect(splitTab(base, "/a", "gX", "right", "gNew")).toBe(base);
+  });
+});
+
+describe("cycleTabRef", () => {
+  const g = L().groups[0]; // tabs /a, /b — active /a
+  it("steps forward and backward with wrapping", () => {
+    expect(cycleTabRef(g, 1)).toBe("/b");
+    expect(cycleTabRef(g, -1)).toBe("/b"); // wraps from index 0 to the end
+    expect(cycleTabRef({ ...g, activeRef: "/b" }, 1)).toBe("/a"); // wraps forward
+  });
+  it("returns null with fewer than two tabs", () => {
+    expect(cycleTabRef(L().groups[1], 1)).toBe(null);
+    expect(cycleTabRef({ tabs: [], activeRef: null }, 1)).toBe(null);
+  });
+  it("starts from the first tab when activeRef dangles", () => {
+    expect(cycleTabRef({ ...g, activeRef: "/gone" }, 1)).toBe("/b");
+  });
+});
+
+describe("reopenTabAt", () => {
+  const tab = { kind: "file", ref: "/c" } as const;
+  it("restores at the recorded index in the original group", () => {
+    const r = reopenTabAt(L(), "g1", 1, { ...tab });
+    expect(r.groups[0].tabs.map((t) => t.ref)).toEqual(["/a", "/c", "/b"]);
+    expect(r.groups[0].activeRef).toBe("/c");
+    expect(r.activeGroupId).toBe("g1");
+  });
+  it("clamps an out-of-range index", () => {
+    const r = reopenTabAt(L(), "g1", 99, { ...tab });
+    expect(r.groups[0].tabs.map((t) => t.ref)).toEqual(["/a", "/b", "/c"]);
+  });
+  it("falls back to the active group when the original group is gone", () => {
+    const r = reopenTabAt(L(), "gGone", 0, { ...tab });
+    expect(r.groups[0].tabs.map((t) => t.ref)).toEqual(["/c", "/a", "/b"]);
+    expect(r.activeGroupId).toBe("g1");
+  });
+  it("focuses an existing tab instead of duplicating", () => {
+    const r = reopenTabAt(L(), "g2", 0, { kind: "file", ref: "/b" });
+    expect(r.groups[0].tabs.map((t) => t.ref)).toEqual(["/a", "/b"]);
+    expect(r.groups[1].tabs.map((t) => t.ref)).toEqual(["s1"]);
+    expect(r.groups[0].activeRef).toBe("/b");
+    expect(r.activeGroupId).toBe("g1");
   });
 });

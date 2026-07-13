@@ -3,6 +3,145 @@
 All notable changes to Conduit are documented here. This project uses
 [semantic versioning](https://semver.org/).
 
+## 0.12.0 — 2026-07-13
+
+- **Added — auto-updates (macOS).** Conduit now checks GitHub Releases in the
+  background and via Settings → About, and installs signed + notarized updates on
+  your consent. This is the first self-updating build — update to it once by hand;
+  future versions update in place.
+
+## 0.11.0 — 2026-07-13
+
+- **Added — sidebar drag-and-drop reordering.** Drag a project header to reorder
+  projects, or drag a session row to reorder sessions within their project; an
+  accent line previews the drop position and the order persists across launches.
+  Project headers also got a clearer visual hierarchy: a header slab, bolder
+  names, group separators, and an indent guide nesting sessions under their
+  project.
+- **Fixed — plan-usage connections self-heal.** "Connect plan usage" no longer
+  reports a missing sign-in when the saved token is merely expired or the network
+  blips: connecting now just verifies credentials exist, and the usage poll
+  re-reads the on-disk token (never the macOS Keychain) and retries, so bars
+  recover on their own after Claude Code refreshes a token. Transient failures no
+  longer disconnect an account or block reconnection on the next launch.
+
+## 0.10.3 — 2026-07-13
+
+- **Changed — Settings control polish.** The glossy native macOS checkboxes, range
+  sliders, and account/select dropdowns in Settings are replaced with
+  theme-matched controls: custom-drawn checkmarks on accent fills, a themed slider
+  track and thumb, and a hand-drawn select chevron. Scoped to the settings and
+  dialog toggles so Markdown-preview task-list boxes and the agy accent toggle are
+  untouched.
+
+## 0.10.2 — 2026-07-13
+
+- **Fixed — clipboard paste into the terminal.** WKWebView on macOS 26 gates
+  `navigator.clipboard.readText()` behind a native consent popup that the
+  canvas-rendered xterm can't satisfy, so browser-side paste silently failed
+  (copy still worked). Conduit now reads the OS clipboard on the Rust side and
+  hands the text to the terminal; a clipboard image is encoded to a temp PNG whose
+  path is pasted, matching how Claude Code's TUI attaches image files.
+
+## 0.10.1 — 2026-07-13
+
+- **Fixed — usage meter fill direction and color.** Remaining-mode bars drew the
+  remaining amount as a full bar, so "95% left" rendered as a 95%-full bar that
+  read like consumption; the fill now tracks the used amount (label still shows
+  "% left") so every bar fills in the same direction. The discrete amber/red
+  health tiers are replaced by a smooth color-mix ramp from the agent's base color
+  toward muted red as the bar approaches full, with onset derived from the
+  Settings low-threshold preference.
+
+## 0.10.0 — 2026-07-12
+
+- **Added — session restore on startup.** Reopen where you left off: opening a
+  project eagerly relaunches all of its sessions (gated by a new
+  `restoreSessionsOnOpen` setting, default on; other projects stay lazy). Claude
+  resumes via `--resume`; agy resumes via `agy --conversation=<uuid>`, with the
+  conversation id captured from agy's own status-line payload (race-free per
+  session) or an unambiguous spawn-time baseline, and persisted so stale ids
+  self-clear and re-capture. Claude + agy today; Codex, OpenCode, and Gemini
+  deferred.
+- **Added — safe-shutdown guard.** Quitting the app or closing a single session
+  now prompts for confirmation whenever an agent is still running, cross-checked
+  against a live PTY so stale or deleted-session statuses can't false-prompt;
+  confirming hard-kills the process while keeping history. agy activity reaches
+  the guard through its status-line `agent_state`, since it fires no Claude-style
+  lifecycle hooks.
+
+## 0.9.0 — 2026-07-12
+
+- **Added — multiple accounts, assignable per session and per project.** Accounts
+  are now agent-aware (Claude + agy) and carry which agents they're signed in
+  for. Set per-agent global defaults and per-project defaults; a resolver chain
+  (session → project default → global default → env) picks the account at spawn.
+  A `ProviderAdapter::account_env` seam centralizes the account→env redirect and
+  is the single extension point a future multi-account agent implements.
+- **Added — all-accounts usage bar.** A unified usage panel replaces the two
+  agent-gated panels and shows every registered account's quota at once — Claude
+  usage fetched per account (per-account token cache), agy snapshots keyed by the
+  posting session's resolved account — driven by user-selectable view preferences
+  (layout, window filters, sort, low-usage threshold). Polling runs at the app
+  root so every account refreshes regardless of the selected agent or sidebar
+  state.
+- **Added — account assignment UI.** Settings → Agent accounts (agent tags plus
+  per-agent and per-project defaults), a new-session account picker, a right-click
+  "Account" submenu, and a per-session chip in the sidebar. Account discovery is
+  generalized to any `<profile>/.claude` under home.
+
+## 0.8.0 — 2026-07-12
+
+- **Added — Antigravity (agy) usage bar.** A violet sidebar meter for agy
+  sessions, sourcing quota from agy's own status-line command hook (its documented
+  extension surface — avoiding the ToS-forbidden direct API access). Because agy
+  execs status-line commands without a shell, Conduit ships a helper script
+  (`conduit-usage.bat` / `.sh`) that posts agy's JSON to the local hook server and
+  echoes the response back as agy's status line. The quota map is parsed into
+  Gemini / Claude&GPT pools (Weekly + 5-hour remaining) plus plan tier and context
+  window; config is synced into the session's resolved home and written
+  atomically, and quota-less ticks are dropped so they can't clobber a good
+  snapshot.
+- **Fixed — Windows terminal and paths.** Path base/parent names now split on both
+  `/` and `\` (Rust emits native backslash paths), fixing the agy worktree "not a
+  valid branch name" bug and garbled editor tab names. Terminal copy/paste and
+  click-to-open-path are now cross-platform (Ctrl+C / Ctrl+Shift+C / Ctrl+V and
+  Ctrl+Click on Windows/Linux, Cmd on macOS).
+
+## 0.7.0 — 2026-07-10
+
+- **Added — markdown preview.** A "Preview" button in the editor breadcrumb (and
+  ⇧⌘V) overlays the still-mounted editor with the active buffer rendered as HTML,
+  re-rendered live from the shared model (150 ms debounce); ⇧⌘V returns to source
+  and ⌘S saves from either. Rendering goes through `marked` (GFM) behind a strict
+  DOM-whitelist sanitizer that is the security boundary since the webview ships
+  `csp:null` — script/iframe and non-whitelisted attributes are stripped and URL
+  schemes policed; anchor clicks route through the external opener rather than
+  navigating the webview.
+- **Added — editor tier-2 polish.** Eleven VS Code-parity features with zero new
+  dependencies: a dirty-state quit/close guard (round-trips to a Rust `DirtyGuard`
+  only when there are unsaved changes) plus Save All; tab navigation (⌃Tab /
+  ⌃⇧Tab, ⌘1–9, ⌘⇧T to reopen closed tabs); italic **preview tabs** that replace
+  each other until pinned; a tab context menu and Reveal in Finder/Tree;
+  breadcrumb status chips (Ln/Col, indentation, clickable LF/CRLF); word wrap,
+  synchronized editor+terminal font zoom, and Clean Whitespace on Save; maximize
+  editor group (⇧⌘M) as a geometry-only override that never unmounts keep-alive
+  panes; and image preview for binary raster files.
+- **Added — editor tier-3.** Diff with HEAD (side-by-side overlay whose modified
+  side is the live buffer, with gutter change stripes); Quick Open (⌘P) fuzzy file
+  palette over `git ls-files`; Find in Files (⌘⇧F) via `rg --json` with git-grep /
+  grep fallbacks; Format Document (⇧⌥F) piping the buffer through project-local
+  prettier / rustfmt / gofmt as one undo-preserving edit; Discard to HEAD
+  (confirm-guarded `git restore` / delete); and hot exit — dirty buffers are
+  backed up to app-data and restored as dirty on relaunch, so ⌘Q backs up and
+  quits silently. Shells out to git/rg/grep and the project's own formatter per
+  the lean-dependencies doctrine.
+
+## 0.6.1 — 2026-07-08
+
+- **Fixed — full local Claude usage.** The local-consumption meter now reports the
+  full local Claude usage instead of an undercounted figure.
+
 ## 0.6.0 — 2026-07-08
 
 - **Added — terminal-to-editor navigation.** Cmd-click file paths in any terminal

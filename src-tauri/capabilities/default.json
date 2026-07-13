@@ -8,6 +8,8 @@
     "core:event:default",
     "dialog:default",
     "notification:default",
-    "window-state:default"
+    "window-state:default",
+    "updater:default",
+    "process:default"
   ]
 }

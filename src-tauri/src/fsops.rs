@@ -41,6 +41,45 @@ pub fn list_dir(dir: &str) -> Vec<DirEntry> {
     entries
 }
 
+/// Quick Open's fallback when the project isn't a git repo: a bounded recursive
+/// walk. Depth/entry caps keep a mistakenly-opened $HOME from hanging the palette;
+/// the heavy well-known noise dirs are skipped outright.
+const WALK_DEPTH: usize = 6;
+const WALK_SKIP: &[&str] = &[
+    ".git",
+    "node_modules",
+    "target",
+    "dist",
+    ".venv",
+    "__pycache__",
+];
+
+pub fn walk_files(dir: &str, cap: usize) -> Vec<String> {
+    fn rec(base: &Path, dir: &Path, depth: usize, cap: usize, out: &mut Vec<String>) {
+        if depth > WALK_DEPTH || out.len() >= cap {
+            return;
+        }
+        let Ok(rd) = fs::read_dir(dir) else { return };
+        for e in rd.flatten() {
+            if out.len() >= cap {
+                return;
+            }
+            let name = e.file_name().to_string_lossy().into_owned();
+            let is_dir = e.file_type().map(|t| t.is_dir()).unwrap_or(false);
+            if is_dir {
+                if !WALK_SKIP.contains(&name.as_str()) && !name.starts_with('.') {
+                    rec(base, &e.path(), depth + 1, cap, out);
+                }
+            } else if let Ok(rel) = e.path().strip_prefix(base) {
+                out.push(rel.to_string_lossy().replace('\\', "/"));
+            }
+        }
+    }
+    let mut out = Vec::new();
+    rec(Path::new(dir), Path::new(dir), 0, cap, &mut out);
+    out
+}
+
 // ---- read contract --------------------------------------------------------
 
 /// Fully editable up to 8 MB.
@@ -170,6 +209,45 @@ fn err_content(msg: String) -> FileContent {
         mtime_ms: 0.0,
         error: Some(msg),
     }
+}
+
+// ---- raw-bytes read (image preview) ----------------------------------------
+
+/// Cap for `read_file_base64`, well under the text HARD_CAP — a 16 MB file already
+/// becomes a ~21 MB base64 string over IPC.
+const IMAGE_CAP: u64 = 16 * 1024 * 1024;
+
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct FileBase64 {
+    pub base64: String,
+    pub size: u64,
+}
+
+/// Read a file's raw bytes base64-encoded (STANDARD engine, same as pty.rs frames).
+/// Fallible at the IPC layer: the caller shows the error string in the preview pane.
+/// The cap is enforced on the BYTES ACTUALLY READ (`take`, like `read_file`'s
+/// HARD_CAP) — a pre-read metadata check alone is a TOCTOU hole: a file that grows
+/// (or a symlink to an unbounded stream) between stat and read would otherwise be
+/// read to EOF without limit.
+pub fn read_file_base64(path: &str) -> Result<FileBase64, String> {
+    use base64::Engine;
+    let f = fs::File::open(path).map_err(|e| format!("could not read file: {e}"))?;
+    let mut data = Vec::new();
+    f.take(IMAGE_CAP + 1)
+        .read_to_end(&mut data)
+        .map_err(|e| format!("could not read file: {e}"))?;
+    if data.len() as u64 > IMAGE_CAP {
+        return Err(format!(
+            "file is too large to preview (limit {} MB)",
+            IMAGE_CAP / (1024 * 1024)
+        ));
+    }
+    let size = data.len() as u64;
+    Ok(FileBase64 {
+        base64: base64::engine::general_purpose::STANDARD.encode(&data),
+        size,
+    })
 }
 
 // ---- write contract (atomic, std-only) ------------------------------------

@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Conduit",
-  "version": "0.6.0",
+  "version": "0.12.0",
   "identifier": "com.conduit.tauri",
   "build": {
     "beforeDevCommand": "pnpm dev",
@@ -28,7 +28,8 @@
   },
   "bundle": {
     "active": true,
-    "targets": ["app"],
+    "createUpdaterArtifacts": true,
+    "targets": ["app", "dmg"],
     "publisher": "Ooozzy",
     "homepage": "https://ooozzy.com",
     "category": "DeveloperTool",
@@ -44,6 +45,14 @@
     ],
     "macOS": {
       "minimumSystemVersion": "13.0"
+    }
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDFFM0VGNzFCQTM1QkQ3Q0EKUldUSzExdWpHL2MrSG9qcTJtU3FDWitPWGFwei8vZkZIN1Vpa1dyY1lSYi9Ib2M4ekdzNERSclMK",
+      "endpoints": [
+        "https://github.com/uziiuzair/conduit/releases/latest/download/latest.json"
+      ]
     }
   }
 }

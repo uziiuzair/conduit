@@ -4,7 +4,10 @@ use std::path::Path;
 
 /// Which coding-agent CLI a session runs. Persisted on each Session; serializes
 /// as a lowercase string ("claude"/"codex"/"gemini"/"opencode"). Unknown/absent → Claude (back-compat).
-#[derive(serde::Serialize, serde::Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
+/// `Hash`/`Eq` let it key the per-agent default-account maps (serde emits it as a JSON string key).
+#[derive(
+    serde::Serialize, serde::Deserialize, Clone, Copy, Debug, PartialEq, Eq, Hash, Default,
+)]
 #[serde(rename_all = "lowercase")]
 pub enum AgentId {
     #[default]
@@ -43,6 +46,36 @@ fn sh_quote(s: &str) -> String {
     }
 }
 
+/// The HOME-redirect env for a `.claude`-style account profile, shared by the Claude and
+/// Antigravity adapters (agy reads `.gemini/antigravity-cli` under the same profile root).
+///
+/// A `.claude` account set up via a HOME-redirect launcher (e.g. a `claude-personal` shim)
+/// keeps its `.claude.json` -- the record of the logged-in account, onboarding, and trust
+/// state -- at the PROFILE ROOT, not inside `.claude`. `CLAUDE_CONFIG_DIR` only redirects the
+/// `.claude` dir, so an interactive session would find the credentials but re-prompt
+/// login/onboarding. Redirect HOME/USERPROFILE to the profile root instead (exactly what the
+/// launcher does) so the full account state is read. Fall back to `CLAUDE_CONFIG_DIR` for a
+/// non-`.claude` custom directory. Existence-guarded: a missing dir yields no env (inherit).
+///
+/// This is a faithful move of the block that used to live inline in `pty.rs`; keeping it a
+/// free fn lets both adapters share it and lets a unit test assert byte-identical output.
+pub fn claude_profile_env(config_dir: &str) -> Vec<(String, String)> {
+    let p = Path::new(config_dir);
+    if !p.exists() {
+        return Vec::new();
+    }
+    let root = (p.file_name().and_then(|f| f.to_str()) == Some(".claude"))
+        .then(|| p.parent().and_then(|r| r.to_str()))
+        .flatten();
+    match root {
+        Some(root) => vec![
+            ("USERPROFILE".to_string(), root.to_string()),
+            ("HOME".to_string(), root.to_string()),
+        ],
+        None => vec![("CLAUDE_CONFIG_DIR".to_string(), config_dir.to_string())],
+    }
+}
+
 /// Knows how to launch one agent CLI inside Conduit's `sh -c` cold-spawn script.
 pub trait ProviderAdapter {
     fn id(&self) -> AgentId;
@@ -54,6 +87,17 @@ pub trait ProviderAdapter {
     }
     /// Extra env vars to set on the child process for this agent.
     fn env_overrides(&self) -> Vec<(&'static str, &'static str)> {
+        Vec::new()
+    }
+    /// Env vars that make this agent run under the registered account whose config dir is
+    /// `config_dir`. Empty vec = this agent has no account concept (the default), so a
+    /// pinned account is a no-op for it. Called once at spawn from `pty.rs`; the returned
+    /// values are applied to the child env and MUST NOT be logged (they are path-derived,
+    /// not secret, but they identify the account). This is the single seam a future
+    /// multi-account agent implements -- nothing in `pty.rs`, the resolver, or the usage
+    /// plumbing needs to change to add one. Claude and Antigravity override it; every other
+    /// adapter inherits the empty default. See the multi-account design doc.
+    fn account_env(&self, _config_dir: &str) -> Vec<(String, String)> {
         Vec::new()
     }
     /// The lifecycle hooks this adapter installs at session spawn.
@@ -70,12 +114,15 @@ pub trait ProviderAdapter {
     /// The agent command that runs after `cd <dir> &&`, including the `|| <bare>`
     /// fallback. `flags` carries already-quoted extra args (e.g. ` --worktree 'x'`).
     /// `projects_dir` is Claude's transcript store (used only by adapters that resume).
+    /// `resume_token` is the agent's own captured conversation id (agy), for adapters that
+    /// can't pin resume to Conduit's `session_id` the way Claude does. None = start fresh.
     fn build_invocation(
         &self,
         session_id: &str,
         projects_dir: Option<&Path>,
         flags: &str,
         initial_prompt: Option<&str>,
+        resume_token: Option<&str>,
     ) -> String;
     /// Build the CLI command string to register an MCP server at user scope.
     /// Returns `None` if this adapter doesn't support the given transport yet.
@@ -116,12 +163,16 @@ impl ProviderAdapter for ClaudeAdapter {
         // Disables the Task-tool migration that breaks the TodoWrite hook (see CLAUDE.md).
         vec![("CLAUDE_CODE_ENABLE_TASKS", "0")]
     }
+    fn account_env(&self, config_dir: &str) -> Vec<(String, String)> {
+        claude_profile_env(config_dir)
+    }
     fn build_invocation(
         &self,
         session_id: &str,
         projects_dir: Option<&Path>,
         flags: &str,
         initial_prompt: Option<&str>,
+        _resume_token: Option<&str>, // Claude resumes via `session_id`/transcript, not this.
     ) -> String {
         let id = crate::pty::quote_arg(session_id);
         // An initial prompt rides as a quoted positional so the worker starts working
@@ -198,6 +249,7 @@ impl ProviderAdapter for GeminiAdapter {
         _projects_dir: Option<&Path>,
         _flags: &str,
         _initial_prompt: Option<&str>,
+        _resume_token: Option<&str>,
     ) -> String {
         "gemini || gemini".to_string()
     }
@@ -317,6 +369,7 @@ impl ProviderAdapter for CodexAdapter {
         _projects_dir: Option<&Path>,
         flags: &str,
         initial_prompt: Option<&str>,
+        _resume_token: Option<&str>,
     ) -> String {
         let Some(prompt) = initial_prompt else {
             return "codex || codex".to_string();
@@ -452,6 +505,7 @@ impl ProviderAdapter for OpenCodeAdapter {
         _projects_dir: Option<&Path>,
         flags: &str,
         initial_prompt: Option<&str>,
+        _resume_token: Option<&str>,
     ) -> String {
         let prompt = initial_prompt
             .map(|p| format!(" --prompt {}", crate::pty::quote_arg(p)))
@@ -508,8 +562,21 @@ impl ProviderAdapter for AntigravityAdapter {
         _projects_dir: Option<&Path>,
         _flags: &str,
         _initial_prompt: Option<&str>,
+        resume_token: Option<&str>,
     ) -> String {
-        "agy || agy".to_string()
+        // agy can't pin our id, so we resume by the conversation id we captured after the first
+        // launch (the newest `conversations/<uuid>.db`). `--conversation=<id>` reopens that exact
+        // conversation; `|| agy` falls back to a fresh session if the id is stale/gone. We avoid
+        // `--continue` (it's global and cross-contaminates concurrent agy sessions).
+        match resume_token {
+            Some(id) => format!("agy --conversation={} || agy", crate::pty::quote_arg(id)),
+            None => "agy || agy".to_string(),
+        }
+    }
+    fn account_env(&self, config_dir: &str) -> Vec<(String, String)> {
+        // agy reads its config from `.gemini/antigravity-cli` under the SAME profile root a
+        // `.claude` account redirects to, so the HOME redirect is identical to Claude's.
+        claude_profile_env(config_dir)
     }
 }
 
@@ -906,6 +973,74 @@ mod tests {
     use super::*;
 
     #[test]
+    fn account_env_redirects_claude_profile_root() {
+        // A `.claude` dir under a temp profile root: HOME/USERPROFILE point at the ROOT (the
+        // behavior the pty.rs inline block used to produce). Claude and Antigravity agree.
+        let root = std::env::temp_dir().join(format!("conduit_acctenv_{}", std::process::id()));
+        let claude = root.join(".claude");
+        let _ = std::fs::create_dir_all(&claude);
+        let dir = claude.to_string_lossy().into_owned();
+        let root_str = root.to_string_lossy().into_owned();
+        let expected = vec![
+            ("USERPROFILE".to_string(), root_str.clone()),
+            ("HOME".to_string(), root_str),
+        ];
+        assert_eq!(ClaudeAdapter.account_env(&dir), expected);
+        assert_eq!(AntigravityAdapter.account_env(&dir), expected);
+        // Other adapters have no account concept -> no env.
+        assert!(CodexAdapter.account_env(&dir).is_empty());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn account_env_falls_back_to_config_dir_for_custom_path() {
+        // A non-`.claude` custom dir uses CLAUDE_CONFIG_DIR, not a HOME redirect.
+        let custom =
+            std::env::temp_dir().join(format!("conduit_acctcustom_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&custom);
+        let dir = custom.to_string_lossy().into_owned();
+        assert_eq!(
+            ClaudeAdapter.account_env(&dir),
+            vec![("CLAUDE_CONFIG_DIR".to_string(), dir.clone())]
+        );
+        let _ = std::fs::remove_dir_all(&custom);
+    }
+
+    #[test]
+    fn account_env_empty_for_missing_dir() {
+        // Nonexistent path -> no env (inherit), matching the old existence guard.
+        assert!(ClaudeAdapter
+            .account_env("/no/such/conduit/account/dir")
+            .is_empty());
+    }
+
+    #[test]
+    fn antigravity_resumes_with_conversation_token_else_fresh() {
+        // No captured id -> a bare, fresh launch (unchanged behavior).
+        assert_eq!(
+            AntigravityAdapter.build_invocation("sid", None, "", None, None),
+            "agy || agy"
+        );
+        // With a captured conversation id -> reopen that exact conversation, falling back to a
+        // fresh session if the id is stale/gone. Assert by parts (quote_arg quoting differs by
+        // platform), and confirm we never use the cross-contaminating `--continue`.
+        let cmd = AntigravityAdapter.build_invocation(
+            "sid",
+            None,
+            "",
+            None,
+            Some("d1d8a55b-cc27-4dd4-bc62-2f73015960d2"),
+        );
+        assert!(cmd.contains("--conversation="), "{cmd}");
+        assert!(
+            cmd.contains("d1d8a55b-cc27-4dd4-bc62-2f73015960d2"),
+            "{cmd}"
+        );
+        assert!(cmd.ends_with("|| agy"), "{cmd}");
+        assert!(!cmd.contains("--continue"), "{cmd}");
+    }
+
+    #[test]
     fn detect_one_marks_found_when_path_nonempty() {
         let info = AgentInfo::from_probe(
             AgentId::Codex,
@@ -931,7 +1066,7 @@ mod tests {
 
     #[test]
     fn codex_spawns_fresh_with_fallback() {
-        let cmd = CodexAdapter.build_invocation("sid", None, "", None);
+        let cmd = CodexAdapter.build_invocation("sid", None, "", None, None);
         assert_eq!(cmd, "codex || codex");
         assert_eq!(CodexAdapter.id(), AgentId::Codex);
         assert_eq!(CodexAdapter.binary(), "codex");
@@ -944,7 +1079,7 @@ mod tests {
         // Regression guard: a manual/non-fleet Codex session's invocation must stay
         // exactly the pre-Tier-2 constant on every platform.
         assert_eq!(
-            CodexAdapter.build_invocation("sid", None, "", None),
+            CodexAdapter.build_invocation("sid", None, "", None, None),
             "codex || codex"
         );
     }
@@ -952,7 +1087,7 @@ mod tests {
     #[cfg(not(windows))]
     #[test]
     fn codex_with_prompt_chains_exec_then_interactive() {
-        let cmd = CodexAdapter.build_invocation("sid-1", None, "", Some("say hello"));
+        let cmd = CodexAdapter.build_invocation("sid-1", None, "", Some("say hello"), None);
         assert!(cmd.contains("exec --json"), "{cmd}");
         assert!(
             cmd.contains("--output-schema .conduit/result.schema.json"),
@@ -965,14 +1100,15 @@ mod tests {
     #[cfg(not(windows))]
     #[test]
     fn codex_with_prompt_and_flags_ends_with_flagged_fallback() {
-        let cmd = CodexAdapter.build_invocation("sid-1", None, " --worktree 'wt'", Some("hi"));
+        let cmd =
+            CodexAdapter.build_invocation("sid-1", None, " --worktree 'wt'", Some("hi"), None);
         assert!(cmd.ends_with("; codex --worktree 'wt'"), "{cmd}");
     }
 
     #[cfg(windows)]
     #[test]
     fn codex_with_prompt_uses_ampersand_chain_on_windows() {
-        let cmd = CodexAdapter.build_invocation("sid-1", None, "", Some("say hello"));
+        let cmd = CodexAdapter.build_invocation("sid-1", None, "", Some("say hello"), None);
         // Every separator is `&` (cmd.exe's actual chain operator) -- never `;`, which
         // cmd.exe doesn't understand as a command separator at all.
         assert!(cmd.contains(" & call .conduit\\result.cmd & "), "{cmd}");
@@ -1002,7 +1138,7 @@ mod tests {
     #[test]
     fn claude_pins_a_new_session_when_no_transcript() {
         // projects_dir = None → no transcript → pin a new session id.
-        let cmd = ClaudeAdapter.build_invocation("abc-123", None, "", None);
+        let cmd = ClaudeAdapter.build_invocation("abc-123", None, "", None, None);
         // Quoting is OS-aware (POSIX single-quote vs cmd bare/double-quote).
         #[cfg(not(windows))]
         let expected = "claude --session-id 'abc-123' || claude";
@@ -1013,7 +1149,7 @@ mod tests {
 
     #[test]
     fn claude_applies_flags_to_both_primary_and_fallback() {
-        let cmd = ClaudeAdapter.build_invocation("id", None, " --worktree 'wt'", None);
+        let cmd = ClaudeAdapter.build_invocation("id", None, " --worktree 'wt'", None, None);
         // The flags arg is pre-quoted by the caller; only the session id is quoted here,
         // and that quoting is OS-aware.
         #[cfg(not(windows))]
@@ -1025,7 +1161,7 @@ mod tests {
 
     #[test]
     fn claude_appends_initial_prompt_as_quoted_positional() {
-        let cmd = ClaudeAdapter.build_invocation("id", None, "", Some("write a haiku"));
+        let cmd = ClaudeAdapter.build_invocation("id", None, "", Some("write a haiku"), None);
         // The spaced prompt is quoted as a single positional; quoting is OS-aware.
         #[cfg(not(windows))]
         let expected = "claude --session-id 'id' 'write a haiku' || claude 'write a haiku'";
@@ -1071,7 +1207,7 @@ mod tests {
         assert_eq!(GeminiAdapter.binary(), "gemini");
         assert!(!GeminiAdapter.supports_worktree());
         assert_eq!(
-            GeminiAdapter.build_invocation("sid", None, "", None),
+            GeminiAdapter.build_invocation("sid", None, "", None, None),
             "gemini || gemini"
         );
         assert_eq!(adapter_for(AgentId::Gemini).id(), AgentId::Gemini);
@@ -1085,7 +1221,7 @@ mod tests {
         // invocation must still never carry it (design doc §2.6's security-relevant
         // constraint -- --skip-trust must never apply outside a Conduit-provisioned
         // worktree).
-        let cmd = GeminiAdapter.build_invocation("sid", None, "", None);
+        let cmd = GeminiAdapter.build_invocation("sid", None, "", None, None);
         assert!(!cmd.contains("--skip-trust"), "{cmd}");
     }
 
@@ -1095,7 +1231,7 @@ mod tests {
         assert_eq!(OpenCodeAdapter.binary(), "opencode");
         assert!(!OpenCodeAdapter.supports_worktree());
         assert_eq!(
-            OpenCodeAdapter.build_invocation("sid", None, "", None),
+            OpenCodeAdapter.build_invocation("sid", None, "", None, None),
             "opencode || opencode"
         );
         assert!(
@@ -1253,7 +1389,7 @@ mod tests {
 
     #[test]
     fn opencode_appends_initial_prompt_via_prompt_flag() {
-        let cmd = OpenCodeAdapter.build_invocation("sid", None, "", Some("do X"));
+        let cmd = OpenCodeAdapter.build_invocation("sid", None, "", Some("do X"), None);
         #[cfg(not(windows))]
         let expected = "opencode --prompt 'do X' || opencode --prompt 'do X'";
         #[cfg(windows)]

@@ -169,6 +169,7 @@ impl PtyManager {
         is_conductor: bool,
         model: Option<String>,
         effort: Option<String>,
+        resume_token: Option<String>,
         on_event: Channel<String>,
     ) -> Result<(), String> {
         // Already running → re-attach the live reader to the new channel and force
@@ -231,6 +232,7 @@ impl PtyManager {
                     projects_dir.as_deref(),
                     model.as_deref(),
                     effort.as_deref(),
+                    resume_token.as_deref(),
                 );
                 cmd.args(["/K", inner.as_str()]);
             }
@@ -262,6 +264,7 @@ impl PtyManager {
                     projects_dir.as_deref(),
                     model.as_deref(),
                     effort.as_deref(),
+                    resume_token.as_deref(),
                 )
             };
             let mut cmd = CommandBuilder::new(&shell);
@@ -301,30 +304,15 @@ impl PtyManager {
                     cmd.env("CONDUIT_OC_APIKEY", key);
                 }
             }
-            // Select a Claude account (Feature 1/2) without disturbing the user's default
-            // `claude`. A `.claude` account set up via a HOME-redirect launcher (e.g. a
-            // `claude-personal` shim) keeps its `.claude.json` -- the record of the
-            // logged-in account, onboarding, and trust state -- at the PROFILE ROOT, not
-            // inside `.claude`. CLAUDE_CONFIG_DIR only redirects the `.claude` dir, so an
-            // interactive session finds the credentials but re-prompts login/onboarding.
-            // Redirect HOME/USERPROFILE to the profile root instead (exactly what the
-            // launcher does) so the full account state is read. Fall back to
-            // CLAUDE_CONFIG_DIR for a non-`.claude` custom directory. Existence-guarded.
+            // Select the pinned account (Feature 1/2) without disturbing the user's default
+            // agent. The account->env mapping now lives behind `ProviderAdapter::account_env`
+            // (the multi-account extension seam): Claude and Antigravity redirect
+            // HOME/USERPROFILE to the profile root (see `agent::claude_profile_env` for why),
+            // every other adapter returns nothing. Behavior is byte-identical to the block
+            // this replaced. Values are path-derived account identifiers -- never logged.
             if let Some(dir) = account_config_dir.as_deref() {
-                let p = Path::new(dir);
-                if p.exists() {
-                    let root = (p.file_name().and_then(|f| f.to_str()) == Some(".claude"))
-                        .then(|| p.parent().and_then(|r| r.to_str()))
-                        .flatten();
-                    match root {
-                        Some(root) => {
-                            cmd.env("USERPROFILE", root);
-                            cmd.env("HOME", root);
-                        }
-                        None => {
-                            cmd.env("CLAUDE_CONFIG_DIR", dir);
-                        }
-                    }
+                for (k, v) in adapter.account_env(dir) {
+                    cmd.env(k, v);
                 }
             }
         }
@@ -710,6 +698,7 @@ fn build_script(
     projects_dir: Option<&Path>,
     model: Option<&str>,
     effort: Option<&str>,
+    resume_token: Option<&str>,
 ) -> String {
     let mut flags = String::new();
     if let Some(name) = worktree {
@@ -739,7 +728,13 @@ fn build_script(
     if let Some(e) = effort {
         flags.push_str(&format!(" --effort {}", shell_quote(e)));
     }
-    let invocation = adapter.build_invocation(session_id, projects_dir, &flags, initial_prompt);
+    let invocation = adapter.build_invocation(
+        session_id,
+        projects_dir,
+        &flags,
+        initial_prompt,
+        resume_token,
+    );
     format!(
         "export CONDUIT_SESSION_ID={sid} CONDUIT_HOOK_PORT={port}; cd {dir} && {invocation}; exec {shell} -i -l",
         sid = shell_quote(session_id),
@@ -769,6 +764,7 @@ fn build_script_win(
     projects_dir: Option<&Path>,
     model: Option<&str>,
     effort: Option<&str>,
+    resume_token: Option<&str>,
 ) -> String {
     let mut flags = String::new();
     if let Some(name) = worktree {
@@ -793,7 +789,13 @@ fn build_script_win(
     if let Some(e) = effort {
         flags.push_str(&format!(" --effort {}", quote_arg(e)));
     }
-    adapter.build_invocation(session_id, projects_dir, &flags, initial_prompt)
+    adapter.build_invocation(
+        session_id,
+        projects_dir,
+        &flags,
+        initial_prompt,
+        resume_token,
+    )
 }
 
 #[cfg(test)]
@@ -898,6 +900,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         );
         assert!(script.contains("export CONDUIT_SESSION_ID='sid-1' CONDUIT_HOOK_PORT=7777"));
         assert!(script.contains("claude --session-id 'sid-1' || claude"));
@@ -922,13 +925,14 @@ mod tests {
             None,                     // projects_dir
             None,                     // model
             None,                     // effort
+            None,
         );
         assert!(script.contains("--settings '/cfg/hooks.json'"), "{script}");
         assert!(script.contains("--mcp-config '/cfg/mcp.json'"), "{script}");
         // The persona rides as a FILE path, never inline text (see write_persona_file):
         // the bare `--append-system-prompt` (no `-file`) must not appear.
         assert!(
-            script.contains("--append-system-prompt-file /cfg/persona.txt"),
+            script.contains("--append-system-prompt-file '/cfg/persona.txt'"),
             "{script}"
         );
         assert!(
@@ -952,6 +956,7 @@ mod tests {
             None,
             None,
             Some("implement the parser"),
+            None,
             None,
             None,
             None,
@@ -1048,6 +1053,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         );
         assert_eq!(script, format!("claude --session-id {ID} || claude"));
         assert!(!script.contains("cd "));
@@ -1064,6 +1070,7 @@ mod tests {
             Some(r"C:\cfg dir\hooks.json"),
             None,
             Some(r"C:\cfg dir\persona.txt"),
+            None,
             None,
             None,
             None,
@@ -1103,6 +1110,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         );
         assert!(script.len() < 8000, "len={}: {script}", script.len());
         // Sanity: inlining the real persona twice (the OLD behavior) WOULD have overflowed
@@ -1128,9 +1136,10 @@ mod tests {
             None,
             Some("claude-opus-4-8"),
             Some("high"),
+            None,
         );
-        assert!(script.contains("--model claude-opus-4-8"), "{script}");
-        assert!(script.contains("--effort high"), "{script}");
+        assert!(script.contains("--model 'claude-opus-4-8'"), "{script}");
+        assert!(script.contains("--effort 'high'"), "{script}");
     }
 
     #[cfg(windows)]
@@ -1147,6 +1156,7 @@ mod tests {
             None,
             Some("claude-opus-4-8"),
             Some("high"),
+            None,
         );
         assert!(script.contains("--model claude-opus-4-8"), "{script}");
         assert!(script.contains("--effort high"), "{script}");

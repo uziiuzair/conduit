@@ -46,3 +46,32 @@ Open an issue with your OS, how you launched the app (`pnpm tauri dev` vs a buil
 `.app`), steps to reproduce, and any output from the terminal where you ran it.
 
 By contributing, you agree your contributions are licensed under the [MIT License](./LICENSE).
+
+## Cutting a release (maintainers)
+
+Releases are built + signed + notarized by CI on a version tag.
+
+1. Bump the version in all three files (see the table in `CLAUDE.md`):
+   `package.json`, `src-tauri/Cargo.toml`, `src-tauri/tauri.conf.json`.
+2. `cargo build --manifest-path src-tauri/Cargo.toml` (refreshes `Cargo.lock`).
+3. Update `CHANGELOG.md`.
+4. Commit, then tag and push:
+   ```bash
+   git tag vX.Y.Z
+   git push origin vX.Y.Z
+   ```
+5. The **Release** workflow builds a universal macOS app, signs + notarizes it,
+   generates `latest.json`, and publishes the GitHub Release. Confirm the release
+   is **published** (not draft/prerelease) — the app's updater endpoint,
+   `releases/latest/download/latest.json`, only resolves to a published release.
+
+### If a bad release ships (rollback = roll forward)
+
+Tauri has no auto-rollback. To pull a bad version:
+
+1. On GitHub, mark the bad release **prerelease** or delete it, so it stops being
+   "latest".
+2. Fix the issue and cut a higher patch (`vX.Y.Z+1`). Because the endpoint tracks
+   "latest," every user moves forward on their next check.
+3. Consent-before-install already limits the blast radius to users who clicked
+   Install before you rolled forward.

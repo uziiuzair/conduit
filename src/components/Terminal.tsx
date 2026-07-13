@@ -13,6 +13,10 @@ function b64ToBytes(b64: string): Uint8Array {
   return bytes;
 }
 
+// Base terminal font size; the View-menu zoom offsets it (editors scale from their own
+// 12px base in CodeEditorPane — the two surfaces deliberately keep their 1px gap).
+const TERM_BASE_FONT = 13;
+
 interface Props {
   sessionId: string;
   projectId: string;
@@ -31,6 +35,9 @@ interface Props {
    * so it never steals focus from the agent on a session switch. Defaults to true.
    */
   focusOnReveal?: boolean;
+  /** Clicking into the terminal body makes its editor group the active group (center
+   *  terminals only — the right-panel shell has no group and omits this). */
+  onFocusGroup?: () => void;
   /** Positioning applied to the host (e.g. left/width % for the active group's slot). */
   style?: React.CSSProperties;
 }
@@ -51,6 +58,7 @@ export function TerminalView({
   shellOnly = false,
   role,
   focusOnReveal = true,
+  onFocusGroup,
   style,
 }: Props) {
   const innerRef = useRef<HTMLDivElement>(null);
@@ -60,11 +68,39 @@ export function TerminalView({
   const resizeTimer = useRef<number | null>(null);
   const disposedRef = useRef(false);
 
+  const restoreOnOpen = useStore((s) => s.restoreSessionsOnOpen);
+  const selectedProjectId = useStore((s) => s.selectedProjectId);
+
+  // Spawn the PTY exactly once (guarded by spawnedRef). Shared by the reveal path and the
+  // eager restore-on-open path, so a restored session can come back live (and resume — Claude
+  // via --resume, agy via --conversation) without the user clicking its tab first.
+  const spawnPty = (cols: number, rows: number) => {
+    if (spawnedRef.current) return;
+    spawnedRef.current = true;
+    const channel = new Channel<string>();
+    channel.onmessage = (msg) => {
+      if (disposedRef.current) return;
+      termRef.current?.write(b64ToBytes(msg));
+    };
+    void invoke("pty_spawn", {
+      sessionId,
+      workingDirectory,
+      cols,
+      rows,
+      shellOnly,
+      worktreeName: worktreeName ?? null,
+      role: role ?? "worker",
+      // A backend-spawned worker carries a first prompt; consumed once here.
+      initialPrompt: useStore.getState().takePendingPrompt(sessionId) ?? null,
+      onEvent: channel,
+    }).catch((e) => termRef.current?.write(`\r\n[spawn error: ${e}]\r\n`));
+  };
+
   // Create the xterm instance exactly once.
   useEffect(() => {
     const term = new Xterm({
       fontFamily: '"SF Mono", SFMono-Regular, Menlo, monospace',
-      fontSize: 13,
+      fontSize: TERM_BASE_FONT + useStore.getState().fontZoom,
       lineHeight: 1.0,
       theme: currentTerminalTheme(),
       cursorBlink: true,
@@ -86,12 +122,18 @@ export function TerminalView({
 
     term.onData((d) => writeSeq(d));
 
-    // --- Cmd+Click a file path -> open it in Conduit's editor (VS Code parity) ---
-    // Track whether Cmd is held so path tokens only light up / activate with the modifier;
+    // The open-path / clipboard modifier is Cmd on macOS, Ctrl on Windows & Linux (VS Code parity).
+    // `navigator.platform` is deprecated and occasionally empty in webviews, so fall back to UA.
+    const isMac = /Mac|iPhone|iPod|iPad/i.test(navigator.platform || navigator.userAgent);
+    const openModHeld = (ev: { metaKey: boolean; ctrlKey: boolean }) =>
+      isMac ? ev.metaKey : ev.ctrlKey;
+
+    // --- Cmd/Ctrl+Click a file path -> open it in Conduit's editor (VS Code parity) ---
+    // Track whether the modifier is held so path tokens only light up / activate with it;
     // a plain click keeps normal terminal selection.
     let cmdHeld = false;
     const onMod = (ev: KeyboardEvent) => {
-      cmdHeld = ev.metaKey;
+      cmdHeld = openModHeld(ev);
     };
     const onBlur = () => {
       cmdHeld = false;
@@ -110,7 +152,7 @@ export function TerminalView({
         useStore.getState().openFile(
           projectId,
           r.absPath,
-          r.line != null ? { line: r.line, col: r.col ?? 1 } : undefined,
+          r.line != null ? { reveal: { line: r.line, col: r.col ?? 1 } } : undefined,
         );
       } catch {
         /* a stale/mistyped path simply does nothing */
@@ -159,7 +201,7 @@ export function TerminalView({
             },
             text: raw,
             activate: (ev: MouseEvent, matched: string) => {
-              if (!ev.metaKey) return;
+              if (!openModHeld(ev)) return;
               void openPath(matched);
             },
           });
@@ -173,8 +215,63 @@ export function TerminalView({
     // delete sequence. Emit the right bytes and skip xterm's default for these two.
     // (Option+Backspace is left to xterm's native macOptionIsMeta handling, which
     // already produces delete-word.)
+    // Clipboard: xterm's canvas isn't a text input, so copy/paste must be wired by hand.
+    // macOS uses Cmd+C / Cmd+V; Windows & Linux use Ctrl+Shift+C / Ctrl+Shift+V, plus the
+    // "smart" Ctrl+C that copies the current selection (then releases it so a second
+    // Ctrl+C still sends SIGINT) and Ctrl+V to paste — matching Windows Terminal.
+    const copySelection = () => {
+      const sel = term.getSelection();
+      if (sel) void navigator.clipboard.writeText(sel).catch(() => {});
+      term.clearSelection();
+    };
+    // Read the clipboard on the Rust side, not via `navigator.clipboard.readText()`:
+    // WKWebView gates browser clipboard reads behind a native "Paste" consent popup
+    // (macOS 26+) and the canvas terminal has no editable target for it, so the browser
+    // path silently fails. Rust reads the OS clipboard directly. A clipboard image comes
+    // back as a temp-PNG path, which Claude Code's TUI attaches as a file.
+    const pasteClipboard = () => {
+      void invoke<{ kind: "text" | "image" | "empty"; text?: string; path?: string }>(
+        "clipboard_read_for_paste",
+      )
+        .then((r) => {
+          if (disposedRef.current) return;
+          if (r.kind === "text" && r.text) term.paste(r.text);
+          else if (r.kind === "image" && r.path) term.paste(r.path);
+        })
+        .catch(() => {});
+    };
+
     term.attachCustomKeyEventHandler((e) => {
       if (e.type !== "keydown") return true;
+      const k = e.key.toLowerCase();
+      // Copy
+      if (k === "c" && !e.altKey) {
+        const macCopy = isMac && e.metaKey && !e.ctrlKey;
+        const winCopyShift = !isMac && e.ctrlKey && e.shiftKey;
+        const winCopySmart = !isMac && e.ctrlKey && !e.shiftKey && term.hasSelection();
+        if (macCopy || winCopyShift || winCopySmart) {
+          if (term.hasSelection()) {
+            copySelection();
+            e.preventDefault();
+            return false;
+          }
+          // No selection on Windows Ctrl+C → fall through so it sends SIGINT.
+          if (winCopyShift) {
+            e.preventDefault();
+            return false;
+          }
+        }
+      }
+      // Paste (Ctrl+V and Ctrl+Shift+V both paste on Windows/Linux; Cmd+V on macOS)
+      if (k === "v" && !e.altKey) {
+        const macPaste = isMac && e.metaKey && !e.ctrlKey;
+        const winPaste = !isMac && e.ctrlKey;
+        if (macPaste || winPaste) {
+          e.preventDefault();
+          pasteClipboard();
+          return false;
+        }
+      }
       const plain = !e.ctrlKey && !e.metaKey;
       // Shift+Enter → newline (same ESC CR that the working Option+Enter sends)
       if (e.key === "Enter" && e.shiftKey && !e.altKey && plain) {
@@ -201,6 +298,15 @@ export function TerminalView({
       }
       return true;
     });
+
+    // Right-click: copy the selection if there is one, otherwise paste — the classic
+    // terminal convention (and the discoverable path for users without the key chords).
+    const onContextMenu = (ev: MouseEvent) => {
+      ev.preventDefault();
+      if (term.hasSelection()) copySelection();
+      else pasteClipboard();
+    };
+    innerRef.current?.addEventListener("contextmenu", onContextMenu);
 
     termRef.current = term;
     const unregister = registerTerminal(term);
@@ -233,6 +339,7 @@ export function TerminalView({
       window.removeEventListener("keydown", onMod, true);
       window.removeEventListener("keyup", onMod, true);
       window.removeEventListener("blur", onBlur);
+      innerRef.current?.removeEventListener("contextmenu", onContextMenu);
       term.dispose();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -257,24 +364,7 @@ export function TerminalView({
       const rows = term.rows;
 
       if (!spawnedRef.current) {
-        spawnedRef.current = true;
-        const channel = new Channel<string>();
-        channel.onmessage = (msg) => {
-          if (disposedRef.current) return;
-          term.write(b64ToBytes(msg));
-        };
-        void invoke("pty_spawn", {
-          sessionId,
-          workingDirectory,
-          cols,
-          rows,
-          shellOnly,
-          worktreeName: worktreeName ?? null,
-          role: role ?? "worker",
-          // A backend-spawned worker carries a first prompt; consumed once here.
-          initialPrompt: useStore.getState().takePendingPrompt(sessionId) ?? null,
-          onEvent: channel,
-        }).catch((e) => term.write(`\r\n[spawn error: ${e}]\r\n`));
+        spawnPty(cols, rows);
       } else {
         void invoke("pty_resize", { sessionId, cols, rows }).catch(() => {});
       }
@@ -288,6 +378,34 @@ export function TerminalView({
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [visible]);
+
+  // Eager restore-on-open: bring every session of the ACTIVE project live without waiting for
+  // a click (VSCode-style — the whole project comes back where you left off). Companion shells
+  // (shellOnly) stay lazy. Spawns with fallback dims; the reveal-refit corrects the size when
+  // the tab is actually shown. Gated by the restoreSessionsOnOpen setting (default on).
+  useEffect(() => {
+    if (spawnedRef.current || shellOnly) return;
+    if (!restoreOnOpen || projectId !== selectedProjectId) return;
+    const term = termRef.current;
+    if (!term) return;
+    spawnPty(term.cols || 80, term.rows || 24);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [restoreOnOpen, selectedProjectId]);
+
+  // App-wide font zoom (View menu). Setting options.fontSize changes cell metrics
+  // WITHOUT firing the ResizeObserver (the host box is unchanged), so cols/rows must
+  // be renegotiated with the PTY explicitly. Hidden keep-alive terminals skip the fit
+  // (0×0 hazard) and pick the new size up through the reveal-refit path.
+  const fontZoom = useStore((s) => s.fontZoom);
+  useEffect(() => {
+    const term = termRef.current;
+    if (!term) return;
+    const size = TERM_BASE_FONT + fontZoom;
+    if (term.options.fontSize === size) return;
+    term.options.fontSize = size;
+    if (visibleRef.current) scheduleFit();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [fontZoom]);
 
   function scheduleFit() {
     if (disposedRef.current) return;
@@ -312,7 +430,11 @@ export function TerminalView({
   }
 
   return (
-    <div className={`term-host ${visible ? "visible" : "hidden"}`} style={style}>
+    <div
+      className={`term-host ${visible ? "visible" : "hidden"}`}
+      style={style}
+      onMouseDown={onFocusGroup}
+    >
       <div ref={innerRef} className="term-inner" />
     </div>
   );

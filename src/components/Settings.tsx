@@ -4,13 +4,17 @@ import { McpMatrix } from "./McpMatrix";
 import { TelemetryToggle } from "./TelemetryToggle";
 import { AboutPanel } from "./AboutPanel";
 import { AccountList } from "./AccountList";
+import { UsagePrefsPanel } from "./UsagePrefsPanel";
+import { GeneralSettings } from "./GeneralSettings";
 import { TrustPanel } from "./TrustPanel";
 import { OpenCodePanel } from "./OpenCodePanel";
 
 // Exported for the native menu integration (menu → open Settings at a specific tab).
 export type SettingsTab =
+  | "general"
   | "agents"
   | "accounts"
+  | "usage"
   | "mcp"
   | "localmodels"
   | "security"
@@ -19,6 +23,7 @@ export type SettingsTab =
 
 /** Grouped sidebar navigation — scales past the point where flat tabs got unwieldy. */
 const NAV: Array<{ group: string; items: Array<{ id: SettingsTab; label: string }> }> = [
+  { group: "", items: [{ id: "general", label: "General" }] },
   {
     group: "Coding agents",
     items: [
@@ -27,7 +32,13 @@ const NAV: Array<{ group: string; items: Array<{ id: SettingsTab; label: string 
       { id: "mcp", label: "MCP servers" },
     ],
   },
-  { group: "Accounts", items: [{ id: "accounts", label: "Claude accounts" }] },
+  {
+    group: "Accounts",
+    items: [
+      { id: "accounts", label: "Agent accounts" },
+      { id: "usage", label: "Usage display" },
+    ],
+  },
   {
     group: "Privacy & security",
     items: [
@@ -91,6 +102,12 @@ export function Settings({
               </button>
             </div>
             <div className="settings-body">
+              {tab === "general" && (
+                <>
+                  <p className="settings-intro">Startup and session behavior.</p>
+                  <GeneralSettings />
+                </>
+              )}
               {tab === "agents" && (
                 <>
                   <p className="settings-intro">
@@ -101,6 +118,7 @@ export function Settings({
                 </>
               )}
               {tab === "accounts" && <AccountList />}
+              {tab === "usage" && <UsagePrefsPanel />}
               {tab === "mcp" && <McpMatrix />}
               {tab === "localmodels" && (
                 <>

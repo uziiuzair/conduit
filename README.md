@@ -1,15 +1,15 @@
 # Conduit
 
-**Run multiple _real_ coding-agent terminals across your projects — Claude Code, Codex, Gemini, and OpenCode, each a live CLI session — side by side in one window.**
+**Run multiple _real_ coding-agent terminals across your projects — Claude Code, Codex, Gemini, Antigravity, and OpenCode, each a live CLI session — side by side in one window.**
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](./LICENSE)
 [![Built with Tauri](https://img.shields.io/badge/built%20with-Tauri%20v2-24C8DB.svg)](https://tauri.app)
 
 Not a chat UI. Not a TUI. Conduit embeds genuine agent CLIs — Claude Code, Codex,
-Gemini, and OpenCode — in a real PTY per session, and lets you arrange those sessions
-(and read-only file views) into
-side-by-side editor groups — with a file tree, a branch-lane git graph, and
-per-session to-dos driven by Claude Code hooks.
+Gemini, Antigravity, and OpenCode — in a real PTY per session, and lets you arrange
+those sessions (and real editor tabs) into side-by-side editor groups — with a file
+tree, a Monaco editor, a branch-lane git graph, per-session to-dos driven by Claude
+Code hooks, and a Conductor that can orchestrate the whole fleet.
 
 ![Conduit](docs/screenshot.png)
 
@@ -23,27 +23,52 @@ binary, so `/resume`, your `CLAUDE.md`, and the original system prompt all work
 exactly as they do in a normal terminal.
 
 > Conduit started as a native macOS SwiftUI app and was rebuilt on Tauri v2 to go
-> cross-platform while keeping the native feel.
+> cross-platform while keeping the native feel — it now runs on macOS and Windows.
 
 ## Features
 
 - **Multiple agent CLIs** — run **Claude Code**, **OpenAI Codex**, **Google Gemini**,
-  and **OpenCode** side by side. Pick a global default and override it per session; a
-  first-run wizard and a Settings panel detect which agents are on your `PATH`, and
-  live status (running · tool activity · done) lights up for every agent.
+  **Google Antigravity** (`agy`), and **OpenCode** side by side. Pick a global default
+  and override it per session; a first-run wizard and a Settings panel detect which
+  agents are on your `PATH` (and can one-click install the missing ones), and live
+  status (running · tool activity · done) lights up for every agent.
 - **Per-project, multi-group workspace** — open sessions and files as tabs, then
-  drag a tab to the side (or use _Open to the Side_) to split the center into
-  resizable groups. Watch **multiple live agent sessions at once**.
-- **Real terminals, kept alive** — each session runs the genuine `claude` CLI in a
+  drag a tab sideways to reorder it or onto a pane's edge to split the center into
+  resizable groups (or use _Open to the Side_). Watch **multiple live agent sessions
+  at once**.
+- **Real terminals, kept alive** — each session runs the genuine agent CLI in a
   PTY. Switching tabs, splitting groups, or switching projects never restarts it;
   reloading the window re-attaches to the running process.
-- **Persisted layouts** — each project remembers its group/tab arrangement to disk
-  and restores it on relaunch.
-- **File tree + read-only viewer** with syntax highlighting; click a file to open it
-  beside your session.
+- **Pick up where you left off** — each project remembers its group/tab layout to
+  disk, and opening a project relaunches all its sessions with their conversations
+  resumed (Claude via `--resume`, Antigravity via `--conversation`). Quitting — or
+  deleting a session — while an agent is still mid-task asks for confirmation first,
+  and conversation history is never lost.
+- **A real editor (Monaco)** — open any file from the tree and edit it in place:
+  save, per-tab unsaved dots with hot exit, a diff viewer, quick open, find in
+  files, Markdown preview, and smart reload when an agent edits a file you have
+  open. Manage files in the tree (create / rename / delete / drag to move), and
+  Cmd-click file paths in any terminal to jump straight to the line.
 - **Branch-lane git graph**, a **Changes** view, and a per-session plain terminal.
-- **Live status from Claude Code hooks** — status dots (running / done / needs-you),
+- **Live status from agent hooks** — status dots (running / done / needs-you),
   a live to-dos list, and native notifications.
+- **The Conductor — orchestrate your fleet** — one session per project that you talk
+  to in plain language: it sees every session's live status, to-dos, and branch, can
+  peek at a worker's recent output, and can **spawn**, **send to**, and **stop**
+  workers (each isolated in its own git worktree; stopping asks you first). It
+  coordinates a capability-aware, cost-conscious fleet across agent types, with
+  project-scoped missions, structured worker handback, and mailbox notes.
+- **Multiple accounts per agent** — register any number of Claude / Antigravity
+  accounts (auto-discovered from your home directory, or added via a folder picker)
+  and assign one per session, per project, or globally; each session authenticates
+  as its account via config-dir redirection, so work and personal quotas never mix.
+- **A unified usage panel** — every account across both Claude and Antigravity in
+  one sidebar readout: local token use, subscription **plan limits** (5-hour &
+  weekly windows), and Antigravity's quota pools — with configurable layouts
+  (stacked / compact summary / low-alerts-only / selected session) and low-quota
+  warnings. Plus Claude **service status** from
+  [status.claude.com](https://status.claude.com) (click for component & incident
+  detail, with a **warning banner** when something's degraded).
 - **Local models for OpenCode** — point OpenCode at your own GPU (Ollama, LM Studio,
   vLLM, llama.cpp, OpenWebUI, or any OpenAI-compatible endpoint) from
   _Settings → Local models_. It auto-detects running servers, fetches their model
@@ -52,13 +77,19 @@ exactly as they do in a normal terminal.
   injected per session via `OPENCODE_CONFIG_CONTENT` (your `opencode.json` files are
   never touched); an optional endpoint API key is held in memory only — never
   written to disk.
-- **Claude service status + usage** — an ambient sidebar readout: a status dot from
-  [status.claude.com](https://status.claude.com) (click for component & incident detail,
-  with a **warning banner** when something's degraded), plus a usage panel showing today's
-  local token use and — once you connect — your subscription **plan limits** (5-hour &
-  weekly windows).
+- **Private mode trust boundaries** — mark a session sensitive (siloed) and it stays
+  visible on your desktop but is withheld from other agents and from remote
+  streaming, with read/send policy gates on the fleet tools.
+- **Mobile companion** — a React Native app that shows each agent as a live chat
+  feed (not a terminal mirror), with per-session status and a prompt box to talk to
+  a session from your phone. Loopback-only by default; LAN access is opt-in and
+  token-gated.
+- **A sidebar that scales** — collapse projects (active work stays in view), drag
+  and drop to reorder projects and sessions, and per-session account tags.
 - **Auto-named sessions** (a tiny `claude -p` call titles a session from its first
-  prompt), **Open in VS Code**, and a warm Tokyo-Night-style theme.
+  prompt), a **shared MCP server matrix** (define a server once, toggle it per
+  agent), **Open in VS Code**, a native menu bar, and a warm Tokyo-Night-style
+  theme.
 
 ## Quick start
 
@@ -69,7 +100,7 @@ pnpm tauri dev
 
 **Requirements:** [Rust](https://rustup.rs) + [Node](https://nodejs.org) (with
 [pnpm](https://pnpm.io)) + at least one supported agent CLI on your `PATH` —
-[`claude`](https://docs.claude.com/en/docs/claude-code), `codex`, `gemini`, or
+[`claude`](https://docs.claude.com/en/docs/claude-code), `codex`, `gemini`, `agy`, or
 `opencode` (the onboarding wizard detects which are installed) — plus `git` and
 `curl`. On macOS you'll also need the Xcode Command Line Tools; on Windows, the MSVC
 toolchain (`rustup` `stable-x86_64-pc-windows-msvc` plus the Visual Studio C++ Build
@@ -137,50 +168,56 @@ This is an **unsigned** local build, so SmartScreen may warn on first run ("More
 then "Run anyway"). Sessions spawn through `cmd.exe`, so the agent CLIs (`claude.cmd`
 and friends) just need to be on your `PATH`.
 
-**Choosing a Claude account (Windows/all platforms).** By default sessions use your
-default `claude` config directory (`%USERPROFILE%\.claude`). To run them against a
-different account's config directory without disturbing your normal `claude`, set
-`CONDUIT_CLAUDE_CONFIG_DIR` to that account's `.claude` folder. Conduit exports it as
-`CLAUDE_CONFIG_DIR` to each spawned session, so the session authenticates as that
-account:
+**Choosing accounts.** Register accounts (work / personal / …) in
+_Settings → Agent accounts_ and assign them per session, per project, or globally —
+no environment variables needed. For a headless default you can still set
+`CONDUIT_CLAUDE_CONFIG_DIR` to a `.claude` folder; Conduit exports it as
+`CLAUDE_CONFIG_DIR` to sessions that have no account assigned.
 
-```powershell
-setx CONDUIT_CLAUDE_CONFIG_DIR "C:\path\to\that-account\.claude"
-```
+## Updating
 
-(Note: with `CLAUDE_CONFIG_DIR`, claude reads its `.claude.json` from inside that folder,
-so a session may start with a fresh in-app config the first time; the account, quota, and
-model access are the chosen account's.)
+From **0.5.0** onward, Conduit updates itself on macOS. It checks GitHub Releases
+in the background (and on demand via **Settings → About → Check for updates**);
+when a newer signed release exists, a notice offers **Install & Relaunch**.
+Updates are Developer ID–signed, notarized, and minisign-verified before install.
+
+> Because auto-update only exists from 0.5.0, existing users must download 0.5.0
+> once by hand from the [Releases page](https://github.com/uziiuzair/conduit/releases).
+> Every version after that updates in place.
 
 ## How it works
 
 | Concern                                                       | Where                                               |
 | ------------------------------------------------------------- | --------------------------------------------------- |
 | PTY manager — spawn / write / resize / keep-alive / re-attach | `src-tauri/src/pty.rs`                              |
-| Project/session store + per-project layout persistence (JSON) | `src-tauri/src/store.rs`                            |
+| Project/session/account store + layout persistence (JSON)     | `src-tauri/src/store.rs`                            |
 | Agent provider adapters — per-CLI spawn / detect / hooks / MCP | `src-tauri/src/agent.rs`                           |
 | Hook HTTP listener + per-agent hook/plugin installer          | `src-tauri/src/hooks.rs`                            |
+| Conductor fleet — status mirror + MCP tools                   | `src-tauri/src/fleet.rs`, `src-tauri/src/fleet_mcp.rs` |
 | Claude **service** status (status.claude.com)                 | `src-tauri/src/claude_status.rs`                   |
-| Claude **usage** — local consumption + plan limits            | `src-tauri/src/claude_usage.rs`                    |
+| Claude **usage** — local consumption + per-account plan limits | `src-tauri/src/claude_usage.rs`                    |
+| Antigravity **usage** — quota pools + conversation capture    | `src-tauri/src/agy_usage.rs`                        |
 | Local LLM servers — detect / list models / tool-call probe    | `src-tauri/src/local_llm.rs`                       |
+| Mobile companion WebSocket bridge                             | `src-tauri/src/bridge.rs`                           |
 | Git metadata + branch graph data                              | `src-tauri/src/git.rs`                              |
-| Read-only filesystem (Files tab + viewer)                     | `src-tauri/src/fsops.rs`                            |
+| Read/write filesystem (tree, editor, search)                  | `src-tauri/src/fsops.rs`, `src-tauri/src/search.rs` |
 | Notifications                                                 | `src-tauri/src/notify.rs`                           |
 | App entry, commands, window/bundle config                     | `src-tauri/src/lib.rs`, `src-tauri/tauri.conf.json` |
 | Workspace state + Tauri command bridge                        | `src/store.ts`                                      |
-| Workspace UI (groups, tabs, tree, viewer, graph)              | `src/components/*`, `src/App.tsx`                   |
+| Workspace UI (groups, tabs, tree, editor, graph)              | `src/components/*`, `src/App.tsx`                   |
 | Theme (palette + ANSI)                                        | `src/theme.css`, `src/components/GitGraph.tsx`      |
 
 **The load-bearing trick:** every session's terminal is mounted once in a flat,
 never-reparented stack and positioned purely by CSS (percentages derived from group
 weights). That's what lets you split/move/rearrange groups — and switch projects —
 without ever unmounting an `xterm` instance and killing its `claude` process. State
-persists to `~/Library/Application Support/ConduitTauri/state.json`.
+persists to `~/Library/Application Support/ConduitTauri/state.json`
+(`%APPDATA%\ConduitTauri\state.json` on Windows).
 
 ## Tech
 
 Tauri v2 (Rust) · React 19 + TypeScript + Vite · `@xterm/xterm` (canvas renderer) ·
-`portable-pty` · `tiny_http` (hook listener) · `react-syntax-highlighter` ·
+`monaco-editor` · `portable-pty` · `tiny_http` (hook listener) ·
 `tauri-plugin-{dialog,notification,window-state}`.
 
 ## Changelog

@@ -261,26 +261,36 @@ button {
 }
 
 .project-block {
-  margin-bottom: 2px;
+  margin-bottom: 8px;
+}
+
+/* Separator so adjacent projects read as distinct groups (the last block's boundary is
+   the usage panel below it). */
+.project-block:not(:last-child) {
+  border-bottom: 1px solid var(--border);
+  padding-bottom: 6px;
 }
 
 .project-head {
   display: flex;
   align-items: center;
   gap: 6px;
-  padding: 4px 7px;
+  padding: 5px 7px;
   border-radius: 5px;
   cursor: pointer;
+  background: var(--hover);
   transition: background 0.12s ease;
 }
 
 .project-head:hover {
-  background: var(--hover);
+  background: var(--selection-bg);
 }
 
 .project-head .name {
   color: var(--text-bright);
-  font-size: 12px;
+  font-size: 12.5px;
+  font-weight: 600;
+  letter-spacing: 0.15px;
   flex: 1;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -318,8 +328,32 @@ button {
   opacity: 1;
 }
 
+/* Indent guide: sessions visibly nest UNDER their project header. */
 .session-list {
-  padding-left: 10px;
+  margin-left: 13px;
+  padding-left: 6px;
+  border-left: 1px solid var(--border);
+}
+
+/* ---- Sidebar drag-reorder (projects among themselves; sessions within a project) ---- */
+.project-head {
+  -webkit-user-drag: element;
+}
+
+.session-row.dragging,
+.project-block.dragging {
+  opacity: 0.45;
+}
+
+/* Accent insertion line above/below the hovered drop target (box-shadow: no layout shift). */
+.session-row.drop-before,
+.project-block.drop-before {
+  box-shadow: inset 0 2px 0 0 var(--accent);
+}
+
+.session-row.drop-after,
+.project-block.drop-after {
+  box-shadow: inset 0 -2px 0 0 var(--accent);
 }
 
 .session-row {
@@ -429,6 +463,14 @@ button {
 
 .context-menu button:hover {
   background: var(--selection-bg);
+}
+
+.context-menu button:disabled {
+  color: var(--text-dim);
+  cursor: default;
+}
+.context-menu button:disabled:hover {
+  background: transparent;
 }
 
 .context-menu button.danger {
@@ -933,6 +975,11 @@ button {
   border-bottom-color: var(--accent);
 }
 
+/* Preview (transient) tab — VS Code's italic-label convention. */
+.tab.preview .tab-label {
+  font-style: italic;
+}
+
 .tab .tab-label {
   overflow: hidden;
   text-overflow: ellipsis;
@@ -1231,6 +1278,211 @@ button {
 }
 .code-host.empty {
   display: none;
+}
+
+/* ---- Markdown preview (overlays the editor host; editor stays mounted below) ---- */
+.md-toggle-btn {
+  flex: 0 0 auto;
+  color: var(--text-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  font-size: 10px;
+  font-family: inherit;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  padding: 2px 5px;
+  cursor: pointer;
+}
+.md-toggle-btn:hover {
+  color: var(--text-bright);
+  background: var(--hover);
+  border-color: var(--border);
+}
+.md-toggle-btn:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+.md-toggle-btn:disabled:hover {
+  color: var(--text-dim);
+  background: transparent;
+  border-color: transparent;
+}
+
+/* Non-interactive breadcrumb status chips (Ln/Col, indentation) — same recipe as
+   .md-toggle-btn / .lang-select-btn minus the hover affordance. */
+.status-chip {
+  flex: 0 0 auto;
+  color: var(--text-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  font-size: 10px;
+  padding: 2px 0;
+  white-space: nowrap;
+}
+
+/* Image preview overlay (binary raster files) — same layer as .md-preview. */
+.image-preview {
+  position: absolute;
+  inset: 0;
+  z-index: 4; /* opaque over the (empty) editor host, under the conflict banners (5) */
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  overflow: auto;
+  padding: 20px;
+  background: var(--panel-bg);
+}
+.image-preview img {
+  max-width: 100%;
+  max-height: calc(100% - 32px);
+  object-fit: contain;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background:
+    repeating-conic-gradient(var(--hover) 0% 25%, transparent 0% 50%) 0 0 / 16px 16px;
+}
+.image-preview-note {
+  flex: 0 0 auto;
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
+.md-preview {
+  position: absolute;
+  inset: 0;
+  z-index: 4; /* opaque over the editor, under the disk-conflict banners (5) */
+  overflow-y: auto;
+  background: var(--panel-bg);
+  outline: none;
+  -webkit-user-select: text;
+  user-select: text;
+  cursor: auto;
+}
+.md-preview-body {
+  max-width: 760px;
+  margin: 0 auto;
+  padding: 20px 28px 48px;
+  font-size: 13px;
+  line-height: 1.6;
+  color: var(--term-fg);
+}
+.md-preview-body > :first-child {
+  margin-top: 0;
+}
+.md-preview-body h1,
+.md-preview-body h2,
+.md-preview-body h3,
+.md-preview-body h4,
+.md-preview-body h5,
+.md-preview-body h6 {
+  margin: 1.2em 0 0.5em;
+  line-height: 1.3;
+  color: var(--text-bright);
+  font-weight: 600;
+}
+.md-preview-body h1 {
+  font-size: 1.65em;
+  padding-bottom: 0.3em;
+  border-bottom: 1px solid var(--border);
+}
+.md-preview-body h2 {
+  font-size: 1.3em;
+  padding-bottom: 0.25em;
+  border-bottom: 1px solid var(--border);
+}
+.md-preview-body h3 {
+  font-size: 1.12em;
+}
+.md-preview-body h4,
+.md-preview-body h5,
+.md-preview-body h6 {
+  font-size: 1em;
+}
+.md-preview-body p,
+.md-preview-body ul,
+.md-preview-body ol,
+.md-preview-body table,
+.md-preview-body blockquote,
+.md-preview-body pre {
+  margin: 0 0 0.9em;
+}
+.md-preview-body ul,
+.md-preview-body ol {
+  padding-left: 1.6em;
+}
+.md-preview-body li {
+  margin: 0.15em 0;
+}
+.md-preview-body li > ul,
+.md-preview-body li > ol {
+  margin-bottom: 0;
+}
+.md-preview-body code {
+  font-family: var(--mono-font);
+  font-size: 0.92em;
+  background: var(--selection-bg);
+  padding: 1px 4px;
+  border-radius: 3px;
+}
+.md-preview-body pre {
+  background: var(--sidebar-bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 10px 12px;
+  overflow-x: auto;
+}
+.md-preview-body pre code {
+  background: none;
+  padding: 0;
+  font-size: 11.5px;
+  line-height: 1.5;
+}
+.md-preview-body blockquote {
+  border-left: 3px solid var(--border);
+  padding-left: 12px;
+  color: var(--text-mid);
+}
+.md-preview-body a {
+  color: var(--accent);
+  text-decoration: none;
+  cursor: pointer;
+}
+.md-preview-body a:hover {
+  text-decoration: underline;
+}
+.md-preview-body img {
+  max-width: 100%;
+}
+.md-preview-body hr {
+  border: none;
+  border-top: 1px solid var(--border);
+  margin: 1.2em 0;
+}
+.md-preview-body table {
+  border-collapse: collapse;
+  display: block;
+  max-width: 100%;
+  overflow-x: auto;
+}
+.md-preview-body th,
+.md-preview-body td {
+  border: 1px solid var(--border);
+  padding: 4px 10px;
+  text-align: left;
+}
+.md-preview-body th {
+  background: var(--sidebar-bg);
+  color: var(--text-bright);
+}
+.md-preview-body del {
+  color: var(--text-dim);
+}
+.md-preview-body input[type="checkbox"] {
+  margin-right: 6px;
+  vertical-align: middle;
 }
 
 /* ---- Right column (split panels) ---- */
@@ -1595,6 +1847,20 @@ button {
   flex-shrink: 0;
 }
 
+/* Which account a session runs under (only shown when >1 account is configured). */
+.account-chip {
+  font-size: 9px;
+  color: var(--text-dim);
+  background: color-mix(in srgb, var(--text-dim) 14%, transparent);
+  border-radius: 999px;
+  padding: 1px 6px;
+  max-width: 80px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
 /* Conductor session marker in the sidebar row. */
 .conductor-chip {
   font-size: 9px;
@@ -1684,6 +1950,252 @@ button {
   color: var(--text-mid); margin-bottom: 4px;
 }
 .claude-usage-panel .claude-connect-btn { margin-top: 6px; padding: 5px; font-size: 11px; }
+
+/* ---- Antigravity (agy) usage panel — violet, to distinguish it from Claude ---- */
+:root { --agy: #a78bfa; }
+.agy-usage-panel {
+  padding: 8px 12px 10px;
+  border-top: 1px solid color-mix(in srgb, var(--agy) 22%, transparent);
+  font-size: 11.5px;
+  display: flex; flex-direction: column; gap: 2px;
+}
+.agy-usage-head {
+  font-size: 9.5px; text-transform: uppercase; letter-spacing: 0.04em;
+  color: var(--text-mid); margin-bottom: 4px;
+  display: flex; align-items: center; justify-content: space-between; gap: 6px;
+}
+.agy-tier-chip {
+  text-transform: none; letter-spacing: 0; font-size: 9.5px;
+  padding: 1px 6px; border-radius: 8px;
+  color: var(--agy);
+  background: color-mix(in srgb, var(--agy) 16%, transparent);
+}
+.agy-group { margin-top: 2px; }
+.agy-group-label {
+  font-size: 10px; opacity: 0.75; margin: 4px 0 1px;
+}
+.agy-meter { margin: 4px 0; }
+.agy-meter-head { display: flex; justify-content: space-between; opacity: 0.9; }
+.agy-meter-bar {
+  height: 6px; border-radius: 3px;
+  background: color-mix(in srgb, var(--agy) 14%, transparent);
+  margin-top: 3px; overflow: hidden;
+}
+.agy-meter-fill { height: 100%; background: var(--agy); transition: width 0.3s ease; }
+.agy-meter-fill.warn { background: var(--amber); }
+.agy-meter-fill.hot { background: var(--red); }
+.agy-meter-fill.disabled { background: var(--text-mid); opacity: 0.5; }
+.agy-meter-fill.ctx { background: color-mix(in srgb, var(--agy) 70%, var(--text-mid)); }
+.agy-context { margin-top: 6px; opacity: 0.9; }
+.agy-usage-hint { color: var(--text-mid); font-size: 11px; margin-top: 2px; }
+.agy-enable-btn {
+  margin-top: 6px; padding: 5px; font-size: 11px;
+  border: 1px solid color-mix(in srgb, var(--agy) 40%, transparent);
+  border-radius: 6px; background: color-mix(in srgb, var(--agy) 12%, transparent);
+  color: var(--agy); cursor: pointer;
+}
+.agy-enable-btn:hover { background: color-mix(in srgb, var(--agy) 20%, transparent); }
+.agy-track-toggle {
+  display: inline-flex; align-items: center; gap: 6px; margin-top: 4px;
+  font-size: 11px; color: var(--text-mid); cursor: pointer; user-select: none;
+}
+.agy-track-toggle input { accent-color: var(--agy); cursor: pointer; }
+
+/* ---- Unified multi-account usage bar (replaces the per-agent panels) ---- */
+.usage-panel {
+  padding: 8px 10px;
+  border-top: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-height: 42vh;
+  overflow-y: auto;
+}
+.usage-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-dim);
+}
+.usage-head-actions {
+  display: inline-flex;
+  gap: 2px;
+}
+.usage-icon-btn {
+  font-size: 11px;
+  color: var(--text-dim);
+  padding: 1px 4px;
+  border-radius: 4px;
+  cursor: pointer;
+  background: transparent;
+}
+.usage-icon-btn:hover {
+  color: var(--text-bright);
+  background: var(--selection-bg);
+}
+.usage-row {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.usage-row-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  color: var(--text-bright);
+}
+.usage-row-label {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.usage-tier-chip {
+  font-size: 9px;
+  padding: 1px 5px;
+  border-radius: 999px;
+  color: var(--agy);
+  background: color-mix(in srgb, var(--agy) 16%, transparent);
+}
+.usage-meter {
+  margin: 2px 0;
+}
+.usage-meter-head {
+  display: flex;
+  justify-content: space-between;
+  font-size: 10px;
+  color: var(--text-mid);
+}
+.usage-meter-bar {
+  height: 5px;
+  border-radius: 3px;
+  margin-top: 2px;
+  overflow: hidden;
+  background: color-mix(in srgb, var(--text-mid) 18%, transparent);
+}
+/* Claude rows tint with the accent; agy rows tint violet. The fill ramps from this base
+   color toward muted red as it approaches full (weight set inline via color-mix). */
+.usage-row.claude .usage-meter-fill {
+  --meter-base: var(--accent);
+}
+.usage-row.antigravity .usage-meter-fill {
+  --meter-base: var(--agy);
+}
+.usage-meter-fill {
+  height: 100%;
+  background: var(--meter-base, var(--accent));
+  transition: width 0.3s ease, background 0.3s ease;
+}
+.usage-meter-fill.disabled {
+  background: var(--text-mid) !important;
+  opacity: 0.5;
+}
+.usage-meter-fill.ctx {
+  opacity: 0.7;
+}
+.usage-hint {
+  font-size: 11px;
+  color: var(--text-mid);
+}
+.usage-local {
+  font-size: 10px;
+  color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
+}
+.usage-connect-btn {
+  margin-top: 2px;
+  padding: 4px;
+  font-size: 11px;
+  border: 1px solid color-mix(in srgb, var(--accent) 40%, transparent);
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+  color: var(--accent);
+  cursor: pointer;
+}
+.usage-connect-btn:hover {
+  background: color-mix(in srgb, var(--accent) 20%, transparent);
+}
+.usage-connect-all {
+  padding: 5px;
+  font-size: 11px;
+  font-weight: 600;
+  border: 1px solid color-mix(in srgb, var(--accent) 45%, transparent);
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+  color: var(--accent);
+  cursor: pointer;
+}
+.usage-connect-all:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--accent) 24%, transparent);
+}
+.usage-connect-all:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+.usage-summary-label {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* Tint the agent glyph in summary rows so Claude vs agy reads at a glance. */
+.usage-summary-item.antigravity {
+  color: var(--agy);
+}
+.usage-summary {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  cursor: pointer;
+}
+.usage-summary-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  color: var(--text-mid);
+  font-variant-numeric: tabular-nums;
+}
+.usage-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+.usage-dot.ok {
+  background: var(--green);
+}
+.usage-dot.warn {
+  background: var(--amber);
+}
+.usage-dot.hot {
+  background: var(--red);
+}
+/* Settings → Usage display */
+.usage-prefs {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+.usage-prefs-section {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.usage-prefs-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-bright);
+}
+.usage-prefs-checks {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
 
 /* ---- Claude service-status warning banner (sidebar top, only when degraded) ---- */
 .claude-warning {
@@ -2120,6 +2632,178 @@ button {
   text-transform: uppercase;
   letter-spacing: 0.06em;
   color: var(--text-dim);
+}
+
+/* ---- Multi-account: agent tags, per-agent + per-project defaults ---- */
+.account-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-top: 5px;
+}
+.account-tag-check {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+  color: var(--text-mid);
+  cursor: pointer;
+}
+.account-defaults {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding-top: 10px;
+  border-top: 1px solid var(--border);
+}
+.account-defaults-title {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-dim);
+}
+.account-defaults-hint {
+  font-size: 11px;
+  color: var(--text-dim);
+  margin: -2px 0 2px;
+}
+.account-default-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+.account-default-label {
+  font-size: 12px;
+  color: var(--text-mid);
+}
+.account-select {
+  flex: 1;
+  max-width: 60%;
+  font-size: 12px;
+  color: var(--text-bright);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 4px 24px 4px 8px;
+  cursor: pointer;
+  /* Strip the native macOS chevron and draw our own, matching .mcp-form-select. */
+  appearance: none;
+  -webkit-appearance: none;
+  background-color: var(--sidebar-bg);
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'%3E%3Cpath d='M1 1l4 4 4-4' fill='none' stroke='%239a938c' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 8px center;
+  background-size: 10px 6px;
+}
+.account-select:hover,
+.account-select:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+/* ── Settings native-control polish ──────────────────────────────────────────
+   Replace the glossy OS checkbox and range slider with theme-matched controls.
+   Checkboxes are scoped to the settings/dialog toggle wrappers so md-preview
+   task-list boxes and the accent-color agy toggle stay untouched. */
+.dialog-toggle input[type="checkbox"],
+.telemetry-toggle input[type="checkbox"],
+.account-tag-check input[type="checkbox"] {
+  appearance: none;
+  -webkit-appearance: none;
+  flex-shrink: 0;
+  width: 15px;
+  height: 15px;
+  margin: 0;
+  border: 1.5px solid var(--border);
+  border-radius: 4px;
+  background: var(--sidebar-bg);
+  cursor: pointer;
+  position: relative;
+  transition: background 0.12s ease, border-color 0.12s ease;
+}
+.dialog-toggle input[type="checkbox"]:hover,
+.telemetry-toggle input[type="checkbox"]:hover,
+.account-tag-check input[type="checkbox"]:hover {
+  border-color: var(--accent);
+}
+.dialog-toggle input[type="checkbox"]:checked,
+.telemetry-toggle input[type="checkbox"]:checked,
+.account-tag-check input[type="checkbox"]:checked {
+  background: var(--accent);
+  border-color: var(--accent);
+}
+/* Checkmark punched out of the accent fill in the panel color (like .agent-radio). */
+.dialog-toggle input[type="checkbox"]:checked::after,
+.telemetry-toggle input[type="checkbox"]:checked::after,
+.account-tag-check input[type="checkbox"]:checked::after {
+  content: "";
+  position: absolute;
+  left: 50%;
+  top: 46%;
+  width: 3.5px;
+  height: 7px;
+  border: solid var(--sidebar-bg);
+  border-width: 0 2px 2px 0;
+  transform: translate(-50%, -50%) rotate(45deg);
+}
+
+.usage-prefs input[type="range"] {
+  appearance: none;
+  -webkit-appearance: none;
+  width: 100%;
+  height: 4px;
+  margin: 8px 0;
+  border-radius: 3px;
+  background: var(--border);
+  cursor: pointer;
+}
+.usage-prefs input[type="range"]::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: var(--accent);
+  border: 2px solid var(--sidebar-bg);
+  cursor: pointer;
+}
+.usage-prefs input[type="range"]::-moz-range-thumb {
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: var(--accent);
+  border: 2px solid var(--sidebar-bg);
+  cursor: pointer;
+}
+.usage-prefs input[type="range"]::-moz-range-track {
+  height: 4px;
+  border-radius: 3px;
+  background: var(--border);
+}
+.account-project-block {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 6px 0;
+}
+.account-project-name {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-bright);
+}
+
+/* Inline account expander inside the session context menu. */
+.context-submenu {
+  display: flex;
+  flex-direction: column;
+  margin: 2px 0 2px 8px;
+  padding-left: 6px;
+  border-left: 1px solid var(--border);
+}
+.context-submenu button {
+  font-size: 12px;
+}
+.context-menu button.sel {
+  color: var(--accent, var(--text-bright));
 }
 
 /* ---- Agent detection list (shared by Settings + Onboarding) ---- */
@@ -2686,4 +3370,270 @@ button {
 
 .mcp-skip-link:hover {
   color: var(--text-mid);
+}
+
+/* ---- Auto-update notice ---- */
+.update-notice {
+  position: fixed;
+  right: 16px;
+  bottom: 16px;
+  z-index: 1000;
+  width: 340px;
+  padding: 14px 16px;
+  border-radius: 10px;
+  background: var(--sidebar-bg);
+  border: 1px solid var(--border);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
+  color: var(--text-bright);
+}
+.update-notice-title {
+  font-weight: 600;
+  font-size: 13px;
+}
+.update-notice-sub {
+  margin-top: 4px;
+  font-size: 12px;
+  color: var(--text-mid);
+  line-height: 1.4;
+}
+.update-notice-link {
+  color: var(--accent);
+  cursor: pointer;
+  text-decoration: underline;
+}
+.update-notice-actions {
+  margin-top: 12px;
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+}
+.update-notice-later,
+.update-notice-install {
+  font-size: 12px;
+  padding: 6px 12px;
+  border-radius: 6px;
+  cursor: pointer;
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--text-bright);
+}
+.update-notice-install {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--panel-bg);
+  font-weight: 600;
+}
+.update-notice-progress {
+  margin-top: 12px;
+  height: 6px;
+  border-radius: 3px;
+  background: var(--border);
+  overflow: hidden;
+}
+.update-notice-progress-fill {
+  height: 100%;
+  background: var(--accent);
+  transition: width 0.15s ease;
+}
+
+.about-updates {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.about-check-btn {
+  font-size: 12px;
+  padding: 4px 10px;
+  border-radius: 6px;
+  cursor: pointer;
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--text-bright);
+}
+.about-check-btn:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+.about-update-status {
+  font-size: 12px;
+  color: var(--text-mid);
+}
+/* ---- Tier 3: palettes (Quick Open / Find in Files) ---- */
+
+/* The overlay reuses .dialog-overlay's backdrop; the palette itself is
+   top-anchored (VS Code convention) instead of centered. */
+.palette-overlay {
+  align-items: flex-start;
+  justify-content: center;
+  padding-top: 10vh;
+}
+
+.palette {
+  width: min(560px, calc(100vw - 80px));
+  max-height: 60vh;
+  display: flex;
+  flex-direction: column;
+  background: var(--sidebar-bg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.45);
+  overflow: hidden;
+}
+
+.palette-search {
+  width: min(680px, calc(100vw - 80px));
+}
+
+.palette-input {
+  font-family: var(--mono-font);
+  font-size: 13px;
+  color: var(--text-bright);
+  background: var(--panel-bg);
+  border: none;
+  border-bottom: 1px solid var(--border);
+  outline: none;
+  padding: 10px 12px;
+}
+
+.palette-list {
+  overflow-y: auto;
+  padding: 4px 0;
+}
+
+.palette-row {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  font-family: var(--mono-font);
+  font-size: 12px;
+  color: var(--text-mid);
+  padding: 3px 12px;
+  cursor: pointer;
+  white-space: nowrap;
+  overflow: hidden;
+}
+
+.palette-row:hover {
+  background: var(--hover);
+}
+
+.palette-row.selected {
+  background: color-mix(in srgb, var(--accent) 16%, transparent);
+  color: var(--text-bright);
+}
+
+.palette-file,
+.palette-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.palette-mark {
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.palette-line {
+  color: var(--text-dim);
+  min-width: 3ch;
+  text-align: right;
+  flex-shrink: 0;
+}
+
+.palette-group {
+  font-family: var(--mono-font);
+  font-size: 11px;
+  color: var(--text-dim);
+  padding: 6px 12px 2px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.palette-empty {
+  font-size: 12px;
+  color: var(--text-dim);
+  padding: 12px;
+}
+
+.palette-status {
+  font-size: 11px;
+  color: var(--text-dim);
+  border-top: 1px solid var(--border);
+  padding: 5px 12px;
+}
+
+/* ---- Tier 3: diff overlay + gutter change stripes ---- */
+
+/* Same overlay geometry as .image-preview: covers the editor host only, never
+   the breadcrumb. The plain editor stays mounted underneath (keep-alive). */
+.diff-host {
+  position: absolute;
+  inset: 0;
+  z-index: 4;
+  background: var(--panel-bg);
+}
+
+.diff-host.hidden {
+  visibility: hidden;
+  pointer-events: none;
+}
+
+/* VS Code's gutter language: green = added, accent/blue = modified, red = deleted.
+   Rendered via linesDecorationsClassName, a 3px stripe in the line-decorations lane. */
+.gutter-added,
+.gutter-modified,
+.gutter-deleted {
+  width: 3px !important;
+  margin-left: 2px;
+}
+
+.gutter-added {
+  background: var(--green);
+}
+
+.gutter-modified {
+  background: var(--amber);
+}
+
+.gutter-deleted {
+  /* A pure deletion marks the boundary line it happened at. */
+  background: var(--red);
+  height: 6px !important;
+  margin-top: 0;
+}
+
+/* ---- Tier 3: clickable Changes rows + row actions ---- */
+
+.mono-row.clickable {
+  cursor: pointer;
+  border-radius: 4px;
+  padding-left: 4px;
+  padding-right: 4px;
+}
+
+.mono-row.clickable:hover {
+  background: var(--hover);
+}
+
+.mono-row .row-action {
+  font-size: 12px;
+  line-height: 1;
+  color: var(--text-dim);
+  background: none;
+  border: none;
+  border-radius: 4px;
+  padding: 1px 4px;
+  cursor: pointer;
+  visibility: hidden;
+  flex-shrink: 0;
+}
+
+.mono-row.clickable:hover .row-action {
+  visibility: visible;
+}
+
+.mono-row .row-action:hover {
+  color: var(--red);
+  background: var(--hover);
 }

@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/core";
-import { open } from "@tauri-apps/plugin-dialog";
+import { ask, open } from "@tauri-apps/plugin-dialog";
 import {
   useStore,
   findSession,
@@ -11,17 +11,24 @@ import {
   type Session,
   type TodoItem,
   type TodoStatus,
+  type AgyUsage,
 } from "./store";
 import { type AgentId } from "./agents";
 import { type ThemePref } from "./themes";
+import { useClaudeAmbient } from "./hooks/useClaudeAmbient";
 import { getLastFocusedEditor } from "./monaco/setup";
 import { Sidebar } from "./components/Sidebar";
 import { WorkspaceCenter } from "./components/WorkspaceCenter";
 import { RightColumn } from "./components/RightColumn";
 import { Onboarding } from "./components/Onboarding";
+import { UpdateNotice } from "./components/UpdateNotice";
 import { Settings } from "./components/Settings";
+import { QuickOpen } from "./components/QuickOpen";
+import { SearchPalette } from "./components/SearchPalette";
 import { useTelemetry } from "./hooks/useTelemetry";
+import { useUpdater } from "./hooks/useUpdater";
 import { useFileWatch } from "./hooks/useFileWatch";
+import { useHotExit } from "./hooks/useHotExit";
 
 interface HookPayload {
   session: string;
@@ -40,6 +47,10 @@ function runEditorAction(id: string): void {
 }
 
 export default function App() {
+  // Poll Claude + agy usage at the app root so it refreshes for every account regardless of
+  // which agent is selected or whether the sidebar is collapsed (both would unmount a
+  // sidebar-hosted poller).
+  useClaudeAmbient();
   const projects = useStore((s) => s.projects);
   const selectedProjectId = useStore((s) => s.selectedProjectId);
   const home = useStore((s) => s.homeDir);
@@ -56,8 +67,17 @@ export default function App() {
   // Anonymous engagement heartbeat; no-op while opted out (Settings/onboarding).
   useTelemetry(telemetryOptOut);
 
+  // Background auto-update checks (launch + every 6h while visible).
+  useUpdater();
+
   // Single app-level poll: silently reload clean open files an agent edits on disk.
   useFileWatch();
+
+  // Hot exit's crash net: debounced backups of dirty buffers to the app-data dir.
+  useHotExit();
+
+  // ⌘P / ⌘⇧F palettes (menu-dispatched; rendered at the app root like Settings).
+  const [palette, setPalette] = useState<"quickopen" | "search" | null>(null);
 
   useEffect(() => {
     void load();
@@ -72,6 +92,33 @@ export default function App() {
     const onCtx = (e: MouseEvent) => e.preventDefault();
     window.addEventListener("contextmenu", onCtx);
     return () => window.removeEventListener("contextmenu", onCtx);
+  }, []);
+
+  // Window-level (capture-phase) tab-navigation shortcuts. Everything else stays a
+  // native menu accelerator; these two can't:
+  // - ⌃Tab/⌃⇧Tab: muda maps Key::Tab to the ⇥ display glyph as the NSMenuItem
+  //   keyEquivalent, which AppKit never matches against a real Tab keypress, so the
+  //   Window-menu accelerator is display-only on macOS. Capture phase because xterm
+  //   cancels Tab-family keydowns before they'd bubble out of a focused terminal.
+  // - ⌘1..9 (⌘9 = last, browser convention): meta ONLY — ctrl+digit is a real
+  //   terminal input (ctrl+3 = ESC would interrupt the agent) and must pass through.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.ctrlKey && !e.metaKey && !e.altKey && e.key === "Tab") {
+        e.preventDefault();
+        e.stopPropagation();
+        useStore.getState().cycleTab(e.shiftKey ? -1 : 1);
+        return;
+      }
+      if (e.metaKey && !e.ctrlKey && !e.altKey && !e.shiftKey) {
+        const m = /^Digit([1-9])$/.exec(e.code);
+        if (!m) return;
+        e.preventDefault();
+        useStore.getState().activateTabAt(Number(m[1]));
+      }
+    };
+    window.addEventListener("keydown", onKey, true);
+    return () => window.removeEventListener("keydown", onKey, true);
   }, []);
 
   // Claude Code hook events relayed by the Rust HTTP listener.
@@ -135,6 +182,19 @@ export default function App() {
     };
   }, []);
 
+  // agy usage snapshots pushed by the status-line helper via the Rust hook server.
+  useEffect(() => {
+    const st = useStore.getState();
+    void st.refreshAgyUsage();
+    void st.refreshAgyUsageTracking();
+    const unlisten = listen<AgyUsage>("agyusage", ({ payload }) => {
+      useStore.getState().setAgyUsage(payload);
+    });
+    return () => {
+      void unlisten.then((f) => f());
+    };
+  }, []);
+
   // Native menu clicks relayed by Rust as a "menu" event whose payload is the item id.
   useEffect(() => {
     const unlisten = listen<string>("menu", ({ payload }) => {
@@ -158,6 +218,96 @@ export default function App() {
           const g = activeGroup(layout);
           const tab = g?.tabs.find((t) => t.ref === g.activeRef);
           if (tab?.kind === "file") void st.saveFile(tab.ref);
+          break;
+        }
+        case "save-all":
+          void st.saveAll();
+          break;
+        case "reopen-tab":
+          st.reopenClosedTab();
+          break;
+        case "reveal-active": {
+          const layout = st.selectedProjectId ? st.layouts[st.selectedProjectId] : undefined;
+          const g = activeGroup(layout);
+          const tab = g?.tabs.find((t) => t.ref === g.activeRef);
+          if (tab?.kind === "file") st.revealInTree(tab.ref);
+          break;
+        }
+        case "next-tab":
+          st.cycleTab(1);
+          break;
+        case "prev-tab":
+          st.cycleTab(-1);
+          break;
+        case "toggle-word-wrap":
+          st.toggleWordWrap();
+          break;
+        case "toggle-trim-on-save":
+          st.toggleTrimOnSave();
+          break;
+        case "zoom-in":
+          st.setFontZoom(st.fontZoom + 1);
+          break;
+        case "zoom-out":
+          st.setFontZoom(st.fontZoom - 1);
+          break;
+        case "zoom-reset":
+          st.setFontZoom(0);
+          break;
+        case "toggle-maximize":
+          if (st.selectedProjectId) st.toggleMaximizeGroup(st.selectedProjectId);
+          break;
+        case "quick-open":
+          setPalette("quickopen");
+          break;
+        case "find-in-files":
+          setPalette("search");
+          break;
+        case "format-document":
+          void st.formatActiveDocument();
+          break;
+        case "toggle-diff": {
+          const layout = st.selectedProjectId ? st.layouts[st.selectedProjectId] : undefined;
+          const g = activeGroup(layout);
+          const tab = g?.tabs.find((t) => t.ref === g.activeRef);
+          if (tab?.kind === "file") st.requestDiff(tab.ref, "toggle");
+          break;
+        }
+        case "quit": {
+          // Rust forwards quit here when it saw a nonzero dirty count OR a running agent
+          // (menu.rs quit arm / CloseRequested handler). Two gates: (1) a running-agent confirm
+          // (killing them interrupts in-progress work — history is safe, but ask first), then
+          // (2) hot exit for dirty editor buffers (silent backup; the data-loss dialog only
+          // appears if the backup WRITE fails).
+          void (async () => {
+            const cur = useStore.getState();
+            const running = cur.projects
+              .flatMap((p) => p.sessions)
+              .filter((s) => cur.live[s.id]?.status === "running");
+            // The frontend `live` map can lag the Rust hook mirror; consult the authoritative
+            // Rust signal too so a real running agent never gets silently killed on quit.
+            const rustRunning = await invoke<boolean>("any_agent_running").catch(() => false);
+            if (running.length > 0 || rustRunning) {
+              const names = running.map((s) => s.name).join(", ");
+              const who = names || "an agent";
+              const plural = running.length > 1;
+              const okRun = await ask(
+                `${plural ? `${running.length} sessions are` : `${who} is`} still working${names && plural ? ` (${names})` : ""}. Quit and stop ${plural ? "them" : "it"}? Conversation history is kept.`,
+                { title: "Conduit", kind: "warning", okLabel: "Quit Anyway", cancelLabel: "Cancel" },
+              );
+              if (!okRun) return; // cancel — window stays open (prevent_close already held it)
+            }
+            const flushed = await st.flushHotExit();
+            const n = Object.keys(st.dirty).length;
+            const ok =
+              flushed ||
+              n === 0 ||
+              (await ask(
+                `Quit with unsaved changes? Backing them up failed — ${n} file${n === 1 ? " has" : "s have"} unsaved edits that will be lost.`,
+                { title: "Conduit", kind: "warning", okLabel: "Quit Anyway", cancelLabel: "Cancel" },
+              ));
+            if (ok) await invoke("quit_app").catch(() => {});
+          })();
           break;
         }
         case "close-tab": {
@@ -355,9 +505,20 @@ export default function App() {
           <RightColumn projects={projects} projectId={selectedProjectId} />
         </div>
       </div>
+      <UpdateNotice />
       {showSettings && (
         <Settings onClose={() => setShowSettings(false)} initialTab={settingsTab} />
       )}
+      {(() => {
+        if (!palette) return null;
+        const p = projects.find((x) => x.id === selectedProjectId);
+        if (!p) return null;
+        return palette === "quickopen" ? (
+          <QuickOpen projectId={p.id} dir={p.path} onClose={() => setPalette(null)} />
+        ) : (
+          <SearchPalette projectId={p.id} dir={p.path} onClose={() => setPalette(null)} />
+        );
+      })()}
     </div>
   );
 }
