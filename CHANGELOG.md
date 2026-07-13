@@ -3,6 +3,13 @@
 All notable changes to Conduit are documented here. This project uses
 [semantic versioning](https://semver.org/).
 
+## 0.13.0 — 2026-07-14
+
+- **Added — rename projects in the sidebar.** Give a project any display name you
+  like: right-click its header (or open the ⋯ menu) and choose Rename, or just
+  double-click the project name to edit it in place. Enter saves, Escape cancels.
+  This renames the sidebar label only — the folder on disk is never touched.
+
 ## 0.12.2 — 2026-07-13
 
 - **Changed — sidebar project headers highlight on hover only.** The faint
