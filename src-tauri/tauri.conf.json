@@ -49,7 +49,7 @@
   },
   "plugins": {
     "updater": {
-      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEMxNDVENjZEMzc2NDhBREIKUldUYmltUTNiZFpGd1lYUjY3THpKekE3SWp3a0ZZekRQVnRjUU9pWDNSZjhKTjJialVzYzlBRUoK",
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDFFM0VGNzFCQTM1QkQ3Q0EKUldUSzExdWpHL2MrSG9qcTJtU3FDWitPWGFwei8vZkZIN1Vpa1dyY1lSYi9Ib2M4ekdzNERSclMK",
       "endpoints": [
         "https://github.com/uziiuzair/conduit/releases/latest/download/latest.json"
       ]
