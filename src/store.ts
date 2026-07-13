@@ -1962,9 +1962,9 @@ export const useStore = create<AppState>((set, get) => {
         if (ok) await get().refreshClaudeUsage();
         return ok;
       } catch {
-        const next = { ...get().planConnected, [key]: false };
-        writePlanConnected(next);
-        set({ planConnected: next });
+        // An invoke-level failure is transient plumbing, not "no credentials" -- keep the
+        // previous connected state so one blip can't flip a working account to
+        // disconnected (persisted false blocks rehydrate on the next launch).
         return false;
       }
     },

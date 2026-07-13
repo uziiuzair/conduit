@@ -229,18 +229,39 @@ pub async fn fetch_claude_usage(
     store: tauri::State<'_, std::sync::Arc<crate::store::Store>>,
 ) -> Result<Vec<ClaudeAccountUsage>, String> {
     let targets = store.usage_targets(crate::agent::AgentId::Claude);
-    let tokens = auth
-        .tokens
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .clone();
+    let auth = auth.inner().clone();
     let out = tauri::async_runtime::spawn_blocking(move || {
+        let tokens = auth
+            .tokens
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
         targets
             .into_iter()
             .map(|(account_id, label, config_dir)| {
-                let token = tokens.get(&account_key(account_id.as_deref())).cloned();
+                let key = account_key(account_id.as_deref());
+                let token = tokens.get(&key).cloned();
                 let local = read_local_usage(config_dir.as_deref());
-                let (plan, plan_source) = fetch_plan(token);
+                let (mut plan, mut plan_source) = fetch_plan(token.clone());
+                // A connected account whose fetch didn't come back live may just hold a
+                // stale token: Claude Code rotates the on-disk credentials whenever one of
+                // its sessions runs, and this cache is memory-only. Re-read the file (never
+                // the Keychain -- that prompts) and retry once with the fresh token.
+                if token.is_some() && plan.is_none() {
+                    if let Some(fresh) = reread_token_file(config_dir.as_deref()) {
+                        if Some(&fresh) != token.as_ref() {
+                            auth.tokens
+                                .lock()
+                                .unwrap_or_else(|e| e.into_inner())
+                                .insert(key, fresh.clone());
+                            let (p, s) = fetch_plan(Some(fresh));
+                            if p.is_some() {
+                                plan = p;
+                                plan_source = s;
+                            }
+                        }
+                    }
+                }
                 ClaudeAccountUsage {
                     account_id,
                     label,
@@ -432,9 +453,29 @@ fn read_oauth_token(config_dir: Option<&str>) -> Option<String> {
     read_credentials_file(&claude_config_dir(config_dir)?)
 }
 
+/// Poll-time credentials re-read: file stores only. On macOS the env-default account
+/// lives in the login Keychain, and reading THAT prompts the user -- a background poll
+/// must never trigger it, so the default account stays connect-time only there.
+#[cfg(target_os = "macos")]
+fn reread_token_file(config_dir: Option<&str>) -> Option<String> {
+    let dir = config_dir.filter(|d| !d.trim().is_empty())?;
+    read_credentials_file(std::path::Path::new(dir))
+}
+
+/// Windows/Linux keep every account's credentials as a plain file, so re-reading is
+/// always prompt-free.
+#[cfg(not(target_os = "macos"))]
+fn reread_token_file(config_dir: Option<&str>) -> Option<String> {
+    read_oauth_token(config_dir)
+}
+
 /// Tauri command: connect plan usage. Reads the OAuth token from wherever this platform
 /// stores it (macOS Keychain prompt, or the Windows plain-file store), caches it in
-/// memory, and returns whether a live plan fetch then succeeded.
+/// memory, and returns whether a token was FOUND. Deliberately NOT gated on a live plan
+/// fetch succeeding: the on-disk token may be momentarily expired (Claude Code rotates it
+/// whenever a session runs) or the network may be down -- both transient. The usage poll
+/// re-reads the file and retries, so "connected" means "credentials exist", and `false`
+/// reliably means "no sign-in found" (which is what the UI tells the user).
 #[tauri::command]
 pub async fn connect_claude_plan_usage(
     account_id: Option<String>,
@@ -450,16 +491,16 @@ pub async fn connect_claude_plan_usage(
     };
     let key = account_key(account_id.as_deref());
     let ok = tauri::async_runtime::spawn_blocking(move || {
-        let token = match read_oauth_token(config_dir.as_deref()) {
-            Some(t) => t,
-            None => return false,
-        };
-        auth.tokens
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .insert(key, token.clone());
-        let (plan, _src) = fetch_plan(Some(token));
-        plan.is_some()
+        match read_oauth_token(config_dir.as_deref()) {
+            Some(token) => {
+                auth.tokens
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .insert(key, token);
+                true
+            }
+            None => false,
+        }
     })
     .await
     .map_err(|e| e.to_string())?;
