@@ -3,7 +3,7 @@
 All notable changes to Conduit are documented here. This project uses
 [semantic versioning](https://semver.org/).
 
-## 0.12.1 — 2026-07-13
+## 0.12.2 — 2026-07-13
 
 - **Changed — sidebar project headers highlight on hover only.** The faint
   background fill behind each project title no longer shows at rest; it now
