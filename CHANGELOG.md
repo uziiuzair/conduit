@@ -5,6 +5,10 @@ All notable changes to Conduit are documented here. This project uses
 
 ## 0.12.1 — 2026-07-13
 
+- **Changed — sidebar project headers highlight on hover only.** The faint
+  background fill behind each project title no longer shows at rest; it now
+  appears on hover, so the header list reads cleaner and unselected groups sit
+  flat.
 - **Fixed — security: patched vulnerable bundled dependencies.** Updated transitive
   dependencies flagged by security advisories. In the desktop app: the HTML
   sanitizer used by the code editor (DOMPurify 3.2.7 → 3.4.12) and the build

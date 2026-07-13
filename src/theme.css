@@ -278,12 +278,12 @@ button {
   padding: 5px 7px;
   border-radius: 5px;
   cursor: pointer;
-  background: var(--hover);
+  background: transparent;
   transition: background 0.12s ease;
 }
 
 .project-head:hover {
-  background: var(--selection-bg);
+  background: var(--hover);
 }
 
 .project-head .name {
