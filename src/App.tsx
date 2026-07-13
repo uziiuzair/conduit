@@ -349,6 +349,20 @@ export default function App() {
     };
   }, []);
 
+  // Mobile bridge asks to wake an idle session (a phone `/conduit use` on a session
+  // whose PTY isn't live yet): open + activate its tab so the TerminalView mounts
+  // and spawns the PTY, which the bridge is polling for.
+  useEffect(() => {
+    const un = listen<{ sessionId: string }>("bridge-open-session", ({ payload }) => {
+      const st = useStore.getState();
+      const found = findSession(st.projects, payload.sessionId);
+      if (found) st.selectSession(found.project.id, payload.sessionId);
+    });
+    return () => {
+      void un.then((f) => f());
+    };
+  }, []);
+
   // Conductor fleet events emitted by the in-app MCP server.
   useEffect(() => {
     const unSpawn = listen<{ projectId: string; session: Session; task?: string }>(

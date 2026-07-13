@@ -75,6 +75,34 @@ fn repo_relative(dir: &str, path: &str) -> Result<String, String> {
         .to_string();
     let top = std::fs::canonicalize(&top).map_err(|e| format!("repo root: {e}"))?;
     let abs = std::fs::canonicalize(path).map_err(|e| format!("path: {e}"))?;
+    abs.strip_prefix(&top)
+        .map_err(|_| "file is outside the repository".to_string())
+        .map(|rel| rel.to_string_lossy().replace('\\', "/"))
+}
+
+/// Max diff text returned to a phone — a big diff is unreadable there anyway.
+const DIFF_TEXT_CAP: usize = 48 * 1024;
+
+/// Unified diff of one file against HEAD, for phone review. An untracked file (not
+/// in HEAD) is shown as all-added via `--no-index` against /dev/null. Output is
+/// capped with a truncation marker.
+pub fn diff_text(dir: &str, path: &str) -> Result<String, String> {
+    let rel = repo_relative(dir, path)?;
+    let mut out = run_checked(&["diff", "HEAD", "--", &rel], dir)?;
+    if out.trim().is_empty() {
+        // `--no-index` exits 1 when the files differ, so use the unchecked `run`.
+        let added = run(&["diff", "--no-index", "--", "/dev/null", &rel], dir);
+        out = if added.trim().is_empty() {
+            format!("(no changes to {rel} against HEAD)")
+        } else {
+            added
+        };
+    }
+    if out.len() > DIFF_TEXT_CAP {
+        out.truncate(DIFF_TEXT_CAP);
+        out.push_str("\n… (diff truncated — review the rest on the desktop)");
+    }
+    Ok(out)
     let rel = abs
         .strip_prefix(&top)
         .map_err(|_| "file is outside the repository".to_string())?;
