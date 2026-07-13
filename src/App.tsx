@@ -21,10 +21,12 @@ import { Sidebar } from "./components/Sidebar";
 import { WorkspaceCenter } from "./components/WorkspaceCenter";
 import { RightColumn } from "./components/RightColumn";
 import { Onboarding } from "./components/Onboarding";
+import { UpdateNotice } from "./components/UpdateNotice";
 import { Settings } from "./components/Settings";
 import { QuickOpen } from "./components/QuickOpen";
 import { SearchPalette } from "./components/SearchPalette";
 import { useTelemetry } from "./hooks/useTelemetry";
+import { useUpdater } from "./hooks/useUpdater";
 import { useFileWatch } from "./hooks/useFileWatch";
 import { useHotExit } from "./hooks/useHotExit";
 
@@ -64,6 +66,9 @@ export default function App() {
 
   // Anonymous engagement heartbeat; no-op while opted out (Settings/onboarding).
   useTelemetry(telemetryOptOut);
+
+  // Background auto-update checks (launch + every 6h while visible).
+  useUpdater();
 
   // Single app-level poll: silently reload clean open files an agent edits on disk.
   useFileWatch();
@@ -486,6 +491,7 @@ export default function App() {
           <RightColumn projects={projects} projectId={selectedProjectId} />
         </div>
       </div>
+      <UpdateNotice />
       {showSettings && (
         <Settings onClose={() => setShowSettings(false)} initialTab={settingsTab} />
       )}

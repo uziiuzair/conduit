@@ -174,6 +174,17 @@ no environment variables needed. For a headless default you can still set
 `CONDUIT_CLAUDE_CONFIG_DIR` to a `.claude` folder; Conduit exports it as
 `CLAUDE_CONFIG_DIR` to sessions that have no account assigned.
 
+## Updating
+
+From **0.5.0** onward, Conduit updates itself on macOS. It checks GitHub Releases
+in the background (and on demand via **Settings → About → Check for updates**);
+when a newer signed release exists, a notice offers **Install & Relaunch**.
+Updates are Developer ID–signed, notarized, and minisign-verified before install.
+
+> Because auto-update only exists from 0.5.0, existing users must download 0.5.0
+> once by hand from the [Releases page](https://github.com/uziiuzair/conduit/releases).
+> Every version after that updates in place.
+
 ## How it works
 
 | Concern                                                       | Where                                               |

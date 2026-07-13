@@ -11,6 +11,8 @@ import {
   writeStoredPref,
 } from "./themes";
 import { AGENTS, type AgentId, type AgentInfo, DEFAULT_AGENT, type McpServer } from "./agents";
+import { check, type Update } from "@tauri-apps/plugin-updater";
+import { relaunch } from "@tauri-apps/plugin-process";
 import { ask } from "@tauri-apps/plugin-dialog";
 import * as registry from "./monaco/registry";
 import {
@@ -335,6 +337,21 @@ function writeUsagePrefs(p: UsagePrefs): void {
   }
 }
 
+// ---- Auto-update ----
+export interface UpdateInfo {
+  version: string;
+  currentVersion: string;
+  notes: string;
+  date?: string;
+}
+export type UpdatePhase = "idle" | "checking" | "available" | "downloading" | "error";
+
+const SKIPPED_VERSION_KEY = "conduit.skippedVersion";
+
+/** The live Update handle from the updater plugin. Not serializable, so it lives
+ *  outside the store; the store holds only the display metadata + phase. */
+let pendingUpdate: Update | null = null;
+
 const DEFAULT_AGENT_KEY = "conduit.defaultAgent";
 const SETUP_DONE_KEY = "conduit.agentSetupComplete";
 const TELEMETRY_OPTOUT_KEY = "conduit.telemetryOptOut";
@@ -656,6 +673,18 @@ interface AppState {
   settingsTab: SettingsTab;
   setSettingsTab: (t: SettingsTab) => void;
 
+  // ---- Auto-update ----
+  updateInfo: UpdateInfo | null;
+  updatePhase: UpdatePhase;
+  updateProgress: number; // 0..1 while downloading
+  updateError: string | null;
+  /** Check for updates. `manual` = user-initiated (surface "up to date" and ignore skip). */
+  checkForUpdates: (opts?: { manual?: boolean }) => Promise<void>;
+  /** Download + install the pending update, then relaunch. */
+  installUpdate: () => Promise<void>;
+  /** "Later" — hide the notice and remember this version so we don't re-nag. */
+  dismissUpdate: () => void;
+
   load: () => Promise<void>;
   agents: AgentInfo[] | null;
   defaultAgent: AgentId;
@@ -921,6 +950,10 @@ export const useStore = create<AppState>((set, get) => {
     claudeStatus: null,
     claudeUsage: [],
     planConnected: readPlanConnected(),
+    updateInfo: null,
+    updatePhase: "idle",
+    updateProgress: 0,
+    updateError: null,
     agyUsageByAccount: {},
     agyUsageTracking: false,
     usagePrefs: readUsagePrefs(),
@@ -1983,6 +2016,96 @@ export const useStore = create<AppState>((set, get) => {
         const u = await invoke<ClaudeAccountUsage[]>("fetch_claude_usage");
         set({ claudeUsage: u });
       } catch { /* fail-open: keep last-known */ }
+    },
+
+    checkForUpdates: async (opts) => {
+      // Don't interfere with an install already in progress.
+      if (get().updatePhase === "downloading") return;
+      const manual = opts?.manual ?? false;
+      // Only show the transient "checking" state when there's no live banner to
+      // disturb — otherwise a background poll would flicker an "available" notice.
+      const showChecking =
+        manual || get().updatePhase === "idle" || get().updatePhase === "error";
+      if (showChecking) set({ updatePhase: "checking", updateError: null });
+      try {
+        const update = await check();
+        if (!update) {
+          void pendingUpdate?.close();
+          pendingUpdate = null;
+          set({ updateInfo: null, updatePhase: "idle" });
+          return;
+        }
+        // Respect a prior "Later" unless this is a manual check.
+        const skipped = localStorage.getItem(SKIPPED_VERSION_KEY);
+        const shouldNotify = manual
+          ? true
+          : await invoke<boolean>("update_should_notify", {
+              remoteVersion: update.version,
+              skippedVersion: skipped,
+            });
+        // Release any previously-held handle (Update is a Rust-side Resource).
+        if (pendingUpdate && pendingUpdate !== update) void pendingUpdate.close();
+        pendingUpdate = null;
+        if (!shouldNotify) {
+          void update.close();
+          set({ updateInfo: null, updatePhase: "idle" });
+          return;
+        }
+        pendingUpdate = update;
+        set({
+          updateInfo: {
+            version: update.version,
+            currentVersion: update.currentVersion,
+            notes: update.body ?? "",
+            date: update.date ?? undefined,
+          },
+          updatePhase: "available",
+        });
+      } catch (e) {
+        // Fail open. A background check that errors leaves any existing pending
+        // update untouched and stays quiet; only a manual check surfaces the error.
+        if (manual) {
+          set({ updatePhase: "error", updateError: String(e) });
+        } else if (get().updatePhase === "checking") {
+          set({ updatePhase: "idle" });
+        }
+      }
+    },
+
+    installUpdate: async () => {
+      if (!pendingUpdate) return;
+      set({ updatePhase: "downloading", updateProgress: 0, updateError: null });
+      try {
+        let downloaded = 0;
+        let total = 0;
+        await pendingUpdate.downloadAndInstall((ev) => {
+          switch (ev.event) {
+            case "Started":
+              total = ev.data.contentLength ?? 0;
+              break;
+            case "Progress":
+              downloaded += ev.data.chunkLength;
+              set({ updateProgress: total > 0 ? downloaded / total : 0 });
+              break;
+            case "Finished":
+              set({ updateProgress: 1 });
+              break;
+          }
+        });
+        // Installed to disk; restart into the new version. This tears down PTYs —
+        // the notice copy warns about that before the user clicks Install.
+        await relaunch();
+      } catch (e) {
+        set({ updatePhase: "error", updateError: String(e) });
+      }
+    },
+
+    dismissUpdate: () => {
+      const v = get().updateInfo?.version;
+      if (v) localStorage.setItem(SKIPPED_VERSION_KEY, v);
+      void pendingUpdate?.close();
+      pendingUpdate = null;
+      set({ updateInfo: null, updatePhase: "idle" });
     },
 
     connectPlanUsage: async (accountId) => {

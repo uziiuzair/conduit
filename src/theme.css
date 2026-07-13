@@ -3372,6 +3372,92 @@ button {
   color: var(--text-mid);
 }
 
+/* ---- Auto-update notice ---- */
+.update-notice {
+  position: fixed;
+  right: 16px;
+  bottom: 16px;
+  z-index: 1000;
+  width: 340px;
+  padding: 14px 16px;
+  border-radius: 10px;
+  background: var(--sidebar-bg);
+  border: 1px solid var(--border);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
+  color: var(--text-bright);
+}
+.update-notice-title {
+  font-weight: 600;
+  font-size: 13px;
+}
+.update-notice-sub {
+  margin-top: 4px;
+  font-size: 12px;
+  color: var(--text-mid);
+  line-height: 1.4;
+}
+.update-notice-link {
+  color: var(--accent);
+  cursor: pointer;
+  text-decoration: underline;
+}
+.update-notice-actions {
+  margin-top: 12px;
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+}
+.update-notice-later,
+.update-notice-install {
+  font-size: 12px;
+  padding: 6px 12px;
+  border-radius: 6px;
+  cursor: pointer;
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--text-bright);
+}
+.update-notice-install {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--panel-bg);
+  font-weight: 600;
+}
+.update-notice-progress {
+  margin-top: 12px;
+  height: 6px;
+  border-radius: 3px;
+  background: var(--border);
+  overflow: hidden;
+}
+.update-notice-progress-fill {
+  height: 100%;
+  background: var(--accent);
+  transition: width 0.15s ease;
+}
+
+.about-updates {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.about-check-btn {
+  font-size: 12px;
+  padding: 4px 10px;
+  border-radius: 6px;
+  cursor: pointer;
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--text-bright);
+}
+.about-check-btn:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+.about-update-status {
+  font-size: 12px;
+  color: var(--text-mid);
+}
 /* ---- Tier 3: palettes (Quick Open / Find in Files) ---- */
 
 /* The overlay reuses .dialog-overlay's backdrop; the palette itself is

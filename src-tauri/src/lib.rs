@@ -29,6 +29,7 @@ mod search;
 mod store;
 mod telemetry;
 mod transcript;
+mod updates;
 mod usage_tally;
 mod worktree;
 
@@ -1208,6 +1209,8 @@ pub fn run() {
         .plugin(tauri_plugin_window_state::Builder::default().build())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_notification::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_clipboard_manager::init())
         .manage(Arc::new(PtyManager::new()))
         .manage(Arc::new(Store::new()))
@@ -1356,6 +1359,7 @@ pub fn run() {
             mcp_apply,
             install_agent,
             telemetry::telemetry_ping,
+            updates::update_should_notify,
             clipboard::clipboard_read_for_paste,
         ])
         .build(tauri::generate_context!())

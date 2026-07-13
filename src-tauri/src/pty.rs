@@ -932,7 +932,7 @@ mod tests {
         // The persona rides as a FILE path, never inline text (see write_persona_file):
         // the bare `--append-system-prompt` (no `-file`) must not appear.
         assert!(
-            script.contains("--append-system-prompt-file /cfg/persona.txt"),
+            script.contains("--append-system-prompt-file '/cfg/persona.txt'"),
             "{script}"
         );
         assert!(
@@ -1138,8 +1138,8 @@ mod tests {
             Some("high"),
             None,
         );
-        assert!(script.contains("--model claude-opus-4-8"), "{script}");
-        assert!(script.contains("--effort high"), "{script}");
+        assert!(script.contains("--model 'claude-opus-4-8'"), "{script}");
+        assert!(script.contains("--effort 'high'"), "{script}");
     }
 
     #[cfg(windows)]

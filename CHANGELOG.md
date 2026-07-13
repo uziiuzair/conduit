@@ -3,6 +3,13 @@
 All notable changes to Conduit are documented here. This project uses
 [semantic versioning](https://semver.org/).
 
+## 0.12.0 — 2026-07-13
+
+- **Added — auto-updates (macOS).** Conduit now checks GitHub Releases in the
+  background and via Settings → About, and installs signed + notarized updates on
+  your consent. This is the first self-updating build — update to it once by hand;
+  future versions update in place.
+
 ## 0.11.0 — 2026-07-13
 
 - **Added — sidebar drag-and-drop reordering.** Drag a project header to reorder
