@@ -244,7 +244,9 @@ fn handle_conn(stream: TcpStream, app: AppHandle, token: Option<String>) {
                 Some(ClientMsg::List) => {
                     // Real project tree (names + branches) with a per-session running flag.
                     let running: HashSet<String> = pty.session_ids().into_iter().collect();
-                    let projects = serde_json::to_value(app.state::<Store>().list())
+                    // Store is managed as `Arc<Store>` (see lib.rs `.manage(Arc::new(...))`),
+                    // so `state::<Store>()` panics the connection thread on the first `list`.
+                    let projects = serde_json::to_value(app.state::<Arc<Store>>().list())
                         .ok()
                         .and_then(|v| v.as_array().cloned())
                         .unwrap_or_default();
