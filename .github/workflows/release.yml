@@ -1,0 +1,67 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  release:
+    runs-on: macos-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+
+      - name: Install Rust (stable) with both apple targets
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+
+      - name: Install frontend dependencies
+        run: pnpm install --frozen-lockfile
+
+      # Notarization uses an App Store Connect API key. The bundler auto-discovers
+      # the private key at ~/private_keys/AuthKey_<APPLE_API_KEY>.p8, so we write it
+      # there from a base64-encoded secret (keeps newlines intact, nothing on disk
+      # in the repo).
+      - name: Provision App Store Connect API key
+        env:
+          APPLE_API_KEY_P8_BASE64: ${{ secrets.APPLE_API_KEY_P8_BASE64 }}
+        run: |
+          mkdir -p ~/private_keys
+          echo "$APPLE_API_KEY_P8_BASE64" | base64 --decode > ~/private_keys/AuthKey_${{ secrets.APPLE_API_KEY }}.p8
+
+      - name: Build, sign, notarize, and publish release
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          # App Store Connect API key notarization (replaces APPLE_ID/APPLE_PASSWORD).
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+        with:
+          args: --target universal-apple-darwin
+          tagName: ${{ github.ref_name }}
+          releaseName: "Conduit ${{ github.ref_name }}"
+          releaseBody: "See the assets below. Release notes:"
+          releaseDraft: false
+          # Hyphenated tags (v0.12.0-rc, -beta) publish as prereleases so they
+          # never become the "latest" release the updater endpoint resolves to;
+          # a clean vX.Y.Z is a full release.
+          prerelease: ${{ contains(github.ref_name, '-') }}
+          includeUpdaterJson: true

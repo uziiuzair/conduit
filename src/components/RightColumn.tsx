@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { ask } from "@tauri-apps/plugin-dialog";
 import {
   useStore,
   liveState,
@@ -10,6 +11,7 @@ import {
   type Project,
   type TodoStatus,
 } from "../store";
+import { joinPath } from "../paths";
 import { GitGraph, type GraphCommit } from "./GitGraph";
 import { FileTree } from "./FileTree";
 import { TerminalView } from "./Terminal";
@@ -189,10 +191,12 @@ export function RightColumn({
     ? `worktree · ${selected.session.branch ?? "session"}`
     : branch ?? "no branch";
 
-  // All sessions' plain shells stay mounted (keep-alive).
-  const allSessions = projects.flatMap((p) =>
-    p.sessions.map((s) => ({ session: s, project: p })),
-  );
+  // All sessions' plain shells stay mounted (keep-alive). Stable id order, decoupled
+  // from sidebar order — a sidebar drag-reorder must not make React physically move
+  // these nodes (same reasoning as WorkspaceCenter's term-stack).
+  const allSessions = projects
+    .flatMap((p) => p.sessions.map((s) => ({ session: s, project: p })))
+    .sort((a, b) => a.session.id.localeCompare(b.session.id));
 
   return (
     <div className="right-col">
@@ -224,7 +228,12 @@ export function RightColumn({
               />
             </>
           ) : topTab === "changes" ? (
-            <ChangesView changes={changes} />
+            <ChangesView
+              changes={changes}
+              projectId={projectId}
+              dir={workingDirectory}
+              onDiscarded={refreshGit}
+            />
           ) : activeSessionId ? (
             <TodosView sessionId={activeSessionId} />
           ) : (
@@ -288,18 +297,83 @@ function PanelTab({
   );
 }
 
-function ChangesView({ changes }: { changes: Change[] }) {
+function ChangesView({
+  changes,
+  projectId,
+  dir,
+  onDiscarded,
+}: {
+  changes: Change[];
+  projectId: string;
+  /** Directory the change paths are relative to (project root or worktree). */
+  dir: string;
+  onDiscarded: () => void;
+}) {
+  const openFile = useStore((s) => s.openFile);
+  const requestDiff = useStore((s) => s.requestDiff);
+  const bumpDir = useStore((s) => s.bumpDir);
+
+  const absOf = (rel: string) => joinPath(dir, rel);
+
+  // Click a row -> open the file as a preview tab with the diff view armed.
+  const openDiff = (c: Change) => {
+    const abs = absOf(c.path);
+    openFile(projectId, abs, { preview: true });
+    requestDiff(abs, "on");
+  };
+
+  // Hover ↺ -> confirm-guarded discard to HEAD (delete, for untracked files).
+  const discard = async (c: Change) => {
+    const abs = absOf(c.path);
+    const dirtyToo = !!useStore.getState().dirty[abs];
+    const ok = await ask(
+      `Discard changes to ${c.path}?` +
+        (dirtyToo ? "\n\nUnsaved editor changes to this file will also be lost." : ""),
+      { title: "Discard Changes", kind: "warning", okLabel: "Discard", cancelLabel: "Cancel" },
+    );
+    if (!ok) return;
+    try {
+      await invoke<string>("git_discard_file", { dir, path: c.path });
+    } catch (e) {
+      void invoke("notify_user", { title: "Discard Changes", body: String(e) }).catch(() => {});
+      return;
+    }
+    // A dirty open buffer is reloaded immediately — the user just chose to discard,
+    // so surfacing the watcher's "changed on disk" banner would be noise. Clean
+    // buffers converge through the watcher's silent reload on its own.
+    if (dirtyToo) await useStore.getState().reloadBufferFromDisk(abs);
+    // The git poll and useFileWatch reconcile the list and any open buffer; the
+    // tree needs an explicit nudge for deleted untracked files.
+    bumpDir(abs.slice(0, Math.max(abs.lastIndexOf("/"), abs.lastIndexOf("\\"))));
+    onDiscarded();
+  };
+
   if (changes.length === 0)
     return <p className="placeholder">No changes against HEAD.</p>;
   return (
     <div className="panel-scroll">
       {changes.map((c, i) => (
-        <div className="mono-row" key={i}>
+        <div
+          className="mono-row clickable"
+          key={i}
+          onClick={() => openDiff(c)}
+          title="Open diff with HEAD"
+        >
           <span className="st">{c.status}</span>
           <span className="path">{c.path}</span>
           <span className="spacer" />
           {c.added > 0 && <span className="add">+{c.added}</span>}
           {c.removed > 0 && <span className="rem">-{c.removed}</span>}
+          <button
+            className="row-action"
+            title="Discard changes (restore from HEAD)"
+            onClick={(e) => {
+              e.stopPropagation();
+              void discard(c);
+            }}
+          >
+            ↺
+          </button>
         </div>
       ))}
     </div>

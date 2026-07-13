@@ -61,6 +61,8 @@ pub fn start(
     store: Arc<crate::store::Store>,
     pty: Arc<crate::pty::PtyManager>,
     board: Arc<crate::board::BoardState>,
+    agy_usage: Arc<crate::agy_usage::AgyUsageState>,
+    agy_resume: Arc<crate::agy_usage::AgyResumeState>,
 ) {
     thread::spawn(move || {
         let mut server: Option<Server> = None;
@@ -104,6 +106,91 @@ pub fn start(
                 .as_reader()
                 .take(1024 * 1024)
                 .read_to_string(&mut body);
+
+            // agy usage: the status-line helper POSTs agy's payload here and echoes our
+            // response as its status line. Handle before the generic "ok" respond so the
+            // reply carries the formatted line, and before the session gate (a usage
+            // snapshot is account-global, not tied to a fleet session). This body is
+            // UNTRUSTED, unauthenticated, localhost display-data (same trust model as the
+            // other hook events) -- no security decision keys off it; it only drives a
+            // cosmetic meter, so a spoofed post at worst shows wrong numbers.
+            if event == "agyusage" {
+                let parsed: Value = serde_json::from_str(&body).unwrap_or(Value::Null);
+                let mut usage = crate::agy_usage::parse_statusline_payload(&parsed);
+                // Key the snapshot by the posting session's resolved account so multiple agy
+                // accounts don't clobber one slot (None = the environment default).
+                usage.account_id = session
+                    .as_deref()
+                    .and_then(|sid| store.session_account_id(sid));
+                // Mirror agy's own activity into the shutdown-guard status: agy doesn't fire
+                // Claude-style lifecycle hooks, so without this a busy agy session is invisible
+                // to the "an agent is working" quit confirm. Runs on EVERY tick (even
+                // quota-less ones) so a working state registers before quota loads.
+                if let Some(sid) = session.as_deref() {
+                    fleet.set_running(
+                        sid,
+                        crate::agy_usage::agent_state_is_active(usage.agent_state.as_deref()),
+                    );
+                }
+                let line = crate::agy_usage::format_status_line(&usage);
+                // Only replace the snapshot when this tick carried real quota data; a
+                // quota-less tick would otherwise clobber a good snapshot (see has_data).
+                if usage.has_data() {
+                    if std::env::var("CONDUIT_HOOK_LOG").as_deref() == Ok("1") {
+                        // Summary only -- never log the raw body (it carries the account email).
+                        eprintln!(
+                            "[hook] agyusage account={:?} groups={} tier={:?}",
+                            usage.account_id,
+                            usage.groups.len(),
+                            usage.plan_tier
+                        );
+                    }
+                    let key = usage
+                        .account_id
+                        .clone()
+                        .unwrap_or_else(|| "default".to_string());
+                    agy_usage.set(key, usage.clone());
+                    let _ = app.emit("agyusage", &usage);
+
+                    // Capture this session's agy conversation id ONCE, so the next spawn can
+                    // reopen it via `--conversation=<id>`. agy won't let us pin our own id, so we
+                    // discover the one it chose -- but only a db NOT present at this session's
+                    // spawn (via the AgyResumeState baseline), so two sessions sharing an agy
+                    // home don't cross-capture. Refuse an id already claimed by another session
+                    // (never point two sessions at one conversation). Skip if already captured.
+                    if let Some(sid) = session.as_deref() {
+                        if store.session_agent_conversation_id(sid).is_none() {
+                            let config_dir = store.session_account_config_dir(sid);
+                            if let Some(home) =
+                                crate::agy_usage::resolve_agy_home(config_dir.as_deref())
+                            {
+                                // Primary: agy's own conversation id from the payload (keyed to
+                                // THIS session -> race-free), accepted only if it names a real
+                                // conversation db. Fallback: the spawn-baseline heuristic, which
+                                // declines when a shared home makes the choice ambiguous.
+                                let captured = crate::agy_usage::parse_conversation_id(&parsed)
+                                    .filter(|id| {
+                                        crate::agy_usage::conversation_db_exists(&home, id)
+                                    })
+                                    .or_else(|| {
+                                        let taken = store.all_agent_conversation_ids_except(sid);
+                                        agy_resume.capture_new(sid, &home, &taken)
+                                    });
+                                if let Some(cid) = captured {
+                                    if !store.conversation_id_in_use(&cid, sid) {
+                                        store.set_session_agent_conversation_id(sid, &cid);
+                                        agy_resume.forget(sid);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                // Always answer agy so its status line still renders.
+                let _ = request.respond(Response::from_string(line));
+                continue;
+            }
+
             let _ = request.respond(Response::from_string("ok"));
 
             let Some(session) = session else { continue };

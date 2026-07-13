@@ -12,13 +12,21 @@ export function NewSessionDialog({
   projectPath: string;
   hasConductor: boolean;
   onCancel: () => void;
-  onCreate: (opts: { name?: string; useWorktree: boolean; agent: AgentId; role: SessionRole }) => void;
+  onCreate: (opts: {
+    name?: string;
+    useWorktree: boolean;
+    agent: AgentId;
+    role: SessionRole;
+    account?: string | null;
+  }) => void;
 }) {
   const defaultAgent = useStore((s) => s.defaultAgent);
+  const accounts = useStore((s) => s.accounts);
   const [name, setName] = useState("");
   const [useWorktree, setUseWorktree] = useState(false);
   const [gitOk, setGitOk] = useState(false);
   const [agent, setAgent] = useState<AgentId>(defaultAgent);
+  const [account, setAccount] = useState<string>("");
   // A Conductor is a Claude session in the project root that orchestrates the fleet.
   const [conductor, setConductor] = useState(false);
   // Detection is loaded once at startup (store.loadAgents) and cached, so opening
@@ -53,13 +61,23 @@ export function NewSessionDialog({
   const anyReady = !detected || detected.some((a) => a.found);
   // The Conductor never isolates in a worktree (it runs in the project root).
   const worktreeAllowed = gitOk && agentMeta(agent).supportsWorktree && !conductor;
+  // Account picker: the effective agent is Claude when the Conductor box is ticked. Only
+  // accounts tagged for that agent are eligible; blank = inherit the project/global default.
+  const effectiveAgent: AgentId = conductor ? "claude" : agent;
+  const eligibleAccounts = accounts.filter((a) => a.agents.includes(effectiveAgent));
+  // Drop a stale pick when switching to an agent that account isn't tagged for.
+  useEffect(() => {
+    if (account && !eligibleAccounts.some((a) => a.id === account)) setAccount("");
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [effectiveAgent]);
   const submit = () => {
+    const acct = account || null;
     if (conductor) {
-      onCreate({ name: name.trim() || undefined, useWorktree: false, agent: "claude", role: "conductor" });
+      onCreate({ name: name.trim() || undefined, useWorktree: false, agent: "claude", role: "conductor", account: acct });
       return;
     }
     if (!isReady(agent)) return;
-    onCreate({ name: name.trim() || undefined, useWorktree: useWorktree && worktreeAllowed, agent, role: "worker" });
+    onCreate({ name: name.trim() || undefined, useWorktree: useWorktree && worktreeAllowed, agent, role: "worker", account: acct });
   };
 
   return (
@@ -110,6 +128,24 @@ export function NewSessionDialog({
             );
           })}
         </div>
+
+        {eligibleAccounts.length > 0 && (
+          <>
+            <div className="dialog-label">Account</div>
+            <select
+              className="dialog-input"
+              value={account}
+              onChange={(e) => setAccount(e.target.value)}
+            >
+              <option value="">Default account for {agentMeta(effectiveAgent).label}</option>
+              {eligibleAccounts.map((a) => (
+                <option key={a.id} value={a.id}>
+                  {a.label}
+                </option>
+              ))}
+            </select>
+          </>
+        )}
 
         <input
           className="dialog-input"

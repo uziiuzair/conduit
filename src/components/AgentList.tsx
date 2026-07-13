@@ -12,6 +12,8 @@ export function AgentList({ allowNoDefault = false }: { allowNoDefault?: boolean
   const installAgent = useStore((s) => s.installAgent);
   const defaultAgent = useStore((s) => s.defaultAgent);
   const setDefaultAgent = useStore((s) => s.setDefaultAgent);
+  const agyTracking = useStore((s) => s.agyUsageTracking);
+  const setAgyTracking = useStore((s) => s.setAgyUsageTracking);
   const info = (id: AgentId) => detected?.find((d) => d.id === id);
   const ready = (id: AgentId) => !detected || info(id)?.found === true;
 
@@ -19,6 +21,17 @@ export function AgentList({ allowNoDefault = false }: { allowNoDefault?: boolean
   const [installing, setInstalling] = useState<Record<string, boolean>>({});
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [installed, setInstalled] = useState<Record<string, boolean>>({});
+  const [agyTrackErr, setAgyTrackErr] = useState<string | null>(null);
+
+  const toggleAgyTracking = async (on: boolean) => {
+    setAgyTrackErr(null);
+    const ok = await setAgyTracking(on);
+    if (!ok && on) {
+      setAgyTrackErr(
+        "agy already has a custom status line — remove it to let Conduit track usage.",
+      );
+    }
+  };
 
   const doInstall = async (id: AgentId) => {
     setInstalling((m) => ({ ...m, [id]: true }));
@@ -61,6 +74,19 @@ export function AgentList({ allowNoDefault = false }: { allowNoDefault?: boolean
               {err && <div className="agent-install-err">Install failed: {err}</div>}
               {installed[a.id] && ok && (
                 <div className="agent-install-note">Installed — open a session to sign in.</div>
+              )}
+              {a.id === "antigravity" && ok && (
+                <label className="agy-track-toggle" title="Installs a status-line hook in agy's settings.json so Conduit can show your Antigravity quota. Uses agy's own extension surface — no third-party API access.">
+                  <input
+                    type="checkbox"
+                    checked={agyTracking}
+                    onChange={(e) => void toggleAgyTracking(e.target.checked)}
+                  />
+                  <span>Show usage in Conduit</span>
+                </label>
+              )}
+              {a.id === "antigravity" && agyTrackErr && (
+                <div className="agent-install-err">{agyTrackErr}</div>
               )}
             </div>
             {ok ? (

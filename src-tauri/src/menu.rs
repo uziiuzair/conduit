@@ -11,12 +11,14 @@
 //! The custom handler kills every PTY first (mirroring the `ExitRequested` cleanup in
 //! `lib.rs`) and only then exits, so no `claude` PTY is ever orphaned.
 
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 use tauri::menu::{Menu, MenuBuilder, MenuItemBuilder, SubmenuBuilder};
 use tauri::{AppHandle, Emitter, Manager, Runtime};
 
 use crate::pty::PtyManager;
+use crate::DirtyGuard;
 
 /// Build the full application menu tree (Conduit · File · Edit · View · Window · Help).
 pub fn build<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<Menu<R>> {
@@ -50,15 +52,36 @@ pub fn build<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<Menu<R>> {
     let save = MenuItemBuilder::with_id("save", "Save")
         .accelerator("CmdOrCtrl+S")
         .build(app)?;
+    // Alt-modified accelerator is macOS-only for the same AltGr reason as `replace`.
+    let save_all = {
+        let b = MenuItemBuilder::with_id("save-all", "Save All");
+        #[cfg(target_os = "macos")]
+        let b = b.accelerator("Cmd+Alt+S");
+        b.build(app)?
+    };
     let close_tab = MenuItemBuilder::with_id("close-tab", "Close Tab")
         .accelerator("CmdOrCtrl+W")
+        .build(app)?;
+    let reopen_tab = MenuItemBuilder::with_id("reopen-tab", "Reopen Closed Tab")
+        .accelerator("CmdOrCtrl+Shift+T")
+        .build(app)?;
+    let reveal_active =
+        MenuItemBuilder::with_id("reveal-active", "Reveal Active File in Tree").build(app)?;
+    let quick_open = MenuItemBuilder::with_id("quick-open", "Go to File…")
+        .accelerator("CmdOrCtrl+P")
         .build(app)?;
     let file_menu = SubmenuBuilder::new(app, "File")
         .item(&new_session)
         .item(&open_project)
         .separator()
+        .item(&quick_open)
+        .separator()
         .item(&save)
+        .item(&save_all)
         .item(&close_tab)
+        .item(&reopen_tab)
+        .separator()
+        .item(&reveal_active)
         .build()?;
 
     // ---- Edit ----
@@ -76,6 +99,14 @@ pub fn build<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<Menu<R>> {
         let b = b.accelerator("Cmd+Alt+F");
         b.build(app)?
     };
+    let find_in_files = MenuItemBuilder::with_id("find-in-files", "Find in Files")
+        .accelerator("CmdOrCtrl+Shift+F")
+        .build(app)?;
+    // Shift+Alt+F is VS Code's own cross-platform Format binding; unlike plain
+    // Alt combos it can't be conflated with AltGr (= Ctrl+Alt) on Win32.
+    let format_doc = MenuItemBuilder::with_id("format-document", "Format Document")
+        .accelerator("Shift+Alt+F")
+        .build(app)?;
     let edit_menu = SubmenuBuilder::new(app, "Edit")
         .undo()
         .redo()
@@ -87,6 +118,9 @@ pub fn build<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<Menu<R>> {
         .separator()
         .item(&find)
         .item(&replace)
+        .item(&find_in_files)
+        .separator()
+        .item(&format_doc)
         .build()?;
 
     // ---- View (with nested Theme submenu) ----
@@ -107,15 +141,64 @@ pub fn build<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<Menu<R>> {
         .item(&theme_warm_dim)
         .item(&theme_near_black)
         .build()?;
+    // ⌥Z is VS Code's word-wrap toggle; Alt accelerators are macOS-only (AltGr, see
+    // `replace` above).
+    let word_wrap = {
+        let b = MenuItemBuilder::with_id("toggle-word-wrap", "Toggle Word Wrap");
+        #[cfg(target_os = "macos")]
+        let b = b.accelerator("Alt+Z");
+        b.build(app)?
+    };
+    let trim_on_save =
+        MenuItemBuilder::with_id("toggle-trim-on-save", "Clean Whitespace on Save").build(app)?;
+    let zoom_in = MenuItemBuilder::with_id("zoom-in", "Zoom In")
+        .accelerator("CmdOrCtrl+=")
+        .build(app)?;
+    let zoom_out = MenuItemBuilder::with_id("zoom-out", "Zoom Out")
+        .accelerator("CmdOrCtrl+-")
+        .build(app)?;
+    let zoom_reset = MenuItemBuilder::with_id("zoom-reset", "Reset Zoom")
+        .accelerator("CmdOrCtrl+0")
+        .build(app)?;
+    let maximize_group = MenuItemBuilder::with_id("toggle-maximize", "Maximize Editor Group")
+        .accelerator("CmdOrCtrl+Shift+M")
+        .build(app)?;
+    let toggle_diff =
+        MenuItemBuilder::with_id("toggle-diff", "Toggle Diff with HEAD").build(app)?;
     let view_menu = SubmenuBuilder::new(app, "View")
         .item(&toggle_sidebar)
         .item(&toggle_right)
+        .separator()
+        .item(&toggle_diff)
+        .separator()
+        .item(&word_wrap)
+        .item(&trim_on_save)
+        .separator()
+        .item(&zoom_in)
+        .item(&zoom_out)
+        .item(&zoom_reset)
+        .separator()
+        .item(&maximize_group)
         .separator()
         .item(&theme_menu)
         .build()?;
 
     // ---- Window ----
+    // NOTE: on macOS these accelerators are display-only — muda maps Key::Tab to the
+    // "⇥" glyph as the NSMenuItem keyEquivalent, which AppKit never matches against a
+    // real Tab keypress. The working chord is App.tsx's capture-phase keydown handler;
+    // the two dispatch paths are mutually exclusive (if the OS ever consumes the key
+    // equivalent, the DOM never sees the keydown), so keeping both cannot double-fire.
+    let next_tab = MenuItemBuilder::with_id("next-tab", "Next Tab")
+        .accelerator("Ctrl+Tab")
+        .build(app)?;
+    let prev_tab = MenuItemBuilder::with_id("prev-tab", "Previous Tab")
+        .accelerator("Ctrl+Shift+Tab")
+        .build(app)?;
     let window_menu = SubmenuBuilder::new(app, "Window")
+        .item(&next_tab)
+        .item(&prev_tab)
+        .separator()
         .minimize()
         .maximize()
         .fullscreen()
@@ -151,9 +234,19 @@ pub fn on_event<R: Runtime>(app: &AppHandle<R>, id: &str) {
                 .spawn();
         }
         "quit" => {
-            // Guarantee PTYs die before exit, mirroring `RunEvent::ExitRequested`.
-            app.state::<Arc<PtyManager>>().kill_all();
-            app.exit(0);
+            // With unsaved buffers (count pushed from the frontend via `set_dirty_count`) OR an
+            // actively running agent, forward quit for a confirm round-trip — the frontend calls
+            // back `quit_app` on approval. A clean+idle quit exits immediately,
+            // webview-independent. PTYs die before exit either way, mirroring
+            // `RunEvent::ExitRequested`.
+            let dirty = app.state::<DirtyGuard>().0.load(Ordering::SeqCst) > 0;
+            let running = crate::live_running_agent(app);
+            if dirty || running {
+                let _ = app.emit("menu", "quit");
+            } else {
+                app.state::<Arc<PtyManager>>().kill_all();
+                app.exit(0);
+            }
         }
         other => {
             let _ = app.emit("menu", other);

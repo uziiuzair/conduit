@@ -36,6 +36,48 @@ export function moveTab(
   return l;
 }
 
+/** The ref ⌃Tab / ⌃⇧Tab should activate: `delta` steps from the active tab, wrapping.
+ *  Null when the group has fewer than two tabs (nothing to cycle to). */
+export function cycleTabRef(
+  group: { tabs: WsTab[]; activeRef: string | null },
+  delta: number,
+): string | null {
+  const n = group.tabs.length;
+  if (n < 2) return null;
+  const i = group.tabs.findIndex((t) => t.ref === group.activeRef);
+  const base = i === -1 ? 0 : i;
+  return group.tabs[(((base + delta) % n) + n) % n].ref;
+}
+
+/** Restore a closed tab at its old group/index (⌘⇧T). Focuses an existing tab with
+ *  the same ref instead of duplicating; falls back to the active group when the
+ *  original group is gone. Index is clamped to the group's current length. */
+export function reopenTabAt(
+  layout: ProjectLayout,
+  groupId: string,
+  index: number,
+  tab: WsTab,
+): ProjectLayout {
+  const l = clone(layout);
+  for (const g of l.groups) {
+    if (g.tabs.some((t) => t.ref === tab.ref)) {
+      g.activeRef = tab.ref;
+      l.activeGroupId = g.id;
+      return l;
+    }
+  }
+  const g =
+    l.groups.find((x) => x.id === groupId) ??
+    l.groups.find((x) => x.id === l.activeGroupId) ??
+    l.groups[0];
+  if (!g) return layout; // validateLayout guarantees ≥1 group in practice
+  const idx = Math.max(0, Math.min(index, g.tabs.length));
+  g.tabs.splice(idx, 0, tab);
+  g.activeRef = tab.ref;
+  l.activeGroupId = g.id;
+  return l;
+}
+
 /** Split `ref` into a new single-tab column beside `targetGroupId` (half its width). */
 export function splitTab(
   layout: ProjectLayout,

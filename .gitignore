@@ -49,3 +49,6 @@ lerna-debug.log*
 # Superpowers visual-brainstorming companion (local mockups)
 .superpowers/
 .claude/
+
+# Stray Windows redirect artifact (a `>NUL` in a shell that isn't cmd creates a literal file)
+NUL

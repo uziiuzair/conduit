@@ -1,6 +1,11 @@
 import { useEffect, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import { useStore, type Account } from "../store";
+import { agentMeta, type AgentId } from "../agents";
+
+/** Agents that support multi-account today (Claude + agy). The rest is deferred, so they
+ *  are intentionally not offered here — see the multi-account design doc. */
+const MANAGED_AGENTS: AgentId[] = ["claude", "antigravity"];
 
 /** Turn a picked path into a short label ("...\.claude-personal\.claude" -> "Personal"). */
 function labelFromPath(picked: string): string {
@@ -12,16 +17,20 @@ function labelFromPath(picked: string): string {
   return base.charAt(0).toUpperCase() + base.slice(1);
 }
 
-/** Settings > Accounts: pick which Claude account new sessions use, add/remove accounts,
- *  and auto-detect the ones on disk. */
+/** Settings > Accounts: register agent accounts, tag which agents each is signed in for,
+ *  and choose the default account per agent (globally and per project). Off by default —
+ *  with no accounts registered, every session inherits your normal agent config. */
 export function AccountList() {
   const accounts = useStore((s) => s.accounts);
-  const defaultAccount = useStore((s) => s.defaultAccount);
+  const defaultAccounts = useStore((s) => s.defaultAccounts);
+  const projects = useStore((s) => s.projects);
   const loadAccounts = useStore((s) => s.loadAccounts);
   const discoverAccounts = useStore((s) => s.discoverAccounts);
   const addAccount = useStore((s) => s.addAccount);
   const removeAccount = useStore((s) => s.removeAccount);
   const setDefaultAccount = useStore((s) => s.setDefaultAccount);
+  const setProjectDefaultAccount = useStore((s) => s.setProjectDefaultAccount);
+  const setAccountAgents = useStore((s) => s.setAccountAgents);
 
   const [candidates, setCandidates] = useState<Account[]>([]);
   const [error, setError] = useState<string | null>(null);
@@ -32,64 +41,64 @@ export function AccountList() {
 
   const registeredDirs = new Set(accounts.map((a) => a.configDir));
   const freshCandidates = candidates.filter((c) => !registeredDirs.has(c.configDir));
+  const eligible = (agent: AgentId) => accounts.filter((a) => a.agents.includes(agent));
 
   const add = async (label: string, configDir: string) => {
-    const err = await addAccount(label, configDir);
-    setError(err);
+    setError(await addAccount(label, configDir));
   };
-
   const detect = async () => {
     setError(null);
     setCandidates(await discoverAccounts());
   };
-
   const pickAndAdd = async () => {
     setError(null);
-    const picked = await open({
-      directory: true,
-      title: "Select a Claude .claude config folder",
-    });
+    const picked = await open({ directory: true, title: "Select an account config folder" });
     if (typeof picked === "string") await add(labelFromPath(picked), picked);
+  };
+
+  const toggleAgentTag = (a: Account, agent: AgentId, on: boolean) => {
+    const next = on ? [...a.agents, agent] : a.agents.filter((x) => x !== agent);
+    void setAccountAgents(a.id, next);
   };
 
   return (
     <div className="account-list">
       <p className="settings-intro">
-        Choose which Claude account new sessions run under. Pick a default below, or add
-        another account's <strong>.claude</strong> folder. Sessions use the selected account
-        without disturbing your normal <strong>claude</strong>.
+        Register additional agent accounts so sessions can run under different logins — for
+        example two Claude accounts to spread token usage. Tag which agents each account is
+        signed in for, then pick a default per agent (globally and per project). Leave this
+        empty and every session uses your normal config.
       </p>
 
+      {/* ---- Registry: one row per account, with editable agent tags ---- */}
       <div className="agent-list">
-        <div className={`agent-list-row ${defaultAccount === null ? "def" : ""}`}>
-          <button
-            className="agent-radio"
-            role="radio"
-            aria-checked={defaultAccount === null}
-            aria-label="Use the default claude config"
-            onClick={() => void setDefaultAccount(null)}
-          />
-          <div className="agent-list-main">
-            <div className="agent-list-name">Default</div>
-            <div className="agent-list-meta">Whatever your normal claude uses (~/.claude)</div>
+        {accounts.length === 0 && (
+          <div className="agent-list-row">
+            <div className="agent-list-main">
+              <div className="agent-list-meta">
+                No extra accounts yet. Detect or add one below.
+              </div>
+            </div>
           </div>
-          {defaultAccount === null && <span className="agent-tag">default</span>}
-        </div>
-
+        )}
         {accounts.map((a) => (
-          <div key={a.id} className={`agent-list-row ${defaultAccount === a.id ? "def" : ""}`}>
-            <button
-              className="agent-radio"
-              role="radio"
-              aria-checked={defaultAccount === a.id}
-              aria-label={`Set ${a.label} as default`}
-              onClick={() => void setDefaultAccount(a.id)}
-            />
+          <div key={a.id} className="agent-list-row">
             <div className="agent-list-main">
               <div className="agent-list-name">{a.label}</div>
               <div className="agent-list-meta">{a.configDir}</div>
+              <div className="account-tags">
+                {MANAGED_AGENTS.map((agent) => (
+                  <label key={agent} className="account-tag-check">
+                    <input
+                      type="checkbox"
+                      checked={a.agents.includes(agent)}
+                      onChange={(e) => toggleAgentTag(a, agent, e.target.checked)}
+                    />
+                    {agentMeta(agent).label}
+                  </label>
+                ))}
+              </div>
             </div>
-            {defaultAccount === a.id && <span className="agent-tag">default</span>}
             <button
               className="account-remove"
               aria-label={`Remove ${a.label}`}
@@ -128,6 +137,78 @@ export function AccountList() {
               </div>
             ))}
           </div>
+        </div>
+      )}
+
+      {/* ---- Global default per agent ---- */}
+      {accounts.length > 0 && (
+        <div className="account-defaults">
+          <div className="account-defaults-title">Default account per agent</div>
+          {MANAGED_AGENTS.map((agent) => {
+            const opts = eligible(agent);
+            if (opts.length === 0) return null;
+            return (
+              <label key={agent} className="account-default-row">
+                <span className="account-default-label">{agentMeta(agent).label}</span>
+                <select
+                  className="account-select"
+                  value={defaultAccounts[agent] ?? ""}
+                  onChange={(e) =>
+                    void setDefaultAccount(agent, e.target.value || null)
+                  }
+                >
+                  <option value="">Default (your normal config)</option>
+                  {opts.map((a) => (
+                    <option key={a.id} value={a.id}>
+                      {a.label}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            );
+          })}
+        </div>
+      )}
+
+      {/* ---- Per-project defaults (beat the global default) ---- */}
+      {accounts.length > 0 && projects.length > 0 && (
+        <div className="account-defaults">
+          <div className="account-defaults-title">Per-project defaults</div>
+          <p className="account-defaults-hint">
+            Override the global default for one project. Blank = use the global default.
+          </p>
+          {projects.map((p) => {
+            const rows = MANAGED_AGENTS.map((agent) => {
+              const opts = eligible(agent);
+              if (opts.length === 0) return null;
+              return (
+                <label key={agent} className="account-default-row">
+                  <span className="account-default-label">{agentMeta(agent).label}</span>
+                  <select
+                    className="account-select"
+                    value={p.defaultAccounts?.[agent] ?? ""}
+                    onChange={(e) =>
+                      void setProjectDefaultAccount(p.id, agent, e.target.value || null)
+                    }
+                  >
+                    <option value="">Use global default</option>
+                    {opts.map((a) => (
+                      <option key={a.id} value={a.id}>
+                        {a.label}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+              );
+            }).filter(Boolean);
+            if (rows.length === 0) return null;
+            return (
+              <div key={p.id} className="account-project-block">
+                <div className="account-project-name">{p.name}</div>
+                {rows}
+              </div>
+            );
+          })}
         </div>
       )}
     </div>

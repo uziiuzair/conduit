@@ -1,0 +1,17 @@
+# pnpm 10+ moved settings out of package.json's "pnpm" field into this file.
+#
+# Security overrides force patched versions of transitive deps flagged by Dependabot:
+#   - dompurify: pulled in (pinned to 3.2.7) by monaco-editor@0.55.1; ^3.4.12 clears
+#     15 sanitizer-bypass/XSS advisories. monaco uses only DOMPurify.sanitize(string),
+#     which is API-stable across 3.2 -> 3.4, so the override is drop-in.
+#   - esbuild: bundled by vite@7.3.5 at 0.27.7; 0.28.1 fixes the Windows dev-server
+#     arbitrary-file-read advisory (GHSA-g7r4-m6w7-qqqr). We use only @vitejs/plugin-react
+#     (not plugin-legacy), so the one documented 0.28 regression does not apply.
+overrides:
+  dompurify: ^3.4.12
+  esbuild: 0.28.1
+
+# esbuild ships a build script that links its platform binary; pnpm blocks build scripts
+# by default. Allow just this one so `pnpm install` completes non-interactively.
+onlyBuiltDependencies:
+  - esbuild

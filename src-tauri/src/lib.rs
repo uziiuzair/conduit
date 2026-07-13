@@ -5,24 +5,31 @@
 //! and exposes them to the React frontend as Tauri commands.
 
 mod agent;
+mod agy_usage;
 mod board;
 mod bridge;
 mod broker;
 mod claude_status;
 mod claude_usage;
+mod clipboard;
 mod fleet;
 mod fleet_mcp;
+mod format;
 mod fsops;
 mod git;
+mod git_mut;
 mod hookbus;
 mod hooks;
+mod hotexit;
 mod local_llm;
 mod menu;
 mod notify;
 mod pty;
+mod search;
 mod store;
 mod telemetry;
 mod transcript;
+mod updates;
 mod usage_tally;
 mod worktree;
 
@@ -31,7 +38,7 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 use tauri::ipc::Channel;
-use tauri::{Manager, State};
+use tauri::{Emitter, Manager, State};
 
 use hooks::HookState;
 use pty::PtyManager;
@@ -55,6 +62,13 @@ impl NoWindow for std::process::Command {
         self
     }
 }
+
+/// Unsaved-buffer count pushed from the frontend (`set_dirty_count`). Rust has no
+/// other view of editor dirtiness; the quit paths (menu.rs `quit` arm and the
+/// `CloseRequested` handler below) consult it so a clean quit stays instant and
+/// webview-independent, while a dirty quit round-trips for a confirm dialog.
+#[derive(Default)]
+pub(crate) struct DirtyGuard(pub std::sync::atomic::AtomicUsize);
 
 /// SPEC-F: does a WORKER session qualify for fleet MCP via mailbox opt-in (as opposed to
 /// a fleet mission)? True iff it has no mission AND has explicitly joined at least one
@@ -83,6 +97,7 @@ fn pty_spawn(
     fleet: State<Arc<crate::fleet::FleetState>>,
     board: State<Arc<crate::board::BoardState>>,
     store: State<Arc<Store>>,
+    agy_resume: State<Arc<crate::agy_usage::AgyResumeState>>,
 ) -> Result<(), String> {
     let port = hook_state.port.load(Ordering::SeqCst);
     let agent = if shell_only {
@@ -105,6 +120,33 @@ fn pty_spawn(
                 .filter(|s| !s.is_empty())
         })
     };
+
+    // agy usage tracking: sync the status-line hook into the home THIS agy session will
+    // actually read from (respecting the per-account HOME redirect pty.rs applies below).
+    // The global toggle writes to the default account's home, but a session bound to a
+    // different account uses a different `.gemini` — so install/remove per-spawn where
+    // agy looks, or the panel silently never populates under the two-account split.
+    if !shell_only && agent == crate::agent::AgentId::Antigravity {
+        if let Some(home) = crate::agy_usage::resolve_agy_home(account_config_dir.as_deref()) {
+            let enabled = crate::agy_usage::tracking_enabled(&store);
+            if let Err(e) = crate::agy_usage::configure_in_home(&home, enabled) {
+                eprintln!("conduit: agy usage tracking sync failed: {e}");
+            }
+            // Resume bookkeeping. If our captured conversation id's db is gone (agy rotated /
+            // the user deleted it), clear it so we start fresh and re-capture instead of
+            // resuming a dead id forever. If there's nothing to resume, snapshot the existing
+            // conversations so the first agyusage hook can tell which new db is THIS session's
+            // (disambiguates a shared agy home -- see AgyResumeState).
+            match store.session_agent_conversation_id(&session_id) {
+                Some(id) if !crate::agy_usage::conversation_db_exists(&home, &id) => {
+                    store.clear_session_agent_conversation_id(&session_id);
+                    agy_resume.snapshot(&session_id, &home);
+                }
+                None => agy_resume.snapshot(&session_id, &home),
+                _ => {} // valid resume in flight; nothing to capture
+            }
+        }
+    }
 
     // A Conductor session gets the fleet MCP server (scoped to it via --mcp-config) and
     // the full orchestration persona. A WORKER gets the SAME MCP server, scoped to its own
@@ -286,6 +328,12 @@ fn pty_spawn(
         (working_directory.clone(), None, None)
     };
 
+    // Resume token: the agent's own captured conversation id. agy resumes via
+    // `--conversation=<id>`; Claude ignores it (keys off session_id). None for shell-only
+    // companions and for a session we haven't captured an id for yet.
+    let resume_token = (!shell_only)
+        .then(|| store.session_agent_conversation_id(&session_id))
+        .flatten();
     pty.spawn(
         session_id,
         cwd,
@@ -305,6 +353,7 @@ fn pty_spawn(
         is_conductor,
         claude_model.map(str::to_string),
         claude_effort.map(str::to_string),
+        resume_token,
         on_event,
     )
 }
@@ -332,6 +381,27 @@ fn pty_kill(session_id: String, pty: State<Arc<PtyManager>>) {
 #[tauri::command]
 fn pty_is_running(session_id: String, pty: State<Arc<PtyManager>>) -> bool {
     pty.has(&session_id)
+}
+
+/// Whether any session with a LIVE PTY is currently marked running. Cross-checks the fleet
+/// status against a real process so a stale "running" (an agent killed mid-turn, or a deleted
+/// session whose status was never cleared) can't trigger a spurious quit prompt. Fed for agy by
+/// its `agent_state`, and for Claude/Codex/etc. by their lifecycle hooks.
+pub(crate) fn live_running_agent<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> bool {
+    let fleet = app.state::<Arc<crate::fleet::FleetState>>();
+    let pty = app.state::<Arc<PtyManager>>();
+    fleet.running_sessions().iter().any(|sid| pty.has(sid))
+}
+
+/// Whether any agent is actively working (live-PTY-checked). The frontend `live` map can lag
+/// the Rust hook mirror, so the shutdown confirm consults this authoritative signal too so a
+/// real running agent is never silently killed on quit.
+#[tauri::command]
+fn any_agent_running(
+    fleet: State<Arc<crate::fleet::FleetState>>,
+    pty: State<Arc<PtyManager>>,
+) -> bool {
+    fleet.running_sessions().iter().any(|sid| pty.has(sid))
 }
 
 // ---- Project / session store commands ---------------------------------------
@@ -380,6 +450,21 @@ fn rename_session(project_id: String, session_id: String, name: String, store: S
     store.rename_session(&project_id, &session_id, name);
 }
 
+#[tauri::command]
+fn reorder_project(project_id: String, to_index: usize, store: State<Arc<Store>>) {
+    store.reorder_project(&project_id, to_index);
+}
+
+#[tauri::command]
+fn reorder_session(
+    project_id: String,
+    session_id: String,
+    to_index: usize,
+    store: State<Arc<Store>>,
+) {
+    store.reorder_session(&project_id, &session_id, to_index);
+}
+
 /// The frontend's reply to a Conductor `fleet_stop` confirmation prompt.
 #[tauri::command]
 fn conductor_confirm_response(
@@ -409,9 +494,12 @@ fn list_accounts(store: State<Arc<Store>>) -> Vec<crate::store::Account> {
     store.list_accounts()
 }
 
+/// Per-agent global default accounts (agent -> account id), e.g. `{ "claude": "…" }`.
 #[tauri::command]
-fn get_default_account(store: State<Arc<Store>>) -> Option<String> {
-    store.default_account()
+fn get_default_accounts(
+    store: State<Arc<Store>>,
+) -> std::collections::HashMap<crate::agent::AgentId, String> {
+    store.default_accounts()
 }
 
 /// Auto-detected candidate accounts (not yet registered), for the "Detect" button.
@@ -430,13 +518,44 @@ fn add_account(
 }
 
 #[tauri::command]
-fn remove_account(account_id: String, store: State<Arc<Store>>) {
+fn remove_account(
+    account_id: String,
+    store: State<Arc<Store>>,
+    agy_usage: State<Arc<crate::agy_usage::AgyUsageState>>,
+    auth: State<Arc<crate::claude_usage::ClaudeAuth>>,
+) {
     store.remove_account(&account_id);
+    // Evict the removed account's cached usage/token so its row/limits don't linger.
+    agy_usage.evict(&account_id);
+    auth.evict(&account_id);
 }
 
 #[tauri::command]
-fn set_default_account(account_id: Option<String>, store: State<Arc<Store>>) {
-    store.set_default_account(account_id);
+fn set_default_account(
+    agent: crate::agent::AgentId,
+    account_id: Option<String>,
+    store: State<Arc<Store>>,
+) {
+    store.set_default_account(agent, account_id);
+}
+
+#[tauri::command]
+fn set_project_default_account(
+    project_id: String,
+    agent: crate::agent::AgentId,
+    account_id: Option<String>,
+    store: State<Arc<Store>>,
+) {
+    store.set_project_default_account(&project_id, agent, account_id);
+}
+
+#[tauri::command]
+fn set_account_agents(
+    account_id: String,
+    agents: Vec<crate::agent::AgentId>,
+    store: State<Arc<Store>>,
+) {
+    store.set_account_agents(&account_id, agents);
 }
 
 #[tauri::command]
@@ -674,6 +793,63 @@ fn git_graph(dir: String) -> Vec<git::GraphCommit> {
     git::graph(&dir, 80)
 }
 
+/// Diff original (left) side: file content at HEAD. `(async)`: `git show` on a big
+/// file shouldn't stall the main thread.
+#[tauri::command(async)]
+fn git_show_head(dir: String, path: String) -> Result<String, String> {
+    git::show_head(&dir, &path)
+}
+
+#[tauri::command(async)]
+fn git_diff_hunks(dir: String, path: String) -> Result<Vec<git::Hunk>, String> {
+    git::diff_hunks(&dir, &path)
+}
+
+/// Quick Open corpus: `git ls-files` in a repo, bounded walk elsewhere.
+#[tauri::command(async)]
+fn list_project_files(dir: String) -> Vec<String> {
+    match git::ls_files(&dir) {
+        Ok(files) if !files.is_empty() => files,
+        _ => fsops::walk_files(&dir, git::LS_FILES_CAP / 2),
+    }
+}
+
+/// Find in Files. `(async)`: a cold rg over a big tree can take a second.
+#[tauri::command(async)]
+fn search_content(dir: String, query: String) -> Result<search::SearchResult, String> {
+    search::search(&dir, &query)
+}
+
+// ---- Git (mutating — confirm-guarded in the UI) --------------------------------
+
+#[tauri::command(async)]
+fn git_discard_file(dir: String, path: String) -> Result<String, String> {
+    git_mut::discard_file(&dir, &path)
+}
+
+// ---- Format Document -----------------------------------------------------------
+
+#[tauri::command(async)]
+fn format_content(
+    dir: String,
+    path: String,
+    content: String,
+) -> Result<format::FormatResult, String> {
+    format::format_content(&dir, &path, &content)
+}
+
+// ---- Hot exit -------------------------------------------------------------------
+
+#[tauri::command]
+fn hotexit_save(entries: Vec<hotexit::HotExitEntry>) -> Result<(), String> {
+    hotexit::save(&entries)
+}
+
+#[tauri::command]
+fn hotexit_load() -> Vec<hotexit::HotExitEntry> {
+    hotexit::load()
+}
+
 // ---- Worktree lifecycle ------------------------------------------------------
 
 #[tauri::command]
@@ -729,8 +905,28 @@ fn delete_path(path: String) -> Result<(), String> {
 }
 
 #[tauri::command]
+fn read_file_base64(path: String) -> Result<fsops::FileBase64, String> {
+    fsops::read_file_base64(&path)
+}
+
+#[tauri::command]
 fn resolve_terminal_path(base: String, token: String) -> Option<fsops::ResolvedPath> {
     fsops::resolve_terminal_path(&base, &token)
+}
+
+// ---- Quit guard ----------------------------------------------------------------
+
+#[tauri::command]
+fn set_dirty_count(count: usize, dirty: State<DirtyGuard>) {
+    dirty.0.store(count, Ordering::SeqCst);
+}
+
+/// Actually quit, invoked by the frontend after the dirty-buffer confirm. Preserves
+/// the PTY-cleanup-before-exit ordering of the direct quit path.
+#[tauri::command]
+fn quit_app(app: tauri::AppHandle, pty: State<Arc<PtyManager>>) {
+    pty.kill_all();
+    app.exit(0);
 }
 
 // ---- Notifications -----------------------------------------------------------
@@ -931,6 +1127,61 @@ fn open_external(url: String) -> Result<(), String> {
     }
 }
 
+/// Reveal a file or directory in the OS file manager, selecting it where the
+/// platform supports selection (Finder `open -R`, Explorer `/select,`). Same
+/// shell-out doctrine as `open_external`: args passed positionally, never through
+/// a shell.
+#[tauri::command]
+fn reveal_path(path: String) -> Result<(), String> {
+    use std::process::Command;
+
+    if !Path::new(&path).exists() {
+        return Err("path does not exist".into());
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        return match Command::new("open")
+            .args(["-R", &path])
+            .no_window()
+            .status()
+        {
+            Ok(s) if s.success() => Ok(()),
+            Ok(s) => Err(format!("opener exited with {s}")),
+            Err(e) => Err(format!("failed to launch opener: {e}")),
+        };
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        // raw_arg, not arg: std would quote the WHOLE "/select,…" token when the path
+        // contains a space, and Explorer's nonstandard comma-splitting parser then
+        // fails to select (or opens Documents). Quote only the path; Windows file
+        // names cannot contain '"'. explorer.exe exits nonzero even on success, so
+        // only launch failures are reported.
+        let mut c = Command::new("explorer.exe");
+        c.raw_arg(format!("/select,\"{path}\""));
+        return c
+            .no_window()
+            .status()
+            .map(|_| ())
+            .map_err(|e| format!("failed to launch explorer: {e}"));
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        // xdg-open has no selection concept; open the containing directory.
+        let parent = Path::new(&path)
+            .parent()
+            .unwrap_or_else(|| Path::new("/"))
+            .to_path_buf();
+        return match Command::new("xdg-open").arg(parent).no_window().status() {
+            Ok(s) if s.success() => Ok(()),
+            Ok(s) => Err(format!("opener exited with {s}")),
+            Err(e) => Err(format!("failed to launch opener: {e}")),
+        };
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -958,15 +1209,36 @@ pub fn run() {
         .plugin(tauri_plugin_window_state::Builder::default().build())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_notification::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_process::init())
+        .plugin(tauri_plugin_clipboard_manager::init())
         .manage(Arc::new(PtyManager::new()))
         .manage(Arc::new(Store::new()))
         .manage(Arc::new(HookState::default()))
         .manage(Arc::new(crate::fleet::FleetState::default()))
         .manage(Arc::new(crate::board::BoardState::default()))
         .manage(Arc::new(claude_usage::ClaudeAuth::default()))
+        .manage(Arc::new(agy_usage::AgyUsageState::default()))
+        .manage(Arc::new(agy_usage::AgyResumeState::default()))
         .manage(Arc::new(hookbus::HookBus::default()))
         .manage(Arc::new(broker::Broker::default()))
         .manage(Arc::new(broker::Presence::default()))
+        .manage(DirtyGuard::default())
+        .on_window_event(|window, event| {
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                // Closing the (only) window quits the app; give dirty buffers AND any actively
+                // running agent the same confirm round-trip as Cmd+Q. Clean+idle windows close
+                // instantly. The frontend decides the exact prompt (unsaved files vs running
+                // agents) from the "quit" event.
+                let app = window.app_handle();
+                let dirty = app.state::<DirtyGuard>().0.load(Ordering::SeqCst);
+                let running = live_running_agent(app);
+                if dirty > 0 || running {
+                    api.prevent_close();
+                    let _ = app.emit("menu", "quit");
+                }
+            }
+        })
         .setup(|app| {
             let fleet = app.state::<Arc<crate::fleet::FleetState>>().inner().clone();
             let board = app.state::<Arc<crate::board::BoardState>>().inner().clone();
@@ -976,6 +1248,14 @@ pub fn run() {
             let presence = app.state::<Arc<broker::Presence>>().inner().clone();
             let pty = app.state::<Arc<PtyManager>>().inner().clone();
             let store = app.state::<Arc<Store>>().inner().clone();
+            let agy_usage = app
+                .state::<Arc<crate::agy_usage::AgyUsageState>>()
+                .inner()
+                .clone();
+            let agy_resume = app
+                .state::<Arc<crate::agy_usage::AgyResumeState>>()
+                .inner()
+                .clone();
             hooks::start(
                 app.handle().clone(),
                 hook_state,
@@ -986,6 +1266,8 @@ pub fn run() {
                 store.clone(),
                 pty.clone(),
                 board.clone(),
+                agy_usage,
+                agy_resume,
             );
             bridge::start(app.handle().clone());
             fleet_mcp::start(app.handle().clone(), store, pty, fleet, board);
@@ -1004,20 +1286,25 @@ pub fn run() {
             pty_resize,
             pty_kill,
             pty_is_running,
+            any_agent_running,
             load_projects,
             add_project,
             remove_project,
             add_session,
             detect_agents,
             rename_session,
+            reorder_project,
+            reorder_session,
             conductor_confirm_response,
             set_project_layout,
             list_accounts,
-            get_default_account,
+            get_default_accounts,
             discover_accounts,
             add_account,
             remove_account,
             set_default_account,
+            set_project_default_account,
+            set_account_agents,
             set_session_account,
             get_trust_settings,
             set_trust_settings,
@@ -1037,6 +1324,14 @@ pub fn run() {
             git_changes,
             git_commits,
             git_graph,
+            git_show_head,
+            git_diff_hunks,
+            git_discard_file,
+            list_project_files,
+            search_content,
+            format_content,
+            hotexit_save,
+            hotexit_load,
             worktree_is_dirty,
             worktree_remove,
             list_dir,
@@ -1047,16 +1342,25 @@ pub fn run() {
             create_dir,
             rename_path,
             delete_path,
+            read_file_base64,
+            set_dirty_count,
+            quit_app,
             resolve_terminal_path,
             notify_user,
             open_in_vscode,
             open_external,
+            reveal_path,
             claude_status::fetch_claude_status,
             claude_usage::fetch_claude_usage,
             claude_usage::connect_claude_plan_usage,
+            agy_usage::fetch_agy_usage,
+            agy_usage::agy_usage_tracking_enabled,
+            agy_usage::set_agy_usage_tracking,
             mcp_apply,
             install_agent,
             telemetry::telemetry_ping,
+            updates::update_should_notify,
+            clipboard::clipboard_read_for_paste,
         ])
         .build(tauri::generate_context!())
         .expect("error while building Conduit")
