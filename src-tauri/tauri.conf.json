@@ -29,7 +29,7 @@
   "bundle": {
     "active": true,
     "createUpdaterArtifacts": true,
-    "targets": ["app"],
+    "targets": ["app", "dmg"],
     "publisher": "Ooozzy",
     "homepage": "https://ooozzy.com",
     "category": "DeveloperTool",
