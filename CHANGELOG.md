@@ -3,6 +3,15 @@
 All notable changes to Conduit are documented here. This project uses
 [semantic versioning](https://semver.org/).
 
+## 0.12.1 — 2026-07-13
+
+- **Fixed — security: patched vulnerable bundled dependencies.** Updated transitive
+  dependencies flagged by security advisories. In the desktop app: the HTML
+  sanitizer used by the code editor (DOMPurify 3.2.7 → 3.4.12) and the build
+  toolchain (esbuild 0.27.7 → 0.28.1). In the mobile companion: the Markdown,
+  link-detection, and UUID libraries (markdown-it 10 → 14.3.0, linkify-it 2.2.0 →
+  5.0.2, uuid 7.0.3 → 11.1.1). No behavior changes; closes 20 Dependabot alerts.
+
 ## 0.12.0 — 2026-07-13
 
 - **Added — auto-updates (macOS).** Conduit now checks GitHub Releases in the
