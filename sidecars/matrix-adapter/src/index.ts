@@ -24,6 +24,7 @@ import {
   saveCredentials,
   saveSettings,
 } from "./config.js";
+import { GenericMatrixProvider, BadgerClawProvider, type MatrixCredentialSource } from "./credential-source.js";
 import { createMatrixClient } from "./matrix.js";
 import { Relay } from "./relay.js";
 
@@ -46,6 +47,9 @@ function usage(): never {
       "",
       "  conduit-matrix run",
       "      Connect to Matrix and the local Conduit bridge, then relay.",
+      "",
+      "  conduit-matrix matrix-login --homeserver <https-url> --user <@you:server> --token <access-token>",
+      "      Use an existing Matrix account/session directly, without BadgerClaw.",
       "",
       "  In a room with the bot: /conduit list · /conduit use <n> · /conduit detach",
     ].join("\n"),
@@ -171,6 +175,22 @@ async function pair(args: string[]): Promise<void> {
   console.log("next: conduit-matrix run   (keep it running alongside Conduit)");
 }
 
+async function matrixLogin(args: string[]): Promise<void> {
+  const homeserver = argValue(args, "--homeserver");
+  const userId = argValue(args, "--user");
+  const accessToken = argValue(args, "--token");
+  if (!homeserver || !userId || !accessToken) {
+    console.error("usage: conduit-matrix matrix-login --homeserver <https-url> --user <@you:server> --token <access-token>");
+    process.exit(1);
+  }
+  const creds = await new GenericMatrixProvider({ homeserver, userId, accessToken, deviceId: null }).acquire();
+  saveCredentials({ ...creds, provider: "matrix" });
+  const settings = loadSettings();
+  if (!settings.owners.includes(userId)) settings.owners.push(userId);
+  saveSettings(settings);
+  console.log(`saved generic Matrix session for ${userId}; run: conduit-matrix run`);
+}
+
 /** Refuse to start a SECOND relay: two processes share one rust-sdk crypto store,
  *  which corrupts E2EE Megolm state and leaves the phone unable to decrypt (messages
  *  stuck "loading"). A pidfile with a liveness check is the guard. */
@@ -219,7 +239,12 @@ async function run(): Promise<void> {
     console.error("no owners allowlisted — re-run pair with --owner <mxid>");
     process.exit(1);
   }
-  const client = await createMatrixClient(creds);
+  const source: MatrixCredentialSource =
+    creds.provider === "matrix"
+      ? new GenericMatrixProvider(creds)
+      : new BadgerClawProvider(async () => creds); // stored bot session; refresh handled in connect()
+  const session = await source.acquire();
+  const client = await createMatrixClient(session);
   const relay = new Relay(client, creds.userId);
   await relay.start();
   await client.start();
@@ -236,7 +261,9 @@ const main =
         ? pair(rest)
         : cmd === "run"
           ? run()
-          : Promise.resolve(usage());
+          : cmd === "matrix-login"
+            ? matrixLogin(rest)
+            : Promise.resolve(usage());
 main.catch((e) => {
   console.error(`conduit-matrix: ${e instanceof Error ? e.message : e}`);
   process.exit(1);

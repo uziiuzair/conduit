@@ -16,6 +16,7 @@ export interface Credentials {
   deviceId: string | null;
   botName: string | null;
   botId: string | null;
+  provider?: "badgerclaw" | "matrix"; // NEW — which source produced this session
 }
 
 /** BadgerClaw ACCOUNT session (from `login`), distinct from the bot's Matrix
