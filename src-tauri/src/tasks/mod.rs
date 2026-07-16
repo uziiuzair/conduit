@@ -83,6 +83,23 @@ pub const DEFAULT_COLUMNS: &[(&str, &str)] = &[
     ("done", "Done"),
 ];
 
+const PERSONA_ORCHESTRATOR: &str = include_str!("personas/orchestrator.md");
+const PERSONA_PLANNER: &str = include_str!("personas/delivery-planner.md");
+const PERSONA_UX: &str = include_str!("personas/ux-designer.md");
+const PERSONA_ARCHITECT: &str = include_str!("personas/solution-architect.md");
+const PERSONA_IMPLEMENTER: &str = include_str!("personas/implementer.md");
+
+const PERSONAS: &[(&str, &str)] = &[
+    ("orchestrator", PERSONA_ORCHESTRATOR),
+    ("delivery-planner", PERSONA_PLANNER),
+    ("ux-designer", PERSONA_UX),
+    ("solution-architect", PERSONA_ARCHITECT),
+    ("implementer", PERSONA_IMPLEMENTER),
+];
+
+const KNOWLEDGE_INDEX: &str = include_str!("knowledge/index.md");
+const KNOWLEDGE_LOG: &str = include_str!("knowledge/log.md");
+
 fn now_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -442,11 +459,90 @@ impl TaskBoard {
         }
         Ok(())
     }
+
+    fn agents_dir(project_root: &str) -> PathBuf {
+        Path::new(project_root).join(".conduit").join("agents")
+    }
+
+    /// Write the bundled role personas into `.conduit/agents/`. Overwrites so a Conduit
+    /// upgrade ships improved briefings; the files are Conduit-managed, not user-edited.
+    pub fn ensure_agents(&self, project_root: &str) -> Result<(), String> {
+        let _g = self.lock.lock().unwrap_or_else(|e| e.into_inner());
+        fs::create_dir_all(Self::agents_dir(project_root)).map_err(|e| e.to_string())?;
+        for (name, body) in PERSONAS {
+            Self::write_atomic(
+                &Self::agents_dir(project_root).join(format!("{name}.md")),
+                body.as_bytes(),
+            )?;
+        }
+        Ok(())
+    }
+
+    fn persona_for(role: &str) -> Option<&'static str> {
+        PERSONAS.iter().find(|(n, _)| *n == role).map(|(_, b)| *b)
+    }
+
+    fn knowledge_dir(project_root: &str) -> PathBuf {
+        Path::new(project_root).join(".conduit").join("knowledge")
+    }
+
+    /// Scaffold the OKF bundle: index.md, log.md, and the five (empty) category dirs. Never
+    /// overwrites an existing index/log (they accrue project history). Idempotent.
+    pub fn ensure_knowledge(&self, project_root: &str) -> Result<(), String> {
+        let _g = self.lock.lock().unwrap_or_else(|e| e.into_inner());
+        let kd = Self::knowledge_dir(project_root);
+        for cat in ["decisions", "patterns", "anti-patterns", "domain", "components"] {
+            fs::create_dir_all(kd.join(cat)).map_err(|e| e.to_string())?;
+        }
+        if !kd.join("index.md").exists() {
+            Self::write_atomic(&kd.join("index.md"), KNOWLEDGE_INDEX.as_bytes())?;
+        }
+        if !kd.join("log.md").exists() {
+            Self::write_atomic(&kd.join("log.md"), KNOWLEDGE_LOG.as_bytes())?;
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ensure_agents_writes_all_five_personas() {
+        let root = tmp_root();
+        let board = TaskBoard::default();
+        board.ensure_agents(&root).unwrap();
+        for name in [
+            "orchestrator",
+            "delivery-planner",
+            "ux-designer",
+            "solution-architect",
+            "implementer",
+        ] {
+            let p = std::path::Path::new(&root)
+                .join(".conduit")
+                .join("agents")
+                .join(format!("{name}.md"));
+            assert!(p.exists(), "missing {name}");
+        }
+    }
+
+    #[test]
+    fn ensure_knowledge_scaffolds_okf_bundle_once() {
+        let root = tmp_root();
+        let board = TaskBoard::default();
+        board.ensure_knowledge(&root).unwrap();
+        let kd = std::path::Path::new(&root).join(".conduit").join("knowledge");
+        assert!(kd.join("index.md").exists());
+        assert!(kd.join("decisions").is_dir());
+        std::fs::write(kd.join("index.md"), "EDITED").unwrap();
+        board.ensure_knowledge(&root).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(kd.join("index.md")).unwrap(),
+            "EDITED"
+        );
+    }
 
     #[test]
     fn card_yaml_round_trip_is_camel_case_and_lossless() {
