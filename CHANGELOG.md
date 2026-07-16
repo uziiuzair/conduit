@@ -3,6 +3,14 @@
 All notable changes to Conduit are documented here. This project uses
 [semantic versioning](https://semver.org/).
 
+## 0.17.0 — 2026-07-17
+
+- **Added — handoffs & presence on the board.** Cards now show a **presence dot** for who's live
+  on them and a **↪ badge** when another session has handed the work off with context. Click a card
+  to open a detail panel with the incoming handoff — what was done, suggested next steps, and the
+  handed-over state — plus the card's body, claim, labels, and comments. Reads Continuity live; if
+  it isn't running the board just shows no dots/badges.
+
 ## 0.16.0 — 2026-07-17
 
 - **Added — session coordination (Continuity).** Board-enabled projects now bundle Continuity:
