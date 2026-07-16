@@ -1,0 +1,11 @@
+{
+  "id": "session-logger",
+  "name": "Session Logger",
+  "version": "1.0.0",
+  "author": "Conduit",
+  "description": "Notifies when agent lifecycle events fire. Demonstrates hooks + notify.",
+  "minAppVersion": "0.13.0",
+  "main": "main.js",
+  "permissions": ["hooks:lifecycle", "notifications"],
+  "contributes": { "hooks": ["lifecycle.stop"] }
+}
