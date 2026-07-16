@@ -1,8 +1,12 @@
-//! Plugin manifest model + validation. Pure parsing/validation only — Tauri
-//! commands and store wiring land in later tasks of increment #1.
+//! What a plugin is and how the OS sees it: the manifest model, validation,
+//! persisted `PluginRecord`, and the Tauri command surface for discovery and
+//! lifecycle. Pure parsing/validation stays free-function + unit-tested; the
+//! commands are thin wrappers over the store and filesystem.
 
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use tauri::State;
 
 /// What the frontend sees for one discovered plugin folder.
 #[derive(Serialize, Clone, Debug)]
@@ -76,6 +80,13 @@ fn default_main() -> String {
     "main.js".to_string()
 }
 
+/// True if a manifest `main` path stays inside the plugin folder (no `..` escape,
+/// not absolute). Shared by `validate_manifest` and `read_plugin_source` so the
+/// two checks can never drift.
+fn main_path_is_safe(main: &str) -> bool {
+    !main.contains("..") && !main.starts_with('/')
+}
+
 /// Parse manifest JSON. Returns the manifest or a human-readable error.
 pub fn parse_manifest(json: &str) -> Result<PluginManifest, String> {
     serde_json::from_str::<PluginManifest>(json).map_err(|e| format!("invalid manifest.json: {e}"))
@@ -143,7 +154,7 @@ pub fn validate_manifest(m: &PluginManifest, folder_name: &str, app_version: &st
             m.min_app_version, app_version
         ));
     }
-    if m.main.contains("..") || m.main.starts_with('/') {
+    if !main_path_is_safe(&m.main) {
         problems.push(format!(
             "main '{}' must stay inside the plugin folder",
             m.main
@@ -177,9 +188,6 @@ pub struct PluginRecord {
     #[serde(default)]
     pub consented_version: String,
 }
-
-use std::sync::Arc;
-use tauri::State;
 
 fn read_descriptor(dir: &Path, records: &[PluginRecord]) -> Option<PluginDescriptor> {
     let folder = dir.file_name()?.to_string_lossy().to_string();
@@ -236,7 +244,7 @@ pub fn read_plugin_source(id: String) -> Result<String, String> {
     let manifest_raw =
         std::fs::read_to_string(dir.join("manifest.json")).map_err(|e| e.to_string())?;
     let m = parse_manifest(&manifest_raw)?;
-    if m.main.contains("..") || m.main.starts_with('/') {
+    if !main_path_is_safe(&m.main) {
         return Err("main path escapes plugin folder".into());
     }
     std::fs::read_to_string(dir.join(&m.main)).map_err(|e| e.to_string())
@@ -248,16 +256,10 @@ pub fn set_plugin_enabled(
     enabled: bool,
     store: State<'_, Arc<crate::store::Store>>,
 ) -> Result<(), String> {
-    let mut rec = store
-        .list_plugins()
-        .into_iter()
-        .find(|r| r.id == id)
-        .unwrap_or(PluginRecord {
-            id: id.clone(),
-            ..Default::default()
-        });
-    rec.enabled = enabled;
-    store.put_plugin_record(rec);
+    if !is_valid_id(&id) {
+        return Err("invalid plugin id".into());
+    }
+    store.update_plugin_record(&id, |r| r.enabled = enabled);
     Ok(())
 }
 
@@ -268,17 +270,13 @@ pub fn set_plugin_grants(
     consented_version: String,
     store: State<'_, Arc<crate::store::Store>>,
 ) -> Result<(), String> {
-    let mut rec = store
-        .list_plugins()
-        .into_iter()
-        .find(|r| r.id == id)
-        .unwrap_or(PluginRecord {
-            id: id.clone(),
-            ..Default::default()
-        });
-    rec.granted_permissions = permissions;
-    rec.consented_version = consented_version;
-    store.put_plugin_record(rec);
+    if !is_valid_id(&id) {
+        return Err("invalid plugin id".into());
+    }
+    store.update_plugin_record(&id, |r| {
+        r.granted_permissions = permissions;
+        r.consented_version = consented_version;
+    });
     Ok(())
 }
 

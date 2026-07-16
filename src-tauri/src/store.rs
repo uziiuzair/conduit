@@ -736,13 +736,24 @@ impl Store {
             .clone()
     }
 
-    /// Upsert a record by id, then persist.
-    pub fn put_plugin_record(&self, rec: crate::plugins::PluginRecord) {
+    /// Atomically find-or-insert the record for `id`, apply `f` under a single
+    /// lock (no read-modify-write race), then persist. Mirrors the single-lock
+    /// mutate idiom used by the account/default setters below.
+    pub fn update_plugin_record(
+        &self,
+        id: &str,
+        f: impl FnOnce(&mut crate::plugins::PluginRecord),
+    ) {
         {
             let mut v = self.plugins.lock().unwrap_or_else(|e| e.into_inner());
-            if let Some(existing) = v.iter_mut().find(|r| r.id == rec.id) {
-                *existing = rec;
+            if let Some(existing) = v.iter_mut().find(|r| r.id == id) {
+                f(existing);
             } else {
+                let mut rec = crate::plugins::PluginRecord {
+                    id: id.to_string(),
+                    ..Default::default()
+                };
+                f(&mut rec);
                 v.push(rec);
             }
         }
@@ -2070,5 +2081,31 @@ mod tests {
     fn legacy_state_without_plugins_defaults_empty() {
         let back: PersistState = serde_json::from_str(r#"{"projects":[]}"#).unwrap();
         assert!(back.plugins.is_empty());
+    }
+
+    #[test]
+    fn update_plugin_record_inserts_then_mutates_in_place() {
+        let dir = temp_dir("plugin_upsert");
+        let store = Store::for_test(&dir);
+        // First call inserts a fresh record.
+        store.update_plugin_record("com.acme.logger", |r| {
+            r.enabled = true;
+            r.granted_permissions = vec!["hooks:session".into()];
+        });
+        // Second call mutates the SAME record (no duplicate row).
+        store.update_plugin_record("com.acme.logger", |r| {
+            r.consented_version = "1.0.0".into();
+        });
+        let recs = store.list_plugins();
+        assert_eq!(recs.len(), 1);
+        assert_eq!(recs[0].id, "com.acme.logger");
+        assert!(recs[0].enabled);
+        assert_eq!(
+            recs[0].granted_permissions,
+            vec!["hooks:session".to_string()]
+        );
+        assert_eq!(recs[0].consented_version, "1.0.0");
+        // Persisted to disk and reloads.
+        assert!(dir.join("state.json").exists());
     }
 }
