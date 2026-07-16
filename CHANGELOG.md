@@ -3,6 +3,14 @@
 All notable changes to Conduit are documented here. This project uses
 [semantic versioning](https://semver.org/).
 
+## 0.16.0 — 2026-07-17
+
+- **Added — session coordination (Continuity).** Board-enabled projects now bundle Continuity:
+  each Claude session gets its own identity and can hand off work — with the context it built up
+  and suggested next steps — to another session, and reports presence so you can tell who's live.
+  Zero-config (local SQLite); needs Node ≥22.5 and is skipped gracefully otherwise, so nothing
+  changes if Node is absent. Surfacing this on the cards (presence dots, handoff badges) comes next.
+
 ## 0.15.0 — 2026-07-17
 
 - **Added — stage-gate cards on the task board.** Any board card can now opt into a full
