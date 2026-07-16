@@ -1,4 +1,5 @@
 pub mod frac;
+pub mod stage_machine;
 
 use crate::board::truncate_utf8;
 use serde::{Deserialize, Serialize};
