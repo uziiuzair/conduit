@@ -637,6 +637,23 @@ fn board_resolve_gate(
     Ok(card)
 }
 
+/// Read-only continuity view for a project's board: which of its sessions are present
+/// (per continuity, matched by agent_label == Conduit session id) and pending handoffs
+/// scoped to any of its cards. Best-effort -- see `continuity_read::view_for_project`.
+#[tauri::command]
+fn list_continuity(
+    store: State<Arc<Store>>,
+    project_id: String,
+) -> Result<continuity_read::ContinuityView, String> {
+    let session_ids: Vec<String> = store
+        .list()
+        .into_iter()
+        .find(|p| p.id == project_id)
+        .map(|p| p.sessions.into_iter().map(|s| s.id).collect())
+        .unwrap_or_default();
+    Ok(continuity_read::view_for_project(&project_id, &session_ids))
+}
+
 #[tauri::command]
 fn add_session(
     project_id: String,
@@ -1517,6 +1534,7 @@ pub fn run() {
             board_release_card,
             board_start_workflow,
             board_resolve_gate,
+            list_continuity,
             add_session,
             detect_agents,
             rename_session,
