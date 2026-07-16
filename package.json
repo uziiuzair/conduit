@@ -1,7 +1,7 @@
 {
   "name": "conduit",
   "private": true,
-  "version": "0.13.0",
+  "version": "0.14.0",
   "type": "module",
   "packageManager": "pnpm@10.33.0",
   "description": "A desktop app for running multiple real Claude Code terminals across projects, in one window.",

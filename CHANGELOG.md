@@ -3,6 +3,16 @@
 All notable changes to Conduit are documented here. This project uses
 [semantic versioning](https://semver.org/).
 
+## 0.14.0 — 2026-07-16
+
+- **Added — project task board.** Every project now has a Kanban board stored in its own
+  repo under `.conduit/board/` (git-shared with your team, one file per card). Open it as a
+  full-screen view with ⇧⌘B, then drag cards between columns and add cards inline — the
+  terminals keep running underneath. Live agent sessions in the project claim, move, and
+  comment on cards through new `task_*` MCP tools, so a fleet coordinates on shared work
+  without stepping on each other: a claimed card can't be double-worked, and card ownership
+  is shown right on the board. Off until you open a board in a project.
+
 ## 0.13.0 — 2026-07-14
 
 - **Added — rename projects in the sidebar.** Give a project any display name you

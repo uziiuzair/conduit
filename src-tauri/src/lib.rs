@@ -493,6 +493,7 @@ fn board_add_card(
     Ok(card)
 }
 
+#[allow(clippy::too_many_arguments)]
 #[tauri::command]
 fn board_move_card(
     app: tauri::AppHandle,
@@ -510,6 +511,7 @@ fn board_move_card(
     Ok(card)
 }
 
+#[allow(clippy::too_many_arguments)]
 #[tauri::command]
 fn board_edit_card(
     app: tauri::AppHandle,
