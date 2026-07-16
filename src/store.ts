@@ -26,6 +26,7 @@ import type * as Monaco from "monaco-editor";
 import type { SettingsTab } from "./components/Settings";
 import type { PluginDescriptor, PluginPermission } from "./plugins/types";
 import { pluginHost } from "./plugins/host";
+import { feedSession } from "./plugins";
 
 // ---- Types (mirror the Rust serde structs, rename_all = "camelCase") ----
 export type SessionRole = "worker" | "conductor";
@@ -1390,6 +1391,7 @@ export const useStore = create<AppState>((set, get) => {
         ),
         selectedProjectId: projectId,
       }));
+      feedSession("session.start", { id: session.id, title: session.name });
       applyLayout(projectId, (l) => rOpenTab(l, { kind: "session", ref: session.id }));
     },
 
@@ -1439,6 +1441,7 @@ export const useStore = create<AppState>((set, get) => {
             : p,
         ),
       }));
+      feedSession("session.rename", { id: sessionId, title: clean });
     },
 
     renameProject: async (projectId, name) => {
@@ -1487,6 +1490,7 @@ export const useStore = create<AppState>((set, get) => {
 
     removeSession: async (projectId, sessionId) => {
       await invoke("remove_session", { projectId, sessionId });
+      feedSession("session.stop", { id: sessionId });
       set((s) => {
         const live = { ...s.live };
         delete live[sessionId];
