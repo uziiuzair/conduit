@@ -3,6 +3,18 @@
 All notable changes to Conduit are documented here. This project uses
 [semantic versioning](https://semver.org/).
 
+## 0.15.0 — 2026-07-17
+
+- **Added — stage-gate cards on the task board.** Any board card can now opt into a full
+  delivery workflow — discovery → requirements → UX → architecture → plan → build → verify.
+  The agent that claims a workflow card is handed that stage's role briefing inline (planner,
+  UX, architect, or implementer), writes the stage's artifact into `.conduit/work-items/`, and
+  reports the outcome to advance the card. An enforced state machine keeps the pipeline honest:
+  an agent can't skip your sign-off — the card stops for you at requirements clarification and
+  at final verification, where you Approve or send it back from the board. Each project also
+  gets a shared knowledge bundle in `.conduit/knowledge/` (decisions, patterns, anti-patterns,
+  domain, components) that the role agents read before proposing and promote to as work lands.
+
 ## 0.14.0 — 2026-07-16
 
 - **Added — project task board.** Every project now has a Kanban board stored in its own
