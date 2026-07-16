@@ -86,6 +86,7 @@ fn opts_into_mailbox(has_mission: bool, channels: &[String]) -> bool {
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
 fn pty_spawn(
+    app: tauri::AppHandle,
     session_id: String,
     working_directory: String,
     cols: u16,
@@ -208,6 +209,37 @@ fn pty_spawn(
     let is_conductor = !shell_only
         && role.as_deref() == Some("conductor")
         && agent == crate::agent::AgentId::Claude;
+
+    // C1 continuity: a real (non-shell) Claude session in a board-enabled project gets the
+    // bundled continuity plugin's MCP tools + presence hooks via `--plugin-dir`, gated on
+    // the host having Node >=22.5 (node:sqlite). `continuity_enabled` takes the RAW board
+    // flag (not `project_board_on`, which already ANDs in `!shell_only`) and re-applies
+    // `shell_only` itself -- passing `project_board_on` here would double-gate on
+    // `!shell_only` harmlessly, but this keeps the two independent and unambiguous.
+    // The Node probe shells out, so it's only run once the cheap gates already hold.
+    let board_enabled_raw = store.board_enabled_for_session(&session_id);
+    let is_claude_session = agent == crate::agent::AgentId::Claude;
+    let continuity_precheck = !shell_only && is_claude_session && board_enabled_raw;
+    let continuity_node = continuity_precheck.then(continuity::detect_node).flatten();
+    let continuity_on = continuity::continuity_enabled(
+        board_enabled_raw,
+        is_claude_session,
+        shell_only,
+        continuity_node,
+    );
+    let continuity_plugin_dir: Option<String> = if continuity_on {
+        continuity::continuity_asset_dir(&app).map(|p| p.to_string_lossy().into_owned())
+    } else {
+        None
+    };
+    // Graceful skip: board-enabled Claude session, but no usable Node -- the board still
+    // works, just without continuity's MCP tools/presence hooks. Never errors the spawn.
+    if continuity_precheck && continuity_node.is_none() {
+        eprintln!(
+            "conduit: continuity coordination needs Node >=22.5; skipping -- the board still works."
+        );
+    }
+
     // `--mcp-config`/`--append-system-prompt-file` are Claude CLI flags, carried through
     // `flags` into `build_invocation` -- ONLY meaningful for Claude. OpenCode's fleet-MCP
     // wiring goes entirely through `OPENCODE_CONFIG_CONTENT` (see the `opencode` block
@@ -354,6 +386,7 @@ fn pty_spawn(
         worktree_arg,
         settings_path,
         mcp_config_path,
+        continuity_plugin_dir,
         system_prompt_file,
         initial_prompt,
         account_config_dir,

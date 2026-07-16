@@ -35,6 +35,70 @@ pub fn continuity_asset_dir(app: &tauri::AppHandle) -> Option<PathBuf> {
     None
 }
 
+/// Parse `node --version` ("v22.5.0", "v24.1.0", "v20.11.1") into (major, minor).
+pub fn parse_node_version(s: &str) -> Option<(u32, u32)> {
+    let s = s.trim().trim_start_matches('v');
+    let mut it = s.split('.');
+    let major = it.next()?.parse().ok()?;
+    let minor = it.next()?.parse().ok()?;
+    Some((major, minor))
+}
+
+/// node:sqlite requires Node >= 22.5.
+pub fn node_supports_sqlite(v: (u32, u32)) -> bool {
+    v.0 > 22 || (v.0 == 22 && v.1 >= 5)
+}
+
+/// Continuity is enabled for a spawn iff: a board-enabled project, a real (non-shell) Claude
+/// session, and Node supports node:sqlite. Pure so it's unit-testable.
+pub fn continuity_enabled(
+    board_enabled: bool,
+    is_claude: bool,
+    shell_only: bool,
+    node: Option<(u32, u32)>,
+) -> bool {
+    board_enabled && is_claude && !shell_only && node.map(node_supports_sqlite).unwrap_or(false)
+}
+
+/// Run `node --version` and parse it; None if node is missing/unparseable. Scrubs
+/// npm_config_prefix like the other spawn sites (nvm-on-PATH robustness).
+pub fn detect_node() -> Option<(u32, u32)> {
+    use crate::NoWindow; // the CREATE_NO_WINDOW trait used elsewhere
+    let out = std::process::Command::new("node")
+        .arg("--version")
+        .env_remove("npm_config_prefix")
+        .no_window()
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    parse_node_version(&String::from_utf8_lossy(&out.stdout))
+}
+
+#[cfg(test)]
+mod probe_tests {
+    use super::*;
+    #[test]
+    fn parses_and_gates() {
+        assert_eq!(parse_node_version("v22.5.0"), Some((22, 5)));
+        assert_eq!(parse_node_version("v24.1.0"), Some((24, 1)));
+        assert!(node_supports_sqlite((22, 5)));
+        assert!(!node_supports_sqlite((22, 4)));
+        assert!(!node_supports_sqlite((20, 11)));
+        assert_eq!(parse_node_version("garbage"), None);
+    }
+    #[test]
+    fn continuity_gate() {
+        assert!(continuity_enabled(true, true, false, Some((22, 5))));
+        assert!(!continuity_enabled(false, true, false, Some((24, 0)))); // board off
+        assert!(!continuity_enabled(true, false, false, Some((24, 0)))); // not claude
+        assert!(!continuity_enabled(true, true, true, Some((24, 0)))); // shell
+        assert!(!continuity_enabled(true, true, false, None)); // node absent
+        assert!(!continuity_enabled(true, true, false, Some((22, 4)))); // node too old
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
