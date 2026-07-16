@@ -1,3 +1,6 @@
+//! Plugin manifest model + validation. Pure parsing/validation only — Tauri
+//! commands and store wiring land in later tasks of increment #1.
+
 use serde::{Deserialize, Serialize};
 
 /// Permission ids valid in increment #1. Unknown ids are rejected at validation.
@@ -97,10 +100,16 @@ pub fn version_satisfies(have: &str, need: &str) -> bool {
 pub fn validate_manifest(m: &PluginManifest, folder_name: &str, app_version: &str) -> Vec<String> {
     let mut problems = Vec::new();
     if !is_valid_id(&m.id) {
-        problems.push(format!("invalid plugin id '{}': must be lowercase [a-z0-9.-]", m.id));
+        problems.push(format!(
+            "invalid plugin id '{}': must be lowercase [a-z0-9.-]",
+            m.id
+        ));
     }
     if m.id != folder_name {
-        problems.push(format!("plugin id '{}' must equal its folder name '{}'", m.id, folder_name));
+        problems.push(format!(
+            "plugin id '{}' must equal its folder name '{}'",
+            m.id, folder_name
+        ));
     }
     if semver_triple(&m.version).is_none() {
         problems.push(format!("invalid version '{}'", m.version));
@@ -114,7 +123,10 @@ pub fn validate_manifest(m: &PluginManifest, folder_name: &str, app_version: &st
         ));
     }
     if m.main.contains("..") || m.main.starts_with('/') {
-        problems.push(format!("main '{}' must stay inside the plugin folder", m.main));
+        problems.push(format!(
+            "main '{}' must stay inside the plugin folder",
+            m.main
+        ));
     }
     for perm in &m.permissions {
         if !KNOWN_PERMISSIONS.contains(&perm.as_str()) {
@@ -166,6 +178,7 @@ mod tests {
     fn rejects_bad_id() {
         assert!(!is_valid_id("Com.Acme")); // uppercase
         assert!(!is_valid_id("-lead"));
+        assert!(is_valid_id("com..acme")); // still matches charset; ok to allow — only charset checked
         assert!(is_valid_id("com.acme.logger"));
     }
 
@@ -189,7 +202,9 @@ mod tests {
     #[test]
     fn rejects_incompatible_app_version() {
         let p = validate_manifest(&good(), "com.acme.logger", "0.13.0");
-        assert!(p.iter().any(|s| s.contains("minAppVersion") || s.contains("0.14.0")));
+        assert!(p
+            .iter()
+            .any(|s| s.contains("minAppVersion") || s.contains("0.14.0")));
     }
 
     #[test]
