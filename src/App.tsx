@@ -29,6 +29,7 @@ import { useTelemetry } from "./hooks/useTelemetry";
 import { useUpdater } from "./hooks/useUpdater";
 import { useFileWatch } from "./hooks/useFileWatch";
 import { useHotExit } from "./hooks/useHotExit";
+import { initPlugins, feedHook, feedFleet } from "./plugins";
 
 interface HookPayload {
   session: string;
@@ -84,6 +85,11 @@ export default function App() {
     void loadAgents();
   }, [load, loadAgents]);
 
+  // Discover + start enabled plugins.
+  useEffect(() => {
+    void initPlugins();
+  }, []);
+
   // Suppress the webview's default context menu (Reload / Inspect Element).
   // Our own row menus call preventDefault + stopPropagation, so they're unaffected —
   // and Monaco's context menu (contextmenu contrib) is its own widget, not the native
@@ -124,6 +130,7 @@ export default function App() {
   // Claude Code hook events relayed by the Rust HTTP listener.
   useEffect(() => {
     const unlisten = listen<HookPayload>("hook", ({ payload }) => {
+      feedHook(payload);
       const { session, event, body } = payload;
       const st = useStore.getState();
       switch (event) {
@@ -367,10 +374,12 @@ export default function App() {
   useEffect(() => {
     const unSpawn = listen<{ projectId: string; session: Session; task?: string }>(
       "fleet-spawn",
-      ({ payload }) =>
+      ({ payload }) => {
         useStore
           .getState()
-          .mergeSpawnedSession(payload.projectId, payload.session, payload.task),
+          .mergeSpawnedSession(payload.projectId, payload.session, payload.task);
+        feedFleet("fleet.spawn", { session: payload.session.id });
+      },
     );
     const unConfirm = listen<{ requestId: string; name: string; branch: string; dirty: boolean }>(
       "conductor-confirm",
