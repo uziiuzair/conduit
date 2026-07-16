@@ -66,8 +66,11 @@ pub struct Card {
     pub links: CardLinks,
     #[serde(default)]
     pub comments: Vec<Comment>,
-    // Populated from the `.claims/` sidecar at load time; skipped on card serialization.
-    #[serde(skip)]
+    // Populated from the `.claims/` sidecar by `snapshot`; included in JSON API responses so
+    // the UI/MCP can show who holds a card. It stays OUT of the persisted YAML because every
+    // `write_card` call operates on a card loaded/created with `claim: None` (claims live only
+    // in the sidecar, never round-trip through the card file), so `skip_serializing_if` omits it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub claim: Option<Claim>,
 }
 
@@ -609,6 +612,37 @@ mod tests {
         assert!(board
             .claim_card(&root, &c.id, "s2", &|_: &str| true)
             .is_ok());
+    }
+
+    #[test]
+    fn claim_is_present_in_json_responses() {
+        let card = Card {
+            id: "c1".into(),
+            title: "t".into(),
+            body: "".into(),
+            column: "todo".into(),
+            order: "U".into(),
+            labels: vec![],
+            created_by: "human".into(),
+            created_at: 1,
+            updated_at: 1,
+            workflow: None,
+            links: CardLinks::default(),
+            comments: vec![],
+            claim: Some(Claim {
+                by: "s2".into(),
+                at: 1,
+                lease_until: 2,
+            }),
+        };
+        let json = serde_json::to_string(&card).unwrap();
+        assert!(json.contains("\"claim\""), "claim must be in JSON: {json}");
+        assert!(json.contains("\"by\":\"s2\""), "claim.by must be in JSON: {json}");
+        // A None-claim card omits it entirely (keeps the YAML file clean).
+        let mut none_card = card.clone();
+        none_card.claim = None;
+        let json2 = serde_json::to_string(&none_card).unwrap();
+        assert!(!json2.contains("\"claim\""), "None claim must be omitted: {json2}");
     }
 
     #[test]

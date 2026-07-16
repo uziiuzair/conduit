@@ -24,10 +24,11 @@ export function useBoard(projectId: string | null, enabled: boolean) {
   useEffect(() => {
     if (!enabled || !projectId) return;
     let un: (() => void) | undefined;
+    let cancelled = false;
     listen<{ projectId: string }>("board-changed", (ev) => {
       if (ev.payload.projectId === projectId) reload();
-    }).then((u) => { un = u; });
-    return () => { if (un) un(); };
+    }).then((u) => { if (cancelled) u(); else un = u; });
+    return () => { cancelled = true; if (un) un(); };
   }, [enabled, projectId, reload]);
 
   useEffect(() => {

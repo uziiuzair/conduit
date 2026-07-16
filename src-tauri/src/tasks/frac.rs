@@ -12,6 +12,12 @@ const HI: u8 = 0x7a; // 'z' — largest allowed digit
 /// Return a key `c` such that `a < c < b`, where `""` is treated as unbounded on that side.
 /// Precondition: `a < b` (callers order neighbours before calling).
 pub fn key_between(a: &str, b: &str) -> String {
+    // Contract is a < b. If a caller violates it (both non-empty and out of order, or
+    // equal), fall back to "append after a" so we never panic on bad/stale input — a
+    // reordered/concurrent move produces a defined key instead of crashing the handler.
+    if !a.is_empty() && !b.is_empty() && a >= b {
+        return key_between(a, "");
+    }
     let av = a.as_bytes();
     let bv = b.as_bytes();
     let mut out: Vec<u8> = Vec::new();
@@ -94,5 +100,17 @@ mod tests {
             assert!(ordered(&lo, &mid, &b), "{lo} < {mid} < {b} failed");
             lo = mid;
         }
+    }
+
+    #[test]
+    fn reversed_or_equal_neighbours_do_not_panic_and_stay_valid_utf8() {
+        // a > b (reversed): must not panic, must be valid UTF-8, and (per the fallback) sort after a.
+        let k = key_between("Z", "A");
+        assert!(std::str::from_utf8(k.as_bytes()).is_ok());
+        assert!(k > "Z".to_string());
+        // a == b: also must not panic.
+        let k2 = key_between("M", "M");
+        assert!(std::str::from_utf8(k2.as_bytes()).is_ok());
+        assert!(k2 > "M".to_string());
     }
 }
