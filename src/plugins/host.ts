@@ -12,18 +12,27 @@ interface Loaded {
 
 class PluginHostImpl {
   private loaded = new Map<string, Loaded>();
+  /** Ids whose start() is mid-flight (past the enable checks, before loaded.set).
+   *  Reserved synchronously so two overlapping start() calls can't both spawn a
+   *  worker and orphan one. */
+  private starting = new Set<string>();
 
   /** Start an enabled, consented plugin: spawn its worker, wire the dispatcher. */
   async start(desc: PluginDescriptor): Promise<void> {
     if (!desc.manifest || desc.problems.length || !desc.record?.enabled) return;
-    if (this.loaded.has(desc.id)) return;
-    const grants = (desc.record.grantedPermissions ?? []) as PluginPermission[];
-    const source = await invoke<string>("read_plugin_source", { id: desc.id });
-    const sandbox = new WorkerSandbox();
-    const hookEvents = new Set(desc.manifest.contributes?.hooks ?? []);
-    const entry: Loaded = { id: desc.id, grants, sandbox, hookEvents };
-    this.loaded.set(desc.id, entry);
-    sandbox.start(source, (m) => this.onMessage(entry, m));
+    if (this.loaded.has(desc.id) || this.starting.has(desc.id)) return;
+    this.starting.add(desc.id);
+    try {
+      const grants = (desc.record.grantedPermissions ?? []) as PluginPermission[];
+      const source = await invoke<string>("read_plugin_source", { id: desc.id });
+      const sandbox = new WorkerSandbox();
+      const hookEvents = new Set(desc.manifest.contributes?.hooks ?? []);
+      const entry: Loaded = { id: desc.id, grants, sandbox, hookEvents };
+      this.loaded.set(desc.id, entry);
+      sandbox.start(source, (m) => this.onMessage(entry, m));
+    } finally {
+      this.starting.delete(desc.id);
+    }
   }
 
   stop(id: string): void {
