@@ -25,6 +25,7 @@ mod local_llm;
 mod menu;
 mod notify;
 mod pty;
+mod plugins;
 mod search;
 mod store;
 mod telemetry;
