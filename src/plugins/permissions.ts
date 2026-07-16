@@ -23,16 +23,16 @@ export const PERMISSIONS: Record<PluginPermission, PermissionInfo> = {
     events: ["session.start", "session.stop", "session.rename"],
   },
   "hooks:fleet": {
-    label: "See fleet / Conductor spawn and stop events",
+    label: "See fleet / Conductor spawn events",
     riskLine: "Can observe orchestration activity across your projects.",
     methods: [],
-    events: ["fleet.spawn", "fleet.stop"],
+    events: ["fleet.spawn"],
   },
   "hooks:lifecycle": {
     label: "See agent activity signals",
-    riskLine: "Can observe agent run/stop/notification signals (no transcript contents).",
+    riskLine: "Can observe agent stop/notification and session start/end signals (no transcript contents).",
     methods: [],
-    events: ["lifecycle.run", "lifecycle.stop", "lifecycle.notify"],
+    events: ["lifecycle.stop", "lifecycle.notification", "lifecycle.sessionstart", "lifecycle.sessionend"],
   },
   notifications: {
     label: "Show desktop notifications",

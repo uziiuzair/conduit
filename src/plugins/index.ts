@@ -22,6 +22,6 @@ export function feedSession(event: "session.start" | "session.stop" | "session.r
 }
 
 /** Feed a fleet event. */
-export function feedFleet(event: "fleet.spawn" | "fleet.stop", payload: { session?: string }): void {
+export function feedFleet(event: "fleet.spawn", payload: { session?: string }): void {
   pluginHost.emit(event, { session: payload.session ?? "" });
 }

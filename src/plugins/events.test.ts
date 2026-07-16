@@ -8,8 +8,10 @@ describe("event sanitizers", () => {
     expect(JSON.stringify(out)).not.toContain("secret text");
   });
 
-  it("maps unknown hook verbs to lifecycle.notify", () => {
-    expect(sanitizeHookPayload({ session: "s1", event: "weird", body: {} }).event).toBe("lifecycle.notify");
+  it("prefix-maps hook verbs to lifecycle.<verb> and never forwards body", () => {
+    expect(sanitizeHookPayload({ session: "s1", event: "sessionstart", body: {} }).event).toBe("lifecycle.sessionstart");
+    const out = sanitizeHookPayload({ session: "s1", event: "tooluse", body: { secret: "x" } });
+    expect(out).toEqual({ event: "lifecycle.tooluse", session: "s1" });
   });
 
   it("reduces a session to id + title only", () => {

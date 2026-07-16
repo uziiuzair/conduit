@@ -7,16 +7,13 @@ export interface PluginEvent {
 /** Frontend "hook" relay payload shape (mirrors App.tsx HookPayload). */
 export interface HookPayload { session: string; event: string; body: unknown; }
 
-const HOOK_VERB_TO_EVENT: Record<string, string> = {
-  run: "lifecycle.run",
-  stop: "lifecycle.stop",
-  notify: "lifecycle.notify",
-};
-
-/** Map a raw hook relay to a sanitized lifecycle event. Never forwards `body`. */
+/** Map a raw hook relay to a sanitized `lifecycle.<verb>` event id. Never forwards
+ *  `body`. The real verbs come from the Rust hook relay (hooks.rs): stop,
+ *  notification, sessionstart, sessionend, prompt, tooluse, pretool, precompact,
+ *  todos. Only the ids listed under `hooks:lifecycle` in permissions.ts are actually
+ *  delivered to a plugin — the permission gate drops the rest. */
 export function sanitizeHookPayload(p: HookPayload): { event: string; session: string } {
-  const event = HOOK_VERB_TO_EVENT[p.event] ?? "lifecycle.notify";
-  return { event, session: p.session };
+  return { event: `lifecycle.${p.event}`, session: p.session };
 }
 
 /** Reduce any session-like object to the safe fields plugins may see. */
