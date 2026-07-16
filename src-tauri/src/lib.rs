@@ -13,6 +13,7 @@ mod claude_status;
 mod claude_usage;
 mod clipboard;
 mod continuity;
+mod continuity_read;
 mod fleet;
 mod fleet_mcp;
 mod format;

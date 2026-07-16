@@ -45,3 +45,4 @@ tungstenite = "0.23"
 dashmap = "6"
 uuid = { version = "1", features = ["v4"] }
 dirs = "5"
+rusqlite = { version = "0.32", features = ["bundled"] }
