@@ -1,12 +1,12 @@
 pub mod frac;
 
+use crate::board::truncate_utf8;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
-use crate::board::truncate_utf8;
 
 /// A board column (coordination status). Order in `Columns.columns` is display order.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -20,7 +20,7 @@ pub struct Column {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct Claim {
-    pub by: String,        // session id, or "human"
+    pub by: String, // session id, or "human"
     pub at: u64,
     pub lease_until: u64,
 }
@@ -97,7 +97,10 @@ impl Default for Columns {
         Columns {
             columns: DEFAULT_COLUMNS
                 .iter()
-                .map(|(id, name)| Column { id: (*id).into(), name: (*name).into() })
+                .map(|(id, name)| Column {
+                    id: (*id).into(),
+                    name: (*name).into(),
+                })
                 .collect(),
         }
     }
@@ -324,7 +327,11 @@ impl TaskBoard {
                 return Err(format!("claimed-by:{}", existing.by));
             }
         }
-        let claim = Claim { by: by.to_string(), at: now, lease_until: now + Self::LEASE_MS };
+        let claim = Claim {
+            by: by.to_string(),
+            at: now,
+            lease_until: now + Self::LEASE_MS,
+        };
         Self::write_claim(project_root, id, &claim)?;
         Ok(claim)
     }
@@ -353,7 +360,13 @@ impl TaskBoard {
 
     pub const COMMENT_MAX_BYTES: usize = 512;
 
-    pub fn comment_card(&self, project_root: &str, id: &str, by: &str, text: &str) -> Result<Card, String> {
+    pub fn comment_card(
+        &self,
+        project_root: &str,
+        id: &str,
+        by: &str,
+        text: &str,
+    ) -> Result<Card, String> {
         let _g = self.lock.lock().unwrap_or_else(|e| e.into_inner());
         let mut card = Self::load_card(project_root, id)?;
         card.comments.push(Comment {
@@ -377,9 +390,15 @@ impl TaskBoard {
     ) -> Result<Card, String> {
         let _g = self.lock.lock().unwrap_or_else(|e| e.into_inner());
         let mut card = Self::load_card(project_root, id)?;
-        if let Some(t) = title { card.title = t.to_string(); }
-        if let Some(b) = body { card.body = b.to_string(); }
-        if let Some(l) = labels { card.labels = l; }
+        if let Some(t) = title {
+            card.title = t.to_string();
+        }
+        if let Some(b) = body {
+            card.body = b.to_string();
+        }
+        if let Some(l) = labels {
+            card.labels = l;
+        }
         card.updated_at = now_ms();
         Self::write_card(project_root, &card)?;
         Ok(card)
@@ -444,7 +463,10 @@ mod tests {
         };
         let yaml = serde_yaml::to_string(&card).unwrap();
         assert!(yaml.contains("createdBy:"), "got:\n{yaml}");
-        assert!(!yaml.contains("claim:"), "volatile claim must not serialize");
+        assert!(
+            !yaml.contains("claim:"),
+            "volatile claim must not serialize"
+        );
         let back: Card = serde_yaml::from_str(&yaml).unwrap();
         assert_eq!(card, back);
     }
@@ -453,7 +475,8 @@ mod tests {
         use std::sync::atomic::{AtomicU64, Ordering};
         static N: AtomicU64 = AtomicU64::new(0);
         let n = N.fetch_add(1, Ordering::SeqCst);
-        let dir = std::env::temp_dir().join(format!("conduit-board-test-{}-{}", std::process::id(), n));
+        let dir =
+            std::env::temp_dir().join(format!("conduit-board-test-{}-{}", std::process::id(), n));
         std::fs::create_dir_all(&dir).unwrap();
         dir.to_string_lossy().into_owned()
     }
@@ -473,7 +496,9 @@ mod tests {
         let root = tmp_root();
         let board = TaskBoard::default();
         let a = board.add_card(&root, "first", "", "todo", "human").unwrap();
-        let b = board.add_card(&root, "second", "", "todo", "human").unwrap();
+        let b = board
+            .add_card(&root, "second", "", "todo", "human")
+            .unwrap();
         assert!(a.order < b.order, "second card must sort after first");
         let snap = board.snapshot(&root);
         let todo: Vec<_> = snap.cards.iter().filter(|c| c.column == "todo").collect();
@@ -490,7 +515,9 @@ mod tests {
         let b = board.add_card(&root, "b", "", "todo", "human").unwrap();
         let moved = board.move_card(&root, &b.id, "review", None, None).unwrap();
         assert_eq!(moved.column, "review");
-        let a2 = board.move_card(&root, &a.id, "review", Some(&b.id), None).unwrap();
+        let a2 = board
+            .move_card(&root, &a.id, "review", Some(&b.id), None)
+            .unwrap();
         assert!(moved.order < a2.order);
         let snap = board.snapshot(&root);
         let review: Vec<_> = snap.cards.iter().filter(|c| c.column == "review").collect();
@@ -514,7 +541,10 @@ mod tests {
         board.claim_card(&root, &a.id, "s4", &alive).unwrap();
         let dead = |who: &str| who != "s4";
         board.claim_card(&root, &a.id, "s7", &dead).unwrap();
-        assert_eq!(board.snapshot(&root).cards[0].claim.as_ref().unwrap().by, "s7");
+        assert_eq!(
+            board.snapshot(&root).cards[0].claim.as_ref().unwrap().by,
+            "s7"
+        );
     }
 
     #[test]
@@ -525,7 +555,9 @@ mod tests {
         let c = board.comment_card(&root, &a.id, "s2", "on it").unwrap();
         assert_eq!(c.comments.len(), 1);
         assert_eq!(c.comments[0].text, "on it");
-        let e = board.edit_card(&root, &a.id, Some("a2"), None, Some(vec!["x".into()])).unwrap();
+        let e = board
+            .edit_card(&root, &a.id, Some("a2"), None, Some(vec!["x".into()]))
+            .unwrap();
         assert_eq!(e.title, "a2");
         assert_eq!(e.body, "body");
         assert_eq!(e.labels, vec!["x".to_string()]);
@@ -550,8 +582,11 @@ mod tests {
         board.ensure_scaffold(&root).unwrap();
         board.ensure_scaffold(&root).unwrap();
         let gi = std::fs::read_to_string(
-            std::path::Path::new(&root).join(".conduit").join(".gitignore"),
-        ).unwrap();
+            std::path::Path::new(&root)
+                .join(".conduit")
+                .join(".gitignore"),
+        )
+        .unwrap();
         assert!(gi.contains("board/.claims/"));
         assert_eq!(board.snapshot(&root).columns.len(), 5);
     }
@@ -561,7 +596,9 @@ mod tests {
         let root = tmp_root();
         let board = TaskBoard::default();
         let evil = "../../../../etc/passwd";
-        assert!(board.claim_card(&root, evil, "s2", &|_: &str| true).is_err());
+        assert!(board
+            .claim_card(&root, evil, "s2", &|_: &str| true)
+            .is_err());
         assert!(board.move_card(&root, evil, "todo", None, None).is_err());
         assert!(board.comment_card(&root, evil, "s2", "x").is_err());
         assert!(board.release_card(&root, evil, "s2").is_err());
@@ -569,17 +606,30 @@ mod tests {
         assert!(board.delete_card(&root, evil).is_err());
         // A legitimate uuid-shaped id is still accepted (created via add_card).
         let c = board.add_card(&root, "ok", "", "todo", "human").unwrap();
-        assert!(board.claim_card(&root, &c.id, "s2", &|_: &str| true).is_ok());
+        assert!(board
+            .claim_card(&root, &c.id, "s2", &|_: &str| true)
+            .is_ok());
     }
 
     #[test]
     fn set_columns_renames_and_reorders() {
         let root = tmp_root();
         let board = TaskBoard::default();
-        board.set_columns(&root, vec![
-            Column { id: "todo".into(), name: "Inbox".into() },
-            Column { id: "done".into(), name: "Shipped".into() },
-        ]).unwrap();
+        board
+            .set_columns(
+                &root,
+                vec![
+                    Column {
+                        id: "todo".into(),
+                        name: "Inbox".into(),
+                    },
+                    Column {
+                        id: "done".into(),
+                        name: "Shipped".into(),
+                    },
+                ],
+            )
+            .unwrap();
         let cols = board.snapshot(&root).columns;
         assert_eq!(cols.len(), 2);
         assert_eq!(cols[0].name, "Inbox");
