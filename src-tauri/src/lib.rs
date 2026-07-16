@@ -27,6 +27,7 @@ mod notify;
 mod pty;
 mod search;
 mod store;
+mod tasks;
 mod telemetry;
 mod transcript;
 mod updates;
