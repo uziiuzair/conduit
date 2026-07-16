@@ -1355,6 +1355,8 @@ mod tests {
             "task_move",
             "task_comment",
             "task_add",
+            "task_workflow_start",
+            "task_advance",
         ] {
             assert!(
                 authorize(&store, &worker.id, t).is_ok(),

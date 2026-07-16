@@ -44,7 +44,12 @@ pub enum Transition {
     Illegal,
 }
 
-/// Is this stage a human checkpoint (the machine must stop here until a human acts)?
+/// Is this stage a human checkpoint the machine stops at until a human acts? Note this is the
+/// narrow "machine halts here" set ({BusinessClarification, Blocked}); the UI's "show a gate
+/// action" set additionally includes Verification (whose *acceptance* is a human gate via
+/// `resolve_gate`). Currently only exercised in tests — kept for the future Blocked-escalation
+/// path, which will have a producer transition into `Blocked`.
+#[allow(dead_code)]
 pub fn is_human_gate(stage: Stage) -> bool {
     matches!(stage, Stage::BusinessClarification | Stage::Blocked)
 }
