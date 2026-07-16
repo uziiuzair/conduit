@@ -2,7 +2,7 @@ import { useEffect, useCallback } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { useStore } from "../store";
-import type { BoardSnapshot } from "../store";
+import type { BoardSnapshot, ContinuityView } from "../store";
 
 const POLL_MS = 1500;
 
@@ -10,6 +10,7 @@ const POLL_MS = 1500;
  *  poll (re-fetch) for teammate/git edits. Only active while `enabled`. */
 export function useBoard(projectId: string | null, enabled: boolean) {
   const setBoard = useStore((s) => s.setBoard);
+  const setContinuity = useStore((s) => s.setContinuity);
 
   const reload = useCallback(async () => {
     if (!projectId) return;
@@ -19,7 +20,13 @@ export function useBoard(projectId: string | null, enabled: boolean) {
     } catch (e) {
       console.error("[board] list_board failed", e);
     }
-  }, [projectId, setBoard]);
+    try {
+      const view = await invoke<ContinuityView>("list_continuity", { projectId });
+      setContinuity(projectId, view);
+    } catch (e) {
+      console.error("[continuity] list_continuity failed", e);
+    }
+  }, [projectId, setBoard, setContinuity]);
 
   useEffect(() => {
     if (!enabled || !projectId) return;

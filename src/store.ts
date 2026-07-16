@@ -221,6 +221,14 @@ export interface BoardCard {
 }
 export interface BoardSnapshot { columns: BoardColumn[]; cards: BoardCard[] }
 
+// ---- Continuity (presence + handoffs) — mirror the Rust serde structs (camelCase) ----
+export interface Presence { sessionId: string; status: "active" | "idle" | "gone"; lastSeenAt: string }
+export interface CardHandoff {
+  cardId: string; id: string; fromLabel: string | null; context: string;
+  state: string | null; suggestedNextActions: string | null; status: string; createdAt: string;
+}
+export interface ContinuityView { presence: Presence[]; handoffs: CardHandoff[] }
+
 /** Center pane mode, per project: the terminal workspace or the task board. */
 export type CenterMode = "terminals" | "board";
 
@@ -933,9 +941,12 @@ interface AppState {
   centerMode: Record<string, CenterMode>;
   /** Latest board snapshot per project, refreshed by useBoard. */
   boards: Record<string, BoardSnapshot>;
+  /** Latest continuity view (presence + handoffs) per project, refreshed by useBoard. */
+  continuity: Record<string, ContinuityView>;
   setCenterMode: (projectId: string, mode: CenterMode) => void;
   toggleCenterMode: (projectId: string) => void;
   setBoard: (projectId: string, snapshot: BoardSnapshot) => void;
+  setContinuity: (projectId: string, view: ContinuityView) => void;
 }
 
 export const useStore = create<AppState>((set, get) => {
@@ -2251,6 +2262,7 @@ export const useStore = create<AppState>((set, get) => {
     // ---- Task board (Conductor board) ----
     centerMode: {},
     boards: {},
+    continuity: {},
     setCenterMode: (projectId, mode) =>
       set((s) => ({ centerMode: { ...s.centerMode, [projectId]: mode } })),
     toggleCenterMode: (projectId) =>
@@ -2260,6 +2272,8 @@ export const useStore = create<AppState>((set, get) => {
       }),
     setBoard: (projectId, snapshot) =>
       set((s) => ({ boards: { ...s.boards, [projectId]: snapshot } })),
+    setContinuity: (projectId, view) =>
+      set((s) => ({ continuity: { ...s.continuity, [projectId]: view } })),
   };
 });
 

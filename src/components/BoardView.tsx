@@ -4,13 +4,16 @@ import { useStore } from "../store";
 import type { BoardCard as Card } from "../store";
 import { useBoard } from "../hooks/useBoard";
 import { BoardColumn } from "./BoardColumn";
+import { BoardCardDetail } from "./BoardCardDetail";
 
 export function BoardView({ projectId }: { projectId: string }) {
   useBoard(projectId, true);
   const snap = useStore((s) => s.boards[projectId]);
+  const continuity = useStore((s) => s.continuity[projectId]);
   const dragId = useRef<string | null>(null);
   const [adding, setAdding] = useState<string | null>(null);
   const [draft, setDraft] = useState("");
+  const [openCardId, setOpenCardId] = useState<string | null>(null);
 
   const cardsByColumn = useMemo(() => {
     const m: Record<string, Card[]> = {};
@@ -45,30 +48,47 @@ export function BoardView({ projectId }: { projectId: string }) {
 
   return (
     <div className="board-view">
-      <div className="board-columns">
-        {snap.columns.map((col) => (
-          <div key={col.id} className="board-column-wrap">
-            <BoardColumn
-              column={col}
-              cards={cardsByColumn[col.id] ?? []}
-              projectId={projectId}
-              onDragStart={(id) => { dragId.current = id; }}
-              onDropCard={onDropCard}
-              footer={
-                adding === col.id ? (
-                  <input
-                    className="board-add-input" autoFocus value={draft}
-                    onChange={(e) => setDraft(e.target.value)}
-                    onBlur={() => addCard(col.id)}
-                    onKeyDown={(e) => { if (e.key === "Enter") addCard(col.id); if (e.key === "Escape") { setAdding(null); setDraft(""); } }}
-                  />
-                ) : (
-                  <button className="board-add" onClick={() => setAdding(col.id)}>+ Add</button>
-                )
-              }
+      <div className="board-body">
+        <div className="board-columns">
+          {snap.columns.map((col) => (
+            <div key={col.id} className="board-column-wrap">
+              <BoardColumn
+                column={col}
+                cards={cardsByColumn[col.id] ?? []}
+                projectId={projectId}
+                onDragStart={(id) => { dragId.current = id; }}
+                onDropCard={onDropCard}
+                onOpen={setOpenCardId}
+                footer={
+                  adding === col.id ? (
+                    <input
+                      className="board-add-input" autoFocus value={draft}
+                      onChange={(e) => setDraft(e.target.value)}
+                      onBlur={() => addCard(col.id)}
+                      onKeyDown={(e) => { if (e.key === "Enter") addCard(col.id); if (e.key === "Escape") { setAdding(null); setDraft(""); } }}
+                    />
+                  ) : (
+                    <button className="board-add" onClick={() => setAdding(col.id)}>+ Add</button>
+                  )
+                }
+              />
+            </div>
+          ))}
+        </div>
+        {openCardId && (() => {
+          const card = snap.cards.find((c) => c.id === openCardId);
+          if (!card) return null;
+          const handoff = continuity?.handoffs.find((h) => h.cardId === card.id) ?? null;
+          const presence = continuity?.presence.find((p) => p.sessionId === card.claim?.by) ?? null;
+          return (
+            <BoardCardDetail
+              card={card}
+              handoff={handoff}
+              presence={presence}
+              onClose={() => setOpenCardId(null)}
             />
-          </div>
-        ))}
+          );
+        })()}
       </div>
     </div>
   );
