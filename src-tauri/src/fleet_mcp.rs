@@ -699,6 +699,16 @@ fn dispatch_tool(name: &str, args: &Value, ctx: &Ctx) -> Result<String, String> 
                 .ok_or("missing column")?;
             let after = args.get("after").and_then(|v| v.as_str());
             let before = args.get("before").and_then(|v| v.as_str());
+            // Don't reorder/move a card that a different, still-running session is holding.
+            let snap = ctx.tasks.snapshot(&root);
+            if let Some(card) = snap.cards.iter().find(|c| c.id == id) {
+                if let Some(cl) = &card.claim {
+                    let running = ctx.fleet.running_sessions();
+                    if cl.by != ctx.conductor_id && running.iter().any(|r| r.as_str() == cl.by) {
+                        return Err(format!("claimed-by:{}", cl.by));
+                    }
+                }
+            }
             ctx.tasks.move_card(&root, id, column, after, before)?;
             emit_board_changed(ctx);
             Ok("moved".to_string())
@@ -1310,7 +1320,12 @@ mod tests {
                 "worker should be allowed {t}"
             );
         }
-        assert!(authorize(&store, &worker.id, "fleet_spawn").is_err());
+        for denied in ["fleet_spawn", "fleet_send", "fleet_stop", "fleet_peek", "fleet_list"] {
+            assert!(
+                authorize(&store, &worker.id, denied).is_err(),
+                "worker must be denied {denied}"
+            );
+        }
     }
 
     #[test]

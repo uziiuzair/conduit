@@ -120,6 +120,17 @@ pub struct TaskBoard {
 }
 
 impl TaskBoard {
+    /// Card ids are server-minted UUIDs; anything else (notably `..` or path separators) is
+    /// rejected before it can be joined into a filesystem path. This is the guard that keeps a
+    /// caller-supplied `id` from escaping the project's `.conduit/` dir (path traversal).
+    fn check_id(id: &str) -> Result<(), String> {
+        if !id.is_empty() && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
+            Ok(())
+        } else {
+            Err("invalid-card-id".to_string())
+        }
+    }
+
     fn board_dir(project_root: &str) -> PathBuf {
         Path::new(project_root).join(".conduit").join("board")
     }
@@ -249,6 +260,7 @@ impl TaskBoard {
     }
 
     fn load_card(project_root: &str, id: &str) -> Result<Card, String> {
+        Self::check_id(id)?;
         let s = fs::read_to_string(Self::card_path(project_root, id))
             .map_err(|_| format!("card not found: {id}"))?;
         serde_yaml::from_str(&s).map_err(|e| e.to_string())
@@ -302,6 +314,7 @@ impl TaskBoard {
         by: &str,
         live: &dyn Fn(&str) -> bool,
     ) -> Result<Claim, String> {
+        Self::check_id(id)?;
         let _g = self.lock.lock().unwrap_or_else(|e| e.into_inner());
         Self::load_card(project_root, id)?;
         let now = now_ms();
@@ -318,6 +331,7 @@ impl TaskBoard {
 
     /// Drop the caller's own claim. No-op if unclaimed; Err if another session holds it.
     pub fn release_card(&self, project_root: &str, id: &str, by: &str) -> Result<(), String> {
+        Self::check_id(id)?;
         let _g = self.lock.lock().unwrap_or_else(|e| e.into_inner());
         match Self::read_claim(project_root, id) {
             None => Ok(()),
@@ -331,6 +345,7 @@ impl TaskBoard {
 
     /// Force-release a claim from the UI (human override), regardless of holder.
     pub fn delete_card_claim(&self, project_root: &str, id: &str) -> Result<(), String> {
+        Self::check_id(id)?;
         let _g = self.lock.lock().unwrap_or_else(|e| e.into_inner());
         let _ = fs::remove_file(Self::claim_path(project_root, id));
         Ok(())
@@ -371,6 +386,7 @@ impl TaskBoard {
     }
 
     pub fn delete_card(&self, project_root: &str, id: &str) -> Result<(), String> {
+        Self::check_id(id)?;
         let _g = self.lock.lock().unwrap_or_else(|e| e.into_inner());
         let _ = fs::remove_file(Self::card_path(project_root, id));
         let _ = fs::remove_file(Self::claim_path(project_root, id));
@@ -538,6 +554,22 @@ mod tests {
         ).unwrap();
         assert!(gi.contains("board/.claims/"));
         assert_eq!(board.snapshot(&root).columns.len(), 5);
+    }
+
+    #[test]
+    fn rejects_path_traversal_ids() {
+        let root = tmp_root();
+        let board = TaskBoard::default();
+        let evil = "../../../../etc/passwd";
+        assert!(board.claim_card(&root, evil, "s2", &|_: &str| true).is_err());
+        assert!(board.move_card(&root, evil, "todo", None, None).is_err());
+        assert!(board.comment_card(&root, evil, "s2", "x").is_err());
+        assert!(board.release_card(&root, evil, "s2").is_err());
+        assert!(board.edit_card(&root, evil, Some("t"), None, None).is_err());
+        assert!(board.delete_card(&root, evil).is_err());
+        // A legitimate uuid-shaped id is still accepted (created via add_card).
+        let c = board.add_card(&root, "ok", "", "todo", "human").unwrap();
+        assert!(board.claim_card(&root, &c.id, "s2", &|_: &str| true).is_ok());
     }
 
     #[test]
