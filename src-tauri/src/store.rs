@@ -267,6 +267,12 @@ pub struct Project {
     /// state (no field) loads. See the multi-account design doc.
     #[serde(default)]
     pub default_accounts: HashMap<AgentId, String>,
+    /// Whether this project's task board has been opened at least once. Gates the fleet MCP
+    /// server (and `task_*` tools) into every session spawned for this project -- not just
+    /// Conductor/mission/mailbox sessions -- once a human has opened the board (`list_board`
+    /// flips this on). `#[serde(default)]` so legacy state (no field) loads as `false`.
+    #[serde(default)]
+    pub board_enabled: bool,
 }
 
 /// A registered agent account: a profile dir that holds its own credentials (a `.claude`
@@ -584,6 +590,7 @@ impl Store {
             sessions: Vec::new(),
             layout: None,
             default_accounts: HashMap::new(),
+            board_enabled: false,
         };
         let mut projects = self.projects.lock().unwrap_or_else(|e| e.into_inner());
         projects.push(project.clone());
@@ -1248,6 +1255,28 @@ impl Store {
             p.layout = Some(layout);
             self.save(&projects);
         }
+    }
+
+    /// Flip a project's task-board flag. Opening the board (`list_board`) turns this on so
+    /// every FUTURE session spawned for the project gets the fleet MCP server (and thus
+    /// `task_*`), not only Conductor/mission/mailbox sessions -- see `gets_fleet_mcp` in
+    /// `lib.rs`. Already-spawned sessions are not retroactively reconnected.
+    pub fn set_board_enabled(&self, project_id: &str, enabled: bool) {
+        let mut projects = self.projects.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(p) = projects.iter_mut().find(|p| p.id == project_id) {
+            p.board_enabled = enabled;
+            self.save(&projects);
+        }
+    }
+
+    /// Whether the project a session belongs to has its task board enabled (see
+    /// `set_board_enabled`). False (not an error) for an unknown session.
+    pub fn board_enabled_for_session(&self, session_id: &str) -> bool {
+        let projects = self.projects.lock().unwrap_or_else(|e| e.into_inner());
+        projects
+            .iter()
+            .find(|p| p.sessions.iter().any(|s| s.id == session_id))
+            .is_some_and(|p| p.board_enabled)
     }
 
     pub fn rename_session(&self, project_id: &str, session_id: &str, name: String) {

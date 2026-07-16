@@ -180,7 +180,14 @@ fn pty_spawn(
         && this_session
             .as_ref()
             .is_some_and(|s| opts_into_mailbox(mission_record.is_some(), &s.channels));
-    let gets_fleet_mcp = mission_record.is_some() || opted_into_mailbox;
+    // Task 15: a session belonging to a project whose task board has been opened at least
+    // once (`list_board` -> `Store::set_board_enabled`) also qualifies for the fleet MCP
+    // server -- board-enabled projects want every session to be able to call `task_*`, not
+    // only Conductor/mission/mailbox sessions. Resolved from `store` by session id rather
+    // than threading a `Project` through the spawn path, mirroring
+    // `session_account_config_dir`'s session->project lookup.
+    let project_board_on = !shell_only && store.board_enabled_for_session(&session_id);
+    let gets_fleet_mcp = mission_record.is_some() || opted_into_mailbox || project_board_on;
     // SPEC-B: model_tier -> concrete model id + effort, Claude only -- the only adapter
     // with a verified per-invocation flag for either (`claude --help` lists both `--model
     // <model>` and `--effort <low|medium|high|xhigh|max>`). Other adapters have no
@@ -443,14 +450,31 @@ fn project_root(store: &Store, project_id: &str) -> Result<String, String> {
 }
 
 fn emit_board_changed(app: &tauri::AppHandle, project_id: &str) {
-    let _ = app.emit("board-changed", serde_json::json!({ "projectId": project_id }));
+    let _ = app.emit(
+        "board-changed",
+        serde_json::json!({ "projectId": project_id }),
+    );
 }
 
 #[tauri::command]
-fn list_board(store: State<Arc<Store>>, board: State<Arc<TaskBoard>>, project_id: String) -> Result<BoardSnapshot, String> {
+fn list_board(
+    store: State<Arc<Store>>,
+    board: State<Arc<TaskBoard>>,
+    project_id: String,
+) -> Result<BoardSnapshot, String> {
     let root = project_root(&store, &project_id)?;
     board.ensure_scaffold(&root)?;
+    // Opening the board at least once enables the fleet MCP server (and `task_*`) for
+    // every session this project spawns from now on -- see `gets_fleet_mcp` in `pty_spawn`.
+    store.set_board_enabled(&project_id, true);
     Ok(board.snapshot(&root))
+}
+
+/// Toggle a project's task-board flag directly (e.g. if the UI ever wants to disable it
+/// again). `list_board` already turns this on the first time the board is opened.
+#[tauri::command]
+fn set_board_enabled(project_id: String, enabled: bool, store: State<Arc<Store>>) {
+    store.set_board_enabled(&project_id, enabled);
 }
 
 #[tauri::command]
@@ -1416,6 +1440,7 @@ pub fn run() {
             add_project,
             remove_project,
             list_board,
+            set_board_enabled,
             board_add_card,
             board_move_card,
             board_edit_card,

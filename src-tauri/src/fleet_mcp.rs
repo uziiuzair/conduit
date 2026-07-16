@@ -200,9 +200,21 @@ fn resolve_pair(
     Ok((caller, target))
 }
 
-/// Tools a Worker-role caller may invoke -- the vertical/horizontal DATA tools, never
+/// Tools a Worker-role caller may invoke -- the vertical/horizontal DATA tools, plus the
+/// task-board tools (Task 15: a worker claims/moves/comments its own cards), but never
 /// anything that spawns, commands, or observes a sibling session (design doc §2.0).
-const WORKER_ALLOWED: &[&str] = &["fleet_result", "fleet_note", "fleet_inbox"];
+const WORKER_ALLOWED: &[&str] = &[
+    "fleet_result",
+    "fleet_note",
+    "fleet_inbox",
+    "task_list",
+    "task_get",
+    "task_claim",
+    "task_release",
+    "task_move",
+    "task_comment",
+    "task_add",
+];
 
 /// Every tool call MUST pass through this before touching Store/Pty/Board. Conductor:
 /// all tools. Worker: only `WORKER_ALLOWED`. Takes `&Store` (not `&Ctx`) so it's testable
@@ -880,7 +892,7 @@ mod tests {
     }
 
     #[test]
-    fn tools_list_includes_all_eleven() {
+    fn tools_list_includes_fleet_and_task_tools() {
         let names: Vec<String> = tool_specs()
             .into_iter()
             .map(|t| t["name"].as_str().unwrap().to_string())
@@ -897,6 +909,13 @@ mod tests {
             "fleet_inbox",
             "fleet_roster",
             "fleet_capabilities",
+            "task_list",
+            "task_get",
+            "task_claim",
+            "task_release",
+            "task_move",
+            "task_comment",
+            "task_add",
         ] {
             assert!(names.contains(&n.to_string()), "missing {n}");
         }
@@ -1272,6 +1291,26 @@ mod tests {
         let (store, _conductor, worker) = store_with_conductor_and_worker("authz_mailbox");
         assert!(authorize(&store, &worker.id, "fleet_note").is_ok());
         assert!(authorize(&store, &worker.id, "fleet_inbox").is_ok());
+    }
+
+    #[test]
+    fn workers_may_use_task_tools_but_not_orchestration() {
+        let (store, _conductor, worker) = store_with_conductor_and_worker("authz_task_tools");
+        for t in [
+            "task_list",
+            "task_get",
+            "task_claim",
+            "task_release",
+            "task_move",
+            "task_comment",
+            "task_add",
+        ] {
+            assert!(
+                authorize(&store, &worker.id, t).is_ok(),
+                "worker should be allowed {t}"
+            );
+        }
+        assert!(authorize(&store, &worker.id, "fleet_spawn").is_err());
     }
 
     #[test]
