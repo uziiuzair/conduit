@@ -24,6 +24,8 @@ import {
 import { cleanupEdits } from "./trim";
 import type * as Monaco from "monaco-editor";
 import type { SettingsTab } from "./components/Settings";
+import type { PluginDescriptor, PluginPermission } from "./plugins/types";
+import { pluginHost } from "./plugins/host";
 
 // ---- Types (mirror the Rust serde structs, rename_all = "camelCase") ----
 export type SessionRole = "worker" | "conductor";
@@ -756,6 +758,15 @@ interface AppState {
   removeMcpServer: (name: string) => Promise<void>;
   /** Invokes mcp_apply; sets pending/error per-cell, reverts on failure. */
   setMcpEnabled: (name: string, agent: AgentId, on: boolean) => Promise<void>;
+
+  // Plugins
+  plugins: PluginDescriptor[];
+  refreshPlugins: () => Promise<void>;
+  enablePlugin: (id: string, grants: PluginPermission[], version: string) => Promise<void>;
+  disablePlugin: (id: string) => Promise<void>;
+  removePlugin: (id: string) => Promise<void>;
+  setAllPluginsEnabled: (enabled: boolean) => Promise<void>;
+
   addProject: (path: string) => Promise<void>;
   removeProject: (id: string) => Promise<void>;
   addSession: (projectId: string, opts?: { name?: string; useWorktree?: boolean; agent?: AgentId; role?: SessionRole; account?: string | null }) => Promise<void>;
@@ -992,6 +1003,9 @@ export const useStore = create<AppState>((set, get) => {
     mcpServers: _initMcp.servers,
     mcpEnabled: _initMcp.enabled,
     mcpBusy: {},
+
+    plugins: [],
+
     topTab: "files",
     bottomTab: "terminal",
     themePref: readStoredPref(),
@@ -1279,6 +1293,37 @@ export const useStore = create<AppState>((set, get) => {
       } catch (e) {
         set((s) => ({ mcpBusy: { ...s.mcpBusy, [key]: { error: String(e) } } }));
       }
+    },
+
+    refreshPlugins: async () => {
+      const plugins = await invoke<PluginDescriptor[]>("list_plugins");
+      set({ plugins });
+    },
+    enablePlugin: async (id, grants, version) => {
+      await invoke("set_plugin_grants", { id, permissions: grants, consentedVersion: version });
+      await invoke("set_plugin_enabled", { id, enabled: true });
+      await get().refreshPlugins();
+      const desc = get().plugins.find((p) => p.id === id);
+      if (desc) await pluginHost.start(desc);
+    },
+    disablePlugin: async (id) => {
+      pluginHost.stop(id);
+      await invoke("set_plugin_enabled", { id, enabled: false });
+      await get().refreshPlugins();
+    },
+    removePlugin: async (id) => {
+      pluginHost.stop(id);
+      await invoke("remove_plugin", { id });
+      await get().refreshPlugins();
+    },
+    setAllPluginsEnabled: async (enabled) => {
+      if (!enabled) pluginHost.stopAll();
+      for (const p of get().plugins) {
+        if (p.manifest && p.problems.length === 0) {
+          await invoke("set_plugin_enabled", { id: p.id, enabled });
+        }
+      }
+      await get().refreshPlugins();
     },
 
     addProject: async (path) => {
