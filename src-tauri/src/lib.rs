@@ -572,6 +572,37 @@ fn board_release_card(
 }
 
 #[tauri::command]
+fn board_start_workflow(
+    app: tauri::AppHandle,
+    store: State<Arc<Store>>,
+    board: State<Arc<TaskBoard>>,
+    project_id: String,
+    id: String,
+) -> Result<Card, String> {
+    let root = project_root(&store, &project_id)?;
+    board.ensure_agents(&root).ok();
+    board.ensure_knowledge(&root).ok();
+    let card = board.start_workflow(&root, &id, "human")?;
+    emit_board_changed(&app, &project_id);
+    Ok(card)
+}
+
+#[tauri::command]
+fn board_resolve_gate(
+    app: tauri::AppHandle,
+    store: State<Arc<Store>>,
+    board: State<Arc<TaskBoard>>,
+    project_id: String,
+    id: String,
+    approved: bool,
+) -> Result<Card, String> {
+    let root = project_root(&store, &project_id)?;
+    let card = board.resolve_gate(&root, &id, approved, "human")?;
+    emit_board_changed(&app, &project_id);
+    Ok(card)
+}
+
+#[tauri::command]
 fn add_session(
     project_id: String,
     name: String,
@@ -1449,6 +1480,8 @@ pub fn run() {
             board_delete_card,
             board_set_columns,
             board_release_card,
+            board_start_workflow,
+            board_resolve_gate,
             add_session,
             detect_agents,
             rename_session,

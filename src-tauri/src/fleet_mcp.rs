@@ -160,6 +160,10 @@ pub fn tool_specs() -> Vec<Value> {
             "inputSchema": {"type":"object","properties":{"id":{"type":"string"},"text":{"type":"string"}},"required":["id","text"]} }),
         json!({ "name": "task_add", "description": "Create a card in a column (default backlog).",
             "inputSchema": {"type":"object","properties":{"title":{"type":"string"},"body":{"type":"string"},"column":{"type":"string"}},"required":["title"]} }),
+        json!({ "name": "task_workflow_start", "description": "Attach the stage-gate workflow to a card (starts at discovery). Use for work that needs the full requirements→architecture→verify pipeline.",
+            "inputSchema": {"type":"object","properties":{"id":{"type":"string"}},"required":["id"]} }),
+        json!({ "name": "task_advance", "description": "Report the outcome of your current stage on a workflow card you have claimed. outcome ∈ completed|failed_checks|design_conflict|ux_conflict. Stops at human gates.",
+            "inputSchema": {"type":"object","properties":{"id":{"type":"string"},"outcome":{"type":"string"},"note":{"type":"string"}},"required":["id","outcome"]} }),
     ]
 }
 
@@ -214,6 +218,8 @@ const WORKER_ALLOWED: &[&str] = &[
     "task_move",
     "task_comment",
     "task_add",
+    "task_workflow_start",
+    "task_advance",
 ];
 
 /// Every tool call MUST pass through this before touching Store/Pty/Board. Conductor:
@@ -673,9 +679,10 @@ fn dispatch_tool(name: &str, args: &Value, ctx: &Ctx) -> Result<String, String> 
                 .ok_or("missing id")?;
             let running = ctx.fleet.running_sessions();
             let live = |sid: &str| running.iter().any(|r| r.as_str() == sid);
-            let claim = ctx.tasks.claim_card(&root, id, &ctx.conductor_id, &live)?;
+            ctx.tasks.claim_card(&root, id, &ctx.conductor_id, &live)?;
+            let briefing = ctx.tasks.claim_briefing(&root, id)?;
             emit_board_changed(ctx);
-            serde_json::to_string(&claim).map_err(|e| e.to_string())
+            serde_json::to_string(&briefing).map_err(|e| e.to_string())
         }
         "task_release" => {
             let root = caller_project_root(ctx)?;
@@ -741,6 +748,38 @@ fn dispatch_tool(name: &str, args: &Value, ctx: &Ctx) -> Result<String, String> 
             let card = ctx
                 .tasks
                 .add_card(&root, title, body, column, &ctx.conductor_id)?;
+            emit_board_changed(ctx);
+            serde_json::to_string(&card).map_err(|e| e.to_string())
+        }
+        "task_workflow_start" => {
+            let root = caller_project_root(ctx)?;
+            let id = args.get("id").and_then(|v| v.as_str()).ok_or("missing id")?;
+            // Scaffold the shared assets first (idempotent; each takes its own lock, so they must
+            // NOT be called from inside start_workflow), then attach the workflow.
+            ctx.tasks.ensure_agents(&root).ok();
+            ctx.tasks.ensure_knowledge(&root).ok();
+            let card = ctx.tasks.start_workflow(&root, id, &ctx.conductor_id)?;
+            emit_board_changed(ctx);
+            serde_json::to_string(&card).map_err(|e| e.to_string())
+        }
+        "task_advance" => {
+            let root = caller_project_root(ctx)?;
+            let id = args.get("id").and_then(|v| v.as_str()).ok_or("missing id")?;
+            // Only the claim holder may advance.
+            let snap = ctx.tasks.snapshot(&root);
+            match snap.cards.iter().find(|c| c.id == id).and_then(|c| c.claim.as_ref()) {
+                Some(cl) if cl.by == ctx.conductor_id => {}
+                _ => return Err("advance requires holding this card's claim".to_string()),
+            }
+            let outcome = match args.get("outcome").and_then(|v| v.as_str()).ok_or("missing outcome")? {
+                "completed" => crate::tasks::stage_machine::Outcome::Completed,
+                "failed_checks" => crate::tasks::stage_machine::Outcome::FailedChecks,
+                "design_conflict" => crate::tasks::stage_machine::Outcome::DesignConflict,
+                "ux_conflict" => crate::tasks::stage_machine::Outcome::UxConflict,
+                other => return Err(format!("outcome not allowed from an agent: {other}")),
+            };
+            let note = args.get("note").and_then(|v| v.as_str()).unwrap_or("");
+            let card = ctx.tasks.advance(&root, id, outcome, &ctx.conductor_id, note)?;
             emit_board_changed(ctx);
             serde_json::to_string(&card).map_err(|e| e.to_string())
         }
@@ -926,6 +965,8 @@ mod tests {
             "task_move",
             "task_comment",
             "task_add",
+            "task_workflow_start",
+            "task_advance",
         ] {
             assert!(names.contains(&n.to_string()), "missing {n}");
         }
