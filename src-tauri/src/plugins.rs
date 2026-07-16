@@ -143,6 +143,20 @@ pub fn validate_manifest(m: &PluginManifest, folder_name: &str, app_version: &st
     problems
 }
 
+/// Persisted per-plugin state. No secrets here.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginRecord {
+    pub id: String,
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub granted_permissions: Vec<String>,
+    /// The manifest version the user last consented to (for escalation detection).
+    #[serde(default)]
+    pub consented_version: String,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
