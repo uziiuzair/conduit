@@ -3,6 +3,13 @@
  *  with no DOM, no window IPC — only postMessage to the host. */
 export const WORKER_BOOTSTRAP = /* js */ `
 let plugin = null;
+// Deny ambient capabilities: plugins reach the network only via the gated
+// conduit.net.fetch (host.request). Removing these from the worker global stops
+// a plugin from bypassing the permission gate with a direct fetch()/WebSocket().
+for (const cap of ["fetch","XMLHttpRequest","WebSocket","EventSource","importScripts","Worker","SharedWorker","indexedDB","caches","BroadcastChannel"]) {
+  try { Object.defineProperty(self, cap, { value: undefined, configurable: false, writable: false }); } catch (e) {}
+}
+try { if (self.navigator) Object.defineProperty(self.navigator, "sendBeacon", { value: undefined, configurable: false }); } catch (e) {}
 let ridSeq = 1;
 const pending = new Map();          // rid -> {resolve,reject}
 const eventHandlers = new Map();    // event -> Set<fn>
