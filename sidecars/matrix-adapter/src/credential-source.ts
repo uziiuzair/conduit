@@ -22,3 +22,19 @@ export interface MatrixCredentialSource {
   readonly provider: "badgerclaw" | "matrix";
   acquire(): Promise<Credentials>;
 }
+
+export class GenericMatrixProvider implements MatrixCredentialSource {
+  readonly provider = "matrix" as const;
+  constructor(private readonly input: MatrixSession) {}
+  async acquire(): Promise<Credentials> {
+    validateMatrixSession(this.input);
+    return {
+      homeserver: this.input.homeserver,
+      userId: this.input.userId,
+      accessToken: this.input.accessToken,
+      deviceId: this.input.deviceId,
+      botName: this.input.botName ?? null,
+      botId: this.input.botId ?? null,
+    };
+  }
+}
