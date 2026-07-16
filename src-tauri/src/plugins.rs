@@ -273,6 +273,12 @@ pub fn set_plugin_grants(
     if !is_valid_id(&id) {
         return Err("invalid plugin id".into());
     }
+    // Defense in depth: only persist ids we recognize, so a bad caller can't
+    // stash arbitrary permission strings that some future code path might trust.
+    let permissions: Vec<String> = permissions
+        .into_iter()
+        .filter(|p| KNOWN_PERMISSIONS.contains(&p.as_str()))
+        .collect();
     store.update_plugin_record(&id, |r| {
         r.granted_permissions = permissions;
         r.consented_version = consented_version;
