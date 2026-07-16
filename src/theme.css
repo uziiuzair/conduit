@@ -677,8 +677,25 @@ button {
   max-width: 320px;
 }
 
-/* ---- Task board overlay (ports TaskBoardView) ---- */
-.board-overlay { position: absolute; inset: 0; z-index: 3; background: var(--panel-bg); overflow: hidden; display: flex; }
+/* ---- Task board (a workspace tab; fills the content area below the tab strip) ---- */
+.board-tab {
+  position: absolute; top: 4px; right: 10px; z-index: 6;
+  display: inline-flex; align-items: center; gap: 6px;
+  height: calc(var(--tabstrip-h) - 8px); padding: 0 12px;
+  font: inherit; font-size: 12px; font-weight: 600; color: var(--text-mid);
+  background: var(--panel-bg); border: 1px solid var(--border); border-radius: 8px;
+  cursor: pointer; transition: color .15s, border-color .15s, background .15s;
+}
+.board-tab:hover { color: var(--text-bright); background: var(--hover); }
+.board-tab.active {
+  color: var(--text-bright);
+  background: color-mix(in srgb, var(--accent) 16%, var(--panel-bg));
+  border-color: color-mix(in srgb, var(--accent) 55%, var(--border));
+}
+.board-tab-dot { width: 7px; height: 7px; border-radius: 2px; background: var(--accent); }
+.board-tab.active .board-tab-dot { box-shadow: 0 0 8px color-mix(in srgb, var(--accent) 65%, transparent); }
+
+.board-overlay { position: absolute; top: var(--tabstrip-h); left: 0; right: 0; bottom: 0; z-index: 3; background: var(--panel-bg); overflow: hidden; display: flex; }
 .board-view { flex: 1; display: flex; flex-direction: column; min-width: 0; }
 
 .board-toolbar {

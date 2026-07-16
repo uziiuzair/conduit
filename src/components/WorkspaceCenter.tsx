@@ -221,6 +221,22 @@ export function WorkspaceCenter({
             ) : null,
           )}
 
+        {projectId && (
+          <button
+            type="button"
+            className={`board-tab ${centerMode === "board" ? "active" : ""}`}
+            title="Task board (⇧⌘B)"
+            onClick={() =>
+              useStore
+                .getState()
+                .setCenterMode(projectId, centerMode === "board" ? "terminals" : "board")
+            }
+          >
+            <span className="board-tab-dot" />
+            Board
+          </button>
+        )}
+
         {layout &&
           !isMax &&
           layout.groups.slice(1).map((g, i) => (
@@ -380,6 +396,7 @@ function GroupTabStrip({
 }) {
   const setActiveTab = useStore((s) => s.setActiveTab);
   const setActiveGroup = useStore((s) => s.setActiveGroup);
+  const setCenterMode = useStore((s) => s.setCenterMode);
   const requestCloseTab = useStore((s) => s.requestCloseTab);
   const pinTab = useStore((s) => s.pinTab);
   const dirty = useStore((s) => s.dirty);
@@ -449,7 +466,10 @@ function GroupTabStrip({
               const rect = e.currentTarget.getBoundingClientRect();
               setCaretIndex(e.clientX < rect.left + rect.width / 2 ? i : i + 1);
             }}
-            onClick={() => setActiveTab(projectId, group.id, t.ref)}
+            onClick={() => {
+              setActiveTab(projectId, group.id, t.ref);
+              setCenterMode(projectId, "terminals");
+            }}
             onDoubleClick={() => {
               // Double-click pins a preview tab (VS Code semantics).
               if (t.kind === "file" && t.preview) pinTab(projectId, t.ref);

@@ -8,7 +8,6 @@ import { BoardColumn } from "./BoardColumn";
 export function BoardView({ projectId }: { projectId: string }) {
   useBoard(projectId, true);
   const snap = useStore((s) => s.boards[projectId]);
-  const setCenterMode = useStore((s) => s.setCenterMode);
   const dragId = useRef<string | null>(null);
   const [adding, setAdding] = useState<string | null>(null);
   const [draft, setDraft] = useState("");
@@ -46,10 +45,6 @@ export function BoardView({ projectId }: { projectId: string }) {
 
   return (
     <div className="board-view">
-      <div className="board-toolbar">
-        <span className="board-title">Board</span>
-        <button className="board-close" onClick={() => setCenterMode(projectId, "terminals")}>Terminals ⇧⌘B</button>
-      </div>
       <div className="board-columns">
         {snap.columns.map((col) => (
           <div key={col.id} className="board-column-wrap">
