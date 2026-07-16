@@ -680,27 +680,129 @@ button {
 /* ---- Task board overlay (ports TaskBoardView) ---- */
 .board-overlay { position: absolute; inset: 0; z-index: 3; background: var(--panel-bg); overflow: hidden; display: flex; }
 .board-view { flex: 1; display: flex; flex-direction: column; min-width: 0; }
-.board-toolbar { display: flex; align-items: center; gap: 8px; padding: 8px 12px; border-bottom: 1px solid var(--border); }
-.board-title { font-weight: 600; }
-.board-close { margin-left: auto; }
-.board-columns { flex: 1; display: flex; gap: 10px; padding: 12px; overflow-x: auto; }
-.board-column-wrap { display: flex; flex-direction: column; min-width: 220px; }
-.board-column { flex: 1; background: rgba(127,127,127,0.08); border-radius: 8px; padding: 8px; display: flex; flex-direction: column; }
-.board-column-head { display: flex; justify-content: space-between; font-size: 12px; text-transform: uppercase; opacity: 0.7; margin-bottom: 8px; }
-.board-column-body { flex: 1; display: flex; flex-direction: column; gap: 6px; min-height: 20px; }
-.board-card { background: var(--sidebar-bg); border: 1px solid var(--border); border-radius: 6px; padding: 8px; cursor: grab; }
-.board-card-title { font-size: 13px; }
-.board-card-labels { display: flex; gap: 4px; margin-top: 4px; }
-.board-label { font-size: 10px; padding: 1px 6px; border-radius: 99px; background: rgba(127,127,127,0.2); }
-.board-claim { display: inline-block; margin-top: 6px; font-size: 10px; padding: 1px 6px; border-radius: 99px; }
-.board-claim.ai { background: rgba(88,101,242,0.25); }
-.board-claim.human { background: rgba(52,199,89,0.22); }
-.board-stage { display:inline-block; margin-top:6px; font-size:10px; padding:1px 6px; border-radius:99px; background:rgba(127,127,127,0.18); text-transform:capitalize; }
-.board-gate { display:inline-block; margin:6px 0 0 6px; font-size:10px; padding:1px 6px; border-radius:99px; background:rgba(255,196,0,0.22); color:#e6b800; font-weight:700; }
-.board-gate-actions { display:flex; gap:6px; margin-top:6px; }
-.board-gate-actions button { font-size:11px; }
-.board-add { margin-top: 6px; font-size: 12px; opacity: 0.75; }
-.board-add-input { margin-top: 6px; }
+
+.board-toolbar {
+  display: flex; align-items: center; gap: 10px; flex: none;
+  height: 46px; padding: 0 18px;
+  border-bottom: 1px solid var(--border);
+  background: linear-gradient(180deg, color-mix(in srgb, var(--accent) 5%, var(--sidebar-bg)), var(--sidebar-bg));
+}
+.board-title {
+  display: flex; align-items: center; gap: 9px;
+  font-size: 13px; font-weight: 650; letter-spacing: 0.01em; color: var(--text-bright);
+}
+.board-title::before {
+  content: ""; width: 7px; height: 7px; border-radius: 2px; background: var(--accent);
+  box-shadow: 0 0 9px color-mix(in srgb, var(--accent) 65%, transparent);
+}
+.board-close {
+  margin-left: auto; font: inherit; font-size: 12px; color: var(--text-mid);
+  background: transparent; border: 1px solid var(--border); border-radius: 8px;
+  padding: 5px 11px; cursor: pointer;
+  transition: color .15s, border-color .15s, background .15s;
+}
+.board-close:hover {
+  color: var(--text-bright); background: var(--hover);
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
+}
+
+/* Columns stretch to fill the full width; scroll only when they'd get narrower than min. */
+.board-columns {
+  flex: 1; display: flex; align-items: stretch; gap: 16px;
+  padding: 18px; overflow-x: auto; overflow-y: hidden;
+}
+.board-column-wrap { flex: 1 1 0; min-width: 250px; display: flex; flex-direction: column; min-height: 0; }
+.board-column {
+  flex: 1; min-height: 0; display: flex; flex-direction: column; overflow: hidden;
+  background: color-mix(in srgb, var(--sidebar-bg) 60%, var(--panel-bg));
+  border: 1px solid var(--border); border-radius: 14px;
+}
+.board-column-head {
+  display: flex; align-items: center; gap: 8px; flex: none;
+  padding: 12px 14px 10px;
+  font-size: 11px; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase;
+  color: var(--text-mid);
+}
+.board-count {
+  margin-left: auto; min-width: 22px; text-align: center;
+  font-size: 10.5px; font-weight: 700; letter-spacing: 0; color: var(--text-dim);
+  background: var(--panel-bg); border: 1px solid var(--border);
+  border-radius: 99px; padding: 1px 7px;
+}
+.board-column-body {
+  flex: 1; min-height: 0; overflow-y: auto;
+  display: flex; flex-direction: column; gap: 8px; padding: 4px 11px 12px;
+}
+.board-column-body::-webkit-scrollbar { width: 9px; }
+.board-column-body::-webkit-scrollbar-thumb { background: var(--border); border-radius: 99px; border: 2px solid transparent; background-clip: padding-box; }
+.board-column-body:hover::-webkit-scrollbar-thumb { background: var(--text-dim); background-clip: padding-box; }
+
+.board-card {
+  background: var(--sidebar-bg); border: 1px solid var(--border); border-radius: 10px;
+  padding: 11px 12px; cursor: grab; box-shadow: 0 1px 2px rgba(0, 0, 0, 0.28);
+  transition: transform .12s ease, border-color .12s ease, box-shadow .12s ease;
+}
+.board-card:hover {
+  transform: translateY(-1px);
+  border-color: color-mix(in srgb, var(--accent) 40%, var(--border));
+  box-shadow: 0 5px 16px rgba(0, 0, 0, 0.38);
+}
+.board-card:active { cursor: grabbing; transform: none; }
+.board-card-title { font-size: 13px; line-height: 1.4; color: var(--text-bright); }
+.board-card-labels { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 8px; }
+.board-label {
+  font-size: 10px; font-weight: 600; padding: 1.5px 8px; border-radius: 99px;
+  background: var(--tag-chip-bg); color: var(--tag-chip-text);
+}
+
+.board-claim {
+  display: inline-flex; align-items: center; gap: 5px; margin-top: 9px;
+  font-size: 10px; font-weight: 600; padding: 2px 9px; border-radius: 99px;
+}
+.board-claim::before { content: ""; width: 5px; height: 5px; border-radius: 99px; background: currentColor; }
+.board-claim.ai { background: color-mix(in srgb, var(--accent) 16%, transparent); color: var(--accent); }
+.board-claim.human { background: color-mix(in srgb, var(--green) 16%, transparent); color: var(--green); }
+
+.board-stage {
+  display: inline-block; margin: 9px 6px 0 0;
+  font-size: 10px; font-weight: 600; padding: 2px 9px; border-radius: 99px;
+  background: var(--chip-bg); color: var(--chip-text); text-transform: capitalize;
+}
+.board-gate {
+  display: inline-block; margin-top: 9px;
+  font-size: 10px; font-weight: 700; letter-spacing: 0.02em; padding: 2px 9px; border-radius: 99px;
+  background: var(--pill-needs-bg); color: var(--pill-needs-text);
+}
+.board-gate-actions { display: flex; gap: 7px; margin-top: 10px; }
+.board-gate-actions button {
+  flex: 1; font: inherit; font-size: 11px; font-weight: 600; padding: 5px 8px;
+  border-radius: 8px; border: 1px solid var(--border); background: var(--panel-bg);
+  color: var(--text-mid); cursor: pointer;
+  transition: color .15s, border-color .15s, background .15s;
+}
+.board-gate-actions button:first-child {
+  color: var(--green); border-color: color-mix(in srgb, var(--green) 35%, var(--border));
+}
+.board-gate-actions button:hover { background: var(--hover); }
+
+.board-add {
+  margin: 2px 0 0; flex: none; text-align: center;
+  font: inherit; font-size: 12px; font-weight: 500; color: var(--text-dim);
+  background: transparent; border: 1px dashed var(--border); border-radius: 9px;
+  padding: 8px; cursor: pointer;
+  transition: color .15s, border-color .15s, background .15s;
+}
+.board-add:hover {
+  color: var(--accent); background: color-mix(in srgb, var(--accent) 6%, transparent);
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
+}
+.board-add-input {
+  margin: 2px 0 0; flex: none;
+  font: inherit; font-size: 13px; color: var(--text-bright);
+  background: var(--panel-bg); border: 1px solid color-mix(in srgb, var(--accent) 55%, var(--border));
+  border-radius: 9px; padding: 8px 11px; outline: none;
+}
+.board-add-input::placeholder { color: var(--text-dim); }
 
 /* ---- Right panel (ports RightPanelView) ---- */
 .tab-bar {

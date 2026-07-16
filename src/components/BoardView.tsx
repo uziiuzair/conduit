@@ -59,17 +59,19 @@ export function BoardView({ projectId }: { projectId: string }) {
               projectId={projectId}
               onDragStart={(id) => { dragId.current = id; }}
               onDropCard={onDropCard}
+              footer={
+                adding === col.id ? (
+                  <input
+                    className="board-add-input" autoFocus value={draft}
+                    onChange={(e) => setDraft(e.target.value)}
+                    onBlur={() => addCard(col.id)}
+                    onKeyDown={(e) => { if (e.key === "Enter") addCard(col.id); if (e.key === "Escape") { setAdding(null); setDraft(""); } }}
+                  />
+                ) : (
+                  <button className="board-add" onClick={() => setAdding(col.id)}>+ Add</button>
+                )
+              }
             />
-            {adding === col.id ? (
-              <input
-                className="board-add-input" autoFocus value={draft}
-                onChange={(e) => setDraft(e.target.value)}
-                onBlur={() => addCard(col.id)}
-                onKeyDown={(e) => { if (e.key === "Enter") addCard(col.id); if (e.key === "Escape") { setAdding(null); setDraft(""); } }}
-              />
-            ) : (
-              <button className="board-add" onClick={() => setAdding(col.id)}>+ Add</button>
-            )}
           </div>
         ))}
       </div>

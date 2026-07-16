@@ -1,12 +1,14 @@
+import type { ReactNode } from "react";
 import type { BoardColumn as Col, BoardCard as Card } from "../store";
 import { BoardCard } from "./BoardCard";
 
 export function BoardColumn({
-  column, cards, projectId, onDragStart, onDropCard,
+  column, cards, projectId, footer, onDragStart, onDropCard,
 }: {
   column: Col;
   cards: Card[];
   projectId: string;
+  footer?: ReactNode;
   onDragStart: (id: string) => void;
   onDropCard: (columnId: string, beforeCardId: string | null) => void;
 }) {
@@ -27,6 +29,7 @@ export function BoardColumn({
             <BoardCard card={c} projectId={projectId} onDragStart={onDragStart} />
           </div>
         ))}
+        {footer}
       </div>
     </div>
   );
