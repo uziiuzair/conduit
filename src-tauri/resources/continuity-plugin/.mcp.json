@@ -1,0 +1,16 @@
+{
+  "mcpServers": {
+    "continuity": {
+      "command": "node",
+      "args": ["${CLAUDE_PLUGIN_ROOT}/mcp/launch.mjs"],
+      "env": {
+        "NODE_NO_WARNINGS": "1",
+        "CONTINUITY_API_URL": "${user_config.apiUrl}",
+        "CONTINUITY_API_KEY": "${user_config.apiKey}",
+        "CONTINUITY_REPO_ALLOWLIST": "${user_config.repoAllowlist}",
+        "CONTINUITY_DB_PATH": "${user_config.dbPath}",
+        "CONTINUITY_MESSAGE_TIMEOUT_MIN": "${user_config.messageTimeoutMinutes}"
+      }
+    }
+  }
+}

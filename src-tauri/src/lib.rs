@@ -12,6 +12,7 @@ mod broker;
 mod claude_status;
 mod claude_usage;
 mod clipboard;
+mod continuity;
 mod fleet;
 mod fleet_mcp;
 mod format;

@@ -1,0 +1,43 @@
+{
+  "name": "continuity",
+  "version": "0.1.0-alpha.3",
+  "description": "[Alpha] Shared presence, file-activity awareness, decisions, task claims & handoffs for parallel Claude Code sessions. Works locally (SQLite, zero-config) or against a team server.",
+  "author": {
+    "name": "Continuity contributors"
+  },
+  "userConfig": {
+    "apiUrl": {
+      "type": "string",
+      "title": "Team API URL (optional)",
+      "description": "Base URL of a Continuity team server (the Cloudflare Worker). Leave blank to run locally against a SQLite file — no server needed."
+    },
+    "apiKey": {
+      "type": "string",
+      "title": "Team API key (optional)",
+      "description": "Your API key for the team server. Required only for team mode; leave blank for local mode.",
+      "sensitive": true
+    },
+    "repoAllowlist": {
+      "type": "string",
+      "title": "Allowed git remotes (optional, comma-separated host/owner/repo)",
+      "description": "Restrict Continuity to specific repos. Leave blank to activate in any git repo."
+    },
+    "dbPath": {
+      "type": "string",
+      "title": "Local database path (optional)",
+      "description": "Where the local SQLite file lives. Defaults to ~/.continuity/continuity.db. Ignored in team mode."
+    },
+    "collisionGuard": {
+      "type": "string",
+      "title": "Collision guard mode",
+      "description": "negotiate (default): when another live session recently edited the same file, the agent must message that session and get a response (or wait out the timeout) before editing. warn: one warning, then the retry proceeds. off: no collision blocking. Legacy true/false map to negotiate/off.",
+      "default": "negotiate"
+    },
+    "messageTimeoutMinutes": {
+      "type": "number",
+      "title": "Message / block timeout (minutes)",
+      "description": "How long messages and edit blocks live before expiring on their own, in minutes. Expiry guarantees a silent teammate can never block you indefinitely. Default 10.",
+      "default": 10
+    }
+  }
+}

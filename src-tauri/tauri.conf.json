@@ -30,6 +30,7 @@
     "active": true,
     "createUpdaterArtifacts": true,
     "targets": ["app", "dmg"],
+    "resources": ["resources/continuity-plugin/**/*"],
     "publisher": "Ooozzy",
     "homepage": "https://ooozzy.com",
     "category": "DeveloperTool",
