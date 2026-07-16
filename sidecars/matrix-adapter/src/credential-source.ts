@@ -38,3 +38,13 @@ export class GenericMatrixProvider implements MatrixCredentialSource {
     };
   }
 }
+
+export class BadgerClawProvider implements MatrixCredentialSource {
+  readonly provider = "badgerclaw" as const;
+  /** `mint` is `() => refreshMatrixToken(account, bot, deviceId)` or the redeem flow,
+   *  bound by the caller in index.ts — keeps network out of this unit. */
+  constructor(private readonly mint: () => Promise<Credentials>) {}
+  acquire(): Promise<Credentials> {
+    return this.mint();
+  }
+}

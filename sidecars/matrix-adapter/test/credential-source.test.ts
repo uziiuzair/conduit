@@ -1,6 +1,8 @@
 import { describe, it, expect } from "vitest";
 import { validateMatrixSession } from "../src/credential-source.js";
 import { GenericMatrixProvider } from "../src/credential-source.js";
+import { BadgerClawProvider } from "../src/credential-source.js";
+import type { Credentials } from "../src/config.js";
 
 describe("validateMatrixSession", () => {
   it("accepts a complete session", () => {
@@ -40,5 +42,14 @@ describe("GenericMatrixProvider", () => {
   it("throws on invalid input before returning", async () => {
     const p = new GenericMatrixProvider({ homeserver: "http://x", userId: "@a:b", accessToken: "t", deviceId: null });
     await expect(p.acquire()).rejects.toThrow(/https/i);
+  });
+});
+
+describe("BadgerClawProvider", () => {
+  it("delegates to the injected mint fn and tags provider", async () => {
+    const fake: Credentials = { homeserver: "https://badger.signout.io", userId: "@bot:badger.signout.io", accessToken: "t", deviceId: "D", botName: "b", botId: "id" };
+    const p = new BadgerClawProvider(async () => fake);
+    expect(p.provider).toBe("badgerclaw");
+    expect(await p.acquire()).toBe(fake);
   });
 });
