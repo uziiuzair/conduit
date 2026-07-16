@@ -48,3 +48,15 @@ export class BadgerClawProvider implements MatrixCredentialSource {
     return this.mint();
   }
 }
+
+/** Resolve the human owner mxid to allowlist for a generic matrix-login. The relay
+ *  drops its OWN messages, so if the only allowlisted owner is the relay account
+ *  (`userId`) the relay is uncommandable — `selfOwner` flags that footgun so the
+ *  caller can warn. Pass `--owner <@you:server>` (distinct from the bot) to fix it. */
+export function resolveMatrixLoginOwner(
+  userId: string,
+  ownerArg: string | null,
+): { owner: string; selfOwner: boolean } {
+  const owner = ownerArg ?? userId;
+  return { owner, selfOwner: owner === userId };
+}

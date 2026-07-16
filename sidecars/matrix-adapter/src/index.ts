@@ -24,7 +24,12 @@ import {
   saveCredentials,
   saveSettings,
 } from "./config.js";
-import { GenericMatrixProvider, BadgerClawProvider, type MatrixCredentialSource } from "./credential-source.js";
+import {
+  GenericMatrixProvider,
+  BadgerClawProvider,
+  resolveMatrixLoginOwner,
+  type MatrixCredentialSource,
+} from "./credential-source.js";
 import { createMatrixClient } from "./matrix.js";
 import { Relay } from "./relay.js";
 
@@ -48,7 +53,7 @@ function usage(): never {
       "  conduit-matrix run",
       "      Connect to Matrix and the local Conduit bridge, then relay.",
       "",
-      "  conduit-matrix matrix-login --homeserver <https-url> --user <@you:server> --token <access-token>",
+      "  conduit-matrix matrix-login --homeserver <https-url> --user <@you:server> --token <access-token> [--owner <@you:server>]",
       "      Use an existing Matrix account/session directly, without BadgerClaw.",
       "",
       "  In a room with the bot: /conduit list · /conduit use <n> · /conduit detach",
@@ -180,15 +185,26 @@ async function matrixLogin(args: string[]): Promise<void> {
   const userId = argValue(args, "--user");
   const accessToken = argValue(args, "--token");
   if (!homeserver || !userId || !accessToken) {
-    console.error("usage: conduit-matrix matrix-login --homeserver <https-url> --user <@you:server> --token <access-token>");
+    console.error("usage: conduit-matrix matrix-login --homeserver <https-url> --user <@bot:server> --token <access-token> [--owner <@you:server>]");
+    process.exit(1);
+  }
+  const { owner, selfOwner } = resolveMatrixLoginOwner(userId, argValue(args, "--owner"));
+  if (!owner.startsWith("@")) {
+    console.error(`--owner must be a Matrix id like @you:server (got ${owner})`);
     process.exit(1);
   }
   const creds = await new GenericMatrixProvider({ homeserver, userId, accessToken, deviceId: null }).acquire();
   saveCredentials({ ...creds, provider: "matrix" });
   const settings = loadSettings();
-  if (!settings.owners.includes(userId)) settings.owners.push(userId);
+  if (!settings.owners.includes(owner)) settings.owners.push(owner);
   saveSettings(settings);
-  console.log(`saved generic Matrix session for ${userId}; run: conduit-matrix run`);
+  if (selfOwner) {
+    console.warn(
+      `warning: owner ${owner} is the relay's own account — the relay ignores its own messages, so it will not be commandable. ` +
+        `Re-run with --owner <your personal @mxid> to command it from your phone.`,
+    );
+  }
+  console.log(`saved generic Matrix session for ${userId}; owner allowlist: ${settings.owners.join(", ")}; run: conduit-matrix run`);
 }
 
 /** Refuse to start a SECOND relay: two processes share one rust-sdk crypto store,
