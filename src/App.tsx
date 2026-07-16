@@ -115,6 +115,15 @@ export default function App() {
         if (!m) return;
         e.preventDefault();
         useStore.getState().activateTabAt(Number(m[1]));
+        return;
+      }
+      // ⇧⌘B: toggle the task board overlay for the selected project (no native menu
+      // accelerator wired yet, so handled here like the other window-level shortcuts).
+      if (e.shiftKey && (e.metaKey || e.ctrlKey) && !e.altKey && e.key.toLowerCase() === "b") {
+        const st = useStore.getState();
+        if (!st.selectedProjectId) return;
+        e.preventDefault();
+        st.toggleCenterMode(st.selectedProjectId);
       }
     };
     window.addEventListener("keydown", onKey, true);
@@ -256,6 +265,9 @@ export default function App() {
           break;
         case "toggle-maximize":
           if (st.selectedProjectId) st.toggleMaximizeGroup(st.selectedProjectId);
+          break;
+        case "toggle-board":
+          if (st.selectedProjectId) st.toggleCenterMode(st.selectedProjectId);
           break;
         case "quick-open":
           setPalette("quickopen");

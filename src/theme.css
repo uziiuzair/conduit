@@ -677,6 +677,27 @@ button {
   max-width: 320px;
 }
 
+/* ---- Task board overlay (ports TaskBoardView) ---- */
+.board-overlay { position: absolute; inset: 0; z-index: 3; background: var(--panel-bg); overflow: hidden; display: flex; }
+.board-view { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+.board-toolbar { display: flex; align-items: center; gap: 8px; padding: 8px 12px; border-bottom: 1px solid var(--border); }
+.board-title { font-weight: 600; }
+.board-close { margin-left: auto; }
+.board-columns { flex: 1; display: flex; gap: 10px; padding: 12px; overflow-x: auto; }
+.board-column-wrap { display: flex; flex-direction: column; min-width: 220px; }
+.board-column { flex: 1; background: rgba(127,127,127,0.08); border-radius: 8px; padding: 8px; display: flex; flex-direction: column; }
+.board-column-head { display: flex; justify-content: space-between; font-size: 12px; text-transform: uppercase; opacity: 0.7; margin-bottom: 8px; }
+.board-column-body { flex: 1; display: flex; flex-direction: column; gap: 6px; min-height: 20px; }
+.board-card { background: var(--sidebar-bg); border: 1px solid var(--border); border-radius: 6px; padding: 8px; cursor: grab; }
+.board-card-title { font-size: 13px; }
+.board-card-labels { display: flex; gap: 4px; margin-top: 4px; }
+.board-label { font-size: 10px; padding: 1px 6px; border-radius: 99px; background: rgba(127,127,127,0.2); }
+.board-claim { display: inline-block; margin-top: 6px; font-size: 10px; padding: 1px 6px; border-radius: 99px; }
+.board-claim.ai { background: rgba(88,101,242,0.25); }
+.board-claim.human { background: rgba(52,199,89,0.22); }
+.board-add { margin-top: 6px; font-size: 12px; opacity: 0.75; }
+.board-add-input { margin-top: 6px; }
+
 /* ---- Right panel (ports RightPanelView) ---- */
 .tab-bar {
   display: flex;

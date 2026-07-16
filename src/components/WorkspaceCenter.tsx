@@ -13,6 +13,7 @@ import {
 } from "../store";
 import { TerminalView } from "./Terminal";
 import { CodeEditorPane } from "./CodeEditorPane";
+import { BoardView } from "./BoardView";
 import { TerminalIcon, FileIcon, CodeIcon, CloseIcon } from "./Icons";
 
 /** Payload carried by a native tab drag (shared between WorkspaceCenter and GroupTabStrip). */
@@ -59,6 +60,7 @@ export function WorkspaceCenter({
   home: string | null;
 }) {
   const layout = useStore((s) => (projectId ? s.layouts[projectId] : undefined));
+  const centerMode = useStore((s) => (projectId ? s.centerMode[projectId] ?? "terminals" : "terminals"));
   const setGroupWeights = useStore((s) => s.setGroupWeights);
   const moveTab = useStore((s) => s.moveTab);
   const splitTab = useStore((s) => s.splitTab);
@@ -331,6 +333,12 @@ export function WorkspaceCenter({
         </div>
 
         {nothingVisible && <EmptyState />}
+
+        {projectId && centerMode === "board" && (
+          <div className="board-overlay">
+            <BoardView projectId={projectId} />
+          </div>
+        )}
 
         {tabMenu && activeProject && projectId && (
           <TabContextMenu
