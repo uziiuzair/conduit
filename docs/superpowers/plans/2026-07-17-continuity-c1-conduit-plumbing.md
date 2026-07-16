@@ -4,7 +4,24 @@
 
 **Goal:** Ship the continuity plugin inside Conduit and, for every session spawned in a board-enabled project (when Node ≥22.5 is present), enable continuity (MCP tools **and** its presence hooks) with a distinct `CONTINUITY_SESSION_ID`. If Node is absent/old, skip silently — the board and all existing features are unaffected.
 
-**Architecture:** Continuity is a Claude Code plugin: a stdio MCP server (`plugin/mcp/launch.mjs`) plus hooks (SessionStart→checkin, SessionEnd→checkout, UserPromptSubmit→focus) that drive presence. Conduit already installs profiles/plugins into a session's Claude config (`hooks.rs`) and writes per-session MCP config + env (`fleet.rs`/`pty.rs`). We reuse those seams to enable continuity per board-enabled session, gated on a Node-version probe.
+**Architecture:** Continuity is a Claude Code plugin: a stdio MCP server (`plugin/mcp/launch.mjs`) plus hooks (SessionStart→checkin, SessionEnd→checkout, UserPromptSubmit→focus) that drive presence.
+
+> **Task 0 RESULT (supersedes the original approach).** Claude CLI has **`claude --plugin-dir <dir>`** — a
+> **session-scoped** plugin load that pulls in the plugin's OWN `.mcp.json` (the stdio MCP server) **and**
+> `hooks/hooks.json` (the presence lifecycle) natively, `${CLAUDE_PLUGIN_ROOT}` resolved by the loader,
+> unset userConfig → zero-config local SQLite. No settings.json merge, no backup/uninstall bookkeeping, no
+> clobber of the user's hooks. So: **full presence (Option A) via `--plugin-dir`**, and the MCP-config-merge
+> task (old Task 3) is **DROPPED** — the plugin loads its own server. `hooks.rs` is **NOT touched**. The wiring
+> is: append `--plugin-dir <bundled-continuity-dir>` to the spawn flags + set `CONTINUITY_SESSION_ID`/
+> `CONTINUITY_AGENT_ID` env, gated on `continuity_on = !shell_only && project_board_on && agent==Claude`.
+> Bundle the plugin dir via `tauri.conf.json` `bundle.resources`, resolve with
+> `app.path().resolve("continuity-plugin", BaseDirectory::Resource)`.
+>
+> **Revised task list:** T1 vendor asset (Tauri resource) · T2 Node probe · **T3 spawn wiring (`--plugin-dir`
+> flag + env, gated)** — replaces old Tasks 3+4 · T4 E2E + version. Concrete file targets below (§Task 0
+> Facts) come from the investigation: `fleet.rs:205-222`, `pty.rs:229/261/276-293/710-711/776-777`,
+> `lib.rs:189-190/207-214/272/331-332`, `store.rs:394-402/1274-1280`, `hooks.rs:642-676`. No existing
+> bundled-directory-resource pattern in the repo — `--plugin-dir` + `bundle.resources` is new here.
 
 **Tech Stack:** Rust (Tauri), the bundled continuity plugin (pure JS), Node ≥22.5 at runtime.
 
