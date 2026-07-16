@@ -98,11 +98,17 @@ fn read_card_handoffs(
     conn: &rusqlite::Connection,
     project_id: &str,
 ) -> rusqlite::Result<Vec<CardHandoff>> {
-    let like = format!("conduit:{project_id}:card:%");
+    // Escape LIKE metacharacters in project_id so a stray `%`/`_` can't wildcard-match another
+    // project's handoff scopes (project ids are UUIDs today, but this is cheap defense-in-depth).
+    let esc = project_id
+        .replace('\\', "\\\\")
+        .replace('%', "\\%")
+        .replace('_', "\\_");
+    let like = format!("conduit:{esc}:card:%");
     let sql = "SELECT h.id, h.project_scope, h.context, h.state, h.suggested_next_actions, \
                h.status, h.created_at, s.agent_label \
                FROM handoffs h LEFT JOIN agent_sessions s ON s.id = h.from_agent_session_id \
-               WHERE h.project_scope LIKE ?1 AND h.status = 'pending'";
+               WHERE h.project_scope LIKE ?1 ESCAPE '\\' AND h.status = 'pending'";
     let mut stmt = conn.prepare(sql)?;
     let rows = stmt.query_map([like], |r| {
         let scope: String = r.get(1)?;
@@ -233,6 +239,25 @@ CREATE INDEX IF NOT EXISTS handoffs_to_agent_idx ON handoffs (to_agent_session_i
         assert_eq!(v.handoffs[0].card_id, "c1");
         assert_eq!(v.handoffs[0].context, "did discovery");
         assert_eq!(v.handoffs[0].from_label.as_deref(), Some("s2"));
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn like_wildcard_project_id_does_not_leak_other_projects() {
+        // Without escaping, project_id="%" would make the LIKE pattern `conduit:%:card:%`,
+        // matching EVERY project's handoffs. With the escape it matches a literal "%" project,
+        // of which the fixture has none -> zero handoffs.
+        let path = temp_db_path("wildcard-leak");
+        build_fixture(&path);
+        std::env::set_var("CONTINUITY_DB_PATH", &path);
+
+        let v = view_for_project("%", &[]);
+        assert!(
+            v.handoffs.is_empty(),
+            "wildcard project_id leaked handoffs: {:?}",
+            v.handoffs
+        );
 
         let _ = std::fs::remove_file(&path);
     }
