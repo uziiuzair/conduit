@@ -2,6 +2,27 @@
 //! commands and store wiring land in later tasks of increment #1.
 
 use serde::{Deserialize, Serialize};
+use std::path::{Path, PathBuf};
+
+/// What the frontend sees for one discovered plugin folder.
+#[derive(Serialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginDescriptor {
+    pub id: String,
+    pub path: String,
+    /// Present when the manifest parsed. `None` when parse failed (see `problems`).
+    pub manifest: Option<PluginManifest>,
+    /// Validation problems (empty when valid). Non-empty ⇒ cannot enable.
+    pub problems: Vec<String>,
+    pub record: Option<PluginRecord>,
+}
+
+/// The plugins directory: `<data_dir>/plugins`. Created if missing.
+pub fn plugins_dir() -> PathBuf {
+    let dir = crate::store::data_dir().join("plugins");
+    let _ = std::fs::create_dir_all(&dir);
+    dir
+}
 
 /// Permission ids valid in increment #1. Unknown ids are rejected at validation.
 pub const KNOWN_PERMISSIONS: &[&str] = &[
@@ -157,6 +178,128 @@ pub struct PluginRecord {
     pub consented_version: String,
 }
 
+use std::sync::Arc;
+use tauri::State;
+
+fn read_descriptor(dir: &Path, records: &[PluginRecord]) -> Option<PluginDescriptor> {
+    let folder = dir.file_name()?.to_string_lossy().to_string();
+    let manifest_path = dir.join("manifest.json");
+    let raw = std::fs::read_to_string(&manifest_path).ok()?;
+    let path = dir.to_string_lossy().to_string();
+    match parse_manifest(&raw) {
+        Ok(m) => {
+            let problems = validate_manifest(&m, &folder, env!("CARGO_PKG_VERSION"));
+            let record = records.iter().find(|r| r.id == m.id).cloned();
+            Some(PluginDescriptor {
+                id: m.id.clone(),
+                path,
+                manifest: Some(m),
+                problems,
+                record,
+            })
+        }
+        Err(e) => Some(PluginDescriptor {
+            id: folder,
+            path,
+            manifest: None,
+            problems: vec![e],
+            record: None,
+        }),
+    }
+}
+
+#[tauri::command]
+pub fn list_plugins(store: State<'_, Arc<crate::store::Store>>) -> Vec<PluginDescriptor> {
+    let records = store.list_plugins();
+    let mut out = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(plugins_dir()) {
+        for entry in entries.flatten() {
+            let p = entry.path();
+            if p.is_dir() {
+                if let Some(d) = read_descriptor(&p, &records) {
+                    out.push(d);
+                }
+            }
+        }
+    }
+    out.sort_by(|a, b| a.id.cmp(&b.id));
+    out
+}
+
+/// Return the plugin's `main.js` source, guarding against path escape.
+#[tauri::command]
+pub fn read_plugin_source(id: String) -> Result<String, String> {
+    if !is_valid_id(&id) {
+        return Err("invalid plugin id".into());
+    }
+    let dir = plugins_dir().join(&id);
+    let manifest_raw =
+        std::fs::read_to_string(dir.join("manifest.json")).map_err(|e| e.to_string())?;
+    let m = parse_manifest(&manifest_raw)?;
+    if m.main.contains("..") || m.main.starts_with('/') {
+        return Err("main path escapes plugin folder".into());
+    }
+    std::fs::read_to_string(dir.join(&m.main)).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn set_plugin_enabled(
+    id: String,
+    enabled: bool,
+    store: State<'_, Arc<crate::store::Store>>,
+) -> Result<(), String> {
+    let mut rec = store
+        .list_plugins()
+        .into_iter()
+        .find(|r| r.id == id)
+        .unwrap_or(PluginRecord {
+            id: id.clone(),
+            ..Default::default()
+        });
+    rec.enabled = enabled;
+    store.put_plugin_record(rec);
+    Ok(())
+}
+
+#[tauri::command]
+pub fn set_plugin_grants(
+    id: String,
+    permissions: Vec<String>,
+    consented_version: String,
+    store: State<'_, Arc<crate::store::Store>>,
+) -> Result<(), String> {
+    let mut rec = store
+        .list_plugins()
+        .into_iter()
+        .find(|r| r.id == id)
+        .unwrap_or(PluginRecord {
+            id: id.clone(),
+            ..Default::default()
+        });
+    rec.granted_permissions = permissions;
+    rec.consented_version = consented_version;
+    store.put_plugin_record(rec);
+    Ok(())
+}
+
+#[tauri::command]
+pub fn remove_plugin(id: String, store: State<'_, Arc<crate::store::Store>>) -> Result<(), String> {
+    if !is_valid_id(&id) {
+        return Err("invalid plugin id".into());
+    }
+    let dir = plugins_dir().join(&id);
+    if dir.exists() {
+        std::fs::remove_dir_all(&dir).map_err(|e| e.to_string())?;
+    }
+    store.remove_plugin_record(&id);
+    Ok(())
+}
+
+#[tauri::command]
+pub fn open_plugins_dir() -> Result<String, String> {
+    Ok(plugins_dir().to_string_lossy().into_owned())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -227,5 +370,14 @@ mod tests {
         assert!(version_satisfies("0.15.2", "0.14.0"));
         assert!(!version_satisfies("0.13.9", "0.14.0"));
         assert!(version_satisfies("dev", "0.14.0")); // non-semver dev build passes
+    }
+
+    #[test]
+    fn descriptor_problems_block_enable_semantics() {
+        let m =
+            parse_manifest(r#"{"id":"x","name":"x","version":"1.0.0","minAppVersion":"9.9.9"}"#)
+                .unwrap();
+        let problems = validate_manifest(&m, "x", "0.14.0");
+        assert!(!problems.is_empty()); // future-version requirement blocks it
     }
 }
