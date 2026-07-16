@@ -24,6 +24,7 @@ mod hotexit;
 mod local_llm;
 mod menu;
 mod notify;
+mod plugins;
 mod pty;
 mod search;
 mod store;
@@ -1367,6 +1368,12 @@ pub fn run() {
             telemetry::telemetry_ping,
             updates::update_should_notify,
             clipboard::clipboard_read_for_paste,
+            plugins::list_plugins,
+            plugins::read_plugin_source,
+            plugins::set_plugin_enabled,
+            plugins::set_plugin_grants,
+            plugins::remove_plugin,
+            plugins::open_plugins_dir,
         ])
         .build(tauri::generate_context!())
         .expect("error while building Conduit")
