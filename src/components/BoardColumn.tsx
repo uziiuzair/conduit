@@ -2,10 +2,11 @@ import type { BoardColumn as Col, BoardCard as Card } from "../store";
 import { BoardCard } from "./BoardCard";
 
 export function BoardColumn({
-  column, cards, onDragStart, onDropCard,
+  column, cards, projectId, onDragStart, onDropCard,
 }: {
   column: Col;
   cards: Card[];
+  projectId: string;
   onDragStart: (id: string) => void;
   onDropCard: (columnId: string, beforeCardId: string | null) => void;
 }) {
@@ -23,7 +24,7 @@ export function BoardColumn({
             onDragOver={(e) => e.preventDefault()}
             onDrop={(e) => { e.stopPropagation(); e.preventDefault(); onDropCard(column.id, c.id); }}
           >
-            <BoardCard card={c} onDragStart={onDragStart} />
+            <BoardCard card={c} projectId={projectId} onDragStart={onDragStart} />
           </div>
         ))}
       </div>

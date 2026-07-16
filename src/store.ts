@@ -204,10 +204,19 @@ export interface Project {
 export interface BoardColumn { id: string; name: string }
 export interface BoardClaim { by: string; at: number; leaseUntil: number }
 export interface BoardComment { by: string; at: number; text: string }
+export type Stage =
+  | "requested" | "discovery" | "requirement_draft" | "business_clarification"
+  | "ux_input" | "architecture_input" | "implementation_plan" | "implementation"
+  | "verification" | "blocked" | "done";
+export interface WorkflowHistory { at: number; by: string; from: Stage; to: Stage; note: string }
+export interface Workflow {
+  kind: string; stage: Stage; resumeState: Stage | null;
+  blockedQuestion: string | null; history: WorkflowHistory[];
+}
 export interface BoardCard {
   id: string; title: string; body: string; column: string; order: string;
   labels: string[]; createdBy: string; createdAt: number; updatedAt: number;
-  workflow: unknown | null; links: { workItem: string | null; pr: string; branch: string };
+  workflow: Workflow | null; links: { workItem: string | null; pr: string; branch: string };
   comments: BoardComment[]; claim: BoardClaim | null;
 }
 export interface BoardSnapshot { columns: BoardColumn[]; cards: BoardCard[] }

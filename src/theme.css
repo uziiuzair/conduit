@@ -695,6 +695,10 @@ button {
 .board-claim { display: inline-block; margin-top: 6px; font-size: 10px; padding: 1px 6px; border-radius: 99px; }
 .board-claim.ai { background: rgba(88,101,242,0.25); }
 .board-claim.human { background: rgba(52,199,89,0.22); }
+.board-stage { display:inline-block; margin-top:6px; font-size:10px; padding:1px 6px; border-radius:99px; background:rgba(127,127,127,0.18); text-transform:capitalize; }
+.board-gate { display:inline-block; margin:6px 0 0 6px; font-size:10px; padding:1px 6px; border-radius:99px; background:rgba(255,196,0,0.22); color:#e6b800; font-weight:700; }
+.board-gate-actions { display:flex; gap:6px; margin-top:6px; }
+.board-gate-actions button { font-size:11px; }
 .board-add { margin-top: 6px; font-size: 12px; opacity: 0.75; }
 .board-add-input { margin-top: 6px; }
 

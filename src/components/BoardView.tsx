@@ -56,6 +56,7 @@ export function BoardView({ projectId }: { projectId: string }) {
             <BoardColumn
               column={col}
               cards={cardsByColumn[col.id] ?? []}
+              projectId={projectId}
               onDragStart={(id) => { dragId.current = id; }}
               onDropCard={onDropCard}
             />
