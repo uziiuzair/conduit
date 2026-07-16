@@ -1372,6 +1372,7 @@ pub fn run() {
             let presence = app.state::<Arc<broker::Presence>>().inner().clone();
             let pty = app.state::<Arc<PtyManager>>().inner().clone();
             let store = app.state::<Arc<Store>>().inner().clone();
+            let tasks = app.state::<Arc<TaskBoard>>().inner().clone();
             let agy_usage = app
                 .state::<Arc<crate::agy_usage::AgyUsageState>>()
                 .inner()
@@ -1394,7 +1395,7 @@ pub fn run() {
                 agy_resume,
             );
             bridge::start(app.handle().clone());
-            fleet_mcp::start(app.handle().clone(), store, pty, fleet, board);
+            fleet_mcp::start(app.handle().clone(), store, pty, fleet, board, tasks);
 
             // Native menu bar. Custom items forward to the frontend as a single "menu"
             // event (payload = item id); Quit kills PTYs before exiting (see menu.rs).

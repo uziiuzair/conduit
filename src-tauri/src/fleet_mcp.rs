@@ -24,6 +24,7 @@ use crate::board::{BoardKind, BoardRecord, BoardState};
 use crate::fleet::{self, FleetState};
 use crate::pty::PtyManager;
 use crate::store::{Session, SessionRole, Store};
+use crate::tasks::TaskBoard;
 
 /// How many bytes of recent output `fleet_peek` returns.
 const PEEK_BYTES: usize = 8192;
@@ -35,6 +36,7 @@ struct Ctx {
     pty: Arc<PtyManager>,
     fleet: Arc<FleetState>,
     board: Arc<BoardState>,
+    tasks: Arc<TaskBoard>,
     conductor_id: String,
 }
 
@@ -137,6 +139,15 @@ pub fn tool_specs() -> Vec<Value> {
             "description": "Static per-agent capability cards: tier (1=full MCP, 2=structured-no-MCP, 3=unmonitored), when to use / not use each agent, and whether it supports fleet_result/the mailbox. A Tier 2/3 worker will not fleet_result -- plan your wake/poll strategy accordingly.",
             "inputSchema": { "type": "object", "properties": {} }
         }),
+        json!({
+            "name": "task_list",
+            "description": "List task-board cards in your project. Optionally filter by column, only your claims, or only unclaimed cards.",
+            "inputSchema": { "type": "object", "properties": {
+                "column": {"type": "string"},
+                "mine": {"type": "boolean"},
+                "unclaimed": {"type": "boolean"}
+            }, "required": [] }
+        }),
     ]
 }
 
@@ -198,6 +209,16 @@ fn authorize(store: &Store, conductor_id: &str, tool: &str) -> Result<(), String
         SessionRole::Worker if WORKER_ALLOWED.contains(&tool) => Ok(()),
         SessionRole::Worker => Err("worker-role-cannot-orchestrate".into()),
     }
+}
+
+/// The on-disk root of the project the calling session belongs to. Resolved from the
+/// session id baked into the MCP URL (`?conductor=<sid>`) via the fleet snapshot -- NEVER
+/// from tool args. This is the structural project-scope guarantee.
+fn caller_project_root(ctx: &Ctx) -> Result<String, String> {
+    ctx.store
+        .fleet_snapshot(&ctx.conductor_id)
+        .map(|snap| snap.project_path)
+        .ok_or_else(|| "caller-not-found".to_string())
 }
 
 /// Filter board records to only those whose author the caller may read, per the design's
@@ -569,6 +590,23 @@ fn dispatch_tool(name: &str, args: &Value, ctx: &Ctx) -> Result<String, String> 
             Ok(json!(readable_by(missions, caller, &snap.sessions)).to_string())
         }
         "fleet_capabilities" => Ok(json!(crate::agent::capability_cards()).to_string()),
+        "task_list" => {
+            let root = caller_project_root(ctx)?;
+            ctx.tasks.ensure_scaffold(&root).ok();
+            let mut snap = ctx.tasks.snapshot(&root);
+            if let Some(col) = args.get("column").and_then(|v| v.as_str()) {
+                snap.cards.retain(|c| c.column == col);
+            }
+            if args.get("mine").and_then(|v| v.as_bool()) == Some(true) {
+                let me = ctx.conductor_id.clone();
+                snap.cards
+                    .retain(|c| c.claim.as_ref().map(|cl| cl.by == me).unwrap_or(false));
+            }
+            if args.get("unclaimed").and_then(|v| v.as_bool()) == Some(true) {
+                snap.cards.retain(|c| c.claim.is_none());
+            }
+            serde_json::to_string(&snap).map_err(|e| e.to_string())
+        }
         other => Err(format!("unknown tool: {other}")),
     }
 }
@@ -596,6 +634,7 @@ pub fn start(
     pty: Arc<PtyManager>,
     fleet: Arc<FleetState>,
     board: Arc<BoardState>,
+    tasks: Arc<TaskBoard>,
 ) {
     thread::spawn(move || {
         let mut server: Option<Server> = None;
@@ -617,7 +656,8 @@ pub fn start(
             let pty = pty.clone();
             let fleet = fleet.clone();
             let board = board.clone();
-            thread::spawn(move || handle_request(request, app, store, pty, fleet, board));
+            let tasks = tasks.clone();
+            thread::spawn(move || handle_request(request, app, store, pty, fleet, board, tasks));
         }
     });
 }
@@ -630,6 +670,7 @@ fn handle_request(
     pty: Arc<PtyManager>,
     fleet: Arc<FleetState>,
     board: Arc<BoardState>,
+    tasks: Arc<TaskBoard>,
 ) {
     // claude opens an optional SSE stream via GET; we don't push server->client, so
     // 405 makes it fall back to POST (validated in the Task 0 spike).
@@ -689,6 +730,7 @@ fn handle_request(
                 pty,
                 fleet,
                 board,
+                tasks,
                 conductor_id,
             };
             match dispatch_tool(name, &args, &ctx) {
@@ -1246,5 +1288,38 @@ mod tests {
     fn persona_teaches_roster_and_capabilities_consultation() {
         assert!(crate::fleet::CONDUCTOR_PERSONA.contains("fleet_roster"));
         assert!(crate::fleet::CONDUCTOR_PERSONA.contains("fleet_capabilities"));
+    }
+
+    // ---- Task 13: task_list structural project scoping ----
+
+    /// `caller_project_root` (the scope helper behind `task_list`) MUST derive the
+    /// project root from the caller's own session id via `fleet_snapshot`, never from a
+    /// tool argument. A full `Ctx` needs an `AppHandle` we can't build in a unit test, so
+    /// this exercises the exact same `store.fleet_snapshot(conductor_id).project_path`
+    /// path that `caller_project_root`'s body is defined in terms of.
+    #[test]
+    fn caller_project_root_resolves_from_session_not_args() {
+        let store = Store::for_test(&temp_dir("caller_project_root"));
+        let proj = store.add_project("/repo-caller-project-root".into());
+        let conductor = store
+            .add_session(
+                &proj.id,
+                "Conductor".into(),
+                false,
+                crate::agent::AgentId::Claude,
+                SessionRole::Conductor,
+            )
+            .unwrap();
+
+        let root = store
+            .fleet_snapshot(&conductor.id)
+            .map(|s| s.project_path)
+            .expect("a session belonging to a project must resolve its project's path");
+        assert_eq!(root, "/repo-caller-project-root");
+
+        // A conductor id belonging to no project (or no session at all) resolves to
+        // Err, never a caller-suppliable path -- this is the structural scoping
+        // guarantee: the tool has no argument that can select a different project.
+        assert!(store.fleet_snapshot("no-such-session-anywhere").is_none());
     }
 }
