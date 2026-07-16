@@ -221,22 +221,6 @@ export function WorkspaceCenter({
             ) : null,
           )}
 
-        {projectId && (
-          <button
-            type="button"
-            className={`board-tab ${centerMode === "board" ? "active" : ""}`}
-            title="Task board (⇧⌘B)"
-            onClick={() =>
-              useStore
-                .getState()
-                .setCenterMode(projectId, centerMode === "board" ? "terminals" : "board")
-            }
-          >
-            <span className="board-tab-dot" />
-            Board
-          </button>
-        )}
-
         {layout &&
           !isMax &&
           layout.groups.slice(1).map((g, i) => (
@@ -397,6 +381,7 @@ function GroupTabStrip({
   const setActiveTab = useStore((s) => s.setActiveTab);
   const setActiveGroup = useStore((s) => s.setActiveGroup);
   const setCenterMode = useStore((s) => s.setCenterMode);
+  const centerMode = useStore((s) => s.centerMode[projectId] ?? "terminals");
   const requestCloseTab = useStore((s) => s.requestCloseTab);
   const pinTab = useStore((s) => s.pinTab);
   const dirty = useStore((s) => s.dirty);
@@ -509,6 +494,19 @@ function GroupTabStrip({
         }}
       />
       {wd && soloGroup && <span className="cwd">{prettyPath(wd, home)}</span>}
+      {isActiveGroup && (
+        <button
+          type="button"
+          className={`header-btn board-tab ${centerMode === "board" ? "active" : ""}`}
+          title="Task board (⇧⌘B)"
+          onClick={() =>
+            setCenterMode(projectId, centerMode === "board" ? "terminals" : "board")
+          }
+        >
+          <span className="board-tab-dot" />
+          <span>Board</span>
+        </button>
+      )}
       {wd &&
         (soloGroup ? (
           <button className="header-btn" title="Open in VS Code" onClick={() => void openInVscode(wd)}>
