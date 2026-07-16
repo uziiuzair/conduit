@@ -148,6 +148,18 @@ pub fn tool_specs() -> Vec<Value> {
                 "unclaimed": {"type": "boolean"}
             }, "required": [] }
         }),
+        json!({ "name": "task_get", "description": "Get one card by id (full body + comments + claim).",
+            "inputSchema": {"type":"object","properties":{"id":{"type":"string"}},"required":["id"]} }),
+        json!({ "name": "task_claim", "description": "Claim a card so no other session works it. Fails if already claimed by a live session.",
+            "inputSchema": {"type":"object","properties":{"id":{"type":"string"}},"required":["id"]} }),
+        json!({ "name": "task_release", "description": "Release your own claim on a card.",
+            "inputSchema": {"type":"object","properties":{"id":{"type":"string"}},"required":["id"]} }),
+        json!({ "name": "task_move", "description": "Move a card to a column, optionally between two card ids.",
+            "inputSchema": {"type":"object","properties":{"id":{"type":"string"},"column":{"type":"string"},"after":{"type":"string"},"before":{"type":"string"}},"required":["id","column"]} }),
+        json!({ "name": "task_comment", "description": "Append a short comment to a card (max 512 bytes).",
+            "inputSchema": {"type":"object","properties":{"id":{"type":"string"},"text":{"type":"string"}},"required":["id","text"]} }),
+        json!({ "name": "task_add", "description": "Create a card in a column (default backlog).",
+            "inputSchema": {"type":"object","properties":{"title":{"type":"string"},"body":{"type":"string"},"column":{"type":"string"}},"required":["title"]} }),
     ]
 }
 
@@ -219,6 +231,26 @@ fn caller_project_root(ctx: &Ctx) -> Result<String, String> {
         .fleet_snapshot(&ctx.conductor_id)
         .map(|snap| snap.project_path)
         .ok_or_else(|| "caller-not-found".to_string())
+}
+
+/// The store `Project.id` of the calling session's project (for `board-changed` event
+/// payloads) -- resolved from the session id baked into the MCP URL, same as
+/// `caller_project_root`, never from tool args.
+fn project_id_of(ctx: &Ctx) -> Option<String> {
+    ctx.store
+        .fleet_snapshot(&ctx.conductor_id)
+        .map(|snap| snap.project_id)
+}
+
+/// Notify the frontend that this project's board changed, so an open Board view refetches.
+/// Best-effort: no receiver (no window yet, or project not resolvable) is not an error.
+fn emit_board_changed(ctx: &Ctx) {
+    if let Some(project_id) = project_id_of(ctx) {
+        let _ = ctx.app.emit(
+            "board-changed",
+            serde_json::json!({ "projectId": project_id }),
+        );
+    }
 }
 
 /// Filter board records to only those whose author the caller may read, per the design's
@@ -606,6 +638,89 @@ fn dispatch_tool(name: &str, args: &Value, ctx: &Ctx) -> Result<String, String> 
                 snap.cards.retain(|c| c.claim.is_none());
             }
             serde_json::to_string(&snap).map_err(|e| e.to_string())
+        }
+        "task_get" => {
+            let root = caller_project_root(ctx)?;
+            let id = args
+                .get("id")
+                .and_then(|v| v.as_str())
+                .ok_or("missing id")?;
+            let snap = ctx.tasks.snapshot(&root);
+            let card = snap
+                .cards
+                .into_iter()
+                .find(|c| c.id == id)
+                .ok_or("card not found")?;
+            serde_json::to_string(&card).map_err(|e| e.to_string())
+        }
+        "task_claim" => {
+            let root = caller_project_root(ctx)?;
+            let id = args
+                .get("id")
+                .and_then(|v| v.as_str())
+                .ok_or("missing id")?;
+            let running = ctx.fleet.running_sessions();
+            let live = |sid: &str| running.iter().any(|r| r.as_str() == sid);
+            let claim = ctx.tasks.claim_card(&root, id, &ctx.conductor_id, &live)?;
+            emit_board_changed(ctx);
+            serde_json::to_string(&claim).map_err(|e| e.to_string())
+        }
+        "task_release" => {
+            let root = caller_project_root(ctx)?;
+            let id = args
+                .get("id")
+                .and_then(|v| v.as_str())
+                .ok_or("missing id")?;
+            ctx.tasks.release_card(&root, id, &ctx.conductor_id)?;
+            emit_board_changed(ctx);
+            Ok("released".to_string())
+        }
+        "task_move" => {
+            let root = caller_project_root(ctx)?;
+            let id = args
+                .get("id")
+                .and_then(|v| v.as_str())
+                .ok_or("missing id")?;
+            let column = args
+                .get("column")
+                .and_then(|v| v.as_str())
+                .ok_or("missing column")?;
+            let after = args.get("after").and_then(|v| v.as_str());
+            let before = args.get("before").and_then(|v| v.as_str());
+            ctx.tasks.move_card(&root, id, column, after, before)?;
+            emit_board_changed(ctx);
+            Ok("moved".to_string())
+        }
+        "task_comment" => {
+            let root = caller_project_root(ctx)?;
+            let id = args
+                .get("id")
+                .and_then(|v| v.as_str())
+                .ok_or("missing id")?;
+            let text = args
+                .get("text")
+                .and_then(|v| v.as_str())
+                .ok_or("missing text")?;
+            ctx.tasks.comment_card(&root, id, &ctx.conductor_id, text)?;
+            emit_board_changed(ctx);
+            Ok("commented".to_string())
+        }
+        "task_add" => {
+            let root = caller_project_root(ctx)?;
+            let title = args
+                .get("title")
+                .and_then(|v| v.as_str())
+                .ok_or("missing title")?;
+            let body = args.get("body").and_then(|v| v.as_str()).unwrap_or("");
+            let column = args
+                .get("column")
+                .and_then(|v| v.as_str())
+                .unwrap_or("backlog");
+            let card = ctx
+                .tasks
+                .add_card(&root, title, body, column, &ctx.conductor_id)?;
+            emit_board_changed(ctx);
+            serde_json::to_string(&card).map_err(|e| e.to_string())
         }
         other => Err(format!("unknown tool: {other}")),
     }
