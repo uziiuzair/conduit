@@ -2,8 +2,8 @@ pub mod frac;
 pub mod stage_machine;
 
 use crate::board::truncate_utf8;
+use crate::tasks::stage_machine::{Outcome, Stage, Transition};
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -45,8 +45,8 @@ pub struct CardLinks {
     pub branch: String,
 }
 
-/// One card = one file at `.conduit/board/cards/<id>.yaml`. `workflow` is always `null` in
-/// Plan A; a later plan fills it with the stage-gate overlay.
+/// One card = one file at `.conduit/board/cards/<id>.yaml`. `workflow` is `null` until
+/// `start_workflow` attaches the stage-gate overlay (see `Workflow`).
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct Card {
@@ -62,7 +62,7 @@ pub struct Card {
     pub created_at: u64,
     pub updated_at: u64,
     #[serde(default)]
-    pub workflow: Option<Value>,
+    pub workflow: Option<Workflow>,
     #[serde(default)]
     pub links: CardLinks,
     #[serde(default)]
@@ -73,6 +73,32 @@ pub struct Card {
     // in the sidecar, never round-trip through the card file), so `skip_serializing_if` omits it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub claim: Option<Claim>,
+}
+
+/// One entry in a workflow's audit trail: who moved the card from which stage to which, and why.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkflowHistory {
+    pub at: u64,
+    pub by: String,
+    pub from: Stage,
+    pub to: Stage,
+    pub note: String,
+}
+
+/// The stage-gate overlay attached to a card once `start_workflow` runs. `null` on a card that
+/// hasn't opted into the workflow (Plan A default).
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct Workflow {
+    pub kind: String, // always "stage-gate"
+    pub stage: Stage,
+    #[serde(default)]
+    pub resume_state: Option<Stage>,
+    #[serde(default)]
+    pub blocked_question: Option<String>,
+    #[serde(default)]
+    pub history: Vec<WorkflowHistory>,
 }
 
 pub const DEFAULT_COLUMNS: &[(&str, &str)] = &[
@@ -502,6 +528,163 @@ impl TaskBoard {
         }
         Ok(())
     }
+
+    fn work_item_dir(project_root: &str, card_id: &str) -> PathBuf {
+        Path::new(project_root)
+            .join(".conduit")
+            .join("work-items")
+            .join(card_id)
+    }
+
+    /// Attach a fresh stage-gate workflow to a card (starting at `discovery`) and create its
+    /// work-item dir. Errors if the card already has a workflow. The CALLER is responsible for
+    /// `ensure_agents`/`ensure_knowledge` (those take their own lock; calling them here would
+    /// double-lock `self.lock`).
+    pub fn start_workflow(
+        &self,
+        project_root: &str,
+        card_id: &str,
+        by: &str,
+    ) -> Result<Card, String> {
+        let _g = self.lock.lock().unwrap_or_else(|e| e.into_inner());
+        let mut card = Self::load_card(project_root, card_id)?;
+        if card.workflow.is_some() {
+            return Err("card already has a workflow".into());
+        }
+        fs::create_dir_all(Self::work_item_dir(project_root, card_id))
+            .map_err(|e| e.to_string())?;
+        let now = now_ms();
+        card.workflow = Some(Workflow {
+            kind: "stage-gate".into(),
+            stage: Stage::Discovery,
+            resume_state: None,
+            blocked_question: None,
+            history: vec![WorkflowHistory {
+                at: now,
+                by: by.to_string(),
+                from: Stage::Requested,
+                to: Stage::Discovery,
+                note: "workflow started".into(),
+            }],
+        });
+        card.updated_at = now;
+        Self::write_card(project_root, &card)?;
+        Ok(card)
+    }
+
+    /// Advance a workflow card by reporting an `outcome` for its current stage. Applies the
+    /// transition table; an illegal outcome is rejected; stops at a human gate; appends history.
+    pub fn advance(
+        &self,
+        project_root: &str,
+        card_id: &str,
+        outcome: Outcome,
+        by: &str,
+        note: &str,
+    ) -> Result<Card, String> {
+        let _g = self.lock.lock().unwrap_or_else(|e| e.into_inner());
+        let mut card = Self::load_card(project_root, card_id)?;
+        let from = card.workflow.as_ref().ok_or("card has no workflow")?.stage;
+        let to = match stage_machine::next(from, outcome) {
+            Transition::Advance(s) | Transition::HumanGate(s) | Transition::Rework(s) => s,
+            Transition::Done => Stage::Done,
+            Transition::Illegal => {
+                return Err(format!("illegal outcome {outcome:?} for stage {from:?}"))
+            }
+        };
+        {
+            let wf = card.workflow.as_mut().unwrap();
+            wf.stage = to;
+            wf.history.push(WorkflowHistory {
+                at: now_ms(),
+                by: by.to_string(),
+                from,
+                to,
+                note: note.to_string(),
+            });
+        }
+        card.updated_at = now_ms();
+        Self::write_card(project_root, &card)?;
+        Ok(card)
+    }
+
+    /// Human resolves a gate: `business_clarification` (approve -> ux_input, else -> rework) or
+    /// `verification` acceptance (accept -> done). Only valid when the card sits at a gate.
+    pub fn resolve_gate(
+        &self,
+        project_root: &str,
+        card_id: &str,
+        approved: bool,
+        by: &str,
+    ) -> Result<Card, String> {
+        let stage = {
+            let _g = self.lock.lock().unwrap_or_else(|e| e.into_inner());
+            let card = Self::load_card(project_root, card_id)?;
+            card.workflow.as_ref().ok_or("no workflow")?.stage
+        };
+        let outcome = match (stage, approved) {
+            (Stage::BusinessClarification, true) => Outcome::Approved,
+            (Stage::BusinessClarification, false) => Outcome::ChangesRequested,
+            (Stage::Verification, true) => Outcome::Accepted,
+            (Stage::Verification, false) => Outcome::FailedChecks,
+            _ => return Err("card is not at a human gate".into()),
+        };
+        self.advance(project_root, card_id, outcome, by, "human gate resolved")
+    }
+
+    /// The briefing a session gets when it claims a card: the card, plus -- for a stage-gate
+    /// card at an agent-owned stage -- the role persona, read list, and work-item dir.
+    pub fn claim_briefing(
+        &self,
+        project_root: &str,
+        card_id: &str,
+    ) -> Result<ClaimBriefing, String> {
+        let _g = self.lock.lock().unwrap_or_else(|e| e.into_inner());
+        let mut card = Self::load_card(project_root, card_id)?;
+        card.claim = Self::read_claim(project_root, card_id);
+        let (stage, role, persona, reads, wid) = match card.workflow.as_ref() {
+            Some(wf) => {
+                let stage = wf.stage;
+                let role = stage_machine::role_of(stage).map(|r| r.to_string());
+                let persona = role
+                    .as_deref()
+                    .and_then(Self::persona_for)
+                    .map(|s| s.to_string());
+                let reads = stage_machine::reads_of(stage)
+                    .iter()
+                    .map(|s| s.to_string())
+                    .collect();
+                let wid = Some(
+                    Self::work_item_dir(project_root, card_id)
+                        .to_string_lossy()
+                        .into_owned(),
+                );
+                (Some(stage), role, persona, reads, wid)
+            }
+            None => (None, None, None, vec![], None),
+        };
+        Ok(ClaimBriefing {
+            card,
+            stage,
+            role,
+            persona,
+            reads,
+            work_item_dir: wid,
+        })
+    }
+}
+
+/// The briefing a session gets when it claims a card: the card, plus (for a stage-gate card at
+/// an agent-owned stage) the role persona, artifacts to read, and work-item dir.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ClaimBriefing {
+    pub card: Card,
+    pub stage: Option<Stage>,
+    pub role: Option<String>,
+    pub persona: Option<String>,
+    pub reads: Vec<String>,
+    pub work_item_dir: Option<String>,
 }
 
 #[cfg(test)]
@@ -764,5 +947,81 @@ mod tests {
         let cols = board.snapshot(&root).columns;
         assert_eq!(cols.len(), 2);
         assert_eq!(cols[0].name, "Inbox");
+    }
+
+    #[test]
+    fn workflow_round_trips_with_stage_and_history() {
+        let wf = Workflow {
+            kind: "stage-gate".into(),
+            stage: Stage::ArchitectureInput,
+            resume_state: None,
+            blocked_question: None,
+            history: vec![WorkflowHistory {
+                at: 1,
+                by: "s2".into(),
+                from: Stage::UxInput,
+                to: Stage::ArchitectureInput,
+                note: "ux done".into(),
+            }],
+        };
+        let yaml = serde_yaml::to_string(&wf).unwrap();
+        assert!(yaml.contains("stage: architecture_input"), "got:\n{yaml}");
+        let back: Workflow = serde_yaml::from_str(&yaml).unwrap();
+        assert_eq!(wf, back);
+    }
+
+    #[test]
+    fn start_workflow_sets_discovery_and_scaffolds_work_item_dir() {
+        let root = tmp_root();
+        let board = TaskBoard::default();
+        let c = board.add_card(&root, "feature X", "", "todo", "human").unwrap();
+        let started = board.start_workflow(&root, &c.id, "human").unwrap();
+        assert_eq!(started.workflow.as_ref().unwrap().stage, Stage::Discovery);
+        let wid = std::path::Path::new(&root)
+            .join(".conduit")
+            .join("work-items")
+            .join(&c.id);
+        assert!(wid.is_dir());
+        assert!(board.start_workflow(&root, &c.id, "human").is_err());
+    }
+
+    #[test]
+    fn advance_walks_to_gate_then_human_resolves() {
+        let root = tmp_root();
+        let board = TaskBoard::default();
+        let c = board.add_card(&root, "x", "", "todo", "human").unwrap();
+        board.start_workflow(&root, &c.id, "human").unwrap();
+        let a = board
+            .advance(&root, &c.id, Outcome::Completed, "s2", "discovery done")
+            .unwrap();
+        assert_eq!(a.workflow.as_ref().unwrap().stage, Stage::RequirementDraft);
+        let b = board
+            .advance(&root, &c.id, Outcome::Completed, "s2", "draft done")
+            .unwrap();
+        assert_eq!(
+            b.workflow.as_ref().unwrap().stage,
+            Stage::BusinessClarification
+        );
+        assert!(board
+            .advance(&root, &c.id, Outcome::Completed, "s2", "")
+            .is_err());
+        let approved = board.resolve_gate(&root, &c.id, true, "human").unwrap();
+        assert_eq!(approved.workflow.as_ref().unwrap().stage, Stage::UxInput);
+        assert!(approved.workflow.as_ref().unwrap().history.len() >= 4);
+    }
+
+    #[test]
+    fn claim_briefing_carries_role_and_reads_for_workflow_cards() {
+        let root = tmp_root();
+        let board = TaskBoard::default();
+        let c = board.add_card(&root, "x", "", "todo", "human").unwrap();
+        let plain = board.claim_briefing(&root, &c.id).unwrap();
+        assert!(plain.persona.is_none());
+        board.start_workflow(&root, &c.id, "human").unwrap();
+        let b = board.claim_briefing(&root, &c.id).unwrap();
+        assert_eq!(b.role.as_deref(), Some("delivery-planner"));
+        let persona = b.persona.as_ref().unwrap().to_lowercase();
+        assert!(persona.contains("delivery planner") || persona.contains("delivery-planner"));
+        assert!(b.reads.iter().any(|r| r.contains("request.md")));
     }
 }
