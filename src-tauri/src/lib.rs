@@ -44,6 +44,7 @@ use tauri::{Emitter, Manager, State};
 use hooks::HookState;
 use pty::PtyManager;
 use store::{Project, ProjectLayout, Session, SessionRole, Store};
+use tasks::{BoardSnapshot, Card, Column, TaskBoard};
 
 /// Suppress the console window Windows flashes when a GUI app spawns a console child
 /// (`where`, `curl`, `git`, `cmd`, ...). Applies CREATE_NO_WINDOW on Windows; a no-op
@@ -426,6 +427,122 @@ fn remove_project(id: String, store: State<Arc<Store>>, pty: State<Arc<PtyManage
         }
     }
     store.remove_project(&id);
+}
+
+// ---- Project task board commands ---------------------------------------------
+
+/// Resolve a project id to its on-disk repo root, using the same `Store` accessor
+/// `load_projects` uses to read the project list.
+fn project_root(store: &Store, project_id: &str) -> Result<String, String> {
+    store
+        .list()
+        .into_iter()
+        .find(|p| p.id == project_id)
+        .map(|p| p.path)
+        .ok_or_else(|| format!("project not found: {project_id}"))
+}
+
+fn emit_board_changed(app: &tauri::AppHandle, project_id: &str) {
+    let _ = app.emit("board-changed", serde_json::json!({ "projectId": project_id }));
+}
+
+#[tauri::command]
+fn list_board(store: State<Arc<Store>>, board: State<Arc<TaskBoard>>, project_id: String) -> Result<BoardSnapshot, String> {
+    let root = project_root(&store, &project_id)?;
+    board.ensure_scaffold(&root)?;
+    Ok(board.snapshot(&root))
+}
+
+#[tauri::command]
+fn board_add_card(
+    app: tauri::AppHandle,
+    store: State<Arc<Store>>,
+    board: State<Arc<TaskBoard>>,
+    project_id: String,
+    title: String,
+    body: String,
+    column: String,
+) -> Result<Card, String> {
+    let root = project_root(&store, &project_id)?;
+    let card = board.add_card(&root, &title, &body, &column, "human")?;
+    emit_board_changed(&app, &project_id);
+    Ok(card)
+}
+
+#[tauri::command]
+fn board_move_card(
+    app: tauri::AppHandle,
+    store: State<Arc<Store>>,
+    board: State<Arc<TaskBoard>>,
+    project_id: String,
+    id: String,
+    column: String,
+    after: Option<String>,
+    before: Option<String>,
+) -> Result<Card, String> {
+    let root = project_root(&store, &project_id)?;
+    let card = board.move_card(&root, &id, &column, after.as_deref(), before.as_deref())?;
+    emit_board_changed(&app, &project_id);
+    Ok(card)
+}
+
+#[tauri::command]
+fn board_edit_card(
+    app: tauri::AppHandle,
+    store: State<Arc<Store>>,
+    board: State<Arc<TaskBoard>>,
+    project_id: String,
+    id: String,
+    title: Option<String>,
+    body: Option<String>,
+    labels: Option<Vec<String>>,
+) -> Result<Card, String> {
+    let root = project_root(&store, &project_id)?;
+    let card = board.edit_card(&root, &id, title.as_deref(), body.as_deref(), labels)?;
+    emit_board_changed(&app, &project_id);
+    Ok(card)
+}
+
+#[tauri::command]
+fn board_delete_card(
+    app: tauri::AppHandle,
+    store: State<Arc<Store>>,
+    board: State<Arc<TaskBoard>>,
+    project_id: String,
+    id: String,
+) -> Result<(), String> {
+    let root = project_root(&store, &project_id)?;
+    board.delete_card(&root, &id)?;
+    emit_board_changed(&app, &project_id);
+    Ok(())
+}
+
+#[tauri::command]
+fn board_set_columns(
+    app: tauri::AppHandle,
+    store: State<Arc<Store>>,
+    board: State<Arc<TaskBoard>>,
+    project_id: String,
+    columns: Vec<Column>,
+) -> Result<(), String> {
+    let root = project_root(&store, &project_id)?;
+    board.set_columns(&root, columns)?;
+    emit_board_changed(&app, &project_id);
+    Ok(())
+}
+
+#[tauri::command]
+fn board_release_card(
+    app: tauri::AppHandle,
+    store: State<Arc<Store>>,
+    board: State<Arc<TaskBoard>>,
+    project_id: String,
+    id: String,
+) -> Result<(), String> {
+    let root = project_root(&store, &project_id)?;
+    board.delete_card_claim(&root, &id)?;
+    emit_board_changed(&app, &project_id);
+    Ok(())
 }
 
 #[tauri::command]
@@ -1223,6 +1340,7 @@ pub fn run() {
         .manage(Arc::new(HookState::default()))
         .manage(Arc::new(crate::fleet::FleetState::default()))
         .manage(Arc::new(crate::board::BoardState::default()))
+        .manage(Arc::new(TaskBoard::default()))
         .manage(Arc::new(claude_usage::ClaudeAuth::default()))
         .manage(Arc::new(agy_usage::AgyUsageState::default()))
         .manage(Arc::new(agy_usage::AgyResumeState::default()))
@@ -1296,6 +1414,13 @@ pub fn run() {
             load_projects,
             add_project,
             remove_project,
+            list_board,
+            board_add_card,
+            board_move_card,
+            board_edit_card,
+            board_delete_card,
+            board_set_columns,
+            board_release_card,
             add_session,
             detect_agents,
             rename_session,

@@ -329,6 +329,13 @@ impl TaskBoard {
         }
     }
 
+    /// Force-release a claim from the UI (human override), regardless of holder.
+    pub fn delete_card_claim(&self, project_root: &str, id: &str) -> Result<(), String> {
+        let _g = self.lock.lock().unwrap_or_else(|e| e.into_inner());
+        let _ = fs::remove_file(Self::claim_path(project_root, id));
+        Ok(())
+    }
+
     pub const COMMENT_MAX_BYTES: usize = 512;
 
     pub fn comment_card(&self, project_root: &str, id: &str, by: &str, text: &str) -> Result<Card, String> {
