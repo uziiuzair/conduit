@@ -71,8 +71,15 @@ untrusted UI rendering** — the smallest slice that de-risks the hard security 
 
 ### Out of scope (future increments, listed so the substrate anticipates them)
 - Hosted marketplace: registry, publishing, install-from-registry, signature verification.
-- UI panels / custom views (iframe runtime + a frontend component registry that replaces the
-  hardcoded `App.tsx` tree and `Settings.tsx` NAV array).
+- **The Privileged capability tier (increment #2, "Tier-P")** — UI contribution, managed
+  sidecars, secret store, bridge client, and status contributions. Specified separately in
+  [`2026-07-16-conduit-plugin-system-tier-p-privileged-design.md`](./2026-07-16-conduit-plugin-system-tier-p-privileged-design.md).
+  **That spec's UI decision — declarative, schema-driven widgets rendered by core, with a
+  sandboxed-iframe escape hatch deferred further out — supersedes the earlier framing of UI
+  panels below.**
+- UI panels / custom views: a fully custom, iframe-rendered view plus a frontend component
+  registry that replaces the hardcoded `App.tsx` tree and `Settings.tsx` NAV array. This is
+  the *rich-custom-UI* path beyond Tier-P's declarative widgets, and remains a later increment.
 - Agent-provider plugins (a *declarative adapter manifest* over the `ProviderAdapter` seam —
   not sandboxed JS, because adapters spawn processes with the user's credentials).
 - Themes (inject a `Theme` into `THEMES` and open the closed `ThemeId` union; target the
