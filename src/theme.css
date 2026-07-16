@@ -3639,24 +3639,47 @@ button {
 }
 
 /* ---- Plugins ---- */
-.plugins-panel { display: flex; flex-direction: column; gap: 12px; }
+.plugins-panel { display: flex; flex-direction: column; gap: 14px; font-family: var(--ui-font); }
 .plugins-actions { display: flex; gap: 8px; flex-wrap: wrap; }
-.plugins-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
-.plugin-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 12px; border: 1px solid var(--border); border-radius: 8px; background: var(--panel-bg); }
-.plugin-row.empty { justify-content: center; color: var(--text-dim); }
-.plugin-meta { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
-.plugin-name { color: var(--text-bright); font-weight: 600; }
-.plugin-sub { color: var(--text-mid); font-size: 12px; }
-.plugin-perms { color: var(--text-dim); font-size: 11px; word-break: break-word; }
+
+/* Buttons in the panel share the app's settings-button look (cf. .mcp-form-actions button). */
+.plugins-panel button,
+.modal .modal-actions button {
+  font-family: var(--ui-font);
+  font-size: 12px;
+  color: var(--text-bright);
+  padding: 5px 12px;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  background: none;
+  cursor: default;
+  transition: background 0.12s ease, border-color 0.12s ease;
+}
+.plugins-panel button:hover,
+.modal .modal-actions button:hover { background: var(--selection-bg); }
+.plugins-panel button.danger { color: var(--red); border-color: transparent; }
+.plugins-panel button.danger:hover { background: var(--hover); }
+.plugins-panel button.primary,
+.modal .modal-actions button.primary { background: var(--accent); color: var(--sidebar-bg); border-color: var(--accent); }
+
+.plugins-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
+.plugin-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 12px 14px; border: 1px solid var(--border); border-radius: 10px; background: var(--sidebar-bg); }
+.plugin-row.empty { justify-content: center; color: var(--text-dim); padding: 22px 14px; font-size: 13px; }
+.plugin-meta { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.plugin-name { font-family: var(--ui-font); color: var(--text-bright); font-weight: 600; font-size: 14px; }
+.plugin-sub { font-family: var(--ui-font); color: var(--text-mid); font-size: 12px; }
+.plugin-perms { font-family: var(--ui-font); color: var(--text-dim); font-size: 11px; word-break: break-word; }
 .plugin-controls { display: flex; gap: 6px; flex-shrink: 0; }
-.plugin-controls .danger, .plugins-actions .danger { color: var(--red); }
-.perm-list { list-style: none; margin: 12px 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
-.perm-row { padding: 8px 10px; border: 1px solid var(--border); border-radius: 6px; }
+
+/* Consent modal */
+.perm-list { list-style: none; margin: 14px 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
+.perm-row { padding: 9px 11px; border: 1px solid var(--border); border-radius: 8px; }
 .perm-row.new { border-color: var(--accent); }
-.perm-label { color: var(--text-bright); font-size: 13px; }
-.perm-risk { color: var(--text-mid); font-size: 12px; margin-top: 2px; }
-.plugin-consent .modal-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 12px; }
+.perm-label { font-family: var(--ui-font); color: var(--text-bright); font-size: 13px; }
+.perm-risk { font-family: var(--ui-font); color: var(--text-mid); font-size: 12px; margin-top: 3px; }
+.plugin-consent .modal-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 16px; }
 
 .modal-backdrop { position: fixed; inset: 0; background: rgba(0,0,0,0.5); display: flex; align-items: center; justify-content: center; z-index: 1000; }
-.modal { background: var(--panel-bg); border: 1px solid var(--border); border-radius: 10px; padding: 20px; width: min(440px, 90vw); max-height: 80vh; overflow-y: auto; box-shadow: 0 12px 40px rgba(0,0,0,0.4); }
-.modal h2 { margin: 0 0 8px; color: var(--text-bright); }
+.modal { font-family: var(--ui-font); background: var(--panel-bg); border: 1px solid var(--border); border-radius: 12px; padding: 22px; width: min(440px, 90vw); max-height: 80vh; overflow-y: auto; box-shadow: 0 12px 40px rgba(0, 0, 0, 0.4); }
+.modal h2 { margin: 0 0 8px; color: var(--text-bright); font-family: var(--ui-font); font-size: 16px; font-weight: 600; }
+.modal .settings-intro { margin-top: 0; }
