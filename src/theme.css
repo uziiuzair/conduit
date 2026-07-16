@@ -3637,3 +3637,26 @@ button {
   color: var(--red);
   background: var(--hover);
 }
+
+/* ---- Plugins ---- */
+.plugins-panel { display: flex; flex-direction: column; gap: 12px; }
+.plugins-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+.plugins-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+.plugin-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 12px; border: 1px solid var(--border); border-radius: 8px; background: var(--panel-bg); }
+.plugin-row.empty { justify-content: center; color: var(--text-dim); }
+.plugin-meta { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.plugin-name { color: var(--text-bright); font-weight: 600; }
+.plugin-sub { color: var(--text-mid); font-size: 12px; }
+.plugin-perms { color: var(--text-dim); font-size: 11px; word-break: break-word; }
+.plugin-controls { display: flex; gap: 6px; flex-shrink: 0; }
+.plugin-controls .danger, .plugins-actions .danger { color: var(--red); }
+.perm-list { list-style: none; margin: 12px 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
+.perm-row { padding: 8px 10px; border: 1px solid var(--border); border-radius: 6px; }
+.perm-row.new { border-color: var(--accent); }
+.perm-label { color: var(--text-bright); font-size: 13px; }
+.perm-risk { color: var(--text-mid); font-size: 12px; margin-top: 2px; }
+.plugin-consent .modal-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 12px; }
+
+.modal-backdrop { position: fixed; inset: 0; background: rgba(0,0,0,0.5); display: flex; align-items: center; justify-content: center; z-index: 1000; }
+.modal { background: var(--panel-bg); border: 1px solid var(--border); border-radius: 10px; padding: 20px; width: min(440px, 90vw); max-height: 80vh; overflow-y: auto; box-shadow: 0 12px 40px rgba(0,0,0,0.4); }
+.modal h2 { margin: 0 0 8px; color: var(--text-bright); }
