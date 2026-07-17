@@ -1,0 +1,199 @@
+{
+  "description": "Continuity — presence, file-activity, and coordination for parallel Claude Code sessions. Every hook fails open: a non-git repo or an unreachable backend never blocks the session.",
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node",
+            "args": ["${CLAUDE_PLUGIN_ROOT}/scripts/session-start.mjs"],
+            "statusMessage": "Continuity: checking in…",
+            "timeout": 15,
+            "env": {
+              "CONTINUITY_API_URL": "${user_config.apiUrl}",
+              "CONTINUITY_API_KEY": "${user_config.apiKey}",
+              "CONTINUITY_REPO_ALLOWLIST": "${user_config.repoAllowlist}",
+              "CONTINUITY_DB_PATH": "${user_config.dbPath}"
+            }
+          }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node",
+            "args": ["${CLAUDE_PLUGIN_ROOT}/scripts/session-end.mjs"],
+            "timeout": 10,
+            "env": {
+              "CONTINUITY_API_URL": "${user_config.apiUrl}",
+              "CONTINUITY_API_KEY": "${user_config.apiKey}",
+              "CONTINUITY_REPO_ALLOWLIST": "${user_config.repoAllowlist}",
+              "CONTINUITY_DB_PATH": "${user_config.dbPath}"
+            }
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node",
+            "args": ["${CLAUDE_PLUGIN_ROOT}/scripts/user-prompt-submit.mjs"],
+            "statusMessage": "Continuity: syncing focus…",
+            "timeout": 10,
+            "env": {
+              "CONTINUITY_API_URL": "${user_config.apiUrl}",
+              "CONTINUITY_API_KEY": "${user_config.apiKey}",
+              "CONTINUITY_REPO_ALLOWLIST": "${user_config.repoAllowlist}",
+              "CONTINUITY_DB_PATH": "${user_config.dbPath}"
+            }
+          }
+        ]
+      }
+    ],
+    "CwdChanged": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node",
+            "args": ["${CLAUDE_PLUGIN_ROOT}/scripts/cwd-changed.mjs"],
+            "async": true,
+            "env": {
+              "CONTINUITY_API_URL": "${user_config.apiUrl}",
+              "CONTINUITY_API_KEY": "${user_config.apiKey}",
+              "CONTINUITY_REPO_ALLOWLIST": "${user_config.repoAllowlist}",
+              "CONTINUITY_DB_PATH": "${user_config.dbPath}"
+            }
+          }
+        ]
+      }
+    ],
+    "WorktreeCreate": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node",
+            "args": ["${CLAUDE_PLUGIN_ROOT}/scripts/worktree-create.mjs"],
+            "async": true,
+            "env": {
+              "CONTINUITY_API_URL": "${user_config.apiUrl}",
+              "CONTINUITY_API_KEY": "${user_config.apiKey}",
+              "CONTINUITY_REPO_ALLOWLIST": "${user_config.repoAllowlist}",
+              "CONTINUITY_DB_PATH": "${user_config.dbPath}"
+            }
+          }
+        ]
+      }
+    ],
+    "WorktreeRemove": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node",
+            "args": ["${CLAUDE_PLUGIN_ROOT}/scripts/worktree-remove.mjs"],
+            "async": true,
+            "env": {
+              "CONTINUITY_API_URL": "${user_config.apiUrl}",
+              "CONTINUITY_API_KEY": "${user_config.apiKey}",
+              "CONTINUITY_REPO_ALLOWLIST": "${user_config.repoAllowlist}",
+              "CONTINUITY_DB_PATH": "${user_config.dbPath}"
+            }
+          }
+        ]
+      }
+    ],
+    "TaskCreated": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node",
+            "args": ["${CLAUDE_PLUGIN_ROOT}/scripts/task-created.mjs"],
+            "async": true,
+            "env": {
+              "CONTINUITY_API_URL": "${user_config.apiUrl}",
+              "CONTINUITY_API_KEY": "${user_config.apiKey}",
+              "CONTINUITY_REPO_ALLOWLIST": "${user_config.repoAllowlist}",
+              "CONTINUITY_DB_PATH": "${user_config.dbPath}"
+            }
+          }
+        ]
+      }
+    ],
+    "TaskCompleted": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node",
+            "args": ["${CLAUDE_PLUGIN_ROOT}/scripts/task-completed.mjs"],
+            "async": true,
+            "env": {
+              "CONTINUITY_API_URL": "${user_config.apiUrl}",
+              "CONTINUITY_API_KEY": "${user_config.apiKey}",
+              "CONTINUITY_REPO_ALLOWLIST": "${user_config.repoAllowlist}",
+              "CONTINUITY_DB_PATH": "${user_config.dbPath}"
+            }
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Write|Edit|MultiEdit|NotebookEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node",
+            "args": ["${CLAUDE_PLUGIN_ROOT}/scripts/pre-tool-use.mjs"],
+            "timeout": 5,
+            "env": {
+              "CONTINUITY_REPO_ALLOWLIST": "${user_config.repoAllowlist}",
+              "CONTINUITY_COLLISION_GUARD": "${user_config.collisionGuard}"
+            }
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node",
+            "args": ["${CLAUDE_PLUGIN_ROOT}/scripts/stop.mjs"],
+            "timeout": 5,
+            "env": {
+              "CONTINUITY_REPO_ALLOWLIST": "${user_config.repoAllowlist}"
+            }
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Write|Edit|MultiEdit|NotebookEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node",
+            "args": ["${CLAUDE_PLUGIN_ROOT}/scripts/post-tool-use.mjs"],
+            "async": true,
+            "env": {
+              "CONTINUITY_REPO_ALLOWLIST": "${user_config.repoAllowlist}"
+            }
+          }
+        ]
+      }
+    ]
+  }
+}

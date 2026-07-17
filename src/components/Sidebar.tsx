@@ -566,6 +566,8 @@ function SessionContextMenu() {
   const closeMenu = useStore((s) => s.closeMenu);
   const startRename = useStore((s) => s.startRename);
   const startProjectRename = useStore((s) => s.startProjectRename);
+  const selectProject = useStore((s) => s.selectProject);
+  const setCenterMode = useStore((s) => s.setCenterMode);
   const removeSession = useStore((s) => s.removeSession);
   const removeProject = useStore((s) => s.removeProject);
   const openToSide = useStore((s) => s.openToSide);
@@ -607,6 +609,15 @@ function SessionContextMenu() {
         onClick={(e) => e.stopPropagation()}
       >
         <button onClick={() => startProjectRename(menu.projectId)}>Rename</button>
+        <button
+          onClick={() => {
+            selectProject(menu.projectId);
+            setCenterMode(menu.projectId, "board");
+            closeMenu();
+          }}
+        >
+          Open board
+        </button>
         <button
           className="danger"
           onClick={() => {

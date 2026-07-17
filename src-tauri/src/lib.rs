@@ -12,6 +12,8 @@ mod broker;
 mod claude_status;
 mod claude_usage;
 mod clipboard;
+mod continuity;
+mod continuity_read;
 mod fleet;
 mod fleet_mcp;
 mod format;
@@ -28,6 +30,7 @@ mod plugins;
 mod pty;
 mod search;
 mod store;
+mod tasks;
 mod telemetry;
 mod transcript;
 mod updates;
@@ -44,6 +47,7 @@ use tauri::{Emitter, Manager, State};
 use hooks::HookState;
 use pty::PtyManager;
 use store::{Project, ProjectLayout, Session, SessionRole, Store};
+use tasks::{BoardSnapshot, Card, Column, TaskBoard};
 
 /// Suppress the console window Windows flashes when a GUI app spawns a console child
 /// (`where`, `curl`, `git`, `cmd`, ...). Applies CREATE_NO_WINDOW on Windows; a no-op
@@ -84,6 +88,7 @@ fn opts_into_mailbox(has_mission: bool, channels: &[String]) -> bool {
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
 fn pty_spawn(
+    app: tauri::AppHandle,
     session_id: String,
     working_directory: String,
     cols: u16,
@@ -179,7 +184,14 @@ fn pty_spawn(
         && this_session
             .as_ref()
             .is_some_and(|s| opts_into_mailbox(mission_record.is_some(), &s.channels));
-    let gets_fleet_mcp = mission_record.is_some() || opted_into_mailbox;
+    // Task 15: a session belonging to a project whose task board has been opened at least
+    // once (`list_board` -> `Store::set_board_enabled`) also qualifies for the fleet MCP
+    // server -- board-enabled projects want every session to be able to call `task_*`, not
+    // only Conductor/mission/mailbox sessions. Resolved from `store` by session id rather
+    // than threading a `Project` through the spawn path, mirroring
+    // `session_account_config_dir`'s session->project lookup.
+    let project_board_on = !shell_only && store.board_enabled_for_session(&session_id);
+    let gets_fleet_mcp = mission_record.is_some() || opted_into_mailbox || project_board_on;
     // SPEC-B: model_tier -> concrete model id + effort, Claude only -- the only adapter
     // with a verified per-invocation flag for either (`claude --help` lists both `--model
     // <model>` and `--effort <low|medium|high|xhigh|max>`). Other adapters have no
@@ -199,6 +211,37 @@ fn pty_spawn(
     let is_conductor = !shell_only
         && role.as_deref() == Some("conductor")
         && agent == crate::agent::AgentId::Claude;
+
+    // C1 continuity: a real (non-shell) Claude session in a board-enabled project gets the
+    // bundled continuity plugin's MCP tools + presence hooks via `--plugin-dir`, gated on
+    // the host having Node >=22.5 (node:sqlite). `continuity_enabled` takes the RAW board
+    // flag (not `project_board_on`, which already ANDs in `!shell_only`) and re-applies
+    // `shell_only` itself -- passing `project_board_on` here would double-gate on
+    // `!shell_only` harmlessly, but this keeps the two independent and unambiguous.
+    // The Node probe shells out, so it's only run once the cheap gates already hold.
+    let board_enabled_raw = store.board_enabled_for_session(&session_id);
+    let is_claude_session = agent == crate::agent::AgentId::Claude;
+    let continuity_precheck = !shell_only && is_claude_session && board_enabled_raw;
+    let continuity_node = continuity_precheck.then(continuity::detect_node).flatten();
+    let continuity_on = continuity::continuity_enabled(
+        board_enabled_raw,
+        is_claude_session,
+        shell_only,
+        continuity_node,
+    );
+    let continuity_plugin_dir: Option<String> = if continuity_on {
+        continuity::continuity_asset_dir(&app).map(|p| p.to_string_lossy().into_owned())
+    } else {
+        None
+    };
+    // Graceful skip: board-enabled Claude session, but no usable Node -- the board still
+    // works, just without continuity's MCP tools/presence hooks. Never errors the spawn.
+    if continuity_precheck && continuity_node.is_none() {
+        eprintln!(
+            "conduit: continuity coordination needs Node >=22.5; skipping -- the board still works."
+        );
+    }
+
     // `--mcp-config`/`--append-system-prompt-file` are Claude CLI flags, carried through
     // `flags` into `build_invocation` -- ONLY meaningful for Claude. OpenCode's fleet-MCP
     // wiring goes entirely through `OPENCODE_CONFIG_CONTENT` (see the `opencode` block
@@ -345,6 +388,7 @@ fn pty_spawn(
         worktree_arg,
         settings_path,
         mcp_config_path,
+        continuity_plugin_dir,
         system_prompt_file,
         initial_prompt,
         account_config_dir,
@@ -426,6 +470,189 @@ fn remove_project(id: String, store: State<Arc<Store>>, pty: State<Arc<PtyManage
         }
     }
     store.remove_project(&id);
+}
+
+// ---- Project task board commands ---------------------------------------------
+
+/// Resolve a project id to its on-disk repo root, using the same `Store` accessor
+/// `load_projects` uses to read the project list.
+fn project_root(store: &Store, project_id: &str) -> Result<String, String> {
+    store
+        .list()
+        .into_iter()
+        .find(|p| p.id == project_id)
+        .map(|p| p.path)
+        .ok_or_else(|| format!("project not found: {project_id}"))
+}
+
+fn emit_board_changed(app: &tauri::AppHandle, project_id: &str) {
+    let _ = app.emit(
+        "board-changed",
+        serde_json::json!({ "projectId": project_id }),
+    );
+}
+
+#[tauri::command]
+fn list_board(
+    store: State<Arc<Store>>,
+    board: State<Arc<TaskBoard>>,
+    project_id: String,
+) -> Result<BoardSnapshot, String> {
+    let root = project_root(&store, &project_id)?;
+    board.ensure_scaffold(&root)?;
+    // Opening the board at least once enables the fleet MCP server (and `task_*`) for
+    // every session this project spawns from now on -- see `gets_fleet_mcp` in `pty_spawn`.
+    store.set_board_enabled(&project_id, true);
+    Ok(board.snapshot(&root))
+}
+
+/// Toggle a project's task-board flag directly (e.g. if the UI ever wants to disable it
+/// again). `list_board` already turns this on the first time the board is opened.
+#[tauri::command]
+fn set_board_enabled(project_id: String, enabled: bool, store: State<Arc<Store>>) {
+    store.set_board_enabled(&project_id, enabled);
+}
+
+#[tauri::command]
+fn board_add_card(
+    app: tauri::AppHandle,
+    store: State<Arc<Store>>,
+    board: State<Arc<TaskBoard>>,
+    project_id: String,
+    title: String,
+    body: String,
+    column: String,
+) -> Result<Card, String> {
+    let root = project_root(&store, &project_id)?;
+    let card = board.add_card(&root, &title, &body, &column, "human")?;
+    emit_board_changed(&app, &project_id);
+    Ok(card)
+}
+
+#[allow(clippy::too_many_arguments)]
+#[tauri::command]
+fn board_move_card(
+    app: tauri::AppHandle,
+    store: State<Arc<Store>>,
+    board: State<Arc<TaskBoard>>,
+    project_id: String,
+    id: String,
+    column: String,
+    after: Option<String>,
+    before: Option<String>,
+) -> Result<Card, String> {
+    let root = project_root(&store, &project_id)?;
+    let card = board.move_card(&root, &id, &column, after.as_deref(), before.as_deref())?;
+    emit_board_changed(&app, &project_id);
+    Ok(card)
+}
+
+#[allow(clippy::too_many_arguments)]
+#[tauri::command]
+fn board_edit_card(
+    app: tauri::AppHandle,
+    store: State<Arc<Store>>,
+    board: State<Arc<TaskBoard>>,
+    project_id: String,
+    id: String,
+    title: Option<String>,
+    body: Option<String>,
+    labels: Option<Vec<String>>,
+) -> Result<Card, String> {
+    let root = project_root(&store, &project_id)?;
+    let card = board.edit_card(&root, &id, title.as_deref(), body.as_deref(), labels)?;
+    emit_board_changed(&app, &project_id);
+    Ok(card)
+}
+
+#[tauri::command]
+fn board_delete_card(
+    app: tauri::AppHandle,
+    store: State<Arc<Store>>,
+    board: State<Arc<TaskBoard>>,
+    project_id: String,
+    id: String,
+) -> Result<(), String> {
+    let root = project_root(&store, &project_id)?;
+    board.delete_card(&root, &id)?;
+    emit_board_changed(&app, &project_id);
+    Ok(())
+}
+
+#[tauri::command]
+fn board_set_columns(
+    app: tauri::AppHandle,
+    store: State<Arc<Store>>,
+    board: State<Arc<TaskBoard>>,
+    project_id: String,
+    columns: Vec<Column>,
+) -> Result<(), String> {
+    let root = project_root(&store, &project_id)?;
+    board.set_columns(&root, columns)?;
+    emit_board_changed(&app, &project_id);
+    Ok(())
+}
+
+#[tauri::command]
+fn board_release_card(
+    app: tauri::AppHandle,
+    store: State<Arc<Store>>,
+    board: State<Arc<TaskBoard>>,
+    project_id: String,
+    id: String,
+) -> Result<(), String> {
+    let root = project_root(&store, &project_id)?;
+    board.delete_card_claim(&root, &id)?;
+    emit_board_changed(&app, &project_id);
+    Ok(())
+}
+
+#[tauri::command]
+fn board_start_workflow(
+    app: tauri::AppHandle,
+    store: State<Arc<Store>>,
+    board: State<Arc<TaskBoard>>,
+    project_id: String,
+    id: String,
+) -> Result<Card, String> {
+    let root = project_root(&store, &project_id)?;
+    board.ensure_agents(&root).ok();
+    board.ensure_knowledge(&root).ok();
+    let card = board.start_workflow(&root, &id, "human")?;
+    emit_board_changed(&app, &project_id);
+    Ok(card)
+}
+
+#[tauri::command]
+fn board_resolve_gate(
+    app: tauri::AppHandle,
+    store: State<Arc<Store>>,
+    board: State<Arc<TaskBoard>>,
+    project_id: String,
+    id: String,
+    approved: bool,
+) -> Result<Card, String> {
+    let root = project_root(&store, &project_id)?;
+    let card = board.resolve_gate(&root, &id, approved, "human")?;
+    emit_board_changed(&app, &project_id);
+    Ok(card)
+}
+
+/// Read-only continuity view for a project's board: which of its sessions are present
+/// (per continuity, matched by agent_label == Conduit session id) and pending handoffs
+/// scoped to any of its cards. Best-effort -- see `continuity_read::view_for_project`.
+#[tauri::command]
+fn list_continuity(
+    store: State<Arc<Store>>,
+    project_id: String,
+) -> Result<continuity_read::ContinuityView, String> {
+    let session_ids: Vec<String> = store
+        .list()
+        .into_iter()
+        .find(|p| p.id == project_id)
+        .map(|p| p.sessions.into_iter().map(|s| s.id).collect())
+        .unwrap_or_default();
+    Ok(continuity_read::view_for_project(&project_id, &session_ids))
 }
 
 #[tauri::command]
@@ -1223,6 +1450,7 @@ pub fn run() {
         .manage(Arc::new(HookState::default()))
         .manage(Arc::new(crate::fleet::FleetState::default()))
         .manage(Arc::new(crate::board::BoardState::default()))
+        .manage(Arc::new(TaskBoard::default()))
         .manage(Arc::new(claude_usage::ClaudeAuth::default()))
         .manage(Arc::new(agy_usage::AgyUsageState::default()))
         .manage(Arc::new(agy_usage::AgyResumeState::default()))
@@ -1254,6 +1482,7 @@ pub fn run() {
             let presence = app.state::<Arc<broker::Presence>>().inner().clone();
             let pty = app.state::<Arc<PtyManager>>().inner().clone();
             let store = app.state::<Arc<Store>>().inner().clone();
+            let tasks = app.state::<Arc<TaskBoard>>().inner().clone();
             let agy_usage = app
                 .state::<Arc<crate::agy_usage::AgyUsageState>>()
                 .inner()
@@ -1276,7 +1505,7 @@ pub fn run() {
                 agy_resume,
             );
             bridge::start(app.handle().clone());
-            fleet_mcp::start(app.handle().clone(), store, pty, fleet, board);
+            fleet_mcp::start(app.handle().clone(), store, pty, fleet, board, tasks);
 
             // Native menu bar. Custom items forward to the frontend as a single "menu"
             // event (payload = item id); Quit kills PTYs before exiting (see menu.rs).
@@ -1296,6 +1525,17 @@ pub fn run() {
             load_projects,
             add_project,
             remove_project,
+            list_board,
+            set_board_enabled,
+            board_add_card,
+            board_move_card,
+            board_edit_card,
+            board_delete_card,
+            board_set_columns,
+            board_release_card,
+            board_start_workflow,
+            board_resolve_gate,
+            list_continuity,
             add_session,
             detect_agents,
             rename_session,

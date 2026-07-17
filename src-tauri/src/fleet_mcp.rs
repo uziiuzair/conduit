@@ -24,6 +24,7 @@ use crate::board::{BoardKind, BoardRecord, BoardState};
 use crate::fleet::{self, FleetState};
 use crate::pty::PtyManager;
 use crate::store::{Session, SessionRole, Store};
+use crate::tasks::TaskBoard;
 
 /// How many bytes of recent output `fleet_peek` returns.
 const PEEK_BYTES: usize = 8192;
@@ -35,6 +36,7 @@ struct Ctx {
     pty: Arc<PtyManager>,
     fleet: Arc<FleetState>,
     board: Arc<BoardState>,
+    tasks: Arc<TaskBoard>,
     conductor_id: String,
 }
 
@@ -137,6 +139,31 @@ pub fn tool_specs() -> Vec<Value> {
             "description": "Static per-agent capability cards: tier (1=full MCP, 2=structured-no-MCP, 3=unmonitored), when to use / not use each agent, and whether it supports fleet_result/the mailbox. A Tier 2/3 worker will not fleet_result -- plan your wake/poll strategy accordingly.",
             "inputSchema": { "type": "object", "properties": {} }
         }),
+        json!({
+            "name": "task_list",
+            "description": "List task-board cards in your project. Optionally filter by column, only your claims, or only unclaimed cards.",
+            "inputSchema": { "type": "object", "properties": {
+                "column": {"type": "string"},
+                "mine": {"type": "boolean"},
+                "unclaimed": {"type": "boolean"}
+            }, "required": [] }
+        }),
+        json!({ "name": "task_get", "description": "Get one card by id (full body + comments + claim).",
+            "inputSchema": {"type":"object","properties":{"id":{"type":"string"}},"required":["id"]} }),
+        json!({ "name": "task_claim", "description": "Claim a card so no other session works it. Fails if already claimed by a live session.",
+            "inputSchema": {"type":"object","properties":{"id":{"type":"string"}},"required":["id"]} }),
+        json!({ "name": "task_release", "description": "Release your own claim on a card.",
+            "inputSchema": {"type":"object","properties":{"id":{"type":"string"}},"required":["id"]} }),
+        json!({ "name": "task_move", "description": "Move a card to a column, optionally between two card ids.",
+            "inputSchema": {"type":"object","properties":{"id":{"type":"string"},"column":{"type":"string"},"after":{"type":"string"},"before":{"type":"string"}},"required":["id","column"]} }),
+        json!({ "name": "task_comment", "description": "Append a short comment to a card (max 512 bytes).",
+            "inputSchema": {"type":"object","properties":{"id":{"type":"string"},"text":{"type":"string"}},"required":["id","text"]} }),
+        json!({ "name": "task_add", "description": "Create a card in a column (default backlog).",
+            "inputSchema": {"type":"object","properties":{"title":{"type":"string"},"body":{"type":"string"},"column":{"type":"string"}},"required":["title"]} }),
+        json!({ "name": "task_workflow_start", "description": "Attach the stage-gate workflow to a card (starts at discovery). Use for work that needs the full requirements→architecture→verify pipeline.",
+            "inputSchema": {"type":"object","properties":{"id":{"type":"string"}},"required":["id"]} }),
+        json!({ "name": "task_advance", "description": "Report the outcome of your current stage on a workflow card you have claimed. outcome ∈ completed|failed_checks|design_conflict|ux_conflict. Stops at human gates.",
+            "inputSchema": {"type":"object","properties":{"id":{"type":"string"},"outcome":{"type":"string"},"note":{"type":"string"}},"required":["id","outcome"]} }),
     ]
 }
 
@@ -177,9 +204,23 @@ fn resolve_pair(
     Ok((caller, target))
 }
 
-/// Tools a Worker-role caller may invoke -- the vertical/horizontal DATA tools, never
+/// Tools a Worker-role caller may invoke -- the vertical/horizontal DATA tools, plus the
+/// task-board tools (Task 15: a worker claims/moves/comments its own cards), but never
 /// anything that spawns, commands, or observes a sibling session (design doc §2.0).
-const WORKER_ALLOWED: &[&str] = &["fleet_result", "fleet_note", "fleet_inbox"];
+const WORKER_ALLOWED: &[&str] = &[
+    "fleet_result",
+    "fleet_note",
+    "fleet_inbox",
+    "task_list",
+    "task_get",
+    "task_claim",
+    "task_release",
+    "task_move",
+    "task_comment",
+    "task_add",
+    "task_workflow_start",
+    "task_advance",
+];
 
 /// Every tool call MUST pass through this before touching Store/Pty/Board. Conductor:
 /// all tools. Worker: only `WORKER_ALLOWED`. Takes `&Store` (not `&Ctx`) so it's testable
@@ -197,6 +238,36 @@ fn authorize(store: &Store, conductor_id: &str, tool: &str) -> Result<(), String
         SessionRole::Conductor => Ok(()),
         SessionRole::Worker if WORKER_ALLOWED.contains(&tool) => Ok(()),
         SessionRole::Worker => Err("worker-role-cannot-orchestrate".into()),
+    }
+}
+
+/// The on-disk root of the project the calling session belongs to. Resolved from the
+/// session id baked into the MCP URL (`?conductor=<sid>`) via the fleet snapshot -- NEVER
+/// from tool args. This is the structural project-scope guarantee.
+fn caller_project_root(ctx: &Ctx) -> Result<String, String> {
+    ctx.store
+        .fleet_snapshot(&ctx.conductor_id)
+        .map(|snap| snap.project_path)
+        .ok_or_else(|| "caller-not-found".to_string())
+}
+
+/// The store `Project.id` of the calling session's project (for `board-changed` event
+/// payloads) -- resolved from the session id baked into the MCP URL, same as
+/// `caller_project_root`, never from tool args.
+fn project_id_of(ctx: &Ctx) -> Option<String> {
+    ctx.store
+        .fleet_snapshot(&ctx.conductor_id)
+        .map(|snap| snap.project_id)
+}
+
+/// Notify the frontend that this project's board changed, so an open Board view refetches.
+/// Best-effort: no receiver (no window yet, or project not resolvable) is not an error.
+fn emit_board_changed(ctx: &Ctx) {
+    if let Some(project_id) = project_id_of(ctx) {
+        let _ = ctx.app.emit(
+            "board-changed",
+            serde_json::json!({ "projectId": project_id }),
+        );
     }
 }
 
@@ -569,6 +640,149 @@ fn dispatch_tool(name: &str, args: &Value, ctx: &Ctx) -> Result<String, String> 
             Ok(json!(readable_by(missions, caller, &snap.sessions)).to_string())
         }
         "fleet_capabilities" => Ok(json!(crate::agent::capability_cards()).to_string()),
+        "task_list" => {
+            let root = caller_project_root(ctx)?;
+            ctx.tasks.ensure_scaffold(&root).ok();
+            let mut snap = ctx.tasks.snapshot(&root);
+            if let Some(col) = args.get("column").and_then(|v| v.as_str()) {
+                snap.cards.retain(|c| c.column == col);
+            }
+            if args.get("mine").and_then(|v| v.as_bool()) == Some(true) {
+                let me = ctx.conductor_id.clone();
+                snap.cards
+                    .retain(|c| c.claim.as_ref().map(|cl| cl.by == me).unwrap_or(false));
+            }
+            if args.get("unclaimed").and_then(|v| v.as_bool()) == Some(true) {
+                snap.cards.retain(|c| c.claim.is_none());
+            }
+            serde_json::to_string(&snap).map_err(|e| e.to_string())
+        }
+        "task_get" => {
+            let root = caller_project_root(ctx)?;
+            let id = args
+                .get("id")
+                .and_then(|v| v.as_str())
+                .ok_or("missing id")?;
+            let snap = ctx.tasks.snapshot(&root);
+            let card = snap
+                .cards
+                .into_iter()
+                .find(|c| c.id == id)
+                .ok_or("card not found")?;
+            serde_json::to_string(&card).map_err(|e| e.to_string())
+        }
+        "task_claim" => {
+            let root = caller_project_root(ctx)?;
+            let id = args
+                .get("id")
+                .and_then(|v| v.as_str())
+                .ok_or("missing id")?;
+            let running = ctx.fleet.running_sessions();
+            let live = |sid: &str| running.iter().any(|r| r.as_str() == sid);
+            ctx.tasks.claim_card(&root, id, &ctx.conductor_id, &live)?;
+            let briefing = ctx.tasks.claim_briefing(&root, id)?;
+            emit_board_changed(ctx);
+            serde_json::to_string(&briefing).map_err(|e| e.to_string())
+        }
+        "task_release" => {
+            let root = caller_project_root(ctx)?;
+            let id = args
+                .get("id")
+                .and_then(|v| v.as_str())
+                .ok_or("missing id")?;
+            ctx.tasks.release_card(&root, id, &ctx.conductor_id)?;
+            emit_board_changed(ctx);
+            Ok("released".to_string())
+        }
+        "task_move" => {
+            let root = caller_project_root(ctx)?;
+            let id = args
+                .get("id")
+                .and_then(|v| v.as_str())
+                .ok_or("missing id")?;
+            let column = args
+                .get("column")
+                .and_then(|v| v.as_str())
+                .ok_or("missing column")?;
+            let after = args.get("after").and_then(|v| v.as_str());
+            let before = args.get("before").and_then(|v| v.as_str());
+            // Don't reorder/move a card that a different, still-running session is holding.
+            let snap = ctx.tasks.snapshot(&root);
+            if let Some(card) = snap.cards.iter().find(|c| c.id == id) {
+                if let Some(cl) = &card.claim {
+                    let running = ctx.fleet.running_sessions();
+                    if cl.by != ctx.conductor_id && running.iter().any(|r| r.as_str() == cl.by) {
+                        return Err(format!("claimed-by:{}", cl.by));
+                    }
+                }
+            }
+            ctx.tasks.move_card(&root, id, column, after, before)?;
+            emit_board_changed(ctx);
+            Ok("moved".to_string())
+        }
+        "task_comment" => {
+            let root = caller_project_root(ctx)?;
+            let id = args
+                .get("id")
+                .and_then(|v| v.as_str())
+                .ok_or("missing id")?;
+            let text = args
+                .get("text")
+                .and_then(|v| v.as_str())
+                .ok_or("missing text")?;
+            ctx.tasks.comment_card(&root, id, &ctx.conductor_id, text)?;
+            emit_board_changed(ctx);
+            Ok("commented".to_string())
+        }
+        "task_add" => {
+            let root = caller_project_root(ctx)?;
+            let title = args
+                .get("title")
+                .and_then(|v| v.as_str())
+                .ok_or("missing title")?;
+            let body = args.get("body").and_then(|v| v.as_str()).unwrap_or("");
+            let column = args
+                .get("column")
+                .and_then(|v| v.as_str())
+                .unwrap_or("backlog");
+            let card = ctx
+                .tasks
+                .add_card(&root, title, body, column, &ctx.conductor_id)?;
+            emit_board_changed(ctx);
+            serde_json::to_string(&card).map_err(|e| e.to_string())
+        }
+        "task_workflow_start" => {
+            let root = caller_project_root(ctx)?;
+            let id = args.get("id").and_then(|v| v.as_str()).ok_or("missing id")?;
+            // Scaffold the shared assets first (idempotent; each takes its own lock, so they must
+            // NOT be called from inside start_workflow), then attach the workflow.
+            ctx.tasks.ensure_agents(&root).ok();
+            ctx.tasks.ensure_knowledge(&root).ok();
+            let card = ctx.tasks.start_workflow(&root, id, &ctx.conductor_id)?;
+            emit_board_changed(ctx);
+            serde_json::to_string(&card).map_err(|e| e.to_string())
+        }
+        "task_advance" => {
+            let root = caller_project_root(ctx)?;
+            let id = args.get("id").and_then(|v| v.as_str()).ok_or("missing id")?;
+            // Only the claim holder may advance.
+            let snap = ctx.tasks.snapshot(&root);
+            match snap.cards.iter().find(|c| c.id == id).and_then(|c| c.claim.as_ref()) {
+                Some(cl) if cl.by == ctx.conductor_id => {}
+                _ => return Err("advance requires holding this card's claim".to_string()),
+            }
+            let outcome = match args.get("outcome").and_then(|v| v.as_str()).ok_or("missing outcome")? {
+                "completed" => crate::tasks::stage_machine::Outcome::Completed,
+                "failed_checks" => crate::tasks::stage_machine::Outcome::FailedChecks,
+                "design_conflict" => crate::tasks::stage_machine::Outcome::DesignConflict,
+                "ux_conflict" => crate::tasks::stage_machine::Outcome::UxConflict,
+                other => return Err(format!("outcome not allowed from an agent: {other}")),
+            };
+            let note = args.get("note").and_then(|v| v.as_str()).unwrap_or("");
+            let card = ctx.tasks.advance(&root, id, outcome, &ctx.conductor_id, note)?;
+            emit_board_changed(ctx);
+            serde_json::to_string(&card).map_err(|e| e.to_string())
+        }
         other => Err(format!("unknown tool: {other}")),
     }
 }
@@ -596,6 +810,7 @@ pub fn start(
     pty: Arc<PtyManager>,
     fleet: Arc<FleetState>,
     board: Arc<BoardState>,
+    tasks: Arc<TaskBoard>,
 ) {
     thread::spawn(move || {
         let mut server: Option<Server> = None;
@@ -617,7 +832,8 @@ pub fn start(
             let pty = pty.clone();
             let fleet = fleet.clone();
             let board = board.clone();
-            thread::spawn(move || handle_request(request, app, store, pty, fleet, board));
+            let tasks = tasks.clone();
+            thread::spawn(move || handle_request(request, app, store, pty, fleet, board, tasks));
         }
     });
 }
@@ -630,6 +846,7 @@ fn handle_request(
     pty: Arc<PtyManager>,
     fleet: Arc<FleetState>,
     board: Arc<BoardState>,
+    tasks: Arc<TaskBoard>,
 ) {
     // claude opens an optional SSE stream via GET; we don't push server->client, so
     // 405 makes it fall back to POST (validated in the Task 0 spike).
@@ -689,6 +906,7 @@ fn handle_request(
                 pty,
                 fleet,
                 board,
+                tasks,
                 conductor_id,
             };
             match dispatch_tool(name, &args, &ctx) {
@@ -723,7 +941,7 @@ mod tests {
     }
 
     #[test]
-    fn tools_list_includes_all_eleven() {
+    fn tools_list_includes_fleet_and_task_tools() {
         let names: Vec<String> = tool_specs()
             .into_iter()
             .map(|t| t["name"].as_str().unwrap().to_string())
@@ -740,6 +958,15 @@ mod tests {
             "fleet_inbox",
             "fleet_roster",
             "fleet_capabilities",
+            "task_list",
+            "task_get",
+            "task_claim",
+            "task_release",
+            "task_move",
+            "task_comment",
+            "task_add",
+            "task_workflow_start",
+            "task_advance",
         ] {
             assert!(names.contains(&n.to_string()), "missing {n}");
         }
@@ -1118,6 +1345,33 @@ mod tests {
     }
 
     #[test]
+    fn workers_may_use_task_tools_but_not_orchestration() {
+        let (store, _conductor, worker) = store_with_conductor_and_worker("authz_task_tools");
+        for t in [
+            "task_list",
+            "task_get",
+            "task_claim",
+            "task_release",
+            "task_move",
+            "task_comment",
+            "task_add",
+            "task_workflow_start",
+            "task_advance",
+        ] {
+            assert!(
+                authorize(&store, &worker.id, t).is_ok(),
+                "worker should be allowed {t}"
+            );
+        }
+        for denied in ["fleet_spawn", "fleet_send", "fleet_stop", "fleet_peek", "fleet_list"] {
+            assert!(
+                authorize(&store, &worker.id, denied).is_err(),
+                "worker must be denied {denied}"
+            );
+        }
+    }
+
+    #[test]
     fn fleet_spawn_refused_when_caller_resolves_to_worker() {
         // SPEC-H depth cap (invariant 5: "a worker cannot spawn workers"), pinned with
         // its own name -- a worker is never even one level removed from orchestrating,
@@ -1246,5 +1500,38 @@ mod tests {
     fn persona_teaches_roster_and_capabilities_consultation() {
         assert!(crate::fleet::CONDUCTOR_PERSONA.contains("fleet_roster"));
         assert!(crate::fleet::CONDUCTOR_PERSONA.contains("fleet_capabilities"));
+    }
+
+    // ---- Task 13: task_list structural project scoping ----
+
+    /// `caller_project_root` (the scope helper behind `task_list`) MUST derive the
+    /// project root from the caller's own session id via `fleet_snapshot`, never from a
+    /// tool argument. A full `Ctx` needs an `AppHandle` we can't build in a unit test, so
+    /// this exercises the exact same `store.fleet_snapshot(conductor_id).project_path`
+    /// path that `caller_project_root`'s body is defined in terms of.
+    #[test]
+    fn caller_project_root_resolves_from_session_not_args() {
+        let store = Store::for_test(&temp_dir("caller_project_root"));
+        let proj = store.add_project("/repo-caller-project-root".into());
+        let conductor = store
+            .add_session(
+                &proj.id,
+                "Conductor".into(),
+                false,
+                crate::agent::AgentId::Claude,
+                SessionRole::Conductor,
+            )
+            .unwrap();
+
+        let root = store
+            .fleet_snapshot(&conductor.id)
+            .map(|s| s.project_path)
+            .expect("a session belonging to a project must resolve its project's path");
+        assert_eq!(root, "/repo-caller-project-root");
+
+        // A conductor id belonging to no project (or no session at all) resolves to
+        // Err, never a caller-suppliable path -- this is the structural scoping
+        // guarantee: the tool has no argument that can select a different project.
+        assert!(store.fleet_snapshot("no-such-session-anywhere").is_none());
     }
 }

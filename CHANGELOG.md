@@ -3,6 +3,48 @@
 All notable changes to Conduit are documented here. This project uses
 [semantic versioning](https://semver.org/).
 
+## 0.17.0 — 2026-07-17
+
+- **Added — handoffs & presence on the board.** Cards now show a **presence dot** for who's live
+  on them and a **↪ badge** when another session has handed the work off with context. Click a card
+  to open a detail panel with the incoming handoff — what was done, suggested next steps, and the
+  handed-over state — plus the card's body, claim, labels, and comments. Reads Continuity live; if
+  it isn't running the board just shows no dots/badges.
+
+## 0.16.0 — 2026-07-17
+
+- **Added — session coordination (Continuity).** Board-enabled projects now bundle Continuity:
+  each Claude session gets its own identity and can hand off work — with the context it built up
+  and suggested next steps — to another session, and reports presence so you can tell who's live.
+  Zero-config (local SQLite); needs Node ≥22.5 and is skipped gracefully otherwise, so nothing
+  changes if Node is absent. Surfacing this on the cards (presence dots, handoff badges) comes next.
+
+## 0.15.0 — 2026-07-17
+
+- **Added — stage-gate cards on the task board.** Any board card can now opt into a full
+  delivery workflow — discovery → requirements → UX → architecture → plan → build → verify.
+  The agent that claims a workflow card is handed that stage's role briefing inline (planner,
+  UX, architect, or implementer), writes the stage's artifact into `.conduit/work-items/`, and
+  reports the outcome to advance the card. An enforced state machine keeps the pipeline honest:
+  an agent can't skip your sign-off — the card stops for you at requirements clarification and
+  at final verification, where you Approve or send it back from the board. Each project also
+  gets a shared knowledge bundle in `.conduit/knowledge/` (decisions, patterns, anti-patterns,
+  domain, components) that the role agents read before proposing and promote to as work lands.
+- **Changed — board UX.** The board is now a **workspace tab** (not a floating overlay): a
+  **Board** button in the tab strip opens it full-width below the strip while terminals stay alive.
+  Columns stretch to fill the width, cards use the app's palette, and "+ Add" lives inside each
+  column beneath its cards.
+
+## 0.14.0 — 2026-07-16
+
+- **Added — project task board.** Every project now has a Kanban board stored in its own
+  repo under `.conduit/board/` (git-shared with your team, one file per card). Open it as a
+  full-screen view with ⇧⌘B, then drag cards between columns and add cards inline — the
+  terminals keep running underneath. Live agent sessions in the project claim, move, and
+  comment on cards through new `task_*` MCP tools, so a fleet coordinates on shared work
+  without stepping on each other: a claimed card can't be double-worked, and card ownership
+  is shown right on the board. Off until you open a board in a project.
+
 ## 0.13.0 — 2026-07-14
 
 - **Added — rename projects in the sidebar.** Give a project any display name you

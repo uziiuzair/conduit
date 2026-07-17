@@ -203,6 +203,38 @@ export interface Project {
   defaultAccounts?: DefaultAccounts;
 }
 
+// ---- Task board (Conductor board) ----
+export interface BoardColumn { id: string; name: string }
+export interface BoardClaim { by: string; at: number; leaseUntil: number }
+export interface BoardComment { by: string; at: number; text: string }
+export type Stage =
+  | "requested" | "discovery" | "requirement_draft" | "business_clarification"
+  | "ux_input" | "architecture_input" | "implementation_plan" | "implementation"
+  | "verification" | "blocked" | "done";
+export interface WorkflowHistory { at: number; by: string; from: Stage; to: Stage; note: string }
+export interface Workflow {
+  kind: string; stage: Stage; resumeState: Stage | null;
+  blockedQuestion: string | null; history: WorkflowHistory[];
+}
+export interface BoardCard {
+  id: string; title: string; body: string; column: string; order: string;
+  labels: string[]; createdBy: string; createdAt: number; updatedAt: number;
+  workflow: Workflow | null; links: { workItem: string | null; pr: string; branch: string };
+  comments: BoardComment[]; claim: BoardClaim | null;
+}
+export interface BoardSnapshot { columns: BoardColumn[]; cards: BoardCard[] }
+
+// ---- Continuity (presence + handoffs) — mirror the Rust serde structs (camelCase) ----
+export interface Presence { sessionId: string; status: "active" | "idle" | "gone"; lastSeenAt: string }
+export interface CardHandoff {
+  cardId: string; id: string; fromLabel: string | null; context: string;
+  state: string | null; suggestedNextActions: string | null; status: string; createdAt: string;
+}
+export interface ContinuityView { presence: Presence[]; handoffs: CardHandoff[] }
+
+/** Center pane mode, per project: the terminal workspace or the task board. */
+export type CenterMode = "terminals" | "board";
+
 export type SessionStatus = "idle" | "running" | "needsInput" | "done";
 export type TodoStatus = "pending" | "in_progress" | "completed";
 
@@ -915,6 +947,18 @@ interface AppState {
   refreshAgyUsage: () => Promise<void>;
   refreshAgyUsageTracking: () => Promise<void>;
   setAgyUsageTracking: (enabled: boolean) => Promise<boolean>;
+
+  // ---- Task board (Conductor board) ----
+  /** Center pane mode per project ("terminals" | "board"); default (unset) is "terminals". */
+  centerMode: Record<string, CenterMode>;
+  /** Latest board snapshot per project, refreshed by useBoard. */
+  boards: Record<string, BoardSnapshot>;
+  /** Latest continuity view (presence + handoffs) per project, refreshed by useBoard. */
+  continuity: Record<string, ContinuityView>;
+  setCenterMode: (projectId: string, mode: CenterMode) => void;
+  toggleCenterMode: (projectId: string) => void;
+  setBoard: (projectId: string, snapshot: BoardSnapshot) => void;
+  setContinuity: (projectId: string, view: ContinuityView) => void;
 }
 
 export const useStore = create<AppState>((set, get) => {
@@ -2263,6 +2307,22 @@ export const useStore = create<AppState>((set, get) => {
       applyTheme(id);
       set({ activeThemeId: id });
     },
+
+    // ---- Task board (Conductor board) ----
+    centerMode: {},
+    boards: {},
+    continuity: {},
+    setCenterMode: (projectId, mode) =>
+      set((s) => ({ centerMode: { ...s.centerMode, [projectId]: mode } })),
+    toggleCenterMode: (projectId) =>
+      set((s) => {
+        const cur = s.centerMode[projectId] ?? "terminals";
+        return { centerMode: { ...s.centerMode, [projectId]: cur === "board" ? "terminals" : "board" } };
+      }),
+    setBoard: (projectId, snapshot) =>
+      set((s) => ({ boards: { ...s.boards, [projectId]: snapshot } })),
+    setContinuity: (projectId, view) =>
+      set((s) => ({ continuity: { ...s.continuity, [projectId]: view } })),
   };
 });
 

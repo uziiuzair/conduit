@@ -160,6 +160,9 @@ impl PtyManager {
         worktree_name: Option<String>,
         settings_path: Option<String>,
         mcp_config_path: Option<String>,
+        // Continuity (Node-gated): the bundled continuity plugin dir, passed to
+        // `claude --plugin-dir <dir>` when Some. Additive only -- None changes nothing.
+        plugin_dir: Option<String>,
         system_prompt_file: Option<String>,
         initial_prompt: Option<String>,
         account_config_dir: Option<String>,
@@ -227,6 +230,7 @@ impl PtyManager {
                     worktree_name.as_deref(),
                     settings_path.as_deref(),
                     mcp_config_path.as_deref(),
+                    plugin_dir.as_deref(),
                     system_prompt_file.as_deref(),
                     initial_prompt.as_deref(),
                     projects_dir.as_deref(),
@@ -259,6 +263,7 @@ impl PtyManager {
                     worktree_name.as_deref(),
                     settings_path.as_deref(),
                     mcp_config_path.as_deref(),
+                    plugin_dir.as_deref(),
                     system_prompt_file.as_deref(),
                     initial_prompt.as_deref(),
                     projects_dir.as_deref(),
@@ -291,6 +296,14 @@ impl PtyManager {
         if !shell_only {
             cmd.env("CONDUIT_SESSION_ID", &session_id);
             cmd.env("CONDUIT_HOOK_PORT", hook_port.to_string());
+            // Continuity identity env: only set when a plugin dir was actually resolved
+            // (i.e. continuity is on for this spawn -- see `continuity::continuity_enabled`).
+            // SESSION_ID gives continuity a distinct identity per Conduit session; AGENT_ID
+            // becomes continuity's presence label so the board can join presence to a card.
+            if plugin_dir.is_some() {
+                cmd.env("CONTINUITY_SESSION_ID", &session_id);
+                cmd.env("CONTINUITY_AGENT_ID", &session_id);
+            }
             for (k, v) in adapter.env_overrides() {
                 cmd.env(k, v);
             }
@@ -693,6 +706,7 @@ fn build_script(
     worktree: Option<&str>,
     settings: Option<&str>,
     mcp_config: Option<&str>,
+    plugin_dir: Option<&str>,
     system_prompt_file: Option<&str>,
     initial_prompt: Option<&str>,
     projects_dir: Option<&Path>,
@@ -709,6 +723,12 @@ fn build_script(
     }
     if let Some(cfg) = mcp_config {
         flags.push_str(&format!(" --mcp-config {}", shell_quote(cfg)));
+    }
+    // Continuity (Node-gated, board-enabled Claude sessions only): the bundled plugin
+    // dir, resolved by `continuity::continuity_asset_dir`. None (continuity off) leaves
+    // this flag out entirely -- same additive shape as `--mcp-config` above.
+    if let Some(dir) = plugin_dir {
+        flags.push_str(&format!(" --plugin-dir {}", shell_quote(dir)));
     }
     // File, not inline text: see `fleet::write_persona_file` for the Windows
     // command-line-length reason. `flags` is duplicated by build_invocation's `||`
@@ -759,6 +779,7 @@ fn build_script_win(
     worktree: Option<&str>,
     settings: Option<&str>,
     mcp_config: Option<&str>,
+    plugin_dir: Option<&str>,
     system_prompt_file: Option<&str>,
     initial_prompt: Option<&str>,
     projects_dir: Option<&Path>,
@@ -775,6 +796,10 @@ fn build_script_win(
     }
     if let Some(cfg) = mcp_config {
         flags.push_str(&format!(" --mcp-config {}", quote_arg(cfg)));
+    }
+    // Continuity: same additive shape as the POSIX `build_script` above, cmd-quoted.
+    if let Some(dir) = plugin_dir {
+        flags.push_str(&format!(" --plugin-dir {}", quote_arg(dir)));
     }
     // File, not inline text -- this is the actual fix for the Windows "command line is too
     // long" Conductor failure (see `fleet::write_persona_file`): the ~5 KB persona must not
@@ -895,6 +920,7 @@ mod tests {
             None,
             None,
             None,
+            None, // plugin_dir
             None,
             None,
             None,
@@ -920,6 +946,7 @@ mod tests {
             None,                     // worktree
             Some("/cfg/hooks.json"),  // settings
             Some("/cfg/mcp.json"),    // mcp_config
+            None,                     // plugin_dir
             Some("/cfg/persona.txt"), // system_prompt_file
             None,                     // initial_prompt
             None,                     // projects_dir
@@ -954,6 +981,7 @@ mod tests {
             None,
             None,
             None,
+            None, // plugin_dir
             None,
             Some("implement the parser"),
             None,
@@ -1048,6 +1076,7 @@ mod tests {
             None,
             None,
             None,
+            None, // plugin_dir
             None,
             None,
             None,
@@ -1069,6 +1098,7 @@ mod tests {
             None,
             Some(r"C:\cfg dir\hooks.json"),
             None,
+            None, // plugin_dir
             Some(r"C:\cfg dir\persona.txt"),
             None,
             None,
@@ -1105,6 +1135,7 @@ mod tests {
             None,
             None,
             Some(r"C:\Users\u\AppData\Roaming\ConduitTauri\conductor-mcp-x.json"),
+            None, // plugin_dir
             Some(persona_path),
             None,
             None,
@@ -1131,6 +1162,7 @@ mod tests {
             None,
             None,
             None,
+            None, // plugin_dir
             None,
             None,
             None,
@@ -1151,6 +1183,7 @@ mod tests {
             None,
             None,
             None,
+            None, // plugin_dir
             None,
             None,
             None,
@@ -1160,5 +1193,69 @@ mod tests {
         );
         assert!(script.contains("--model claude-opus-4-8"), "{script}");
         assert!(script.contains("--effort high"), "{script}");
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn build_script_appends_plugin_dir_when_present() {
+        let adapter = crate::agent::adapter_for(crate::agent::AgentId::Claude);
+        let with_plugin = build_script(
+            &*adapter,
+            "sid-1",
+            8423,
+            "/repo",
+            "/bin/zsh",
+            None,
+            None,
+            None,
+            Some("/opt/continuity-plugin"), // plugin_dir
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
+        assert!(
+            with_plugin.contains("--plugin-dir '/opt/continuity-plugin'"),
+            "{with_plugin}"
+        );
+
+        // None (continuity off) must add nothing -- purely additive.
+        let without_plugin = build_script(
+            &*adapter, "sid-1", 8423, "/repo", "/bin/zsh", None, None, None, None, None, None,
+            None, None, None, None,
+        );
+        assert!(!without_plugin.contains("--plugin-dir"), "{without_plugin}");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn build_script_win_appends_plugin_dir_when_present() {
+        let adapter = crate::agent::adapter_for(crate::agent::AgentId::Claude);
+        let with_plugin = build_script_win(
+            &*adapter,
+            "sid-1",
+            None,
+            None,
+            None,
+            Some(r"C:\continuity-plugin"), // plugin_dir
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
+        assert!(
+            with_plugin.contains("--plugin-dir C:\\continuity-plugin"),
+            "{with_plugin}"
+        );
+
+        // None (continuity off) must add nothing -- purely additive.
+        let without_plugin = build_script_win(
+            &*adapter, "sid-1", None, None, None, None, None, None, None, None, None, None,
+        );
+        assert!(!without_plugin.contains("--plugin-dir"), "{without_plugin}");
     }
 }

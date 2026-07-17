@@ -13,6 +13,7 @@ import {
 } from "../store";
 import { TerminalView } from "./Terminal";
 import { CodeEditorPane } from "./CodeEditorPane";
+import { BoardView } from "./BoardView";
 import { TerminalIcon, FileIcon, CodeIcon, CloseIcon } from "./Icons";
 
 /** Payload carried by a native tab drag (shared between WorkspaceCenter and GroupTabStrip). */
@@ -59,6 +60,7 @@ export function WorkspaceCenter({
   home: string | null;
 }) {
   const layout = useStore((s) => (projectId ? s.layouts[projectId] : undefined));
+  const centerMode = useStore((s) => (projectId ? s.centerMode[projectId] ?? "terminals" : "terminals"));
   const setGroupWeights = useStore((s) => s.setGroupWeights);
   const moveTab = useStore((s) => s.moveTab);
   const splitTab = useStore((s) => s.splitTab);
@@ -332,6 +334,12 @@ export function WorkspaceCenter({
 
         {nothingVisible && <EmptyState />}
 
+        {projectId && centerMode === "board" && (
+          <div className="board-overlay">
+            <BoardView projectId={projectId} />
+          </div>
+        )}
+
         {tabMenu && activeProject && projectId && (
           <TabContextMenu
             projectId={projectId}
@@ -372,6 +380,8 @@ function GroupTabStrip({
 }) {
   const setActiveTab = useStore((s) => s.setActiveTab);
   const setActiveGroup = useStore((s) => s.setActiveGroup);
+  const setCenterMode = useStore((s) => s.setCenterMode);
+  const centerMode = useStore((s) => s.centerMode[projectId] ?? "terminals");
   const requestCloseTab = useStore((s) => s.requestCloseTab);
   const pinTab = useStore((s) => s.pinTab);
   const dirty = useStore((s) => s.dirty);
@@ -441,7 +451,10 @@ function GroupTabStrip({
               const rect = e.currentTarget.getBoundingClientRect();
               setCaretIndex(e.clientX < rect.left + rect.width / 2 ? i : i + 1);
             }}
-            onClick={() => setActiveTab(projectId, group.id, t.ref)}
+            onClick={() => {
+              setActiveTab(projectId, group.id, t.ref);
+              setCenterMode(projectId, "terminals");
+            }}
             onDoubleClick={() => {
               // Double-click pins a preview tab (VS Code semantics).
               if (t.kind === "file" && t.preview) pinTab(projectId, t.ref);
@@ -481,6 +494,19 @@ function GroupTabStrip({
         }}
       />
       {wd && soloGroup && <span className="cwd">{prettyPath(wd, home)}</span>}
+      {isActiveGroup && (
+        <button
+          type="button"
+          className={`header-btn board-tab ${centerMode === "board" ? "active" : ""}`}
+          title="Task board (⇧⌘B)"
+          onClick={() =>
+            setCenterMode(projectId, centerMode === "board" ? "terminals" : "board")
+          }
+        >
+          <span className="board-tab-dot" />
+          <span>Board</span>
+        </button>
+      )}
       {wd &&
         (soloGroup ? (
           <button className="header-btn" title="Open in VS Code" onClick={() => void openInVscode(wd)}>
