@@ -30,6 +30,10 @@ All notable changes to Conduit are documented here. This project uses
   at final verification, where you Approve or send it back from the board. Each project also
   gets a shared knowledge bundle in `.conduit/knowledge/` (decisions, patterns, anti-patterns,
   domain, components) that the role agents read before proposing and promote to as work lands.
+- **Changed — board UX.** The board is now a **workspace tab** (not a floating overlay): a
+  **Board** button in the tab strip opens it full-width below the strip while terminals stay alive.
+  Columns stretch to fill the width, cards use the app's palette, and "+ Add" lives inside each
+  column beneath its cards.
 
 ## 0.14.0 — 2026-07-16
 

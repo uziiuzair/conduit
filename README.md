@@ -58,6 +58,13 @@ exactly as they do in a normal terminal.
   workers (each isolated in its own git worktree; stopping asks you first). It
   coordinates a capability-aware, cost-conscious fleet across agent types, with
   project-scoped missions, structured worker handback, and mailbox notes.
+- **A shared task board the fleet drives** — every project gets a Kanban board stored in its own
+  repo (`.conduit/board/`, git-shared with your team) and opened as a full-screen **Board** tab:
+  drag and add cards, while live agent sessions **claim, move, and comment** on them through
+  `task_*` MCP tools so a fleet coordinates without colliding. A card can opt into a **stage-gate
+  workflow** (discovery → requirements → UX → architecture → plan → build → verify) with inline
+  role briefings, human sign-off gates, and a project knowledge bundle. With **Continuity** bundled,
+  sessions **hand off work with context** to one another and show **live presence** on cards.
 - **Multiple accounts per agent** — register any number of Claude / Antigravity
   accounts (auto-discovered from your home directory, or added via a folder picker)
   and assign one per session, per project, or globally; each session authenticates
@@ -194,6 +201,8 @@ Updates are Developer ID–signed, notarized, and minisign-verified before insta
 | Agent provider adapters — per-CLI spawn / detect / hooks / MCP | `src-tauri/src/agent.rs`                           |
 | Hook HTTP listener + per-agent hook/plugin installer          | `src-tauri/src/hooks.rs`                            |
 | Conductor fleet — status mirror + MCP tools                   | `src-tauri/src/fleet.rs`, `src-tauri/src/fleet_mcp.rs` |
+| Task board (Kanban) — `.conduit/` files, `task_*` MCP, stage-gate | `src-tauri/src/tasks/*.rs`, `src-tauri/src/fleet_mcp.rs` |
+| Continuity coordination — bundled plugin + read-only view     | `src-tauri/src/continuity.rs`, `src-tauri/src/continuity_read.rs` |
 | Claude **service** status (status.claude.com)                 | `src-tauri/src/claude_status.rs`                   |
 | Claude **usage** — local consumption + per-account plan limits | `src-tauri/src/claude_usage.rs`                    |
 | Antigravity **usage** — quota pools + conversation capture    | `src-tauri/src/agy_usage.rs`                        |
@@ -218,7 +227,7 @@ persists to `~/Library/Application Support/ConduitTauri/state.json`
 
 Tauri v2 (Rust) · React 19 + TypeScript + Vite · `@xterm/xterm` (canvas renderer) ·
 `monaco-editor` · `portable-pty` · `tiny_http` (hook listener) ·
-`tauri-plugin-{dialog,notification,window-state}`.
+`rusqlite` (Continuity read) · `tauri-plugin-{dialog,notification,window-state}`.
 
 ## Changelog
 
