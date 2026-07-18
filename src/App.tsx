@@ -79,6 +79,17 @@ export default function App() {
   // Hot exit's crash net: debounced backups of dirty buffers to the app-data dir.
   useHotExit();
 
+  // macOS exits native fullscreen on an unconsumed Escape (AppKit cancelOperation).
+  // Swallow the OS default at the window level — bubble phase, so terminal/dialog
+  // Escape handling has already run — and keep the app in fullscreen.
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") e.preventDefault();
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, []);
+
   // ⌘P / ⌘⇧F palettes (menu-dispatched; rendered at the app root like Settings).
   const [palette, setPalette] = useState<"quickopen" | "search" | null>(null);
 
