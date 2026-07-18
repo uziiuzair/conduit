@@ -673,7 +673,7 @@ CONDUIT_DATA_DIR_NAME=ConduitTauri-dev pnpm tauri dev
 
 - [ ] **Step 7: Restart with an existing worktree.** Quit the dev app and relaunch (same `CONDUIT_DATA_DIR_NAME=ConduitTauri-dev`). Reopen the worktree session from Step 3 (recreate the worktree first if Step 4 deleted it). Expect: the first resolver tick confirms the on-disk worktree, so the shell spawns there with no visible deferral.
 
-- [ ] **Step 8: Escape stays in fullscreen (Task 6b).** Enter macOS fullscreen (green button). Press Esc with focus on the file tree, then with focus in the terminal. Expect: the app stays in fullscreen both times, and Esc still works inside the terminal (e.g. dismisses Claude's menus / works in vim) and still closes in-app dialogs.
+- [ ] **Step 8: Escape stays in fullscreen (Task 6b).** Enter macOS fullscreen (green button). Press Esc with focus on the file tree, then with focus in the terminal, then MID-RENAME (start renaming a session in the sidebar and a file in the tree, press Esc — rename cancels, app stays fullscreen). Expect: the app stays in fullscreen every time, and Esc still works inside the terminal (e.g. dismisses Claude's menus / works in vim) and still closes in-app dialogs. If a CJK input method is handy: Esc mid-composition should still cancel the composition.
 
 - [ ] **Step 9: Close-button quit guard (pre-existing, verify only).** Give an agent session a long task (e.g. ask Claude to run `sleep 30`), and while it is working press the red window close button. Expect: the app does NOT close; the running-agents confirm dialog appears; Cancel keeps the session alive. (Same check via Cmd+Q.)
 
