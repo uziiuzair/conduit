@@ -61,7 +61,8 @@ to observed state, which makes spawn order irrelevant.
 - New selector: `effectiveDirOf(project, session, sessionDirs): string` — returns
   `sessionDirs[session.id] ?? project.path`.
 - `workingDirOf` remains as the statement of *intent* (`worktreePath ?? project.path`),
-  used only by the resolver and by agent spawn paths.
+  used only by the agent-terminal spawn path (the resolver reads `session.worktreePath`
+  directly).
 
 Resolution rule per session:
 

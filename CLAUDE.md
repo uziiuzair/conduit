@@ -147,6 +147,20 @@ Service status + subscription/local usage (distinct from per-session hook status
   Usage display). Polled by `src/hooks/useClaudeAmbient.ts`; state in `src/store.ts`
   (`claudeUsage` array + `agyUsageByAccount` map + `usagePrefs`).
 
+## Where the unified session directory lives
+
+Every panel (Files/Changes/Git, tab-strip path, Open in VS Code) and the right-panel
+companion shell bind to ONE confirmed per-session directory — the worktree once it
+exists on disk, else the project root. **Never wire a new consumer to `workingDirOf`**
+(intent only; used solely by the agent-terminal spawn) — use
+`effectiveDirOf(project, session, sessionDirs)` from `src/store.ts`. The `sessionDirs`
+map is filled by the one resolver `src/hooks/useSessionDirs.ts` (1 s confirm poll via
+the Rust `dir_exists` command in `fsops.rs`, ~5 s deletion sweep; a pending worktree
+keeps NO entry — that absence holds the shell's `dirReady` gate closed). Shell
+kill+respawn on dir change lives in `Terminal.tsx` and is strictly `shellOnly` — agent
+terminals are keep-alive and must never be respawned. Design:
+`docs/superpowers/specs/2026-07-18-unified-session-directory-design.md`.
+
 ## Where multi-account assignment lives
 
 Accounts are per-agent profile pointers (`Account { agents, configDir }`, `store.rs`), assigned
