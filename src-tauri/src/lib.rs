@@ -1103,6 +1103,11 @@ fn list_dir(dir: String) -> Vec<fsops::DirEntry> {
 }
 
 #[tauri::command]
+fn dir_exists(path: String) -> bool {
+    fsops::dir_exists(&path)
+}
+
+#[tauri::command]
 fn read_file(path: String) -> fsops::FileContent {
     fsops::read_file(&path)
 }
@@ -1582,6 +1587,7 @@ pub fn run() {
             worktree_is_dirty,
             worktree_remove,
             list_dir,
+            dir_exists,
             read_file,
             write_file,
             stat_file,
