@@ -3,6 +3,19 @@
 All notable changes to Conduit are documented here. This project uses
 [semantic versioning](https://semver.org/).
 
+## 0.17.1 — 2026-07-19
+
+- **Fixed — panels and the companion shell now follow the session's real directory.**
+  Files, Changes, Git, and the right-panel terminal all bind to one confirmed
+  per-session directory: the session's worktree once it exists on disk, the project
+  root otherwise. The companion shell no longer lands in the home directory when it
+  opens before a worktree has been created — it waits for the directory, and respawns
+  into the right place if the worktree is later deleted (falling back to the project
+  root) or recreated.
+- **Fixed — Escape no longer exits fullscreen.** Pressing Escape (in the terminal, a
+  dialog, or anywhere else) no longer drops the app out of macOS fullscreen; Escape
+  keeps its in-app meaning only.
+
 ## 0.17.0 — 2026-07-17
 
 - **Added — handoffs & presence on the board.** Cards now show a **presence dot** for who's live
