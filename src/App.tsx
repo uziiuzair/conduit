@@ -16,6 +16,7 @@ import {
 import { type AgentId } from "./agents";
 import { type ThemePref } from "./themes";
 import { useClaudeAmbient } from "./hooks/useClaudeAmbient";
+import { useSessionDirs } from "./hooks/useSessionDirs";
 import { getLastFocusedEditor } from "./monaco/setup";
 import { Sidebar } from "./components/Sidebar";
 import { WorkspaceCenter } from "./components/WorkspaceCenter";
@@ -52,6 +53,7 @@ export default function App() {
   // which agent is selected or whether the sidebar is collapsed (both would unmount a
   // sidebar-hosted poller).
   useClaudeAmbient();
+  useSessionDirs();
   const projects = useStore((s) => s.projects);
   const selectedProjectId = useStore((s) => s.selectedProjectId);
   const home = useStore((s) => s.homeDir);
