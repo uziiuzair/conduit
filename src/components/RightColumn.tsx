@@ -5,7 +5,7 @@ import {
   useStore,
   liveState,
   findSession,
-  workingDirOf,
+  effectiveDirOf,
   activeSessionIdOf,
   activeGroup,
   type Project,
@@ -58,6 +58,7 @@ export function RightColumn({
   }, [bottomTab]);
 
   const layout = useStore((s) => (projectId ? s.layouts[projectId] : undefined));
+  const sessionDirs = useStore((s) => s.sessionDirs);
   const project = projectId ? projects.find((p) => p.id === projectId) ?? null : null;
 
   // The right column follows the active group's session *context*. If the active
@@ -73,7 +74,7 @@ export function RightColumn({
   }
   const selected = activeSessionId ? findSession(projects, activeSessionId) : null;
   const workingDirectory = selected
-    ? workingDirOf(selected.project, selected.session)
+    ? effectiveDirOf(selected.project, selected.session, sessionDirs)
     : project?.path ?? "";
 
   const [changes, setChanges] = useState<Change[]>([]);
@@ -259,7 +260,8 @@ export function RightColumn({
               key={`${session.id}::term`}
               sessionId={`${session.id}::term`}
               projectId={project.id}
-              workingDirectory={workingDirOf(project, session)}
+              workingDirectory={effectiveDirOf(project, session, sessionDirs)}
+              dirReady={!session.worktreePath || sessionDirs[session.id] !== undefined}
               visible={activeSessionId === session.id && bottomTab === "terminal"}
               focusOnReveal={focusShellOnReveal}
               shellOnly

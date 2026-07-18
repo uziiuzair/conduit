@@ -6,7 +6,7 @@ import {
   useStore,
   liveState,
   findSession,
-  workingDirOf,
+  effectiveDirOf,
   openInVscode,
   worktreeIsDirty,
   worktreeRemove,
@@ -456,6 +456,7 @@ function RenameInput({
         e.stopPropagation();
         if (e.key === "Enter") commit(e.currentTarget.value);
         else if (e.key === "Escape") {
+          e.preventDefault();
           done.current = true;
           cancelRename();
         }
@@ -497,6 +498,7 @@ function ProjectRenameInput({
         e.stopPropagation();
         if (e.key === "Enter") commit(e.currentTarget.value);
         else if (e.key === "Escape") {
+          e.preventDefault();
           done.current = true;
           cancelProjectRename();
         }
@@ -767,7 +769,10 @@ function SessionContextMenu() {
       <button
         onClick={() => {
           const found = findSession(projects, sid);
-          if (found) void openInVscode(workingDirOf(found.project, found.session));
+          if (found)
+            void openInVscode(
+              effectiveDirOf(found.project, found.session, useStore.getState().sessionDirs),
+            );
           closeMenu();
         }}
       >

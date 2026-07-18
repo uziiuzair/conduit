@@ -4,6 +4,7 @@ import {
   useStore,
   activeGroup,
   workingDirOf,
+  effectiveDirOf,
   prettyPath,
   openInVscode,
   baseName,
@@ -386,6 +387,7 @@ function GroupTabStrip({
   const pinTab = useStore((s) => s.pinTab);
   const dirty = useStore((s) => s.dirty);
   const moveTab = useStore((s) => s.moveTab);
+  const sessionDirs = useStore((s) => s.sessionDirs);
 
   // Insertion caret for tab reorder / move-into-strip: index in [0, tabs.length].
   const [caretIndex, setCaretIndex] = useState<number | null>(null);
@@ -406,7 +408,7 @@ function GroupTabStrip({
     activeTab?.kind === "session"
       ? project.sessions.find((s) => s.id === activeTab.ref) ?? null
       : null;
-  const wd = activeSession ? workingDirOf(project, activeSession) : null;
+  const wd = activeSession ? effectiveDirOf(project, activeSession, sessionDirs) : null;
 
   const label = (t: WsTab): string =>
     t.kind === "session"

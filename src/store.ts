@@ -690,6 +690,15 @@ interface AppState {
   usagePrefs: UsagePrefs;
   setUsagePrefs: (patch: Partial<UsagePrefs>) => void;
 
+  // ---- unified session directory (observed effective dir per session) ----
+  /** Session id → CONFIRMED effective working directory: the worktree once it exists
+   *  on disk, or the project root. A worktree session PENDING first confirmation has
+   *  no entry (consumers fall back to project.path via effectiveDirOf). Runtime-only —
+   *  rebuilt by useSessionDirs; never persisted. */
+  sessionDirs: Record<string, string>;
+  setSessionDir: (sessionId: string, dir: string) => void;
+  pruneSessionDirs: (liveIds: Set<string>) => void;
+
   // ---- panel collapse + Settings dialog (native menu-driven, App-level) ----
   /** Persisted. When true (default), opening/switching to a project eagerly spawns and
    *  resumes all its sessions instead of waiting for a click. */
@@ -1018,6 +1027,7 @@ export const useStore = create<AppState>((set, get) => {
     agyUsageByAccount: {},
     agyUsageTracking: false,
     usagePrefs: readUsagePrefs(),
+    sessionDirs: {},
     restoreSessionsOnOpen: readRestoreSessionsOnOpen(),
     sidebarCollapsed: readSidebarCollapsed(),
     rightCollapsed: readRightCollapsed(),
@@ -2261,6 +2271,22 @@ export const useStore = create<AppState>((set, get) => {
         agyUsageByAccount: { ...s.agyUsageByAccount, [accountKey(u.accountId)]: u },
       })),
 
+    setSessionDir: (sessionId, dir) =>
+      set((s) =>
+        s.sessionDirs[sessionId] === dir
+          ? s
+          : { sessionDirs: { ...s.sessionDirs, [sessionId]: dir } },
+      ),
+
+    pruneSessionDirs: (liveIds) =>
+      set((s) => {
+        const stale = Object.keys(s.sessionDirs).filter((id) => !liveIds.has(id));
+        if (!stale.length) return s;
+        const next = { ...s.sessionDirs };
+        for (const id of stale) delete next[id];
+        return { sessionDirs: next };
+      }),
+
     refreshAgyUsage: async () => {
       try {
         const list = await invoke<AgyUsage[]>("fetch_agy_usage");
@@ -2344,6 +2370,17 @@ export function findSession(
 
 export function workingDirOf(project: Project, session: Session): string {
   return session.worktreePath ?? project.path;
+}
+
+/** Observed effective working directory: the confirmed entry from `sessionDirs` when
+ *  present, else the project root. Panels and the companion shell bind to THIS — never
+ *  to `workingDirOf` — so a worktree only counts once it exists on disk. */
+export function effectiveDirOf(
+  project: Project,
+  session: Session,
+  sessionDirs: Record<string, string>,
+): string {
+  return sessionDirs[session.id] ?? project.path;
 }
 
 /** Replace the home-directory prefix with `~` for display. */

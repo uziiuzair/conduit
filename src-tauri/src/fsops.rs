@@ -366,6 +366,13 @@ pub fn create_dir(path: &str) -> Result<(), String> {
     fs::create_dir(path).map_err(|e| format!("could not create folder: {e}"))
 }
 
+/// True only for an existing directory (a file at `path` returns false). Backs the
+/// frontend session-dir resolver: a worktree only becomes a session's effective
+/// directory once it actually exists on disk.
+pub fn dir_exists(path: &str) -> bool {
+    Path::new(path).is_dir()
+}
+
 /// Rename/move a file or directory. Errors if the destination already exists.
 pub fn rename_path(from: &str, to: &str) -> Result<(), String> {
     if Path::new(to).exists() {
@@ -599,6 +606,30 @@ mod tests {
         assert!(!gone.exists);
         assert_eq!(gone.size, 0);
         assert_eq!(gone.mtime_ms, 0.0);
+    }
+
+    #[test]
+    fn dir_exists_true_for_directory() {
+        let dir = unique_temp_dir("direxists");
+        assert!(dir_exists(dir.to_str().unwrap()));
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn dir_exists_false_for_missing_path() {
+        let dir = unique_temp_dir("direxists-missing");
+        let missing = dir.join("nope");
+        assert!(!dir_exists(missing.to_str().unwrap()));
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn dir_exists_false_for_file() {
+        let dir = unique_temp_dir("direxists-file");
+        let file = dir.join("f.txt");
+        fs::write(&file, b"x").unwrap();
+        assert!(!dir_exists(file.to_str().unwrap()));
+        fs::remove_dir_all(&dir).unwrap();
     }
 }
 
