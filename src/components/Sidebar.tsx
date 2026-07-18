@@ -456,6 +456,7 @@ function RenameInput({
         e.stopPropagation();
         if (e.key === "Enter") commit(e.currentTarget.value);
         else if (e.key === "Escape") {
+          e.preventDefault();
           done.current = true;
           cancelRename();
         }
@@ -497,6 +498,7 @@ function ProjectRenameInput({
         e.stopPropagation();
         if (e.key === "Enter") commit(e.currentTarget.value);
         else if (e.key === "Escape") {
+          e.preventDefault();
           done.current = true;
           cancelProjectRename();
         }

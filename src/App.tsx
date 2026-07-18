@@ -82,8 +82,10 @@ export default function App() {
   // macOS exits native fullscreen on an unconsumed Escape (AppKit cancelOperation).
   // Swallow the OS default at the window level — bubble phase, so terminal/dialog
   // Escape handling has already run — and keep the app in fullscreen.
+  // (Composing Escape is left to the IME — it consumes it before AppKit would.)
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
+      if (e.isComposing) return;
       if (e.key === "Escape") e.preventDefault();
     };
     window.addEventListener("keydown", onKeyDown);

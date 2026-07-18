@@ -453,6 +453,7 @@ function InlineRow({
             done.current = true;
             onCommit(e.currentTarget.value);
           } else if (e.key === "Escape") {
+            e.preventDefault();
             done.current = true;
             onCancel();
           }
