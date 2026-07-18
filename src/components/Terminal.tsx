@@ -83,6 +83,10 @@ export function TerminalView({
   useEffect(() => {
     wdRef.current = workingDirectory;
   }, [workingDirectory]);
+  /** Monotonic PTY generation. Bumped when a shell PTY is killed for respawn; each
+   *  Channel closes over its generation so a doomed PTY's late output (including the
+   *  "[process exited]" notice) can't paint into the reset terminal. */
+  const spawnGenRef = useRef(0);
 
   const restoreOnOpen = useStore((s) => s.restoreSessionsOnOpen);
   const selectedProjectId = useStore((s) => s.selectedProjectId);
@@ -93,15 +97,19 @@ export function TerminalView({
   const spawnPty = (cols: number, rows: number) => {
     if (spawnedRef.current) return;
     spawnedRef.current = true;
-    spawnedDirRef.current = workingDirectory;
+    // Read the dir from the ref, not the render closure: a deferred respawn (below)
+    // may run after newer renders, and must spawn into the LATEST resolved dir.
+    const wd = wdRef.current;
+    spawnedDirRef.current = wd;
+    const gen = spawnGenRef.current;
     const channel = new Channel<string>();
     channel.onmessage = (msg) => {
-      if (disposedRef.current) return;
+      if (disposedRef.current || gen !== spawnGenRef.current) return;
       termRef.current?.write(b64ToBytes(msg));
     };
     void invoke("pty_spawn", {
       sessionId,
-      workingDirectory,
+      workingDirectory: wd,
       cols,
       rows,
       shellOnly,
@@ -416,14 +424,22 @@ export function TerminalView({
   useEffect(() => {
     if (!shellOnly || !spawnedRef.current) return;
     if (spawnedDirRef.current === workingDirectory) return;
-    void invoke("pty_kill", { sessionId }).catch(() => {});
+    // Bump the generation FIRST so the doomed PTY's channel goes silent, then reset.
+    const gen = ++spawnGenRef.current;
     spawnedRef.current = false;
     spawnedDirRef.current = null;
-    const term = termRef.current;
-    term?.reset();
-    if (term && visibleRef.current && dirReady) {
-      spawnPty(term.cols || 80, term.rows || 24);
-    }
+    termRef.current?.reset();
+    // Await the kill before respawning: if pty_spawn could land first, it would
+    // re-attach to the doomed PTY and the kill would leave a dead pane.
+    void invoke("pty_kill", { sessionId })
+      .catch(() => {})
+      .then(() => {
+        if (disposedRef.current || gen !== spawnGenRef.current) return;
+        const term = termRef.current;
+        if (term && visibleRef.current && dirReady) {
+          spawnPty(term.cols || 80, term.rows || 24);
+        }
+      });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [workingDirectory]);
 
