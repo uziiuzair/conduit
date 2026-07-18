@@ -78,9 +78,10 @@ New `src/hooks/useSessionDirs.ts`, mounted once in `App.tsx` (same pattern as
 `useClaudeAmbient`). For every session of every open project:
 
 - No `worktreePath` → `setSessionDir(id, project.path)` once; no polling.
-- `worktreePath` set → check `invoke("dir_exists", { path: worktreePath })` every **1 s**
-  until true, then `setSessionDir(id, worktreePath)` and stop the fast poll for that
-  session.
+- `worktreePath` set, unconfirmed → check `invoke("dir_exists", { path: worktreePath })`
+  every **1 s**; on true, `setSessionDir(id, worktreePath)`. While pending, **no map
+  entry is written** — panels get `project.path` via the `effectiveDirOf` fallback, and
+  the absence of an entry is what keeps the shell's `dirReady` false (see section 4).
 - **Deletion sweep:** every **~5 s**, re-check each *confirmed* worktree directory; if it
   no longer exists, `setSessionDir(id, project.path)` (and the 1 s confirmation poll
   resumes, in case the worktree is recreated).
@@ -114,12 +115,15 @@ dependency on the directory already triggers the reload).
 
 - **New prop `dirReady: boolean`** (default `true`, so agent terminals are unaffected).
   The spawn effect waits for `visible && dirReady` before calling `pty_spawn`. RightColumn
-  computes `dirReady = !session.worktreePath || sessionDirs[session.id] ===
-  session.worktreePath` — i.e. non-worktree sessions are ready immediately; worktree
-  sessions are ready only once the worktree is confirmed on disk. A pending worktree
-  session's shell pane stays blank (unspawned) rather than spawning at the project root
-  and respawning seconds later. Both spawn paths honor the gate — the reveal path *and*
-  the eager restore-on-open path (`restoreSessionsOnOpen`) — since `spawnPty` is shared.
+  computes `dirReady = !session.worktreePath || sessionDirs[session.id] !== undefined` —
+  i.e. non-worktree sessions are ready immediately; a worktree session is ready once the
+  resolver has written *any* entry for it: the worktree path on confirmation, or the
+  project root after a confirmed worktree was deleted. A *pending* worktree session (no
+  entry yet — the worktree has never been seen on disk) keeps a blank, unspawned shell
+  pane rather than spawning at the project root and respawning seconds later. Panels are
+  unaffected while pending: `effectiveDirOf` falls back to `project.path`. Only the
+  reveal spawn path needs the gate — the eager restore-on-open path already skips
+  `shellOnly` terminals.
 - **Respawn on dir change:** an effect watching `workingDirectory` after spawn. When it
   changes for an already-spawned `shellOnly` terminal: `invoke("pty_kill", { sessionId })`
   (`lib.rs:422`), `term.reset()`, then `spawnPty` again with the new directory. In
