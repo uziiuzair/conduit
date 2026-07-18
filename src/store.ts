@@ -697,6 +697,7 @@ interface AppState {
    *  rebuilt by useSessionDirs; never persisted. */
   sessionDirs: Record<string, string>;
   setSessionDir: (sessionId: string, dir: string) => void;
+  pruneSessionDirs: (liveIds: Set<string>) => void;
 
   // ---- panel collapse + Settings dialog (native menu-driven, App-level) ----
   /** Persisted. When true (default), opening/switching to a project eagerly spawns and
@@ -2276,6 +2277,15 @@ export const useStore = create<AppState>((set, get) => {
           ? s
           : { sessionDirs: { ...s.sessionDirs, [sessionId]: dir } },
       ),
+
+    pruneSessionDirs: (liveIds) =>
+      set((s) => {
+        const stale = Object.keys(s.sessionDirs).filter((id) => !liveIds.has(id));
+        if (!stale.length) return s;
+        const next = { ...s.sessionDirs };
+        for (const id of stale) delete next[id];
+        return { sessionDirs: next };
+      }),
 
     refreshAgyUsage: async () => {
       try {

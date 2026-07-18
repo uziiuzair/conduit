@@ -26,6 +26,14 @@ interface Props {
   worktreeName?: string;
   /** Plain login shell instead of launching `claude` (the bottom-panel terminal). */
   shellOnly?: boolean;
+  /**
+   * The workingDirectory has been confirmed by the session-dir resolver
+   * (useSessionDirs). The PTY is not spawned until this is true, so a worktree
+   * shell never spawns into a not-yet-created directory (the old "shell lands in
+   * ~" bug). Agent terminals omit it (default true) — pty_spawn resolves their
+   * worktree race natively via worktree::spawn_target.
+   */
+  dirReady?: boolean;
   /** "conductor" attaches the fleet MCP server + persona at spawn; default "worker". */
   role?: SessionRole;
   /**
@@ -56,6 +64,7 @@ export function TerminalView({
   visible,
   worktreeName,
   shellOnly = false,
+  dirReady = true,
   role,
   focusOnReveal = true,
   onFocusGroup,
@@ -67,6 +76,13 @@ export function TerminalView({
   const spawnedRef = useRef(false);
   const resizeTimer = useRef<number | null>(null);
   const disposedRef = useRef(false);
+  /** Dir the live PTY was spawned in — respawn trigger compares against the prop. */
+  const spawnedDirRef = useRef<string | null>(null);
+  /** Latest workingDirectory for closures created in the mount-once effect (openPath). */
+  const wdRef = useRef(workingDirectory);
+  useEffect(() => {
+    wdRef.current = workingDirectory;
+  }, [workingDirectory]);
 
   const restoreOnOpen = useStore((s) => s.restoreSessionsOnOpen);
   const selectedProjectId = useStore((s) => s.selectedProjectId);
@@ -77,6 +93,7 @@ export function TerminalView({
   const spawnPty = (cols: number, rows: number) => {
     if (spawnedRef.current) return;
     spawnedRef.current = true;
+    spawnedDirRef.current = workingDirectory;
     const channel = new Channel<string>();
     channel.onmessage = (msg) => {
       if (disposedRef.current) return;
@@ -146,7 +163,7 @@ export function TerminalView({
       try {
         const r = await invoke<{ absPath: string; line: number | null; col: number | null } | null>(
           "resolve_terminal_path",
-          { base: workingDirectory, token: raw },
+          { base: wdRef.current, token: raw },
         );
         if (!r || disposedRef.current) return;
         useStore.getState().openFile(
@@ -364,7 +381,7 @@ export function TerminalView({
       const rows = term.rows;
 
       if (!spawnedRef.current) {
-        spawnPty(cols, rows);
+        if (dirReady) spawnPty(cols, rows);
       } else {
         void invoke("pty_resize", { sessionId, cols, rows }).catch(() => {});
       }
@@ -377,7 +394,7 @@ export function TerminalView({
       window.setTimeout(() => scheduleFit(), 120);
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [visible]);
+  }, [visible, dirReady]);
 
   // Eager restore-on-open: bring every session of the ACTIVE project live without waiting for
   // a click (VSCode-style — the whole project comes back where you left off). Companion shells
@@ -391,6 +408,24 @@ export function TerminalView({
     spawnPty(term.cols || 80, term.rows || 24);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [restoreOnOpen, selectedProjectId]);
+
+  // Shell-only: the resolved directory changed after spawn — a confirmed worktree was
+  // deleted (fall back to the project root) or a deleted one came back. Kill + respawn
+  // the shell there; scrollback for this pane is intentionally sacrificed. NEVER applied
+  // to agent terminals — the keep-alive rule stands.
+  useEffect(() => {
+    if (!shellOnly || !spawnedRef.current) return;
+    if (spawnedDirRef.current === workingDirectory) return;
+    void invoke("pty_kill", { sessionId }).catch(() => {});
+    spawnedRef.current = false;
+    spawnedDirRef.current = null;
+    const term = termRef.current;
+    term?.reset();
+    if (term && visibleRef.current && dirReady) {
+      spawnPty(term.cols || 80, term.rows || 24);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [workingDirectory]);
 
   // App-wide font zoom (View menu). Setting options.fontSize changes cell metrics
   // WITHOUT firing the ResizeObserver (the host box is unchanged), so cols/rows must

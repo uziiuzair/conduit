@@ -35,7 +35,7 @@ export function useSessionDirs(): void {
       running = true;
       tickCount++;
       try {
-        const { projects, setSessionDir } = useStore.getState();
+        const { projects, setSessionDir, pruneSessionDirs } = useStore.getState();
         const liveIds = new Set<string>();
         for (const project of projects) {
           for (const session of project.sessions) {
@@ -49,8 +49,10 @@ export function useSessionDirs(): void {
             }
             if (entry === wt) {
               if (tickCount % SWEEP_EVERY_TICKS !== 0) continue;
+              // IPC failure must not demote a confirmed worktree (shell would flap
+              // to the project root and back); only a real "gone" answer does.
               const exists = await invoke<boolean>("dir_exists", { path: wt }).catch(
-                () => false,
+                () => true,
               );
               if (cancelled) return;
               if (!exists) setSessionDir(session.id, project.path);
@@ -64,13 +66,8 @@ export function useSessionDirs(): void {
           }
         }
         // Prune entries for sessions that were deleted; the map must not grow forever.
-        const dirs = useStore.getState().sessionDirs;
-        const stale = Object.keys(dirs).filter((id) => !liveIds.has(id));
-        if (stale.length) {
-          const next = { ...dirs };
-          for (const id of stale) delete next[id];
-          useStore.setState({ sessionDirs: next });
-        }
+        // Safe only because this hook is the sole writer of sessionDirs.
+        pruneSessionDirs(liveIds);
       } finally {
         running = false;
       }
