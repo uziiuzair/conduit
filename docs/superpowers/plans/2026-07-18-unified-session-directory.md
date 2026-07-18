@@ -607,6 +607,50 @@ git commit -m "feat(session-dirs): panels + companion shell bind to confirmed ef
 
 ---
 
+### Task 6b: Escape must not exit macOS fullscreen
+
+macOS AppKit exits native fullscreen when an Escape keypress reaches the window
+unconsumed (`cancelOperation:`). Nothing in-repo handles Escape today, so pressing Esc
+with focus outside a consumer (e.g. on the file tree) drops the app out of fullscreen.
+Fix: swallow the OS default at the window level in the BUBBLE phase — terminal and
+dialog handlers have already run by then, so Esc keeps every in-app meaning.
+
+**Files:**
+- Modify: `src/App.tsx` (new effect near the other app-level effects)
+
+- [ ] **Step 1: Add the effect** (near the other app-level `useEffect`s in `App()`):
+
+```ts
+  // macOS exits native fullscreen on an unconsumed Escape (AppKit cancelOperation).
+  // Swallow the OS default at the window level — bubble phase, so terminal/dialog
+  // Escape handling has already run — and keep the app in fullscreen.
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") e.preventDefault();
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, []);
+```
+
+- [ ] **Step 2: Typecheck + build**
+
+```bash
+pnpm exec tsc --noEmit
+pnpm build
+```
+
+Expected: clean.
+
+- [ ] **Step 3: Commit**
+
+```bash
+git add src/App.tsx
+git commit -m "fix(ui): keep Escape from exiting macOS fullscreen"
+```
+
+---
+
 ### Task 7: Manual verification in the dev app
 
 **IMPORTANT — data-dir isolation:** the installed Conduit.app may be running (it hosts live agent sessions). NEVER run a bare `pnpm tauri dev`; always:
@@ -628,6 +672,10 @@ CONDUIT_DATA_DIR_NAME=ConduitTauri-dev pnpm tauri dev
 - [ ] **Step 6: Agent terminal untouched.** The center agent terminal behaves exactly as before in all of the above (spawns immediately, lands in the worktree via its own native handling).
 
 - [ ] **Step 7: Restart with an existing worktree.** Quit the dev app and relaunch (same `CONDUIT_DATA_DIR_NAME=ConduitTauri-dev`). Reopen the worktree session from Step 3 (recreate the worktree first if Step 4 deleted it). Expect: the first resolver tick confirms the on-disk worktree, so the shell spawns there with no visible deferral.
+
+- [ ] **Step 8: Escape stays in fullscreen (Task 6b).** Enter macOS fullscreen (green button). Press Esc with focus on the file tree, then with focus in the terminal. Expect: the app stays in fullscreen both times, and Esc still works inside the terminal (e.g. dismisses Claude's menus / works in vim) and still closes in-app dialogs.
+
+- [ ] **Step 9: Close-button quit guard (pre-existing, verify only).** Give an agent session a long task (e.g. ask Claude to run `sleep 30`), and while it is working press the red window close button. Expect: the app does NOT close; the running-agents confirm dialog appears; Cancel keeps the session alive. (Same check via Cmd+Q.)
 
 Record actual results per step. Any failure → stop, debug with superpowers:systematic-debugging, do not proceed to Task 8.
 
@@ -663,6 +711,9 @@ cargo build --manifest-path src-tauri/Cargo.toml
   opens before a worktree has been created — it waits for the directory, and respawns
   into the right place if the worktree is later deleted (falling back to the project
   root) or recreated.
+- **Fixed — Escape no longer exits fullscreen.** Pressing Escape (in the terminal, a
+  dialog, or anywhere else) no longer drops the app out of macOS fullscreen; Escape
+  keeps its in-app meaning only.
 ```
 
 - [ ] **Step 4: Sanity-check lockstep**
