@@ -16,6 +16,7 @@ import {
 import { type AgentId } from "./agents";
 import { type ThemePref } from "./themes";
 import { useClaudeAmbient } from "./hooks/useClaudeAmbient";
+import { useSessionDirs } from "./hooks/useSessionDirs";
 import { getLastFocusedEditor } from "./monaco/setup";
 import { Sidebar } from "./components/Sidebar";
 import { WorkspaceCenter } from "./components/WorkspaceCenter";
@@ -29,6 +30,7 @@ import { useTelemetry } from "./hooks/useTelemetry";
 import { useUpdater } from "./hooks/useUpdater";
 import { useFileWatch } from "./hooks/useFileWatch";
 import { useHotExit } from "./hooks/useHotExit";
+import { initPlugins, feedHook, feedFleet } from "./plugins";
 
 interface HookPayload {
   session: string;
@@ -51,6 +53,7 @@ export default function App() {
   // which agent is selected or whether the sidebar is collapsed (both would unmount a
   // sidebar-hosted poller).
   useClaudeAmbient();
+  useSessionDirs();
   const projects = useStore((s) => s.projects);
   const selectedProjectId = useStore((s) => s.selectedProjectId);
   const home = useStore((s) => s.homeDir);
@@ -76,6 +79,19 @@ export default function App() {
   // Hot exit's crash net: debounced backups of dirty buffers to the app-data dir.
   useHotExit();
 
+  // macOS exits native fullscreen on an unconsumed Escape (AppKit cancelOperation).
+  // Swallow the OS default at the window level — bubble phase, so terminal/dialog
+  // Escape handling has already run — and keep the app in fullscreen.
+  // (Composing Escape is left to the IME — it consumes it before AppKit would.)
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.isComposing) return;
+      if (e.key === "Escape") e.preventDefault();
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, []);
+
   // ⌘P / ⌘⇧F palettes (menu-dispatched; rendered at the app root like Settings).
   const [palette, setPalette] = useState<"quickopen" | "search" | null>(null);
 
@@ -83,6 +99,11 @@ export default function App() {
     void load();
     void loadAgents();
   }, [load, loadAgents]);
+
+  // Discover + start enabled plugins.
+  useEffect(() => {
+    void initPlugins();
+  }, []);
 
   // Suppress the webview's default context menu (Reload / Inspect Element).
   // Our own row menus call preventDefault + stopPropagation, so they're unaffected —
@@ -115,6 +136,15 @@ export default function App() {
         if (!m) return;
         e.preventDefault();
         useStore.getState().activateTabAt(Number(m[1]));
+        return;
+      }
+      // ⇧⌘B: toggle the task board overlay for the selected project (no native menu
+      // accelerator wired yet, so handled here like the other window-level shortcuts).
+      if (e.shiftKey && (e.metaKey || e.ctrlKey) && !e.altKey && e.key.toLowerCase() === "b") {
+        const st = useStore.getState();
+        if (!st.selectedProjectId) return;
+        e.preventDefault();
+        st.toggleCenterMode(st.selectedProjectId);
       }
     };
     window.addEventListener("keydown", onKey, true);
@@ -124,6 +154,7 @@ export default function App() {
   // Claude Code hook events relayed by the Rust HTTP listener.
   useEffect(() => {
     const unlisten = listen<HookPayload>("hook", ({ payload }) => {
+      feedHook(payload);
       const { session, event, body } = payload;
       const st = useStore.getState();
       switch (event) {
@@ -257,6 +288,9 @@ export default function App() {
         case "toggle-maximize":
           if (st.selectedProjectId) st.toggleMaximizeGroup(st.selectedProjectId);
           break;
+        case "toggle-board":
+          if (st.selectedProjectId) st.toggleCenterMode(st.selectedProjectId);
+          break;
         case "quick-open":
           setPalette("quickopen");
           break;
@@ -367,10 +401,12 @@ export default function App() {
   useEffect(() => {
     const unSpawn = listen<{ projectId: string; session: Session; task?: string }>(
       "fleet-spawn",
-      ({ payload }) =>
+      ({ payload }) => {
         useStore
           .getState()
-          .mergeSpawnedSession(payload.projectId, payload.session, payload.task),
+          .mergeSpawnedSession(payload.projectId, payload.session, payload.task);
+        feedFleet("fleet.spawn", { session: payload.session.id });
+      },
     );
     const unConfirm = listen<{ requestId: string; name: string; branch: string; dirty: boolean }>(
       "conductor-confirm",

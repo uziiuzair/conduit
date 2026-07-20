@@ -6,7 +6,7 @@ import {
   useStore,
   liveState,
   findSession,
-  workingDirOf,
+  effectiveDirOf,
   openInVscode,
   worktreeIsDirty,
   worktreeRemove,
@@ -164,6 +164,8 @@ function ProjectBlock({ project }: { project: Project }) {
   const addSession = useStore((s) => s.addSession);
   const openMenu = useStore((s) => s.openMenu);
   const reorderProject = useStore((s) => s.reorderProject);
+  const startProjectRename = useStore((s) => s.startProjectRename);
+  const editing = useStore((s) => s.editingProjectId === project.id);
   const [showNew, setShowNew] = useState(false);
   const [collapsed, setCollapsed] = useState(() => loadCollapsed().has(project.id));
   const [dragSelf, setDragSelf] = useState(false);
@@ -216,7 +218,7 @@ function ProjectBlock({ project }: { project: Project }) {
         role="button"
         aria-expanded={!collapsed}
         title={collapsed ? "Expand project" : "Collapse project"}
-        draggable
+        draggable={!editing}
         onDragStart={(e) => {
           sidebarDrag = { kind: "project", projectId: project.id };
           // Some engines (WebKit/Gecko) won't start a drag with an empty data store.
@@ -228,7 +230,13 @@ function ProjectBlock({ project }: { project: Project }) {
           sidebarDrag = null;
           setDragSelf(false);
         }}
-        onClick={toggleCollapsed}
+        onClick={() => {
+          if (!editing) toggleCollapsed();
+        }}
+        onDoubleClick={(e) => {
+          e.stopPropagation();
+          startProjectRename(project.id);
+        }}
         onContextMenu={(e) => {
           e.preventDefault();
           e.stopPropagation();
@@ -240,7 +248,11 @@ function ProjectBlock({ project }: { project: Project }) {
           className={`project-chevron ${collapsed ? "" : "expanded"}`}
         />
         <FolderIcon size={11} className="folder-icon" />
-        <span className="name">{project.name}</span>
+        {editing ? (
+          <ProjectRenameInput projectId={project.id} initial={project.name} />
+        ) : (
+          <span className="name">{project.name}</span>
+        )}
         <button
           className="menu-btn"
           title="Project actions"
@@ -444,8 +456,51 @@ function RenameInput({
         e.stopPropagation();
         if (e.key === "Enter") commit(e.currentTarget.value);
         else if (e.key === "Escape") {
+          e.preventDefault();
           done.current = true;
           cancelRename();
+        }
+      }}
+      onBlur={(e) => commit(e.currentTarget.value)}
+    />
+  );
+}
+
+/** Inline editor for a project's display label. Mirrors RenameInput; renames the sidebar
+ *  label only, never the directory on disk. */
+function ProjectRenameInput({
+  projectId,
+  initial,
+}: {
+  projectId: string;
+  initial: string;
+}) {
+  const renameProject = useStore((s) => s.renameProject);
+  const cancelProjectRename = useStore((s) => s.cancelProjectRename);
+  const done = useRef(false);
+
+  const commit = (value: string) => {
+    if (done.current) return;
+    done.current = true;
+    void renameProject(projectId, value);
+  };
+
+  return (
+    <input
+      className="session-rename-input"
+      defaultValue={initial}
+      autoFocus
+      spellCheck={false}
+      onClick={(e) => e.stopPropagation()}
+      onDoubleClick={(e) => e.stopPropagation()}
+      onFocus={(e) => e.currentTarget.select()}
+      onKeyDown={(e) => {
+        e.stopPropagation();
+        if (e.key === "Enter") commit(e.currentTarget.value);
+        else if (e.key === "Escape") {
+          e.preventDefault();
+          done.current = true;
+          cancelProjectRename();
         }
       }}
       onBlur={(e) => commit(e.currentTarget.value)}
@@ -512,6 +567,9 @@ function SessionContextMenu() {
   const projects = useStore((s) => s.projects);
   const closeMenu = useStore((s) => s.closeMenu);
   const startRename = useStore((s) => s.startRename);
+  const startProjectRename = useStore((s) => s.startProjectRename);
+  const selectProject = useStore((s) => s.selectProject);
+  const setCenterMode = useStore((s) => s.setCenterMode);
   const removeSession = useStore((s) => s.removeSession);
   const removeProject = useStore((s) => s.removeProject);
   const openToSide = useStore((s) => s.openToSide);
@@ -552,6 +610,16 @@ function SessionContextMenu() {
         style={{ left: menu.x, top: menu.y }}
         onClick={(e) => e.stopPropagation()}
       >
+        <button onClick={() => startProjectRename(menu.projectId)}>Rename</button>
+        <button
+          onClick={() => {
+            selectProject(menu.projectId);
+            setCenterMode(menu.projectId, "board");
+            closeMenu();
+          }}
+        >
+          Open board
+        </button>
         <button
           className="danger"
           onClick={() => {
@@ -701,7 +769,10 @@ function SessionContextMenu() {
       <button
         onClick={() => {
           const found = findSession(projects, sid);
-          if (found) void openInVscode(workingDirOf(found.project, found.session));
+          if (found)
+            void openInVscode(
+              effectiveDirOf(found.project, found.session, useStore.getState().sessionDirs),
+            );
           closeMenu();
         }}
       >

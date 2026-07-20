@@ -278,12 +278,12 @@ button {
   padding: 5px 7px;
   border-radius: 5px;
   cursor: pointer;
-  background: var(--hover);
+  background: transparent;
   transition: background 0.12s ease;
 }
 
 .project-head:hover {
-  background: var(--selection-bg);
+  background: var(--hover);
 }
 
 .project-head .name {
@@ -676,6 +676,230 @@ button {
   color: var(--text-mid);
   max-width: 320px;
 }
+
+/* ---- Task board (a workspace tab; fills the content area below the tab strip) ---- */
+/* The Board toggle is a `.header-btn` in the active strip, next to "Open in VS Code". */
+.board-tab.active {
+  color: var(--text-bright);
+  background: color-mix(in srgb, var(--accent) 16%, var(--panel-bg));
+  border-color: color-mix(in srgb, var(--accent) 55%, var(--border));
+}
+.board-tab-dot { width: 7px; height: 7px; border-radius: 2px; background: var(--accent); flex-shrink: 0; }
+.board-tab.active .board-tab-dot { box-shadow: 0 0 8px color-mix(in srgb, var(--accent) 65%, transparent); }
+
+.board-overlay { position: absolute; top: var(--tabstrip-h); left: 0; right: 0; bottom: 0; z-index: 3; background: var(--panel-bg); overflow: hidden; display: flex; }
+.board-view { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+
+.board-toolbar {
+  display: flex; align-items: center; gap: 10px; flex: none;
+  height: 46px; padding: 0 18px;
+  border-bottom: 1px solid var(--border);
+  background: linear-gradient(180deg, color-mix(in srgb, var(--accent) 5%, var(--sidebar-bg)), var(--sidebar-bg));
+}
+.board-title {
+  display: flex; align-items: center; gap: 9px;
+  font-size: 13px; font-weight: 650; letter-spacing: 0.01em; color: var(--text-bright);
+}
+.board-title::before {
+  content: ""; width: 7px; height: 7px; border-radius: 2px; background: var(--accent);
+  box-shadow: 0 0 9px color-mix(in srgb, var(--accent) 65%, transparent);
+}
+.board-close {
+  margin-left: auto; font: inherit; font-size: 12px; color: var(--text-mid);
+  background: transparent; border: 1px solid var(--border); border-radius: 8px;
+  padding: 5px 11px; cursor: pointer;
+  transition: color .15s, border-color .15s, background .15s;
+}
+.board-close:hover {
+  color: var(--text-bright); background: var(--hover);
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
+}
+
+/* Row: columns stretch to fill remaining width; the detail panel (when open) sits
+ * beside them at a fixed width. Neither ever causes horizontal page scroll. */
+.board-body { flex: 1; min-height: 0; display: flex; align-items: stretch; min-width: 0; }
+
+/* Columns stretch to fill the full width; scroll only when they'd get narrower than min. */
+.board-columns {
+  flex: 1; min-width: 0; display: flex; align-items: stretch; gap: 16px;
+  padding: 18px; overflow-x: auto; overflow-y: hidden;
+}
+.board-column-wrap { flex: 1 1 0; min-width: 250px; display: flex; flex-direction: column; min-height: 0; }
+.board-column {
+  flex: 1; min-height: 0; display: flex; flex-direction: column; overflow: hidden;
+  background: color-mix(in srgb, var(--sidebar-bg) 60%, var(--panel-bg));
+  border: 1px solid var(--border); border-radius: 14px;
+}
+.board-column-head {
+  display: flex; align-items: center; gap: 8px; flex: none;
+  padding: 12px 14px 10px;
+  font-size: 11px; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase;
+  color: var(--text-mid);
+}
+.board-count {
+  margin-left: auto; min-width: 22px; text-align: center;
+  font-size: 10.5px; font-weight: 700; letter-spacing: 0; color: var(--text-dim);
+  background: var(--panel-bg); border: 1px solid var(--border);
+  border-radius: 99px; padding: 1px 7px;
+}
+.board-column-body {
+  flex: 1; min-height: 0; overflow-y: auto;
+  display: flex; flex-direction: column; gap: 8px; padding: 4px 11px 12px;
+}
+.board-column-body::-webkit-scrollbar { width: 9px; }
+.board-column-body::-webkit-scrollbar-thumb { background: var(--border); border-radius: 99px; border: 2px solid transparent; background-clip: padding-box; }
+.board-column-body:hover::-webkit-scrollbar-thumb { background: var(--text-dim); background-clip: padding-box; }
+
+.board-card {
+  background: var(--sidebar-bg); border: 1px solid var(--border); border-radius: 10px;
+  padding: 11px 12px; cursor: grab; box-shadow: 0 1px 2px rgba(0, 0, 0, 0.28);
+  transition: transform .12s ease, border-color .12s ease, box-shadow .12s ease;
+}
+.board-card:hover {
+  transform: translateY(-1px);
+  border-color: color-mix(in srgb, var(--accent) 40%, var(--border));
+  box-shadow: 0 5px 16px rgba(0, 0, 0, 0.38);
+}
+.board-card:active { cursor: grabbing; transform: none; }
+.board-card-title { font-size: 13px; line-height: 1.4; color: var(--text-bright); }
+.board-card-labels { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 8px; }
+.board-label {
+  font-size: 10px; font-weight: 600; padding: 1.5px 8px; border-radius: 99px;
+  background: var(--tag-chip-bg); color: var(--tag-chip-text);
+}
+
+.board-claim {
+  display: inline-flex; align-items: center; gap: 5px; margin-top: 9px;
+  font-size: 10px; font-weight: 600; padding: 2px 9px; border-radius: 99px;
+}
+.board-claim::before { content: ""; width: 5px; height: 5px; border-radius: 99px; background: currentColor; }
+.board-claim.ai { background: color-mix(in srgb, var(--accent) 16%, transparent); color: var(--accent); }
+.board-claim.human { background: color-mix(in srgb, var(--green) 16%, transparent); color: var(--green); }
+
+.board-stage {
+  display: inline-block; margin: 9px 6px 0 0;
+  font-size: 10px; font-weight: 600; padding: 2px 9px; border-radius: 99px;
+  background: var(--chip-bg); color: var(--chip-text); text-transform: capitalize;
+}
+.board-gate {
+  display: inline-block; margin-top: 9px;
+  font-size: 10px; font-weight: 700; letter-spacing: 0.02em; padding: 2px 9px; border-radius: 99px;
+  background: var(--pill-needs-bg); color: var(--pill-needs-text);
+}
+.board-gate-actions { display: flex; gap: 7px; margin-top: 10px; }
+.board-gate-actions button {
+  flex: 1; font: inherit; font-size: 11px; font-weight: 600; padding: 5px 8px;
+  border-radius: 8px; border: 1px solid var(--border); background: var(--panel-bg);
+  color: var(--text-mid); cursor: pointer;
+  transition: color .15s, border-color .15s, background .15s;
+}
+.board-gate-actions button:first-child {
+  color: var(--green); border-color: color-mix(in srgb, var(--green) 35%, var(--border));
+}
+.board-gate-actions button:hover { background: var(--hover); }
+
+.board-add {
+  margin: 2px 0 0; flex: none; text-align: center;
+  font: inherit; font-size: 12px; font-weight: 500; color: var(--text-dim);
+  background: transparent; border: 1px dashed var(--border); border-radius: 9px;
+  padding: 8px; cursor: pointer;
+  transition: color .15s, border-color .15s, background .15s;
+}
+.board-add:hover {
+  color: var(--accent); background: color-mix(in srgb, var(--accent) 6%, transparent);
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
+}
+.board-add-input {
+  margin: 2px 0 0; flex: none;
+  font: inherit; font-size: 13px; color: var(--text-bright);
+  background: var(--panel-bg); border: 1px solid color-mix(in srgb, var(--accent) 55%, var(--border));
+  border-radius: 9px; padding: 8px 11px; outline: none;
+}
+.board-add-input::placeholder { color: var(--text-dim); }
+
+/* ---- Continuity: presence dot + handoff badge (C2 T5) ---- */
+.board-presence {
+  display: inline-block; width: 7px; height: 7px; border-radius: 99px;
+  margin-left: 6px; vertical-align: middle; flex-shrink: 0;
+}
+.board-presence.active { background: var(--green); box-shadow: 0 0 6px color-mix(in srgb, var(--green) 60%, transparent); }
+.board-presence.idle { background: var(--amber); }
+.board-presence.gone { background: var(--text-dim); }
+
+.board-handoff-badge {
+  display: inline-flex; align-items: center; justify-content: center;
+  margin: 9px 0 0; min-width: 20px; height: 18px; padding: 0 6px;
+  font-size: 11px; font-weight: 700; border-radius: 99px; cursor: default;
+  background: var(--chip-bg); color: var(--chip-text);
+}
+
+/* ---- Continuity: read-only card detail panel (C2 T5) ---- */
+.board-detail {
+  flex: none; width: 340px; min-width: 340px;
+  border-left: 1px solid var(--border); background: var(--sidebar-bg);
+  overflow-y: auto; padding: 16px;
+}
+.board-detail-head {
+  display: flex; align-items: flex-start; gap: 10px; margin-bottom: 8px;
+}
+.board-detail-title {
+  flex: 1; font-size: 14px; font-weight: 650; line-height: 1.4; color: var(--text-bright);
+}
+.board-detail-close {
+  flex: none; font: inherit; font-size: 12px; line-height: 1; color: var(--text-mid);
+  background: transparent; border: 1px solid var(--border); border-radius: 8px;
+  width: 24px; height: 24px; cursor: pointer;
+  transition: color .15s, border-color .15s, background .15s;
+}
+.board-detail-close:hover {
+  color: var(--text-bright); background: var(--hover);
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
+}
+.board-detail-stage {
+  display: inline-block; margin-bottom: 10px;
+  font-size: 10px; font-weight: 600; padding: 2px 9px; border-radius: 99px;
+  background: var(--chip-bg); color: var(--chip-text); text-transform: capitalize;
+}
+.board-detail-row {
+  display: flex; align-items: center; gap: 3px; margin-bottom: 12px;
+  font-size: 12px; color: var(--text-mid);
+}
+.board-detail-row .label {
+  font-size: 10px; font-weight: 700; letter-spacing: 0.06em; text-transform: uppercase;
+  color: var(--text-dim); margin-right: 6px;
+}
+.board-detail-row .board-presence { margin-left: 0; }
+.board-detail-body {
+  font-size: 12.5px; line-height: 1.55; color: var(--text-mid);
+  white-space: pre-wrap; margin-bottom: 14px;
+}
+.board-detail-section {
+  font-size: 10px; font-weight: 700; letter-spacing: 0.06em; text-transform: uppercase;
+  color: var(--text-dim); margin: 14px 0 6px;
+}
+.board-detail-handoff {
+  margin-top: 6px; padding: 12px; border-radius: 10px;
+  background: color-mix(in srgb, var(--accent) 8%, transparent);
+  border: 1px solid color-mix(in srgb, var(--accent) 30%, var(--border));
+}
+.board-detail-handoff .board-detail-section:first-child { margin-top: 0; }
+.board-detail-context {
+  font-size: 12.5px; line-height: 1.55; color: var(--text-bright); white-space: pre-wrap;
+}
+.board-detail-pre {
+  font: 11.5px/1.5 var(--mono-font); color: var(--text-mid);
+  background: var(--panel-bg); border: 1px solid var(--border); border-radius: 8px;
+  padding: 8px 10px; overflow-x: auto; white-space: pre-wrap; word-break: break-word;
+}
+.board-detail-hint {
+  margin-top: 12px; font-size: 11px; font-style: italic; color: var(--text-dim);
+}
+.board-detail-labels { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 14px; }
+.board-detail-comments { margin-top: 14px; }
+.board-detail-comment {
+  font-size: 12px; line-height: 1.5; color: var(--text-mid); margin-bottom: 8px;
+}
+.board-detail-comment b { color: var(--text-bright); font-weight: 600; margin-right: 5px; }
 
 /* ---- Right panel (ports RightPanelView) ---- */
 .tab-bar {
@@ -3637,3 +3861,49 @@ button {
   color: var(--red);
   background: var(--hover);
 }
+
+/* ---- Plugins ---- */
+.plugins-panel { display: flex; flex-direction: column; gap: 14px; font-family: var(--ui-font); }
+.plugins-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+
+/* Buttons in the panel share the app's settings-button look (cf. .mcp-form-actions button). */
+.plugins-panel button,
+.modal .modal-actions button {
+  font-family: var(--ui-font);
+  font-size: 12px;
+  color: var(--text-bright);
+  padding: 5px 12px;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  background: none;
+  cursor: default;
+  transition: background 0.12s ease, border-color 0.12s ease;
+}
+.plugins-panel button:hover,
+.modal .modal-actions button:hover { background: var(--selection-bg); }
+.plugins-panel button.danger { color: var(--red); border-color: transparent; }
+.plugins-panel button.danger:hover { background: var(--hover); }
+.plugins-panel button.primary,
+.modal .modal-actions button.primary { background: var(--accent); color: var(--sidebar-bg); border-color: var(--accent); }
+
+.plugins-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
+.plugin-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 12px 14px; border: 1px solid var(--border); border-radius: 10px; background: var(--sidebar-bg); }
+.plugin-row.empty { justify-content: center; color: var(--text-dim); padding: 22px 14px; font-size: 13px; }
+.plugin-meta { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.plugin-name { font-family: var(--ui-font); color: var(--text-bright); font-weight: 600; font-size: 14px; }
+.plugin-sub { font-family: var(--ui-font); color: var(--text-mid); font-size: 12px; }
+.plugin-perms { font-family: var(--ui-font); color: var(--text-dim); font-size: 11px; word-break: break-word; }
+.plugin-controls { display: flex; gap: 6px; flex-shrink: 0; }
+
+/* Consent modal */
+.perm-list { list-style: none; margin: 14px 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
+.perm-row { padding: 9px 11px; border: 1px solid var(--border); border-radius: 8px; }
+.perm-row.new { border-color: var(--accent); }
+.perm-label { font-family: var(--ui-font); color: var(--text-bright); font-size: 13px; }
+.perm-risk { font-family: var(--ui-font); color: var(--text-mid); font-size: 12px; margin-top: 3px; }
+.plugin-consent .modal-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 16px; }
+
+.modal-backdrop { position: fixed; inset: 0; background: rgba(0,0,0,0.5); display: flex; align-items: center; justify-content: center; z-index: 1000; }
+.modal { font-family: var(--ui-font); background: var(--panel-bg); border: 1px solid var(--border); border-radius: 12px; padding: 22px; width: min(440px, 90vw); max-height: 80vh; overflow-y: auto; box-shadow: 0 12px 40px rgba(0, 0, 0, 0.4); }
+.modal h2 { margin: 0 0 8px; color: var(--text-bright); font-family: var(--ui-font); font-size: 16px; font-weight: 600; }
+.modal .settings-intro { margin-top: 0; }

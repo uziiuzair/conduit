@@ -267,6 +267,12 @@ pub struct Project {
     /// state (no field) loads. See the multi-account design doc.
     #[serde(default)]
     pub default_accounts: HashMap<AgentId, String>,
+    /// Whether this project's task board has been opened at least once. Gates the fleet MCP
+    /// server (and `task_*` tools) into every session spawned for this project -- not just
+    /// Conductor/mission/mailbox sessions -- once a human has opened the board (`list_board`
+    /// flips this on). `#[serde(default)]` so legacy state (no field) loads as `false`.
+    #[serde(default)]
+    pub board_enabled: bool,
 }
 
 /// A registered agent account: a profile dir that holds its own credentials (a `.claude`
@@ -359,6 +365,8 @@ pub struct PersistState {
     pub trust: TrustSettings,
     #[serde(default)]
     pub opencode: OpenCodeSettings,
+    #[serde(default)]
+    pub plugins: Vec<crate::plugins::PluginRecord>,
 }
 
 pub struct Store {
@@ -369,6 +377,7 @@ pub struct Store {
     default_accounts: Mutex<HashMap<AgentId, String>>,
     trust: Mutex<TrustSettings>,
     opencode: Mutex<OpenCodeSettings>,
+    plugins: Mutex<Vec<crate::plugins::PluginRecord>>,
     /// The local-endpoint API key, held in memory for the app's lifetime only. Never part
     /// of `PersistState`/`save()`, never logged; injected into an `opencode` child's env.
     opencode_key: Mutex<Option<String>>,
@@ -494,6 +503,7 @@ impl Store {
             default_accounts: Mutex::new(default_accounts),
             trust: Mutex::new(state.trust),
             opencode: Mutex::new(state.opencode),
+            plugins: Mutex::new(state.plugins),
             opencode_key: Mutex::new(None),
             save_path,
         }
@@ -523,6 +533,11 @@ impl Store {
             trust: self.trust.lock().unwrap_or_else(|e| e.into_inner()).clone(),
             opencode: self
                 .opencode
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone(),
+            plugins: self
+                .plugins
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
                 .clone(),
@@ -584,6 +599,7 @@ impl Store {
             sessions: Vec::new(),
             layout: None,
             default_accounts: HashMap::new(),
+            board_enabled: false,
         };
         let mut projects = self.projects.lock().unwrap_or_else(|e| e.into_inner());
         projects.push(project.clone());
@@ -594,6 +610,15 @@ impl Store {
     pub fn remove_project(&self, project_id: &str) {
         let mut projects = self.projects.lock().unwrap_or_else(|e| e.into_inner());
         projects.retain(|p| p.id != project_id);
+        self.save(&projects);
+    }
+
+    /// Rename a project's display label only. Does not touch `path` or anything on disk.
+    pub fn rename_project(&self, project_id: &str, name: String) {
+        let mut projects = self.projects.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(project) = projects.iter_mut().find(|p| p.id == project_id) {
+            project.name = name;
+        }
         self.save(&projects);
     }
 
@@ -707,6 +732,47 @@ impl Store {
                     .unwrap_or_else(|| p.path.clone())
             })
         })
+    }
+
+    // ---- Plugin records (persisted enabled-state + granted permissions) --------
+
+    pub fn list_plugins(&self) -> Vec<crate::plugins::PluginRecord> {
+        self.plugins
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+
+    /// Atomically find-or-insert the record for `id`, apply `f` under a single
+    /// lock (no read-modify-write race), then persist. Mirrors the single-lock
+    /// mutate idiom used by the account/default setters below.
+    pub fn update_plugin_record(
+        &self,
+        id: &str,
+        f: impl FnOnce(&mut crate::plugins::PluginRecord),
+    ) {
+        {
+            let mut v = self.plugins.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(existing) = v.iter_mut().find(|r| r.id == id) {
+                f(existing);
+            } else {
+                let mut rec = crate::plugins::PluginRecord {
+                    id: id.to_string(),
+                    ..Default::default()
+                };
+                f(&mut rec);
+                v.push(rec);
+            }
+        }
+        self.persist();
+    }
+
+    pub fn remove_plugin_record(&self, id: &str) {
+        {
+            let mut v = self.plugins.lock().unwrap_or_else(|e| e.into_inner());
+            v.retain(|r| r.id != id);
+        }
+        self.persist();
     }
 
     // ---- Account registry (Feature 2: Claude account switching) ----------------
@@ -1241,6 +1307,28 @@ impl Store {
         }
     }
 
+    /// Flip a project's task-board flag. Opening the board (`list_board`) turns this on so
+    /// every FUTURE session spawned for the project gets the fleet MCP server (and thus
+    /// `task_*`), not only Conductor/mission/mailbox sessions -- see `gets_fleet_mcp` in
+    /// `lib.rs`. Already-spawned sessions are not retroactively reconnected.
+    pub fn set_board_enabled(&self, project_id: &str, enabled: bool) {
+        let mut projects = self.projects.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(p) = projects.iter_mut().find(|p| p.id == project_id) {
+            p.board_enabled = enabled;
+            self.save(&projects);
+        }
+    }
+
+    /// Whether the project a session belongs to has its task board enabled (see
+    /// `set_board_enabled`). False (not an error) for an unknown session.
+    pub fn board_enabled_for_session(&self, session_id: &str) -> bool {
+        let projects = self.projects.lock().unwrap_or_else(|e| e.into_inner());
+        projects
+            .iter()
+            .find(|p| p.sessions.iter().any(|s| s.id == session_id))
+            .is_some_and(|p| p.board_enabled)
+    }
+
     pub fn rename_session(&self, project_id: &str, session_id: &str, name: String) {
         let mut projects = self.projects.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(project) = projects.iter_mut().find(|p| p.id == project_id) {
@@ -1288,6 +1376,7 @@ mod tests {
                 default_accounts: Mutex::new(HashMap::new()),
                 trust: Mutex::new(TrustSettings::default()),
                 opencode: Mutex::new(OpenCodeSettings::default()),
+                plugins: Mutex::new(Vec::new()),
                 opencode_key: Mutex::new(None),
                 save_path: dir.join("state.json"),
             }
@@ -2001,5 +2090,51 @@ mod tests {
         assert!(!ps.opencode.enabled);
         assert!(ps.opencode.base_url.is_empty());
         assert!(ps.opencode.context_limit.is_none());
+    }
+
+    #[test]
+    fn plugin_record_round_trips_in_persist_state() {
+        let mut st = PersistState::default();
+        st.plugins.push(crate::plugins::PluginRecord {
+            id: "com.acme.logger".into(),
+            enabled: true,
+            granted_permissions: vec!["hooks:session".into()],
+            consented_version: "1.0.0".into(),
+        });
+        let json = serde_json::to_string(&st).unwrap();
+        let back: PersistState = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.plugins, st.plugins);
+    }
+
+    #[test]
+    fn legacy_state_without_plugins_defaults_empty() {
+        let back: PersistState = serde_json::from_str(r#"{"projects":[]}"#).unwrap();
+        assert!(back.plugins.is_empty());
+    }
+
+    #[test]
+    fn update_plugin_record_inserts_then_mutates_in_place() {
+        let dir = temp_dir("plugin_upsert");
+        let store = Store::for_test(&dir);
+        // First call inserts a fresh record.
+        store.update_plugin_record("com.acme.logger", |r| {
+            r.enabled = true;
+            r.granted_permissions = vec!["hooks:session".into()];
+        });
+        // Second call mutates the SAME record (no duplicate row).
+        store.update_plugin_record("com.acme.logger", |r| {
+            r.consented_version = "1.0.0".into();
+        });
+        let recs = store.list_plugins();
+        assert_eq!(recs.len(), 1);
+        assert_eq!(recs[0].id, "com.acme.logger");
+        assert!(recs[0].enabled);
+        assert_eq!(
+            recs[0].granted_permissions,
+            vec!["hooks:session".to_string()]
+        );
+        assert_eq!(recs[0].consented_version, "1.0.0");
+        // Persisted to disk and reloads.
+        assert!(dir.join("state.json").exists());
     }
 }

@@ -8,6 +8,7 @@ import { UsagePrefsPanel } from "./UsagePrefsPanel";
 import { GeneralSettings } from "./GeneralSettings";
 import { TrustPanel } from "./TrustPanel";
 import { OpenCodePanel } from "./OpenCodePanel";
+import { PluginsPanel } from "./PluginsPanel";
 
 // Exported for the native menu integration (menu → open Settings at a specific tab).
 export type SettingsTab =
@@ -19,6 +20,7 @@ export type SettingsTab =
   | "localmodels"
   | "security"
   | "privacy"
+  | "plugins"
   | "about";
 
 /** Grouped sidebar navigation — scales past the point where flat tabs got unwieldy. */
@@ -46,6 +48,7 @@ const NAV: Array<{ group: string; items: Array<{ id: SettingsTab; label: string 
       { id: "privacy", label: "Privacy" },
     ],
   },
+  { group: "Extensions", items: [{ id: "plugins", label: "Plugins" }] },
   { group: "", items: [{ id: "about", label: "About" }] },
 ];
 
@@ -148,6 +151,12 @@ export function Settings({
                     file paths, project names, or personal data are ever sent.
                   </p>
                   <TelemetryToggle />
+                </>
+              )}
+              {tab === "plugins" && (
+                <>
+                  <p className="settings-intro">Community extensions.</p>
+                  <PluginsPanel />
                 </>
               )}
               {tab === "about" && <AboutPanel />}

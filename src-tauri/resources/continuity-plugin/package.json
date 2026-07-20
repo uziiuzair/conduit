@@ -1,0 +1,7 @@
+{
+  "name": "@continuity/plugin",
+  "version": "0.1.0-alpha.3",
+  "private": true,
+  "description": "The Continuity Claude Code plugin — hooks, skills, and the bundled MCP server payload.",
+  "license": "MIT"
+}

@@ -24,6 +24,9 @@ import {
 import { cleanupEdits } from "./trim";
 import type * as Monaco from "monaco-editor";
 import type { SettingsTab } from "./components/Settings";
+import type { PluginDescriptor, PluginPermission } from "./plugins/types";
+import { pluginHost } from "./plugins/host";
+import { feedSession } from "./plugins";
 
 // ---- Types (mirror the Rust serde structs, rename_all = "camelCase") ----
 export type SessionRole = "worker" | "conductor";
@@ -199,6 +202,38 @@ export interface Project {
   /** Per-agent default account for this project's sessions (beats the global default). */
   defaultAccounts?: DefaultAccounts;
 }
+
+// ---- Task board (Conductor board) ----
+export interface BoardColumn { id: string; name: string }
+export interface BoardClaim { by: string; at: number; leaseUntil: number }
+export interface BoardComment { by: string; at: number; text: string }
+export type Stage =
+  | "requested" | "discovery" | "requirement_draft" | "business_clarification"
+  | "ux_input" | "architecture_input" | "implementation_plan" | "implementation"
+  | "verification" | "blocked" | "done";
+export interface WorkflowHistory { at: number; by: string; from: Stage; to: Stage; note: string }
+export interface Workflow {
+  kind: string; stage: Stage; resumeState: Stage | null;
+  blockedQuestion: string | null; history: WorkflowHistory[];
+}
+export interface BoardCard {
+  id: string; title: string; body: string; column: string; order: string;
+  labels: string[]; createdBy: string; createdAt: number; updatedAt: number;
+  workflow: Workflow | null; links: { workItem: string | null; pr: string; branch: string };
+  comments: BoardComment[]; claim: BoardClaim | null;
+}
+export interface BoardSnapshot { columns: BoardColumn[]; cards: BoardCard[] }
+
+// ---- Continuity (presence + handoffs) — mirror the Rust serde structs (camelCase) ----
+export interface Presence { sessionId: string; status: "active" | "idle" | "gone"; lastSeenAt: string }
+export interface CardHandoff {
+  cardId: string; id: string; fromLabel: string | null; context: string;
+  state: string | null; suggestedNextActions: string | null; status: string; createdAt: string;
+}
+export interface ContinuityView { presence: Presence[]; handoffs: CardHandoff[] }
+
+/** Center pane mode, per project: the terminal workspace or the task board. */
+export type CenterMode = "terminals" | "board";
 
 export type SessionStatus = "idle" | "running" | "needsInput" | "done";
 export type TodoStatus = "pending" | "in_progress" | "completed";
@@ -636,6 +671,7 @@ interface AppState {
 
   menu: ContextMenuState | null;
   editingSessionId: string | null;
+  editingProjectId: string | null;
   homeDir: string | null;
   topTab: TopTab;
   bottomTab: BottomTab;
@@ -653,6 +689,15 @@ interface AppState {
   /** Usage-bar view preferences (layout, window filters, sort, low threshold). */
   usagePrefs: UsagePrefs;
   setUsagePrefs: (patch: Partial<UsagePrefs>) => void;
+
+  // ---- unified session directory (observed effective dir per session) ----
+  /** Session id → CONFIRMED effective working directory: the worktree once it exists
+   *  on disk, or the project root. A worktree session PENDING first confirmation has
+   *  no entry (consumers fall back to project.path via effectiveDirOf). Runtime-only —
+   *  rebuilt by useSessionDirs; never persisted. */
+  sessionDirs: Record<string, string>;
+  setSessionDir: (sessionId: string, dir: string) => void;
+  pruneSessionDirs: (liveIds: Set<string>) => void;
 
   // ---- panel collapse + Settings dialog (native menu-driven, App-level) ----
   /** Persisted. When true (default), opening/switching to a project eagerly spawns and
@@ -755,10 +800,21 @@ interface AppState {
   removeMcpServer: (name: string) => Promise<void>;
   /** Invokes mcp_apply; sets pending/error per-cell, reverts on failure. */
   setMcpEnabled: (name: string, agent: AgentId, on: boolean) => Promise<void>;
+
+  // Plugins
+  plugins: PluginDescriptor[];
+  refreshPlugins: () => Promise<void>;
+  enablePlugin: (id: string, grants: PluginPermission[], version: string) => Promise<void>;
+  disablePlugin: (id: string) => Promise<void>;
+  removePlugin: (id: string) => Promise<void>;
+  setAllPluginsEnabled: (enabled: boolean) => Promise<void>;
+
   addProject: (path: string) => Promise<void>;
   removeProject: (id: string) => Promise<void>;
   addSession: (projectId: string, opts?: { name?: string; useWorktree?: boolean; agent?: AgentId; role?: SessionRole; account?: string | null }) => Promise<void>;
   renameSession: (projectId: string, sessionId: string, name: string) => Promise<void>;
+  /** Rename a project's display label only (not the directory on disk). */
+  renameProject: (projectId: string, name: string) => Promise<void>;
   /** Move a project / session in the sidebar. `toIndex` is the insertion index in the
    *  list WITHOUT the moved item (sessions reorder within their own project only). */
   reorderProject: (projectId: string, toIndex: number) => Promise<void>;
@@ -881,6 +937,8 @@ interface AppState {
   closeMenu: () => void;
   startRename: (sessionId: string) => void;
   cancelRename: () => void;
+  startProjectRename: (projectId: string) => void;
+  cancelProjectRename: () => void;
   setStatus: (id: string, status: SessionStatus) => void;
   setTodos: (id: string, todos: TodoItem[]) => void;
   setActivity: (id: string, activity: string | undefined) => void;
@@ -898,6 +956,18 @@ interface AppState {
   refreshAgyUsage: () => Promise<void>;
   refreshAgyUsageTracking: () => Promise<void>;
   setAgyUsageTracking: (enabled: boolean) => Promise<boolean>;
+
+  // ---- Task board (Conductor board) ----
+  /** Center pane mode per project ("terminals" | "board"); default (unset) is "terminals". */
+  centerMode: Record<string, CenterMode>;
+  /** Latest board snapshot per project, refreshed by useBoard. */
+  boards: Record<string, BoardSnapshot>;
+  /** Latest continuity view (presence + handoffs) per project, refreshed by useBoard. */
+  continuity: Record<string, ContinuityView>;
+  setCenterMode: (projectId: string, mode: CenterMode) => void;
+  toggleCenterMode: (projectId: string) => void;
+  setBoard: (projectId: string, snapshot: BoardSnapshot) => void;
+  setContinuity: (projectId: string, view: ContinuityView) => void;
 }
 
 export const useStore = create<AppState>((set, get) => {
@@ -957,6 +1027,7 @@ export const useStore = create<AppState>((set, get) => {
     agyUsageByAccount: {},
     agyUsageTracking: false,
     usagePrefs: readUsagePrefs(),
+    sessionDirs: {},
     restoreSessionsOnOpen: readRestoreSessionsOnOpen(),
     sidebarCollapsed: readSidebarCollapsed(),
     rightCollapsed: readRightCollapsed(),
@@ -964,6 +1035,7 @@ export const useStore = create<AppState>((set, get) => {
     settingsTab: "agents",
     menu: null,
     editingSessionId: null,
+    editingProjectId: null,
     homeDir: null,
     agents: null,
     defaultAgent: readDefaultAgent(),
@@ -986,6 +1058,9 @@ export const useStore = create<AppState>((set, get) => {
     mcpServers: _initMcp.servers,
     mcpEnabled: _initMcp.enabled,
     mcpBusy: {},
+
+    plugins: [],
+
     topTab: "files",
     bottomTab: "terminal",
     themePref: readStoredPref(),
@@ -1275,6 +1350,37 @@ export const useStore = create<AppState>((set, get) => {
       }
     },
 
+    refreshPlugins: async () => {
+      const plugins = await invoke<PluginDescriptor[]>("list_plugins");
+      set({ plugins });
+    },
+    enablePlugin: async (id, grants, version) => {
+      await invoke("set_plugin_grants", { id, permissions: grants, consentedVersion: version });
+      await invoke("set_plugin_enabled", { id, enabled: true });
+      await get().refreshPlugins();
+      const desc = get().plugins.find((p) => p.id === id);
+      if (desc) await pluginHost.start(desc);
+    },
+    disablePlugin: async (id) => {
+      pluginHost.stop(id);
+      await invoke("set_plugin_enabled", { id, enabled: false });
+      await get().refreshPlugins();
+    },
+    removePlugin: async (id) => {
+      pluginHost.stop(id);
+      await invoke("remove_plugin", { id });
+      await get().refreshPlugins();
+    },
+    setAllPluginsEnabled: async (enabled) => {
+      if (!enabled) pluginHost.stopAll();
+      for (const p of get().plugins) {
+        if (p.manifest && p.problems.length === 0) {
+          await invoke("set_plugin_enabled", { id: p.id, enabled });
+        }
+      }
+      await get().refreshPlugins();
+    },
+
     addProject: async (path) => {
       const project = await invoke<Project>("add_project", { path });
       set((s) => ({
@@ -1339,6 +1445,7 @@ export const useStore = create<AppState>((set, get) => {
         ),
         selectedProjectId: projectId,
       }));
+      feedSession("session.start", { id: session.id, title: session.name });
       applyLayout(projectId, (l) => rOpenTab(l, { kind: "session", ref: session.id }));
     },
 
@@ -1388,6 +1495,22 @@ export const useStore = create<AppState>((set, get) => {
             : p,
         ),
       }));
+      feedSession("session.rename", { id: sessionId, title: clean });
+    },
+
+    renameProject: async (projectId, name) => {
+      const clean = name.trim();
+      if (!clean) {
+        set({ editingProjectId: null });
+        return;
+      }
+      await invoke("rename_project", { projectId, name: clean });
+      set((s) => ({
+        editingProjectId: null,
+        projects: s.projects.map((p) =>
+          p.id === projectId ? { ...p, name: clean } : p,
+        ),
+      }));
     },
 
     reorderProject: async (projectId, toIndex) => {
@@ -1421,6 +1544,7 @@ export const useStore = create<AppState>((set, get) => {
 
     removeSession: async (projectId, sessionId) => {
       await invoke("remove_session", { projectId, sessionId });
+      feedSession("session.stop", { id: sessionId });
       set((s) => {
         const live = { ...s.live };
         delete live[sessionId];
@@ -1979,6 +2103,8 @@ export const useStore = create<AppState>((set, get) => {
     closeMenu: () => set({ menu: null }),
     startRename: (sessionId) => set({ editingSessionId: sessionId, menu: null }),
     cancelRename: () => set({ editingSessionId: null }),
+    startProjectRename: (projectId) => set({ editingProjectId: projectId, menu: null }),
+    cancelProjectRename: () => set({ editingProjectId: null }),
 
     setStatus: (id, status) =>
       set((s) => ({
@@ -2145,6 +2271,22 @@ export const useStore = create<AppState>((set, get) => {
         agyUsageByAccount: { ...s.agyUsageByAccount, [accountKey(u.accountId)]: u },
       })),
 
+    setSessionDir: (sessionId, dir) =>
+      set((s) =>
+        s.sessionDirs[sessionId] === dir
+          ? s
+          : { sessionDirs: { ...s.sessionDirs, [sessionId]: dir } },
+      ),
+
+    pruneSessionDirs: (liveIds) =>
+      set((s) => {
+        const stale = Object.keys(s.sessionDirs).filter((id) => !liveIds.has(id));
+        if (!stale.length) return s;
+        const next = { ...s.sessionDirs };
+        for (const id of stale) delete next[id];
+        return { sessionDirs: next };
+      }),
+
     refreshAgyUsage: async () => {
       try {
         const list = await invoke<AgyUsage[]>("fetch_agy_usage");
@@ -2191,6 +2333,22 @@ export const useStore = create<AppState>((set, get) => {
       applyTheme(id);
       set({ activeThemeId: id });
     },
+
+    // ---- Task board (Conductor board) ----
+    centerMode: {},
+    boards: {},
+    continuity: {},
+    setCenterMode: (projectId, mode) =>
+      set((s) => ({ centerMode: { ...s.centerMode, [projectId]: mode } })),
+    toggleCenterMode: (projectId) =>
+      set((s) => {
+        const cur = s.centerMode[projectId] ?? "terminals";
+        return { centerMode: { ...s.centerMode, [projectId]: cur === "board" ? "terminals" : "board" } };
+      }),
+    setBoard: (projectId, snapshot) =>
+      set((s) => ({ boards: { ...s.boards, [projectId]: snapshot } })),
+    setContinuity: (projectId, view) =>
+      set((s) => ({ continuity: { ...s.continuity, [projectId]: view } })),
   };
 });
 
@@ -2212,6 +2370,17 @@ export function findSession(
 
 export function workingDirOf(project: Project, session: Session): string {
   return session.worktreePath ?? project.path;
+}
+
+/** Observed effective working directory: the confirmed entry from `sessionDirs` when
+ *  present, else the project root. Panels and the companion shell bind to THIS — never
+ *  to `workingDirOf` — so a worktree only counts once it exists on disk. */
+export function effectiveDirOf(
+  project: Project,
+  session: Session,
+  sessionDirs: Record<string, string>,
+): string {
+  return sessionDirs[session.id] ?? project.path;
 }
 
 /** Replace the home-directory prefix with `~` for display. */
