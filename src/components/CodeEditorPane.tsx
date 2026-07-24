@@ -100,7 +100,6 @@ export function CodeEditorPane({ projectId, groupId, visible, style }: CodeEdito
 
   const setDirty = useStore((s) => s.setDirty);
   const saveFile = useStore((s) => s.saveFile);
-  const formatActiveDocument = useStore((s) => s.formatActiveDocument);
 
   // Derive THIS group's active file path from the store (null when the active tab is a
   // session or the group is empty).
@@ -741,7 +740,17 @@ export function CodeEditorPane({ projectId, groupId, visible, style }: CodeEdito
         {!!activePath && !noModel && !!fc && !fc.readOnly && hasFormatter(activePath) && (
           <button
             className="md-toggle-btn"
-            onClick={() => void formatActiveDocument()}
+            onClick={() => {
+              // Clicking a toolbar button doesn't focus/activate its pane's group, but
+              // formatActiveDocument resolves its target via the globally active group —
+              // in a split layout that would format the WRONG pane. Activate this pane's
+              // group first so the subsequent read sees the right target.
+              const st = useStore.getState();
+              if (activeGroup(st.layouts[projectId])?.id !== groupId) {
+                st.setActiveGroup(projectId, groupId);
+              }
+              void st.formatActiveDocument();
+            }}
             title="Format document (⇧⌥F)"
           >
             Format

@@ -738,7 +738,7 @@ async function formatBuffer(
         path,
       });
       formatted = await formatWithFallback(path, content, mergeFormatOptions(project, globalCfg));
-      note = project ? "bundled prettier (project config)" : "bundled prettier (default rules)";
+      note = project ? "bundled prettier (project config)" : "bundled prettier (global rules)";
     } catch (fe) {
       return { kind: "error", message: String(fe) };
     }

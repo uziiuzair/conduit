@@ -11,8 +11,10 @@ export function FormatPrefsPanel() {
   const formatOnSave = useStore((s) => s.formatOnSave);
   const toggleFormat = useStore((s) => s.toggleFormatOnSave);
 
-  const num = (k: keyof PrettierOptions) => (e: React.ChangeEvent<HTMLInputElement>) =>
-    setCfg({ [k]: Number(e.target.value) } as Partial<PrettierOptions>);
+  const num = (k: keyof PrettierOptions) => (e: React.ChangeEvent<HTMLInputElement>) => {
+    const n = Number(e.target.value);
+    if (Number.isFinite(n) && n > 0) setCfg({ [k]: n } as Partial<PrettierOptions>);
+  };
   const bool = (k: keyof PrettierOptions) => (e: React.ChangeEvent<HTMLInputElement>) =>
     setCfg({ [k]: e.target.checked } as Partial<PrettierOptions>);
 
