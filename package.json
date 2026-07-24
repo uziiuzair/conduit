@@ -37,6 +37,7 @@
     "@xterm/xterm": "^5.5.0",
     "marked": "^18.0.5",
     "monaco-editor": "^0.55.1",
+    "prettier": "^3.4.2",
     "react": "^19.1.0",
     "react-dom": "^19.1.0",
     "zustand": "^5.0.2"
