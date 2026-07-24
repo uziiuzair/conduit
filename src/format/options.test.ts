@@ -14,6 +14,12 @@ describe("parserSpecFor", () => {
   it("maps js family to babel", () => {
     expect(parserSpecFor("/p/a.mjs")).toEqual({ parser: "babel", plugins: ["babel", "estree"] });
   });
+  it("maps json/jsonc to the babel plugin (not a json plugin)", () => {
+    expect(parserSpecFor("/p/a.json")).toEqual({ parser: "json", plugins: ["babel", "estree"] });
+  });
+  it("is case-insensitive on the extension", () => {
+    expect(parserSpecFor("/p/A.TSX")?.parser).toBe("typescript");
+  });
   it("maps css/scss/less to postcss with matching parser", () => {
     expect(parserSpecFor("/p/a.scss")).toEqual({ parser: "scss", plugins: ["postcss"] });
   });
