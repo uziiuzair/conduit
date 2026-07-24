@@ -27,7 +27,12 @@ import type { SettingsTab } from "./components/Settings";
 import type { PluginDescriptor, PluginPermission } from "./plugins/types";
 import { pluginHost } from "./plugins/host";
 import { feedSession } from "./plugins";
-import { DEFAULT_FORMAT_CONFIG, mergeFormatOptions, type PrettierOptions } from "./format/options";
+import {
+  DEFAULT_FORMAT_CONFIG,
+  mergeFormatOptions,
+  hasFormatter,
+  type PrettierOptions,
+} from "./format/options";
 import { formatWithFallback } from "./format/fallback";
 
 // ---- Types (mirror the Rust serde structs, rename_all = "camelCase") ----
@@ -1869,6 +1874,26 @@ export const useStore = create<AppState>((set, get) => {
       registry.saving.add(path);
       if (get().trimOnSave) {
         applyWhitespaceCleanup(entry.model as unknown as Monaco.editor.ITextModel);
+      }
+      // Format-on-save (opt-in, off by default). Runs INSIDE the saving window so its
+      // model edit is covered by the same watcher/dirty suppression. Skips instantly for
+      // non-formattable files. Must NOT block the save: on error we toast and write the
+      // un-formatted buffer. `writtenVersion` below is snapshotted AFTER this edit.
+      if (get().formatOnSave && !entry.readOnly && hasFormatter(path)) {
+        const dir = path.slice(0, Math.max(0, path.lastIndexOf("/"))) || "/";
+        try {
+          const outcome = await formatBuffer(
+            path,
+            dir,
+            entry.model as unknown as Monaco.editor.ITextModel,
+            get().formatConfig,
+          );
+          if (outcome.kind === "error") {
+            get().pushToast(`Format on save skipped: ${outcome.message}`, "error");
+          }
+        } catch (e) {
+          get().pushToast(`Format on save skipped: ${String(e)}`, "error");
+        }
       }
       const value = entry.model.getValue();
       // The version whose content is being written — snapshotted NEXT TO getValue().
