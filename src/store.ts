@@ -726,6 +726,7 @@ async function formatBuffer(
     const msg = String(e);
     // Only the missing-prettier case falls back to the bundled renderer formatter.
     // rustfmt/gofmt-not-found and real syntax errors surface as-is.
+    // Prefix contract with format.rs PRETTIER_NOT_FOUND — keep in sync.
     if (!msg.startsWith("prettier not found")) return { kind: "error", message: msg };
     try {
       const project = await invoke<Partial<PrettierOptions> | null>("resolve_prettier_options", {
@@ -2048,6 +2049,7 @@ export const useStore = create<AppState>((set, get) => {
       if (!project || !tab || tab.kind !== "file") return;
       const path = tab.ref;
       const entry = registry.model(path);
+      // Format READS the saving window but never adds to it — adding would make a concurrent ⌘S silently drop its save. A Format racing a save just yields a harmless "buffer changed" toast.
       if (!entry?.model || registry.saving.has(path)) return;
       if (entry.readOnly) {
         get().pushToast("Can't format: file is read-only (too large / binary).", "error");
@@ -2063,7 +2065,7 @@ export const useStore = create<AppState>((set, get) => {
           get().pushToast("Already formatted.");
           break;
         case "buffer-changed":
-          get().pushToast("Buffer changed while formatting — try again.", "error");
+          get().pushToast("Buffer changed while formatting — try again.");
           break;
         case "error":
           get().pushToast(`Format failed: ${outcome.message}`, "error");

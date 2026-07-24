@@ -200,6 +200,10 @@ pub fn formatter_for(path: &str) -> Option<&'static str> {
     }
 }
 
+/// The exact error `format_content` returns when no prettier is found. The renderer
+/// fallback in `src/store.ts` (formatBuffer) keys off this prefix — keep them in sync.
+pub const PRETTIER_NOT_FOUND: &str = "prettier not found (install it in the project or on PATH)";
+
 pub fn format_content(dir: &str, path: &str, content: &str) -> Result<FormatResult, String> {
     let formatter =
         formatter_for(path).ok_or_else(|| "no formatter for this file type".to_string())?;
@@ -207,7 +211,7 @@ pub fn format_content(dir: &str, path: &str, content: &str) -> Result<FormatResu
         "prettier" => {
             let bin = local_prettier(Path::new(path))
                 .or_else(|| resolve_on_path("prettier"))
-                .ok_or("prettier not found (install it in the project or on PATH)")?;
+                .ok_or(PRETTIER_NOT_FOUND)?;
             let formatted = pipe_through(&bin, &["--stdin-filepath", path], dir, content)?;
             Ok(FormatResult {
                 formatted,
@@ -237,6 +241,13 @@ pub fn format_content(dir: &str, path: &str, content: &str) -> Result<FormatResu
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn prettier_not_found_prefix_is_stable() {
+        // src/store.ts formatBuffer switches the bundled fallback ON only when the error
+        // starts with this prefix. If you reword PRETTIER_NOT_FOUND, update store.ts too.
+        assert!(PRETTIER_NOT_FOUND.starts_with("prettier not found"));
+    }
 
     #[test]
     fn formatter_selection_by_extension() {
