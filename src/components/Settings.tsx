@@ -5,6 +5,7 @@ import { TelemetryToggle } from "./TelemetryToggle";
 import { AboutPanel } from "./AboutPanel";
 import { AccountList } from "./AccountList";
 import { UsagePrefsPanel } from "./UsagePrefsPanel";
+import { FormatPrefsPanel } from "./FormatPrefsPanel";
 import { GeneralSettings } from "./GeneralSettings";
 import { TrustPanel } from "./TrustPanel";
 import { OpenCodePanel } from "./OpenCodePanel";
@@ -18,6 +19,7 @@ export type SettingsTab =
   | "usage"
   | "mcp"
   | "localmodels"
+  | "formatting"
   | "security"
   | "privacy"
   | "plugins"
@@ -41,6 +43,7 @@ const NAV: Array<{ group: string; items: Array<{ id: SettingsTab; label: string 
       { id: "usage", label: "Usage display" },
     ],
   },
+  { group: "Editor", items: [{ id: "formatting", label: "Formatting" }] },
   {
     group: "Privacy & security",
     items: [
@@ -133,6 +136,7 @@ export function Settings({
                   <OpenCodePanel />
                 </>
               )}
+              {tab === "formatting" && <FormatPrefsPanel />}
               {tab === "security" && (
                 <>
                   <p className="settings-intro">
