@@ -4,6 +4,7 @@ import type * as Monaco from "monaco-editor";
 import { monaco, languageFor, setLastFocusedEditor } from "../monaco/setup";
 import * as registry from "../monaco/registry";
 import { useStore, activeGroup, baseName, type FileContent } from "../store";
+import { hasFormatter } from "../format/options";
 import { LanguageSelector } from "./LanguageSelector";
 import { MarkdownPreview } from "./MarkdownPreview";
 import { ImagePreview } from "./ImagePreview";
@@ -99,6 +100,7 @@ export function CodeEditorPane({ projectId, groupId, visible, style }: CodeEdito
 
   const setDirty = useStore((s) => s.setDirty);
   const saveFile = useStore((s) => s.saveFile);
+  const formatActiveDocument = useStore((s) => s.formatActiveDocument);
 
   // Derive THIS group's active file path from the store (null when the active tab is a
   // session or the group is empty).
@@ -734,6 +736,15 @@ export function CodeEditorPane({ projectId, groupId, visible, style }: CodeEdito
             title="Toggle Markdown preview (⇧⌘V)"
           >
             {previewOn ? "Source" : "Preview"}
+          </button>
+        )}
+        {!!activePath && !noModel && !!fc && !fc.readOnly && hasFormatter(activePath) && (
+          <button
+            className="md-toggle-btn"
+            onClick={() => void formatActiveDocument()}
+            title="Format document (⇧⌥F)"
+          >
+            Format
           </button>
         )}
         <LanguageSelector value={langId} onChange={onLangChange} disabled={noModel || !activePath} />
