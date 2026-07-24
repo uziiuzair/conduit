@@ -41,8 +41,9 @@ pub struct PrettierConfig {
     pub end_of_line: Option<String>,
 }
 
-/// Parse a `.prettierrc`/`.prettierrc.json`/`.prettierrc.yaml` body. `.prettierrc` may be
-/// either JSON or YAML, so try JSON first, then YAML. Unknown keys are ignored by serde.
+/// Parse a `.prettierrc`/`.prettierrc.json`/`.prettierrc.yaml`/`.prettierrc.yml` body.
+/// `.prettierrc` may be either JSON or YAML, so try JSON first, then YAML. Unknown keys
+/// are ignored by serde.
 /// Returns None on parse failure (caller falls through to global config).
 fn parse_config_str(s: &str) -> Option<PrettierConfig> {
     if let Ok(c) = serde_json::from_str::<PrettierConfig>(s) {
@@ -71,8 +72,9 @@ const PRETTIER_CONFIG_NAMES: &[&str] = &[
 ];
 
 /// Walk up from the file looking for the nearest static prettier config (prettier's own
-/// upward search). First hit wins. `.prettierrc.js`/`prettier.config.js` are ignored —
-/// they can't be read without executing them. Returns None when nothing is found.
+/// upward search). First successfully-parsed config wins — a malformed nearest config is
+/// silently skipped and the walk continues. `.prettierrc.js`/`prettier.config.js` are
+/// ignored — they can't be read without executing them. Returns None when nothing is found.
 pub fn resolve_prettier_config(path: &Path) -> Option<PrettierConfig> {
     let mut dir = path.parent()?;
     loop {
@@ -282,5 +284,59 @@ mod tests {
     #[test]
     fn package_json_without_prettier_is_none() {
         assert!(extract_package_prettier(r#"{ "name": "x" }"#).is_none());
+    }
+
+    /// Fresh unique dir under the OS temp dir (mirrors the fsops/store idiom; no external
+    /// crate). Unique per test via the process id + the test name.
+    fn make_tmp(name: &str) -> std::path::PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("conduit-format-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn resolve_nearest_dir_config_wins() {
+        // A `.prettierrc` in the child dir must beat a different one in the grandparent.
+        let root = make_tmp("nearest");
+        let deep = root.join("child").join("deep");
+        std::fs::create_dir_all(&deep).unwrap();
+        std::fs::write(root.join(".prettierrc"), r#"{ "printWidth": 80 }"#).unwrap();
+        std::fs::write(
+            root.join("child").join(".prettierrc"),
+            r#"{ "printWidth": 120 }"#,
+        )
+        .unwrap();
+        let c = resolve_prettier_config(&deep.join("file.ts")).unwrap();
+        assert_eq!(c.print_width, Some(120));
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn resolve_prettierrc_beats_package_json_same_dir() {
+        // Same dir has both — the `.prettierrc` wins over the package.json "prettier" block.
+        let root = make_tmp("rc-beats-pkg");
+        let sub = root.join("sub");
+        std::fs::create_dir_all(&sub).unwrap();
+        std::fs::write(root.join(".prettierrc"), r#"{ "semi": false }"#).unwrap();
+        std::fs::write(
+            root.join("package.json"),
+            r#"{ "name": "x", "prettier": { "semi": true } }"#,
+        )
+        .unwrap();
+        let c = resolve_prettier_config(&sub.join("file.ts")).unwrap();
+        assert_eq!(c.semi, Some(false));
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn resolve_none_when_no_config_anywhere() {
+        // No config in the temp tree → the walk finds nothing and returns None.
+        let root = make_tmp("none");
+        let deep = root.join("a").join("b");
+        std::fs::create_dir_all(&deep).unwrap();
+        assert!(resolve_prettier_config(&deep.join("file.ts")).is_none());
+        std::fs::remove_dir_all(&root).ok();
     }
 }
