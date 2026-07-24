@@ -3905,3 +3905,32 @@ button {
 .modal { font-family: var(--ui-font); background: var(--panel-bg); border: 1px solid var(--border); border-radius: 12px; padding: 22px; width: min(440px, 90vw); max-height: 80vh; overflow-y: auto; box-shadow: 0 12px 40px rgba(0, 0, 0, 0.4); }
 .modal h2 { margin: 0 0 8px; color: var(--text-bright); font-family: var(--ui-font); font-size: 16px; font-weight: 600; }
 .modal .settings-intro { margin-top: 0; }
+
+/* In-app toasts (editor feedback: Format, etc.) */
+.toasts {
+  position: fixed;
+  bottom: 16px;
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  z-index: 1000;
+  pointer-events: none;
+}
+.toast {
+  pointer-events: auto;
+  max-width: 480px;
+  padding: 8px 14px;
+  border-radius: 8px;
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--text-bright);
+  background: var(--sidebar-bg);
+  border: 1px solid var(--border);
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.35);
+  cursor: pointer;
+}
+.toast.error {
+  border-color: var(--red);
+}

@@ -29,6 +29,12 @@ import { pluginHost } from "./plugins/host";
 import { feedSession } from "./plugins";
 
 // ---- Types (mirror the Rust serde structs, rename_all = "camelCase") ----
+export type ToastKind = "info" | "error";
+export interface Toast {
+  id: string;
+  body: string;
+  kind: ToastKind;
+}
 export type SessionRole = "worker" | "conductor";
 
 export interface Session {
@@ -895,6 +901,11 @@ interface AppState {
   /** Format the active file tab through the project's formatter (Rust shell-out);
    *  applies the result as one undo-preserving edit. Errors surface as toasts. */
   formatActiveDocument: () => Promise<void>;
+  /** Transient in-app messages (bottom-center). The FIRST-CLASS editor feedback channel;
+   *  notify_user (OS banner) stays for background events only. */
+  toasts: Toast[];
+  pushToast: (body: string, kind?: ToastKind) => void;
+  dismissToast: (id: string) => void;
   /** Overwrite an open buffer with current disk content (undo-preserving), settle
    *  its dirty/conflict state. Used after an explicit discard-to-HEAD; no-op when
    *  the path has no live editable model. */
@@ -1074,6 +1085,7 @@ export const useStore = create<AppState>((set, get) => {
     recentFiles: {},
     pendingDiff: null,
     hotExit: {},
+    toasts: [],
 
     load: async () => {
       const [projects, home, accounts, defaultAccounts, trust, opencode, hotExitEntries] =
@@ -1910,6 +1922,15 @@ export const useStore = create<AppState>((set, get) => {
         pendingDiff: { path, nonce: (s.pendingDiff?.nonce ?? 0) + 1, mode },
       })),
     clearPendingDiff: () => set((s) => (s.pendingDiff ? { pendingDiff: null } : {})),
+
+    pushToast: (body, kind = "info") =>
+      set((s) => ({
+        toasts: [
+          ...s.toasts,
+          { id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`, body, kind },
+        ].slice(-4), // cap the stack
+      })),
+    dismissToast: (id) => set((s) => ({ toasts: s.toasts.filter((t) => t.id !== id) })),
 
     formatActiveDocument: async () => {
       const s = get();
