@@ -27,7 +27,8 @@ import type { SettingsTab } from "./components/Settings";
 import type { PluginDescriptor, PluginPermission } from "./plugins/types";
 import { pluginHost } from "./plugins/host";
 import { feedSession } from "./plugins";
-import { DEFAULT_FORMAT_CONFIG, type PrettierOptions } from "./format/options";
+import { DEFAULT_FORMAT_CONFIG, mergeFormatOptions, type PrettierOptions } from "./format/options";
+import { formatWithFallback } from "./format/fallback";
 
 // ---- Types (mirror the Rust serde structs, rename_all = "camelCase") ----
 export type ToastKind = "info" | "error";
@@ -691,6 +692,57 @@ function applyWhitespaceCleanup(m: Monaco.editor.ITextModel): void {
     });
   }
   if (edits.length) m.pushEditOperations([], edits, () => null);
+}
+
+// ---- format document ----
+type FormatOutcome =
+  | { kind: "applied"; note: string }
+  | { kind: "unchanged" }
+  | { kind: "buffer-changed" }
+  | { kind: "error"; message: string };
+
+/** Format one editable model in place (undo-preserving). Prefers the project's own
+ *  formatter via the Rust shell-out; only when Rust reports "prettier not found" does it
+ *  fall back to bundled prettier-standalone with project-.prettierrc-over-global options.
+ *  Assumes the model is present and NOT read-only (callers guard that). Never writes disk. */
+async function formatBuffer(
+  path: string,
+  dir: string,
+  model: Monaco.editor.ITextModel,
+  globalCfg: PrettierOptions,
+): Promise<FormatOutcome> {
+  const content = model.getValue();
+  let formatted: string;
+  let note: string;
+  try {
+    const r = await invoke<{ formatted: string; formatter: string }>("format_content", {
+      dir,
+      path,
+      content,
+    });
+    formatted = r.formatted;
+    note = r.formatter; // "prettier" | "rustfmt" | "gofmt"
+  } catch (e) {
+    const msg = String(e);
+    // Only the missing-prettier case falls back to the bundled renderer formatter.
+    // rustfmt/gofmt-not-found and real syntax errors surface as-is.
+    if (!msg.startsWith("prettier not found")) return { kind: "error", message: msg };
+    try {
+      const project = await invoke<Partial<PrettierOptions> | null>("resolve_prettier_options", {
+        path,
+      });
+      formatted = await formatWithFallback(path, content, mergeFormatOptions(project, globalCfg));
+      note = project ? "bundled prettier (project config)" : "bundled prettier (default rules)";
+    } catch (fe) {
+      return { kind: "error", message: String(fe) };
+    }
+  }
+  // The buffer may have moved while the formatter ran; applying a stale result would
+  // silently revert those keystrokes.
+  if (model.getValue() !== content) return { kind: "buffer-changed" };
+  if (formatted === content) return { kind: "unchanged" };
+  model.pushEditOperations([], [{ range: model.getFullModelRange(), text: formatted }], () => null);
+  return { kind: "applied", note };
 }
 
 // ---- debounced persistence ----
@@ -1989,8 +2041,6 @@ export const useStore = create<AppState>((set, get) => {
 
     formatActiveDocument: async () => {
       const s = get();
-      const toast = (body: string) =>
-        void invoke("notify_user", { title: "Format Document", body }).catch(() => {});
       const pid = s.selectedProjectId;
       const project = s.projects.find((p) => p.id === pid);
       const g = pid ? activeGroup(s.layouts[pid]) : null;
@@ -1998,33 +2048,27 @@ export const useStore = create<AppState>((set, get) => {
       if (!project || !tab || tab.kind !== "file") return;
       const path = tab.ref;
       const entry = registry.model(path);
-      if (!entry?.model || entry.readOnly || registry.saving.has(path)) return;
-      const content = entry.model.getValue();
-      let formatted: string;
-      try {
-        const r = await invoke<{ formatted: string; formatter: string }>("format_content", {
-          dir: project.path,
-          path,
-          content,
-        });
-        formatted = r.formatted;
-      } catch (e) {
-        toast(String(e));
+      if (!entry?.model || registry.saving.has(path)) return;
+      if (entry.readOnly) {
+        get().pushToast("Can't format: file is read-only (too large / binary).", "error");
         return;
       }
-      // The buffer may have moved while the formatter ran; formatting a stale
-      // snapshot would silently revert those keystrokes.
-      if (entry.model.getValue() !== content) {
-        toast("Buffer changed while formatting — try again.");
-        return;
+      const model = entry.model as unknown as Monaco.editor.ITextModel;
+      const outcome = await formatBuffer(path, project.path, model, get().formatConfig);
+      switch (outcome.kind) {
+        case "applied":
+          get().pushToast(`Formatted with ${outcome.note}.`);
+          break;
+        case "unchanged":
+          get().pushToast("Already formatted.");
+          break;
+        case "buffer-changed":
+          get().pushToast("Buffer changed while formatting — try again.", "error");
+          break;
+        case "error":
+          get().pushToast(`Format failed: ${outcome.message}`, "error");
+          break;
       }
-      if (formatted === content) return;
-      const m = entry.model as unknown as Monaco.editor.ITextModel;
-      m.pushEditOperations(
-        [],
-        [{ range: m.getFullModelRange(), text: formatted }],
-        () => null,
-      );
     },
 
     reloadBufferFromDisk: async (path) => {
