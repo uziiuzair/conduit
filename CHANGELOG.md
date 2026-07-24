@@ -3,6 +3,14 @@
 All notable changes to Conduit are documented here. This project uses
 [semantic versioning](https://semver.org/).
 
+## 0.17.2 — 2026-07-24
+
+- **Changed — worktree sessions show a git-branch icon instead of the branch name.**
+  A session running on its own worktree now carries a small branch icon in the sidebar
+  rather than the truncated `worktree-…` text, which was crowding the session name. Hover
+  the icon to see the full branch name; it also remains visible in the Files panel and the
+  terminal.
+
 ## 0.17.1 — 2026-07-19
 
 - **Fixed — panels and the companion shell now follow the session's real directory.**

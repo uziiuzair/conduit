@@ -73,6 +73,17 @@ export const FileIcon = ({ size = 13, className }: P) =>
 export const ChevronRightIcon = ({ size = 12, className }: P) =>
   svg(size, className, <path d="M9 6l6 6-6 6" />);
 
+// Git-branch glyph — marks a session running on its own worktree/branch.
+export const GitBranchIcon = ({ size = 12, className }: P) =>
+  svg(size, className, (
+    <>
+      <line x1="6" y1="4" x2="6" y2="15" />
+      <circle cx="6" cy="18" r="2.4" />
+      <circle cx="18" cy="7" r="2.4" />
+      <path d="M18 9.4a8 8 0 0 1-8 8" />
+    </>
+  ));
+
 export const CloseIcon = ({ size = 12, className }: P) =>
   svg(size, className, <path d="M6 6l12 12M18 6l-12 12" />);
 

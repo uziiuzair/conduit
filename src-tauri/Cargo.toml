@@ -1,6 +1,6 @@
 [package]
 name = "conduit-tauri"
-version = "0.17.1"
+version = "0.17.2"
 description = "Conduit — multiple real Claude Code terminals across projects, in one window."
 authors = ["uziiuzair"]
 license = "MIT"

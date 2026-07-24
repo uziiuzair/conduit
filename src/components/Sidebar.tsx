@@ -22,6 +22,7 @@ import {
   EllipsisIcon,
   CircleFilledIcon,
   ChevronRightIcon,
+  GitBranchIcon,
 } from "./Icons";
 import { AgentGlyph } from "./AgentGlyph";
 import { ThemeSwitcher } from "./ThemeSwitcher";
@@ -410,8 +411,8 @@ function SessionRow({
         <span className="name">{session.name}</span>
       )}
       {!editing && session.branch && (
-        <span className="branch-chip" title={session.branch}>
-          {session.branch}
+        <span className="branch-chip" title={`Worktree: ${session.branch}`}>
+          <GitBranchIcon size={11} />
         </span>
       )}
       {!editing && accountLabel && (

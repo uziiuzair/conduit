@@ -2060,14 +2060,12 @@ button {
   color: var(--sidebar-bg);
 }
 
-/* branch chip on a worktree session row */
+/* worktree marker on a session row — icon stands in for the branch name,
+   which is already shown in the Files panel and Terminal. Full name on hover. */
 .branch-chip {
-  font-size: 9.5px;
-  color: var(--text-mid);
-  max-width: 96px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  display: inline-flex;
+  align-items: center;
+  color: var(--text-dim);
   flex-shrink: 0;
 }
 
