@@ -1071,6 +1071,11 @@ fn format_content(
     format::format_content(&dir, &path, &content)
 }
 
+#[tauri::command]
+fn resolve_prettier_options(path: String) -> Option<format::PrettierConfig> {
+    format::resolve_prettier_config(std::path::Path::new(&path))
+}
+
 // ---- Hot exit -------------------------------------------------------------------
 
 #[tauri::command]
@@ -1582,6 +1587,7 @@ pub fn run() {
             list_project_files,
             search_content,
             format_content,
+            resolve_prettier_options,
             hotexit_save,
             hotexit_load,
             worktree_is_dirty,
