@@ -4,6 +4,7 @@ import type * as Monaco from "monaco-editor";
 import { monaco, languageFor, setLastFocusedEditor } from "../monaco/setup";
 import * as registry from "../monaco/registry";
 import { useStore, activeGroup, baseName, type FileContent } from "../store";
+import { hasFormatter } from "../format/options";
 import { LanguageSelector } from "./LanguageSelector";
 import { MarkdownPreview } from "./MarkdownPreview";
 import { ImagePreview } from "./ImagePreview";
@@ -734,6 +735,25 @@ export function CodeEditorPane({ projectId, groupId, visible, style }: CodeEdito
             title="Toggle Markdown preview (⇧⌘V)"
           >
             {previewOn ? "Source" : "Preview"}
+          </button>
+        )}
+        {!!activePath && !noModel && !!fc && !fc.readOnly && hasFormatter(activePath) && (
+          <button
+            className="md-toggle-btn"
+            onClick={() => {
+              // Clicking a toolbar button doesn't focus/activate its pane's group, but
+              // formatActiveDocument resolves its target via the globally active group —
+              // in a split layout that would format the WRONG pane. Activate this pane's
+              // group first so the subsequent read sees the right target.
+              const st = useStore.getState();
+              if (activeGroup(st.layouts[projectId])?.id !== groupId) {
+                st.setActiveGroup(projectId, groupId);
+              }
+              void st.formatActiveDocument();
+            }}
+            title="Format document (⇧⌥F)"
+          >
+            Format
           </button>
         )}
         <LanguageSelector value={langId} onChange={onLangChange} disabled={noModel || !activePath} />

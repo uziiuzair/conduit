@@ -23,6 +23,7 @@ import { WorkspaceCenter } from "./components/WorkspaceCenter";
 import { RightColumn } from "./components/RightColumn";
 import { Onboarding } from "./components/Onboarding";
 import { UpdateNotice } from "./components/UpdateNotice";
+import { Toasts } from "./components/Toasts";
 import { Settings } from "./components/Settings";
 import { QuickOpen } from "./components/QuickOpen";
 import { SearchPalette } from "./components/SearchPalette";
@@ -542,6 +543,7 @@ export default function App() {
         </div>
       </div>
       <UpdateNotice />
+      <Toasts />
       {showSettings && (
         <Settings onClose={() => setShowSettings(false)} initialTab={settingsTab} />
       )}

@@ -27,8 +27,21 @@ import type { SettingsTab } from "./components/Settings";
 import type { PluginDescriptor, PluginPermission } from "./plugins/types";
 import { pluginHost } from "./plugins/host";
 import { feedSession } from "./plugins";
+import {
+  DEFAULT_FORMAT_CONFIG,
+  mergeFormatOptions,
+  hasFormatter,
+  type PrettierOptions,
+} from "./format/options";
+import { formatWithFallback } from "./format/fallback";
 
 // ---- Types (mirror the Rust serde structs, rename_all = "camelCase") ----
+export type ToastKind = "info" | "error";
+export interface Toast {
+  id: string;
+  body: string;
+  kind: ToastKind;
+}
 export type SessionRole = "worker" | "conductor";
 
 export interface Session {
@@ -488,6 +501,38 @@ function readTrimOnSave(): boolean {
 function writeTrimOnSave(v: boolean): void {
   try { localStorage.setItem(TRIM_ON_SAVE_KEY, v ? "1" : "0"); } catch { /* quota — non-fatal */ }
 }
+const FORMAT_CONFIG_KEY = "conduit.formatConfig";
+const FORMAT_ON_SAVE_KEY = "conduit.formatOnSave";
+function readFormatConfig(): PrettierOptions {
+  try {
+    const raw = localStorage.getItem(FORMAT_CONFIG_KEY);
+    if (raw) return { ...DEFAULT_FORMAT_CONFIG, ...JSON.parse(raw) };
+  } catch {
+    /* fall through to defaults */
+  }
+  return { ...DEFAULT_FORMAT_CONFIG };
+}
+function writeFormatConfig(v: PrettierOptions): void {
+  try {
+    localStorage.setItem(FORMAT_CONFIG_KEY, JSON.stringify(v));
+  } catch {
+    /* quota — non-fatal */
+  }
+}
+function readFormatOnSave(): boolean {
+  try {
+    return localStorage.getItem(FORMAT_ON_SAVE_KEY) === "1";
+  } catch {
+    return false;
+  }
+}
+function writeFormatOnSave(v: boolean): void {
+  try {
+    localStorage.setItem(FORMAT_ON_SAVE_KEY, v ? "1" : "0");
+  } catch {
+    /* quota — non-fatal */
+  }
+}
 function readFontZoom(): number {
   try {
     const v = Number(localStorage.getItem(FONT_ZOOM_KEY));
@@ -652,6 +697,58 @@ function applyWhitespaceCleanup(m: Monaco.editor.ITextModel): void {
     });
   }
   if (edits.length) m.pushEditOperations([], edits, () => null);
+}
+
+// ---- format document ----
+type FormatOutcome =
+  | { kind: "applied"; note: string }
+  | { kind: "unchanged" }
+  | { kind: "buffer-changed" }
+  | { kind: "error"; message: string };
+
+/** Format one editable model in place (undo-preserving). Prefers the project's own
+ *  formatter via the Rust shell-out; only when Rust reports "prettier not found" does it
+ *  fall back to bundled prettier-standalone with project-.prettierrc-over-global options.
+ *  Assumes the model is present and NOT read-only (callers guard that). Never writes disk. */
+async function formatBuffer(
+  path: string,
+  dir: string,
+  model: Monaco.editor.ITextModel,
+  globalCfg: PrettierOptions,
+): Promise<FormatOutcome> {
+  const content = model.getValue();
+  let formatted: string;
+  let note: string;
+  try {
+    const r = await invoke<{ formatted: string; formatter: string }>("format_content", {
+      dir,
+      path,
+      content,
+    });
+    formatted = r.formatted;
+    note = r.formatter; // "prettier" | "rustfmt" | "gofmt"
+  } catch (e) {
+    const msg = String(e);
+    // Only the missing-prettier case falls back to the bundled renderer formatter.
+    // rustfmt/gofmt-not-found and real syntax errors surface as-is.
+    // Prefix contract with format.rs PRETTIER_NOT_FOUND — keep in sync.
+    if (!msg.startsWith("prettier not found")) return { kind: "error", message: msg };
+    try {
+      const project = await invoke<Partial<PrettierOptions> | null>("resolve_prettier_options", {
+        path,
+      });
+      formatted = await formatWithFallback(path, content, mergeFormatOptions(project, globalCfg));
+      note = project ? "bundled prettier (project config)" : "bundled prettier (global rules)";
+    } catch (fe) {
+      return { kind: "error", message: String(fe) };
+    }
+  }
+  // The buffer may have moved while the formatter ran; applying a stale result would
+  // silently revert those keystrokes.
+  if (model.getValue() !== content) return { kind: "buffer-changed" };
+  if (formatted === content) return { kind: "unchanged" };
+  model.pushEditOperations([], [{ range: model.getFullModelRange(), text: formatted }], () => null);
+  return { kind: "applied", note };
 }
 
 // ---- debounced persistence ----
@@ -874,6 +971,13 @@ interface AppState {
   toggleWordWrap: () => void;
   trimOnSave: boolean;
   toggleTrimOnSave: () => void;
+  /** Global prettier config for the bundled fallback (Settings → Formatting). A project's
+   *  own .prettierrc overrides these; see format/options.ts mergeFormatOptions. */
+  formatConfig: PrettierOptions;
+  setFormatConfig: (patch: Partial<PrettierOptions>) => void;
+  /** Opt-in: run the document formatter on every save (off by default). */
+  formatOnSave: boolean;
+  toggleFormatOnSave: () => void;
   fontZoom: number;
   setFontZoom: (z: number) => void;
   /** Ask the file tree to expand to + scroll to a path (nonce forces re-trigger). */
@@ -895,6 +999,11 @@ interface AppState {
   /** Format the active file tab through the project's formatter (Rust shell-out);
    *  applies the result as one undo-preserving edit. Errors surface as toasts. */
   formatActiveDocument: () => Promise<void>;
+  /** Transient in-app messages (bottom-center). The FIRST-CLASS editor feedback channel;
+   *  notify_user (OS banner) stays for background events only. */
+  toasts: Toast[];
+  pushToast: (body: string, kind?: ToastKind) => void;
+  dismissToast: (id: string) => void;
   /** Overwrite an open buffer with current disk content (undo-preserving), settle
    *  its dirty/conflict state. Used after an explicit discard-to-HEAD; no-op when
    *  the path has no live editable model. */
@@ -1069,11 +1178,14 @@ export const useStore = create<AppState>((set, get) => {
     maximized: {},
     wordWrap: readWordWrap(),
     trimOnSave: readTrimOnSave(),
+    formatConfig: readFormatConfig(),
+    formatOnSave: readFormatOnSave(),
     fontZoom: readFontZoom(),
     reveal: null,
     recentFiles: {},
     pendingDiff: null,
     hotExit: {},
+    toasts: [],
 
     load: async () => {
       const [projects, home, accounts, defaultAccounts, trust, opencode, hotExitEntries] =
@@ -1763,6 +1875,33 @@ export const useStore = create<AppState>((set, get) => {
       if (get().trimOnSave) {
         applyWhitespaceCleanup(entry.model as unknown as Monaco.editor.ITextModel);
       }
+      // Format-on-save (opt-in, off by default). Runs INSIDE the saving window so its
+      // model edit is covered by the same watcher/dirty suppression. Skips instantly for
+      // non-formattable files. Must NOT block the save: on error we toast and write the
+      // un-formatted buffer. `writtenVersion` below is snapshotted AFTER this edit.
+      if (get().formatOnSave && !entry.readOnly && hasFormatter(path)) {
+        const dir = path.slice(0, Math.max(0, path.lastIndexOf("/"))) || "/";
+        try {
+          const outcome = await formatBuffer(
+            path,
+            dir,
+            entry.model as unknown as Monaco.editor.ITextModel,
+            get().formatConfig,
+          );
+          if (outcome.kind === "error") {
+            get().pushToast(`Format on save skipped: ${outcome.message}`, "error");
+          }
+        } catch (e) {
+          get().pushToast(`Format on save skipped: ${String(e)}`, "error");
+        }
+      }
+      // The tab may have been closed (model disposed → entries.delete) while the async
+      // formatter ran. Touching entry.model then throws 'Model is disposed!' below —
+      // outside the write's try/finally — leaking this path in registry.saving forever.
+      if (!registry.model(path)?.model) {
+        registry.saving.delete(path);
+        return;
+      }
       const value = entry.model.getValue();
       // The version whose content is being written — snapshotted NEXT TO getValue().
       // setSaved must record this, not the post-write current id: a keystroke landing
@@ -1887,6 +2026,19 @@ export const useStore = create<AppState>((set, get) => {
         return { trimOnSave: next };
       }),
 
+    setFormatConfig: (patch) =>
+      set((s) => {
+        const next = { ...s.formatConfig, ...patch };
+        writeFormatConfig(next);
+        return { formatConfig: next };
+      }),
+    toggleFormatOnSave: () =>
+      set((s) => {
+        const next = !s.formatOnSave;
+        writeFormatOnSave(next);
+        return { formatOnSave: next };
+      }),
+
     setFontZoom: (z) => {
       const v = Math.max(FONT_ZOOM_MIN, Math.min(FONT_ZOOM_MAX, Math.round(z)));
       writeFontZoom(v);
@@ -1911,10 +2063,17 @@ export const useStore = create<AppState>((set, get) => {
       })),
     clearPendingDiff: () => set((s) => (s.pendingDiff ? { pendingDiff: null } : {})),
 
+    pushToast: (body, kind = "info") =>
+      set((s) => ({
+        toasts: [
+          ...s.toasts,
+          { id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`, body, kind },
+        ].slice(-4), // cap the stack
+      })),
+    dismissToast: (id) => set((s) => ({ toasts: s.toasts.filter((t) => t.id !== id) })),
+
     formatActiveDocument: async () => {
       const s = get();
-      const toast = (body: string) =>
-        void invoke("notify_user", { title: "Format Document", body }).catch(() => {});
       const pid = s.selectedProjectId;
       const project = s.projects.find((p) => p.id === pid);
       const g = pid ? activeGroup(s.layouts[pid]) : null;
@@ -1922,33 +2081,34 @@ export const useStore = create<AppState>((set, get) => {
       if (!project || !tab || tab.kind !== "file") return;
       const path = tab.ref;
       const entry = registry.model(path);
-      if (!entry?.model || entry.readOnly || registry.saving.has(path)) return;
-      const content = entry.model.getValue();
-      let formatted: string;
+      // Format READS the saving window but never adds to it — adding would make a concurrent ⌘S silently drop its save. A Format racing a save just yields a harmless "buffer changed" toast.
+      if (!entry?.model || registry.saving.has(path)) return;
+      if (entry.readOnly) {
+        get().pushToast("Can't format: file is read-only (too large / binary).", "error");
+        return;
+      }
+      const model = entry.model as unknown as Monaco.editor.ITextModel;
+      let outcome: Awaited<ReturnType<typeof formatBuffer>>;
       try {
-        const r = await invoke<{ formatted: string; formatter: string }>("format_content", {
-          dir: project.path,
-          path,
-          content,
-        });
-        formatted = r.formatted;
+        outcome = await formatBuffer(path, project.path, model, get().formatConfig);
       } catch (e) {
-        toast(String(e));
+        get().pushToast(`Format failed: ${String(e)}`, "error");
         return;
       }
-      // The buffer may have moved while the formatter ran; formatting a stale
-      // snapshot would silently revert those keystrokes.
-      if (entry.model.getValue() !== content) {
-        toast("Buffer changed while formatting — try again.");
-        return;
+      switch (outcome.kind) {
+        case "applied":
+          get().pushToast(`Formatted with ${outcome.note}.`);
+          break;
+        case "unchanged":
+          get().pushToast("Already formatted.");
+          break;
+        case "buffer-changed":
+          get().pushToast("Buffer changed while formatting — try again.");
+          break;
+        case "error":
+          get().pushToast(`Format failed: ${outcome.message}`, "error");
+          break;
       }
-      if (formatted === content) return;
-      const m = entry.model as unknown as Monaco.editor.ITextModel;
-      m.pushEditOperations(
-        [],
-        [{ range: m.getFullModelRange(), text: formatted }],
-        () => null,
-      );
     },
 
     reloadBufferFromDisk: async (path) => {
