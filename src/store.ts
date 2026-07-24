@@ -1895,6 +1895,13 @@ export const useStore = create<AppState>((set, get) => {
           get().pushToast(`Format on save skipped: ${String(e)}`, "error");
         }
       }
+      // The tab may have been closed (model disposed → entries.delete) while the async
+      // formatter ran. Touching entry.model then throws 'Model is disposed!' below —
+      // outside the write's try/finally — leaking this path in registry.saving forever.
+      if (!registry.model(path)?.model) {
+        registry.saving.delete(path);
+        return;
+      }
       const value = entry.model.getValue();
       // The version whose content is being written — snapshotted NEXT TO getValue().
       // setSaved must record this, not the post-write current id: a keystroke landing
@@ -2081,7 +2088,13 @@ export const useStore = create<AppState>((set, get) => {
         return;
       }
       const model = entry.model as unknown as Monaco.editor.ITextModel;
-      const outcome = await formatBuffer(path, project.path, model, get().formatConfig);
+      let outcome: Awaited<ReturnType<typeof formatBuffer>>;
+      try {
+        outcome = await formatBuffer(path, project.path, model, get().formatConfig);
+      } catch (e) {
+        get().pushToast(`Format failed: ${String(e)}`, "error");
+        return;
+      }
       switch (outcome.kind) {
         case "applied":
           get().pushToast(`Formatted with ${outcome.note}.`);
