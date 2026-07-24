@@ -27,6 +27,7 @@ import type { SettingsTab } from "./components/Settings";
 import type { PluginDescriptor, PluginPermission } from "./plugins/types";
 import { pluginHost } from "./plugins/host";
 import { feedSession } from "./plugins";
+import { DEFAULT_FORMAT_CONFIG, type PrettierOptions } from "./format/options";
 
 // ---- Types (mirror the Rust serde structs, rename_all = "camelCase") ----
 export type ToastKind = "info" | "error";
@@ -494,6 +495,38 @@ function readTrimOnSave(): boolean {
 function writeTrimOnSave(v: boolean): void {
   try { localStorage.setItem(TRIM_ON_SAVE_KEY, v ? "1" : "0"); } catch { /* quota — non-fatal */ }
 }
+const FORMAT_CONFIG_KEY = "conduit.formatConfig";
+const FORMAT_ON_SAVE_KEY = "conduit.formatOnSave";
+function readFormatConfig(): PrettierOptions {
+  try {
+    const raw = localStorage.getItem(FORMAT_CONFIG_KEY);
+    if (raw) return { ...DEFAULT_FORMAT_CONFIG, ...JSON.parse(raw) };
+  } catch {
+    /* fall through to defaults */
+  }
+  return { ...DEFAULT_FORMAT_CONFIG };
+}
+function writeFormatConfig(v: PrettierOptions): void {
+  try {
+    localStorage.setItem(FORMAT_CONFIG_KEY, JSON.stringify(v));
+  } catch {
+    /* quota — non-fatal */
+  }
+}
+function readFormatOnSave(): boolean {
+  try {
+    return localStorage.getItem(FORMAT_ON_SAVE_KEY) === "1";
+  } catch {
+    return false;
+  }
+}
+function writeFormatOnSave(v: boolean): void {
+  try {
+    localStorage.setItem(FORMAT_ON_SAVE_KEY, v ? "1" : "0");
+  } catch {
+    /* quota — non-fatal */
+  }
+}
 function readFontZoom(): number {
   try {
     const v = Number(localStorage.getItem(FONT_ZOOM_KEY));
@@ -880,6 +913,13 @@ interface AppState {
   toggleWordWrap: () => void;
   trimOnSave: boolean;
   toggleTrimOnSave: () => void;
+  /** Global prettier config for the bundled fallback (Settings → Formatting). A project's
+   *  own .prettierrc overrides these; see format/options.ts mergeFormatOptions. */
+  formatConfig: PrettierOptions;
+  setFormatConfig: (patch: Partial<PrettierOptions>) => void;
+  /** Opt-in: run the document formatter on every save (off by default). */
+  formatOnSave: boolean;
+  toggleFormatOnSave: () => void;
   fontZoom: number;
   setFontZoom: (z: number) => void;
   /** Ask the file tree to expand to + scroll to a path (nonce forces re-trigger). */
@@ -1080,6 +1120,8 @@ export const useStore = create<AppState>((set, get) => {
     maximized: {},
     wordWrap: readWordWrap(),
     trimOnSave: readTrimOnSave(),
+    formatConfig: readFormatConfig(),
+    formatOnSave: readFormatOnSave(),
     fontZoom: readFontZoom(),
     reveal: null,
     recentFiles: {},
@@ -1897,6 +1939,19 @@ export const useStore = create<AppState>((set, get) => {
         const next = !s.trimOnSave;
         writeTrimOnSave(next);
         return { trimOnSave: next };
+      }),
+
+    setFormatConfig: (patch) =>
+      set((s) => {
+        const next = { ...s.formatConfig, ...patch };
+        writeFormatConfig(next);
+        return { formatConfig: next };
+      }),
+    toggleFormatOnSave: () =>
+      set((s) => {
+        const next = !s.formatOnSave;
+        writeFormatOnSave(next);
+        return { formatOnSave: next };
       }),
 
     setFontZoom: (z) => {
