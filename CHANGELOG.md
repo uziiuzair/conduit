@@ -3,6 +3,24 @@
 All notable changes to Conduit are documented here. This project uses
 [semantic versioning](https://semver.org/).
 
+## 0.18.0 — 2026-07-24
+
+- **Added — Bundled formatter fallback.** Format Document now works even when a project has
+  no prettier installed: Conduit falls back to a bundled prettier, loaded on demand (kept
+  out of the initial bundle, so it costs nothing until first used). Projects with their own
+  prettier and config are unchanged and always take precedence.
+- **Added — Format on save.** Opt-in (Settings → Formatting), off by default. Formats the
+  document on every save for supported file types (prettier, rustfmt, gofmt); other files
+  save instantly as before.
+- **Added — Format button.** A Format button in the editor toolbar for formatter-eligible
+  files, alongside the existing Edit → Format Document menu item.
+- **Added — Formatting settings.** A Settings → Formatting page with global prettier rules
+  (print width, indentation, quotes, semicolons, trailing commas, end of line) used by the
+  bundled fallback; a project's own `.prettierrc` overrides them.
+- **Fixed — Silent Format Document.** Formatting outcomes now surface as an in-app message
+  instead of doing nothing — missing prettier, read-only or oversized files, and
+  already-formatted buffers all report clearly.
+
 ## 0.17.2 — 2026-07-24
 
 - **Changed — worktree sessions show a git-branch icon instead of the branch name.**
