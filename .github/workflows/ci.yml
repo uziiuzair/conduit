@@ -1,0 +1,139 @@
+name: CI
+
+# Validation runs on every PR and on pushes to main. Releases are a separate
+# workflow (release.yml) triggered by a `v*` tag — this one never publishes.
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# A new push to the same branch supersedes the previous run.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  # Platform-independent checks. Runs on Linux because tsc/vite need no webview
+  # or Tauri system dependencies — keeps the fast feedback loop cheap.
+  frontend:
+    name: Frontend (typecheck + build)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Version comes from package.json "packageManager". Must precede setup-node
+      # so that `cache: pnpm` can find the binary.
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      - name: Typecheck
+        run: pnpm exec tsc --noEmit
+
+      - name: Production build
+        run: pnpm build
+
+      # Non-blocking: a newly published advisory would otherwise turn CI red on
+      # PRs that changed nothing related. Dependabot is the enforcing mechanism.
+      - name: Audit dependencies
+        run: pnpm audit --audit-level high
+        continue-on-error: true
+
+  # The Rust backend is the platform-sensitive half — spawn/PTY/path handling
+  # differs per OS, so it is tested on both shipping targets.
+  rust:
+    name: Rust (${{ matrix.platform }})
+    strategy:
+      fail-fast: false
+      matrix:
+        platform: [macos-latest, windows-latest]
+    runs-on: ${{ matrix.platform }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+
+      - name: Test
+        run: cargo test --manifest-path src-tauri/Cargo.toml
+
+      # fmt and clippy are reported but not enforced: the tree currently has
+      # formatting drift and ~15 clippy warnings. Promote these to blocking once
+      # a cleanup pass lands, so CI never starts out red.
+      - name: Format check (non-blocking)
+        run: cargo fmt --manifest-path src-tauri/Cargo.toml --check
+        continue-on-error: true
+
+      - name: Clippy (non-blocking)
+        run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets
+        continue-on-error: true
+
+  # Full installer build. Too slow for every PR, so it runs on merges to main
+  # and on demand — this is what catches a Windows bundling regression before a
+  # release tag is cut, and it publishes an installable MSI per merge.
+  bundle:
+    name: Bundle (${{ matrix.platform }})
+    if: github.event_name != 'pull_request'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: macos-latest
+            args: --target universal-apple-darwin
+            rust-targets: aarch64-apple-darwin,x86_64-apple-darwin
+          - platform: windows-latest
+            # tauri.conf.json's bundle.targets is ["app","dmg"] (macOS-only), so
+            # the Windows bundle target is selected explicitly here.
+            args: --bundles msi
+            rust-targets: ""
+    runs-on: ${{ matrix.platform }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.rust-targets }}
+
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+
+      - run: pnpm install --frozen-lockfile
+
+      # tauri.ci.conf.json turns off createUpdaterArtifacts. Without it the build
+      # writes the installer and *then* exits non-zero on the missing
+      # TAURI_SIGNING_PRIVATE_KEY, so this job would fail despite a good bundle.
+      # Keeping the key out also means CI can never emit a signed updater
+      # artifact that gets mistaken for a release build.
+      - name: Build bundle
+        run: pnpm tauri build ${{ matrix.args }} --config .github/tauri.ci.conf.json
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: conduit-${{ matrix.platform }}
+          retention-days: 14
+          if-no-files-found: error
+          path: |
+            src-tauri/target/release/bundle/msi/*.msi
+            src-tauri/target/**/release/bundle/dmg/*.dmg
