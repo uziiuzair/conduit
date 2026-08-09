@@ -36,6 +36,12 @@ const SUBSCRIBER_BUFFER: usize = 1024;
 /// How many recent output bytes to retain per session for `fleet_peek`.
 const OUTPUT_RING_BYTES: usize = 64 * 1024;
 
+/// Lines of scrollback tmux keeps per persistent session. With `mouse on` this is the
+/// history the wheel actually scrolls (see `tmux::conf_body`), so it is the user-visible
+/// scrollback depth, not an internal buffer. ~50k lines costs a few MB per session.
+#[cfg(not(windows))]
+const TMUX_SCROLLBACK: u32 = 50_000;
+
 /// A bounded byte ring buffer of recent PTY output, shared with the reader thread.
 /// Backs the Conductor's `fleet_peek` (xterm keeps scrollback in the frontend, so
 /// Rust needs its own small tail buffer).
@@ -135,13 +141,61 @@ pub struct PtyManager {
     // Arc so the per-session reader thread can hold a clone and remove its own entry
     // when the child exits on its own (otherwise the dead session leaks forever).
     sessions: Arc<DashMap<String, Mutex<PtySession>>>,
+    /// Whether new sessions are wrapped in tmux so they outlive the app. Mirrors the
+    /// frontend's `persistSessions` setting, pushed down by `set_session_persistence`
+    /// rather than threaded through `spawn` -- which already takes 24 arguments.
+    ///
+    /// Turning it OFF never kills anything: sessions already running under tmux keep
+    /// working until they are destroyed. A setting toggle that silently discarded
+    /// running work would be a worse bug than the one this feature fixes.
+    #[cfg(not(windows))]
+    persist: AtomicBool,
+    /// Resolved once — probing four fixed paths plus `$PATH` on every spawn would be
+    /// wasted work, and the answer cannot change without the app restarting.
+    #[cfg(not(windows))]
+    tmux: std::sync::OnceLock<Option<PathBuf>>,
 }
 
 impl PtyManager {
     pub fn new() -> Self {
         Self {
             sessions: Arc::new(DashMap::new()),
+            #[cfg(not(windows))]
+            persist: AtomicBool::new(true),
+            #[cfg(not(windows))]
+            tmux: std::sync::OnceLock::new(),
         }
+    }
+
+    /// Absolute tmux path, or None when tmux is unavailable. Resolved on first use.
+    #[cfg(not(windows))]
+    pub fn tmux_path(&self) -> Option<&PathBuf> {
+        self.tmux
+            .get_or_init(|| {
+                let found = crate::tmux::find_tmux();
+                if let Some(p) = &found {
+                    // The tmux server outlives the app and will not re-read `-f` on
+                    // relaunch, so the config has to be pushed into a running server.
+                    crate::tmux::ensure_conf(p, TMUX_SCROLLBACK);
+                }
+                found
+            })
+            .as_ref()
+    }
+
+    /// Mirror the frontend's `persistSessions` setting. See the field's note.
+    #[cfg(not(windows))]
+    pub fn set_persist(&self, on: bool) {
+        self.persist.store(on, Ordering::SeqCst);
+    }
+
+    /// tmux available AND persistence enabled — the two conditions for wrapping a spawn.
+    #[cfg(not(windows))]
+    fn persistence_active(&self) -> Option<&PathBuf> {
+        if !self.persist.load(Ordering::SeqCst) {
+            return None;
+        }
+        self.tmux_path()
     }
 
     pub fn has(&self, session_id: &str) -> bool {
@@ -272,6 +326,24 @@ impl PtyManager {
                     resume_token.as_deref(),
                 )
             };
+            // Persistence: run `inner` inside a tmux session named after this session id,
+            // so the agent survives the app quitting. `new-session -A` is attach-or-create,
+            // which makes resume conditional for free -- on create tmux runs `inner` (with
+            // whatever `--resume` flag the adapter built into it); on attach tmux ignores
+            // the command, so a live agent is never resumed out from under itself.
+            //
+            // Falls through to the direct spawn when tmux is missing or the setting is off,
+            // so the unpersisted path stays byte-for-byte what it is today.
+            let inner = match self.persistence_active() {
+                Some(tmux) => crate::tmux::wrap_command(
+                    tmux,
+                    Some(&crate::tmux::conf_path()),
+                    &crate::tmux::session_name(&session_id),
+                    &working_directory,
+                    &inner,
+                ),
+                None => inner,
+            };
             let mut cmd = CommandBuilder::new(&shell);
             cmd.args(["-i", "-l", "-c", inner.as_str()]);
             cmd
@@ -296,6 +368,14 @@ impl PtyManager {
         if !shell_only {
             cmd.env("CONDUIT_SESSION_ID", &session_id);
             cmd.env("CONDUIT_HOOK_PORT", hook_port.to_string());
+            // The port ABOVE is fixed for this session's lifetime; the path below is how
+            // it stays correct anyway. Hook commands source this file before posting, so a
+            // session that outlives an app restart onto a different port finds the live
+            // one instead of posting into a closed socket. See `hooks::write_endpoint_file`.
+            cmd.env(
+                "CONDUIT_HOOK_ENDPOINT",
+                crate::hooks::endpoint_file_path().as_os_str(),
+            );
             // Continuity identity env: only set when a plugin dir was actually resolved
             // (i.e. continuity is on for this spawn -- see `continuity::continuity_enabled`).
             // SESSION_ID gives continuity a distinct identity per Conduit session; AGENT_ID
@@ -576,12 +656,41 @@ impl PtyManager {
                 let _ = session.child.wait(); // reap so we don't leave a zombie
             }
         }
+        // Every caller of `kill` means DESTROY -- session removed, project removed,
+        // worktree removed, fleet_stop, or the companion shell being respawned at a new
+        // directory. Killing the PTY alone would only detach the tmux client and strand
+        // the session (and its agent) running forever with nothing able to reattach.
+        //
+        // This is deliberately asymmetric with `kill_all` below. See its note.
+        #[cfg(not(windows))]
+        if let Some(tmux) = self.tmux_path() {
+            crate::tmux::kill_session(tmux, session_id);
+        }
     }
 
+    /// App quit. Drops every PTY and -- unlike `kill` -- deliberately leaves the tmux
+    /// sessions alone, which is the entire point of persistence: the agents keep working
+    /// and the next launch reattaches to them.
+    ///
+    /// The instinct when reading this is to make it consistent with `kill`. Don't; that
+    /// would silently restore the old behavior where quitting kills every agent.
     pub fn kill_all(&self) {
         let ids: Vec<String> = self.sessions.iter().map(|e| e.key().clone()).collect();
         for id in ids {
-            self.kill(&id);
+            if let Some((_, m)) = self.sessions.remove(&id) {
+                if let Ok(mut session) = m.lock() {
+                    #[cfg(windows)]
+                    if let Some(pid) = session.child.process_id() {
+                        use crate::NoWindow;
+                        let _ = std::process::Command::new("taskkill")
+                            .args(["/T", "/F", "/PID", &pid.to_string()])
+                            .no_window()
+                            .status();
+                    }
+                    let _ = session.child.kill();
+                    let _ = session.child.wait();
+                }
+            }
         }
     }
 }

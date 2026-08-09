@@ -32,6 +32,8 @@ mod search;
 mod store;
 mod tasks;
 mod telemetry;
+#[cfg_attr(windows, allow(dead_code))]
+mod tmux;
 mod transcript;
 mod updates;
 mod usage_tally;
@@ -426,6 +428,49 @@ fn pty_kill(session_id: String, pty: State<Arc<PtyManager>>) {
 #[tauri::command]
 fn pty_is_running(session_id: String, pty: State<Arc<PtyManager>>) -> bool {
     pty.has(&session_id)
+}
+
+/// What the Settings toggle needs to know: can this machine persist sessions at all, and
+/// which tmux would it use. `available: false` is what makes the toggle render disabled
+/// with an install hint instead of silently doing nothing when switched on.
+#[derive(serde::Serialize)]
+struct TmuxInfo {
+    available: bool,
+    path: Option<String>,
+}
+
+#[tauri::command]
+fn tmux_available(pty: State<Arc<PtyManager>>) -> TmuxInfo {
+    #[cfg(not(windows))]
+    {
+        let path = pty.tmux_path().map(|p| p.to_string_lossy().into_owned());
+        TmuxInfo {
+            available: path.is_some(),
+            path,
+        }
+    }
+    // tmux is Unix-only, and Conduit on Windows keeps the non-persistent path.
+    #[cfg(windows)]
+    {
+        let _ = pty;
+        TmuxInfo {
+            available: false,
+            path: None,
+        }
+    }
+}
+
+/// Push the frontend's `persistSessions` setting down to the PTY manager. Called at boot
+/// and whenever the toggle changes. Turning it off never kills a running session — see
+/// the field note on `PtyManager::persist`.
+#[tauri::command]
+fn set_session_persistence(enabled: bool, pty: State<Arc<PtyManager>>) {
+    #[cfg(not(windows))]
+    pty.set_persist(enabled);
+    #[cfg(windows)]
+    {
+        let _ = (enabled, pty);
+    }
 }
 
 /// Whether any session with a LIVE PTY is currently marked running. Cross-checks the fleet
@@ -1515,6 +1560,30 @@ pub fn run() {
                 agy_resume,
             );
             bridge::start(app.handle().clone());
+
+            // Sweep tmux sessions whose Conduit session no longer exists. Persistence
+            // means a tmux session outlives the app, so one whose owner was deleted while
+            // the app was closed would otherwise hold its agent (and whatever it spawned)
+            // running forever with nothing able to reattach. Off the main thread: the
+            // probe shells out, and boot should not wait on it.
+            #[cfg(not(windows))]
+            {
+                let store_for_sweep = store.clone();
+                let pty_for_sweep = pty.clone();
+                std::thread::spawn(move || {
+                    let Some(tmux) = pty_for_sweep.tmux_path() else {
+                        return;
+                    };
+                    let live: Vec<String> = store_for_sweep
+                        .list()
+                        .into_iter()
+                        .flat_map(|p| p.sessions)
+                        .flat_map(|s| [format!("{}::term", s.id), s.id])
+                        .collect();
+                    crate::tmux::sweep_orphans(tmux, &live);
+                });
+            }
+
             fleet_mcp::start(app.handle().clone(), store, pty, fleet, board, tasks);
 
             // Native menu bar. Custom items forward to the frontend as a single "menu"
@@ -1531,6 +1600,8 @@ pub fn run() {
             pty_resize,
             pty_kill,
             pty_is_running,
+            tmux_available,
+            set_session_persistence,
             any_agent_running,
             load_projects,
             add_project,
