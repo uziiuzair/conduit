@@ -227,6 +227,15 @@ export default function App() {
     };
   }, []);
 
+  // Session persistence: probe for tmux and push the persisted preference down to Rust
+  // before anything spawns, so the first session of the launch is wrapped (or not)
+  // according to the setting rather than the backend's own default. The quit guard also
+  // reads the result — it decides between "will be stopped" and "keeps running", and
+  // getting that backwards changes whether someone cancels.
+  useEffect(() => {
+    void useStore.getState().probeTmux();
+  }, []);
+
   // Native menu clicks relayed by Rust as a "menu" event whose payload is the item id.
   useEffect(() => {
     const unlisten = listen<string>("menu", ({ payload }) => {
@@ -326,9 +335,24 @@ export default function App() {
               const names = running.map((s) => s.name).join(", ");
               const who = names || "an agent";
               const plural = running.length > 1;
+              // With session persistence on, quitting no longer stops the agent — it keeps
+              // running under tmux and the next launch attaches to it. Still worth asking
+              // (a user quitting mid-turn should know), but the old copy would now be a
+              // lie, and "will be stopped" vs "keeps working" is the difference between
+              // cancelling and not.
+              const persists = cur.persistSessions && cur.tmuxAvailable !== false;
+              const subject = plural ? `${running.length} sessions are` : `${who} is`;
+              const suffix = names && plural ? ` (${names})` : "";
               const okRun = await ask(
-                `${plural ? `${running.length} sessions are` : `${who} is`} still working${names && plural ? ` (${names})` : ""}. Quit and stop ${plural ? "them" : "it"}? Conversation history is kept.`,
-                { title: "Conduit", kind: "warning", okLabel: "Quit Anyway", cancelLabel: "Cancel" },
+                persists
+                  ? `${subject} still working${suffix}. Quit? ${plural ? "They" : "It"} will keep running in the background, and Conduit will reattach next launch.`
+                  : `${subject} still working${suffix}. Quit and stop ${plural ? "them" : "it"}? Conversation history is kept.`,
+                {
+                  title: "Conduit",
+                  kind: persists ? "info" : "warning",
+                  okLabel: persists ? "Quit" : "Quit Anyway",
+                  cancelLabel: "Cancel",
+                },
               );
               if (!okRun) return; // cancel — window stays open (prevent_close already held it)
             }

@@ -2041,6 +2041,21 @@ button {
   opacity: 0.5;
   cursor: not-allowed;
 }
+/* Inline follow-on inside a toggle's label: why it is unavailable, or that we are
+   still finding out. Dimmer than the label so it reads as a footnote, not a second
+   instruction. */
+.dialog-hint {
+  color: var(--text-dim, var(--text-mid));
+  font-style: normal;
+  opacity: 0.75;
+}
+.dialog-hint code {
+  font-family: var(--mono-font);
+  font-size: 11px;
+  padding: 0 3px;
+  border-radius: 3px;
+  background: var(--hover);
+}
 .dialog-actions {
   display: flex;
   justify-content: flex-end;

@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
+// @ts-expect-error node builtins are deliberately untyped here — this project has no
+// @types/node on purpose (see vite.config.ts), because it would make `process`, `Buffer`
+// and friends visible to frontend code that has no Node runtime under it.
 import { readdirSync, readFileSync, statSync } from "node:fs";
+// @ts-expect-error same reason as above
 import { join } from "node:path";
 
 /**

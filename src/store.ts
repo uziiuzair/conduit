@@ -464,6 +464,31 @@ function writeRestoreSessionsOnOpen(v: boolean): void {
   }
 }
 
+// Session persistence (tmux): run each session inside a tmux session so the agent keeps
+// working after Conduit quits, and the next launch ATTACHES to it instead of replaying a
+// transcript. Default ON, and a no-op on a machine without tmux (the toggle renders
+// disabled — `tmux_available` is what it asks). Composes with restore-on-open above:
+// that one decides WHETHER to open a session eagerly, this one decides whether opening it
+// is an attach or a cold spawn.
+//
+// Turning it off never kills anything already running; it only stops new spawns from
+// using tmux. Same persisted-pref pattern as everything else here.
+const PERSIST_SESSIONS_KEY = "conduit.persistSessions";
+function readPersistSessions(): boolean {
+  try {
+    return localStorage.getItem(PERSIST_SESSIONS_KEY) !== "0"; // default on (absent => true)
+  } catch {
+    return true;
+  }
+}
+function writePersistSessions(v: boolean): void {
+  try {
+    localStorage.setItem(PERSIST_SESSIONS_KEY, v ? "1" : "0");
+  } catch {
+    /* quota — non-fatal */
+  }
+}
+
 // Sidebar / right-panel collapse state (native menu: View > Toggle Sidebar / Toggle
 // Right Panel). Small persisted UI prefs, same pattern as telemetryOptOut above.
 // Default: both expanded (false).
@@ -801,6 +826,16 @@ interface AppState {
    *  resumes all its sessions instead of waiting for a click. */
   restoreSessionsOnOpen: boolean;
   setRestoreSessionsOnOpen: (v: boolean) => void;
+  /** Persisted. When true (default), sessions run inside tmux and survive quitting the
+   *  app — the next launch attaches to the live agent rather than resuming a transcript.
+   *  Ignored on a machine without tmux; see `tmuxAvailable`. */
+  persistSessions: boolean;
+  setPersistSessions: (v: boolean) => void;
+  /** Whether this machine has tmux at all, resolved once at boot from the Rust side.
+   *  `null` = not yet probed, which the Settings toggle renders as neither on nor
+   *  disabled rather than flashing a false "unavailable". */
+  tmuxAvailable: boolean | null;
+  probeTmux: () => Promise<void>;
   /** Persisted. When true, the sidebar (and its resizer) is hidden. */
   sidebarCollapsed: boolean;
   toggleSidebar: () => void;
@@ -1138,6 +1173,8 @@ export const useStore = create<AppState>((set, get) => {
     usagePrefs: readUsagePrefs(),
     sessionDirs: {},
     restoreSessionsOnOpen: readRestoreSessionsOnOpen(),
+    persistSessions: readPersistSessions(),
+    tmuxAvailable: null,
     sidebarCollapsed: readSidebarCollapsed(),
     rightCollapsed: readRightCollapsed(),
     showSettings: false,
@@ -2242,6 +2279,31 @@ export const useStore = create<AppState>((set, get) => {
     setRestoreSessionsOnOpen: (v) => {
       writeRestoreSessionsOnOpen(v);
       set({ restoreSessionsOnOpen: v });
+    },
+
+    setPersistSessions: (v) => {
+      writePersistSessions(v);
+      set({ persistSessions: v });
+      // The Rust side decides per spawn, so it needs the value rather than reading
+      // localStorage. Fire-and-forget: a failure here leaves the backend on its previous
+      // setting, which is a stale preference and not a broken session.
+      void invoke("set_session_persistence", { enabled: v }).catch(() => {});
+    },
+
+    probeTmux: async () => {
+      try {
+        const info = await invoke<{ available: boolean; path: string | null }>(
+          "tmux_available",
+        );
+        set({ tmuxAvailable: info.available });
+        // Push the persisted preference down at boot. Without this the backend would
+        // start on its own default and disagree with the toggle the user is looking at.
+        void invoke("set_session_persistence", {
+          enabled: info.available && get().persistSessions,
+        }).catch(() => {});
+      } catch {
+        set({ tmuxAvailable: false });
+      }
     },
 
     toggleSidebar: () =>
