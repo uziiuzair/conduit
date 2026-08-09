@@ -15,6 +15,7 @@ import {
 import { TerminalView } from "./Terminal";
 import { CodeEditorPane } from "./CodeEditorPane";
 import { BoardView } from "./BoardView";
+import { CanvasView } from "./CanvasView";
 import { TerminalIcon, FileIcon, CodeIcon, CloseIcon } from "./Icons";
 
 /** Payload carried by a native tab drag (shared between WorkspaceCenter and GroupTabStrip). */
@@ -341,6 +342,14 @@ export function WorkspaceCenter({
           </div>
         )}
 
+        {/* Overlay, not a replacement: the terminals stay mounted underneath, which is
+            what keeps their PTYs alive while the canvas is open. */}
+        {projectId && centerMode === "canvas" && (
+          <div className="canvas-overlay">
+            <CanvasView projectId={projectId} />
+          </div>
+        )}
+
         {tabMenu && activeProject && projectId && (
           <TabContextMenu
             projectId={projectId}
@@ -507,6 +516,19 @@ function GroupTabStrip({
         >
           <span className="board-tab-dot" />
           <span>Board</span>
+        </button>
+      )}
+      {isActiveGroup && (
+        <button
+          type="button"
+          className={`header-btn board-tab ${centerMode === "canvas" ? "active" : ""}`}
+          title="Canvas — every session as a card on a pan/zoom plane"
+          onClick={() =>
+            setCenterMode(projectId, centerMode === "canvas" ? "terminals" : "canvas")
+          }
+        >
+          <span className="board-tab-dot" />
+          <span>Canvas</span>
         </button>
       )}
       {wd &&

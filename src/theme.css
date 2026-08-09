@@ -688,6 +688,79 @@ button {
 .board-tab.active .board-tab-dot { box-shadow: 0 0 8px color-mix(in srgb, var(--accent) 65%, transparent); }
 
 .board-overlay { position: absolute; top: var(--tabstrip-h); left: 0; right: 0; bottom: 0; z-index: 3; background: var(--panel-bg); overflow: hidden; display: flex; }
+
+/* Canvas view. Same overlay contract as the board: it covers the terminals, it never
+   unmounts them. */
+.canvas-overlay { position: absolute; top: var(--tabstrip-h); left: 0; right: 0; bottom: 0; z-index: 3; background: var(--panel-bg); overflow: hidden; display: flex; }
+.canvas-view { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+.canvas-toolbar {
+  display: flex; align-items: center; gap: 10px; flex: none;
+  height: 46px; padding: 0 18px;
+  border-bottom: 1px solid var(--border);
+  background: linear-gradient(180deg, color-mix(in srgb, var(--accent) 5%, var(--sidebar-bg)), var(--sidebar-bg));
+}
+.canvas-title { font-size: 13px; font-weight: 600; color: var(--text-hi); }
+.canvas-count { font-size: 11px; color: var(--text-dim); }
+.canvas-toolbar-spacer { flex: 1; }
+.canvas-btn {
+  font-size: 11px; padding: 3px 9px; border-radius: 5px;
+  border: 1px solid var(--border); background: transparent; color: var(--text-mid);
+  cursor: pointer; font-variant-numeric: tabular-nums;
+}
+.canvas-btn:hover { background: var(--hover); color: var(--text-hi); }
+
+.canvas-viewport {
+  position: relative; flex: 1; overflow: hidden;
+  cursor: grab;
+  /* A dot grid gives pan and zoom something to read against — without it, moving an
+     empty region looks like nothing happened. */
+  background-image: radial-gradient(circle, var(--border) 1px, transparent 1px);
+  background-size: 24px 24px;
+}
+.canvas-viewport.panning { cursor: grabbing; }
+.canvas-plane { position: absolute; top: 0; left: 0; transform-origin: 0 0; will-change: transform; }
+
+.canvas-card {
+  position: absolute;
+  display: flex; flex-direction: column; gap: 6px;
+  padding: 11px 13px;
+  border: 1px solid var(--border); border-radius: 9px;
+  background: var(--sidebar-bg);
+  cursor: grab;
+  user-select: none;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.25);
+}
+.canvas-card:hover { border-color: color-mix(in srgb, var(--accent) 45%, var(--border)); }
+.canvas-card:active { cursor: grabbing; }
+/* The one card you most need to find on a busy canvas gets the only accent border. */
+.canvas-card.status-needsInput { border-color: var(--accent); }
+
+.canvas-card-head { display: flex; align-items: center; gap: 7px; min-width: 0; }
+.canvas-card-name {
+  flex: 1; min-width: 0; font-size: 12px; font-weight: 600; color: var(--text-hi);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.canvas-card-meta { min-width: 0; }
+.canvas-branch {
+  font-family: var(--mono-font); font-size: 10px; color: var(--text-mid);
+  display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.canvas-branch.dim { color: var(--text-dim); font-style: italic; font-family: inherit; }
+.canvas-card-status { font-size: 10px; color: var(--text-dim); margin-top: auto; }
+
+.canvas-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--text-dim); flex: none; }
+.canvas-dot.status-running { background: var(--accent); animation: canvas-pulse 1.6s ease-in-out infinite; }
+.canvas-dot.status-needsInput { background: #e0a33e; }
+.canvas-dot.status-done { background: #4c9a6a; }
+@keyframes canvas-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.35; } }
+@media (prefers-reduced-motion: reduce) {
+  .canvas-dot.status-running { animation: none; }
+}
+
+.canvas-empty {
+  position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
+  font-size: 12px; color: var(--text-dim); pointer-events: none;
+}
 .board-view { flex: 1; display: flex; flex-direction: column; min-width: 0; }
 
 .board-toolbar {

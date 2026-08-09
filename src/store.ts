@@ -22,6 +22,7 @@ import {
   splitTab as reduceSplitTab,
 } from "./layout";
 import { cleanupEdits } from "./trim";
+import type { CanvasState } from "./canvas";
 import type * as Monaco from "monaco-editor";
 import type { SettingsTab } from "./components/Settings";
 import type { PluginDescriptor, PluginPermission } from "./plugins/types";
@@ -245,8 +246,10 @@ export interface CardHandoff {
 }
 export interface ContinuityView { presence: Presence[]; handoffs: CardHandoff[] }
 
-/** Center pane mode, per project: the terminal workspace or the task board. */
-export type CenterMode = "terminals" | "board";
+/** Center pane mode, per project: the terminal workspace, the task board, or the
+ *  spatial canvas. Every mode is an OVERLAY over the still-mounted terminals — none of
+ *  them may unmount or reparent a TerminalView. */
+export type CenterMode = "terminals" | "board" | "canvas";
 
 export type SessionStatus = "idle" | "running" | "needsInput" | "done";
 export type TodoStatus = "pending" | "in_progress" | "completed";
@@ -459,6 +462,30 @@ function readRestoreSessionsOnOpen(): boolean {
 function writeRestoreSessionsOnOpen(v: boolean): void {
   try {
     localStorage.setItem(RESTORE_SESSIONS_KEY, v ? "1" : "0");
+  } catch {
+    /* quota — non-fatal */
+  }
+}
+
+// Canvas view: card positions / pan / zoom per project. Same persisted-pref pattern as the
+// toggles above. A corrupt or hand-edited value falls back to "no saved canvas", which
+// `reconcile` then repopulates by auto-placing every session — a canvas that lays itself
+// out again is a much better failure than one that throws on load.
+const CANVASES_KEY = "conduit.canvases";
+function readCanvases(): Record<string, CanvasState> {
+  try {
+    const raw = localStorage.getItem(CANVASES_KEY);
+    if (!raw) return {};
+    const parsed: unknown = JSON.parse(raw);
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return {};
+    return parsed as Record<string, CanvasState>;
+  } catch {
+    return {};
+  }
+}
+function writeCanvases(v: Record<string, CanvasState>): void {
+  try {
+    localStorage.setItem(CANVASES_KEY, JSON.stringify(v));
   } catch {
     /* quota — non-fatal */
   }
@@ -1110,6 +1137,14 @@ interface AppState {
   continuity: Record<string, ContinuityView>;
   setCenterMode: (projectId: string, mode: CenterMode) => void;
   toggleCenterMode: (projectId: string) => void;
+
+  // ---- Canvas view (per project) ----
+  /** Card positions, pan and zoom per project. Persisted to localStorage rather than to
+   *  the Rust-side ProjectLayout: these are per-machine view preferences (like sidebar
+   *  collapse), and keeping them out of persisted project state means a canvas layout
+   *  cannot corrupt a project. Migrating into ProjectLayout stays open — see the spec. */
+  canvases: Record<string, CanvasState>;
+  setCanvas: (projectId: string, next: CanvasState) => void;
   setBoard: (projectId: string, snapshot: BoardSnapshot) => void;
   setContinuity: (projectId: string, view: ContinuityView) => void;
 }
@@ -2558,10 +2593,18 @@ export const useStore = create<AppState>((set, get) => {
 
     // ---- Task board (Conductor board) ----
     centerMode: {},
+    canvases: readCanvases(),
     boards: {},
     continuity: {},
     setCenterMode: (projectId, mode) =>
       set((s) => ({ centerMode: { ...s.centerMode, [projectId]: mode } })),
+
+    setCanvas: (projectId, next) =>
+      set((s) => {
+        const canvases = { ...s.canvases, [projectId]: next };
+        writeCanvases(canvases);
+        return { canvases };
+      }),
     toggleCenterMode: (projectId) =>
       set((s) => {
         const cur = s.centerMode[projectId] ?? "terminals";
