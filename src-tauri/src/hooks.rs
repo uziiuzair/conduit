@@ -78,6 +78,12 @@ pub fn start(
             return;
         };
 
+        // Publish the live port where every already-running session can find it. Hook
+        // commands source this file before they POST, so a session spawned under a
+        // previous port heals itself the first time it fires an event instead of going
+        // silently dark. See `write_endpoint_file`.
+        write_endpoint_file(state.port.load(Ordering::SeqCst));
+
         for mut request in server.incoming_requests() {
             if request.method() != &Method::Post {
                 let _ = request.respond(Response::from_string("ok"));
@@ -685,6 +691,33 @@ pub fn install(dir: &str, port: u16) {
     install_profile(dir, port, &claude_profile());
 }
 
+/// Absolute path of the endpoint file — the one indirection that keeps a long-lived
+/// session's hooks pointed at a live listener.
+///
+/// It lives in the DATA DIR, not a machine-stable path like `~/.conduit/`. That is
+/// deliberate: `CONDUIT_DATA_DIR_NAME` is how a dev build is isolated from the installed
+/// app, and a shared path would let whichever one booted last capture the other's
+/// sessions. Each install publishes its own port and each session points at its own
+/// install's file.
+pub fn endpoint_file_path() -> std::path::PathBuf {
+    crate::store::data_dir().join("hook-endpoint.sh")
+}
+
+/// Write `<dataDir>/hook-endpoint.sh` with the port the listener actually bound to.
+///
+/// The file is one `KEY=value` line — it is *sourced* by the hook command, never
+/// executed, so it carries no shebang and no export. Rewritten on every boot, which is
+/// what makes it the freshest of the three places a port is recorded (see `command`).
+///
+/// Best-effort: a data dir that cannot be written leaves the hook command falling back
+/// to exactly today's behavior.
+pub fn write_endpoint_file(port: u16) {
+    let path = endpoint_file_path();
+    if let Err(e) = fs::write(&path, format!("CONDUIT_HOOK_PORT={port}\n")) {
+        eprintln!("conduit: could not write hook endpoint file: {e}");
+    }
+}
+
 /// A settings object containing only Conduit's hooks, for `claude --settings <file>`.
 fn settings_value(port: u16) -> Value {
     let mut hooks = serde_json::Map::new();
@@ -698,8 +731,10 @@ fn settings_value(port: u16) -> Value {
 /// Worktree sessions pass this via `claude --settings`, since a worktree is a separate
 /// working tree that doesn't see the project's settings.local.json.
 pub fn write_settings_file(port: u16) -> Option<String> {
-    let base = dirs::data_dir()?.join("ConduitTauri");
-    let _ = fs::create_dir_all(&base);
+    // `store::data_dir()` rather than a hardcoded "ConduitTauri": this file used to
+    // ignore CONDUIT_DATA_DIR_NAME, so a dev build wrote its settings over the installed
+    // app's — the same data-dir isolation the endpoint file above depends on.
+    let base = crate::store::data_dir();
     let path = base.join("conduit-hooks.json");
     let data = serde_json::to_vec_pretty(&settings_value(port)).ok()?;
     fs::write(&path, data).ok()?;
@@ -723,13 +758,31 @@ fn command(event: &str, port: u16) -> Value {
             "curl -s -m 2 -X POST -H \"Content-Type: application/json\" --data-binary @- \"{url}\" >NUL 2>&1 || ver >NUL"
         )
     };
+    // POSIX: source the endpoint file first, so the port is resolved at HOOK time rather
+    // than at spawn time. Three layers, freshest first:
+    //
+    //   1. CONDUIT_HOOK_PORT from the sourced endpoint file — rewritten every boot, so
+    //      always current.
+    //   2. CONDUIT_HOOK_PORT from the session env — correct when the session spawned.
+    //   3. The literal baked here — correct when the hook was installed.
+    //
+    // Each layer is a strictly better guess than the one under it, and a layer that is
+    // absent falls through rather than erroring. Without layer 1, a session that outlives
+    // an app restart onto a different port in 8423..=8443 posts into a closed socket, and
+    // `|| true` swallows it: status, to-dos, and usage stop updating with nothing logged.
+    // That is invisible today only because a restart also respawns every session — it
+    // stops being invisible the moment a session can survive one (tmux persistence).
+    //
+    // The leading `[ … ] && … ;` is a statement, not a guard on the curl: an unset or
+    // unreadable endpoint leaves it false and the POST still runs, byte-for-byte as before.
     #[cfg(not(windows))]
     let cmd = {
         let url = format!(
             "http://127.0.0.1:${{CONDUIT_HOOK_PORT:-{port}}}/hook?session=${{CONDUIT_SESSION_ID:-unknown}}&event={event}"
         );
         format!(
-            "curl -s -m 2 -X POST -H \"Content-Type: application/json\" --data-binary @- \"{url}\" >/dev/null 2>&1 || true"
+            "[ -n \"$CONDUIT_HOOK_ENDPOINT\" ] && [ -r \"$CONDUIT_HOOK_ENDPOINT\" ] && . \"$CONDUIT_HOOK_ENDPOINT\"; \
+             curl -s -m 2 -X POST -H \"Content-Type: application/json\" --data-binary @- \"{url}\" >/dev/null 2>&1 || true"
         )
     };
     json!({ "type": "command", "command": cmd })
@@ -746,7 +799,22 @@ fn merged(existing: Option<&Value>, entries: Vec<Value>) -> Value {
     Value::Array(array)
 }
 
+/// Does this settings entry belong to Conduit?
+///
+/// The marker is the ROUTING PATH, not the bare variable name. `CONDUIT_SESSION_ID` on
+/// its own would also match a foreign tool that legitimately reads Conduit's variable,
+/// and matching it would delete that tool's hook from any event we both subscribe to.
+/// `/hook?session=` plus the variable is unmistakably ours.
+///
+/// Both currently shipped command formats contain this substring, so the tighter matcher
+/// still recognizes entries written by older Conduit versions — which is what keeps
+/// `install` replacing them rather than stacking a second copy on upgrade.
 fn is_conduit_entry(entry: &Value) -> bool {
+    #[cfg(windows)]
+    const MARKER: &str = "/hook?session=%CONDUIT_SESSION_ID%";
+    #[cfg(not(windows))]
+    const MARKER: &str = "/hook?session=${CONDUIT_SESSION_ID";
+
     entry
         .get("hooks")
         .and_then(|h| h.as_array())
@@ -754,7 +822,7 @@ fn is_conduit_entry(entry: &Value) -> bool {
             hooks.iter().any(|h| {
                 h.get("command")
                     .and_then(|c| c.as_str())
-                    .map(|c| c.contains("CONDUIT_SESSION_ID"))
+                    .map(|c| c.contains(MARKER))
                     .unwrap_or(false)
             })
         })
@@ -789,6 +857,199 @@ mod tests {
         let (_id, rx) = bus.subscribe();
         forward_to_bus(&bus, None, "stop".to_string(), serde_json::Value::Null);
         assert!(rx.try_recv().is_err());
+    }
+
+    // ---- endpoint indirection -------------------------------------------------
+    //
+    // The port lives in three places, and only the endpoint file is refreshed on every
+    // boot. These tests pin the resolution ORDER, because getting it backwards would
+    // look correct in every situation except the one the feature exists for.
+
+    #[cfg(not(windows))]
+    mod endpoint {
+        use super::*;
+        use std::process::{Command, Stdio};
+
+        /// A scratch dir holding a fake `curl` that records the URL it was called with,
+        /// so the generated hook command can be executed for real under `sh`.
+        struct Harness {
+            dir: PathBuf,
+        }
+
+        impl Harness {
+            fn new(tag: &str) -> Self {
+                let dir = fresh_test_dir(&format!("endpoint_{tag}"));
+                let curl = dir.join("curl");
+                // Consume stdin (the command pipes the hook payload in via `@-`), then
+                // record the last argument that looks like our URL.
+                fs::write(
+                    &curl,
+                    "#!/bin/sh\ncat >/dev/null\nfor a in \"$@\"; do case \"$a\" in \
+                     http://*) printf '%s' \"$a\" > \"$(dirname \"$0\")/url\";; esac; done\n",
+                )
+                .unwrap();
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    fs::set_permissions(&curl, fs::Permissions::from_mode(0o755)).unwrap();
+                }
+                Harness { dir }
+            }
+
+            /// Run the generated hook command under `sh` with our fake curl first on
+            /// PATH, and return the URL it was invoked with.
+            fn run(&self, cmd: &str, env: &[(&str, &str)]) -> String {
+                let path = format!(
+                    "{}:{}",
+                    self.dir.display(),
+                    std::env::var("PATH").unwrap_or_default()
+                );
+                let mut c = Command::new("sh");
+                c.arg("-c")
+                    .arg(cmd)
+                    .env("PATH", path)
+                    .env_remove("CONDUIT_HOOK_ENDPOINT")
+                    .env_remove("CONDUIT_HOOK_PORT")
+                    .env_remove("CONDUIT_SESSION_ID")
+                    .stdin(Stdio::null());
+                for (k, v) in env {
+                    c.env(k, v);
+                }
+                assert!(c.status().unwrap().success(), "hook command exited non-zero");
+                fs::read_to_string(self.dir.join("url")).unwrap_or_default()
+            }
+
+            fn endpoint_with_port(&self, port: u16) -> String {
+                let p = self.dir.join("endpoint.sh");
+                fs::write(&p, format!("CONDUIT_HOOK_PORT={port}\n")).unwrap();
+                p.to_string_lossy().into_owned()
+            }
+        }
+
+        #[test]
+        fn endpoint_file_beats_session_env_and_baked_default() {
+            let h = Harness::new("fresh");
+            let ep = h.endpoint_with_port(8431);
+            let url = h.run(
+                command("Stop", 8423)["command"].as_str().unwrap(),
+                &[
+                    ("CONDUIT_HOOK_ENDPOINT", ep.as_str()),
+                    ("CONDUIT_HOOK_PORT", "8425"),
+                    ("CONDUIT_SESSION_ID", "s1"),
+                ],
+            );
+            // The endpoint file is rewritten every boot, so it wins over the spawn-time
+            // env (8425) and the install-time literal (8423). This is the whole feature.
+            assert!(url.contains("127.0.0.1:8431"), "got {url}");
+            assert!(url.contains("session=s1"), "got {url}");
+            assert!(url.contains("event=Stop"), "got {url}");
+        }
+
+        #[test]
+        fn session_env_wins_when_no_endpoint_file_exists() {
+            let h = Harness::new("noep");
+            let url = h.run(
+                command("Stop", 8423)["command"].as_str().unwrap(),
+                &[
+                    ("CONDUIT_HOOK_ENDPOINT", "/nonexistent/endpoint.sh"),
+                    ("CONDUIT_HOOK_PORT", "8425"),
+                    ("CONDUIT_SESSION_ID", "s1"),
+                ],
+            );
+            assert!(url.contains("127.0.0.1:8425"), "got {url}");
+        }
+
+        #[test]
+        fn baked_default_wins_when_nothing_is_set() {
+            // A session predating this change carries neither variable. It must behave
+            // exactly as it does today rather than posting nowhere.
+            let h = Harness::new("bare");
+            let url = h.run(command("Stop", 8423)["command"].as_str().unwrap(), &[]);
+            assert!(url.contains("127.0.0.1:8423"), "got {url}");
+            assert!(url.contains("session=unknown"), "got {url}");
+        }
+
+        #[test]
+        fn a_corrupt_endpoint_file_falls_through_instead_of_failing() {
+            let h = Harness::new("corrupt");
+            let p = h.dir.join("bad.sh");
+            fs::write(&p, "this is not shell (((\n").unwrap();
+            let url = h.run(
+                command("Stop", 8423)["command"].as_str().unwrap(),
+                &[
+                    ("CONDUIT_HOOK_ENDPOINT", p.to_string_lossy().as_ref()),
+                    ("CONDUIT_HOOK_PORT", "8425"),
+                    ("CONDUIT_SESSION_ID", "s1"),
+                ],
+            );
+            assert!(url.contains("127.0.0.1:8425"), "got {url}");
+        }
+
+        #[test]
+        fn command_still_cannot_block_a_prompt() {
+            // A non-zero UserPromptSubmit hook BLOCKS the prompt. The trailing `|| true`
+            // is the only thing standing between a curl failure and a session nobody can
+            // type into, so it is asserted rather than assumed.
+            let cmd = command("UserPromptSubmit", 8423)["command"]
+                .as_str()
+                .unwrap()
+                .to_string();
+            assert!(cmd.ends_with("|| true"), "got {cmd}");
+
+            // No curl on PATH at all — the harshest version of "the POST failed".
+            // `/bin/sh` by absolute path, because an empty PATH would otherwise stop us
+            // finding the shell rather than the curl we are trying to hide.
+            let status = Command::new("/bin/sh")
+                .arg("-c")
+                .arg(&cmd)
+                .env("PATH", "/nonexistent")
+                .stdin(Stdio::null())
+                .status()
+                .unwrap();
+            assert!(status.success(), "hook command must always exit 0");
+        }
+    }
+
+    #[test]
+    fn endpoint_file_is_one_sourceable_assignment() {
+        let port = 8431;
+        let body = format!("CONDUIT_HOOK_PORT={port}\n");
+        assert_eq!(body.lines().count(), 1);
+        assert!(!body.starts_with("#!"), "sourced, never executed");
+        assert!(!body.contains("export"), "sourcing already sets it");
+    }
+
+    #[test]
+    fn endpoint_path_honors_the_data_dir_override() {
+        // The isolation that keeps a dev build from capturing the installed app's
+        // sessions. A machine-stable path would break it.
+        assert!(endpoint_file_path().ends_with("hook-endpoint.sh"));
+        assert!(endpoint_file_path().starts_with(crate::store::data_dir()));
+    }
+
+    #[test]
+    fn conduit_entry_marker_matches_ours_and_not_a_foreign_hook() {
+        let ours = json!({ "hooks": [ command("Stop", 8423) ] });
+        assert!(is_conduit_entry(&ours));
+
+        // The format shipped before endpoint indirection — upgrades must REPLACE these,
+        // not stack a second copy beside them.
+        #[cfg(not(windows))]
+        let legacy = json!({ "hooks": [ { "type": "command", "command":
+            "curl -s -m 2 -X POST -H \"Content-Type: application/json\" --data-binary @- \
+             \"http://127.0.0.1:${CONDUIT_HOOK_PORT:-8423}/hook?session=${CONDUIT_SESSION_ID:-unknown}&event=Stop\" \
+             >/dev/null 2>&1 || true" } ] });
+        #[cfg(windows)]
+        let legacy = json!({ "hooks": [ { "type": "command", "command":
+            "curl -s -m 2 -X POST --data-binary @- \
+             \"http://127.0.0.1:8423/hook?session=%CONDUIT_SESSION_ID%&event=Stop\" >NUL 2>&1 || ver >NUL" } ] });
+        assert!(is_conduit_entry(&legacy), "must still match the shipped format");
+
+        // A foreign tool that merely reads Conduit's variable is NOT ours, and deleting
+        // its hook would be a bug in someone else's app.
+        let foreign = json!({ "hooks": [ { "type": "command", "command":
+            "echo \"$CONDUIT_SESSION_ID\" >> ~/my-own-audit.log" } ] });
+        assert!(!is_conduit_entry(&foreign));
     }
 
     #[test]

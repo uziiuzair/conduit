@@ -70,8 +70,9 @@ jobs:
       - name: Format
         run: cargo fmt --manifest-path src-tauri/Cargo.toml --check
 
-      # -D warnings from the start: the tree is clean today (verified), and a
-      # warning-tolerant lint job stops being read within a month.
+      # -D warnings from the start: a warning-tolerant lint job stops being read within
+      # a month. If the tree does not pass on the first run, fix the lints rather than
+      # weakening this line.
       - name: Clippy
         run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
 
