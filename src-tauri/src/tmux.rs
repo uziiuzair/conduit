@@ -145,7 +145,13 @@ pub fn ensure_conf(tmux: &Path, scrollback: u32) -> Option<PathBuf> {
 /// (whose smallest-client-wins rule would shrink the pane) never applies.
 ///
 /// `exec` replaces the login shell, leaving no extra process between the PTY and tmux.
-pub fn wrap_command(tmux: &Path, conf: Option<&Path>, name: &str, dir: &str, inner: &str) -> String {
+pub fn wrap_command(
+    tmux: &Path,
+    conf: Option<&Path>,
+    name: &str,
+    dir: &str,
+    inner: &str,
+) -> String {
     let conf_flag = match conf {
         Some(p) => format!(" -f {}", crate::pty::shell_quote(&p.to_string_lossy())),
         None => String::new(),
@@ -165,7 +171,13 @@ pub fn wrap_command(tmux: &Path, conf: Option<&Path>, name: &str, dir: &str, inn
 /// (`PtyManager::kill`), never from app quit -- see the asymmetry note on `kill_all`.
 pub fn kill_session(tmux: &Path, session_id: &str) {
     let _ = Command::new(tmux)
-        .args(["-L", SOCKET, "kill-session", "-t", &session_name(session_id)])
+        .args([
+            "-L",
+            SOCKET,
+            "kill-session",
+            "-t",
+            &session_name(session_id),
+        ])
         .output();
 }
 

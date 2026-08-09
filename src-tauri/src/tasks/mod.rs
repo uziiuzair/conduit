@@ -517,7 +517,13 @@ impl TaskBoard {
     pub fn ensure_knowledge(&self, project_root: &str) -> Result<(), String> {
         let _g = self.lock.lock().unwrap_or_else(|e| e.into_inner());
         let kd = Self::knowledge_dir(project_root);
-        for cat in ["decisions", "patterns", "anti-patterns", "domain", "components"] {
+        for cat in [
+            "decisions",
+            "patterns",
+            "anti-patterns",
+            "domain",
+            "components",
+        ] {
             fs::create_dir_all(kd.join(cat)).map_err(|e| e.to_string())?;
         }
         if !kd.join("index.md").exists() {
@@ -716,7 +722,9 @@ mod tests {
         let root = tmp_root();
         let board = TaskBoard::default();
         board.ensure_knowledge(&root).unwrap();
-        let kd = std::path::Path::new(&root).join(".conduit").join("knowledge");
+        let kd = std::path::Path::new(&root)
+            .join(".conduit")
+            .join("knowledge");
         assert!(kd.join("index.md").exists());
         assert!(kd.join("decisions").is_dir());
         std::fs::write(kd.join("index.md"), "EDITED").unwrap();
@@ -917,12 +925,18 @@ mod tests {
         };
         let json = serde_json::to_string(&card).unwrap();
         assert!(json.contains("\"claim\""), "claim must be in JSON: {json}");
-        assert!(json.contains("\"by\":\"s2\""), "claim.by must be in JSON: {json}");
+        assert!(
+            json.contains("\"by\":\"s2\""),
+            "claim.by must be in JSON: {json}"
+        );
         // A None-claim card omits it entirely (keeps the YAML file clean).
         let mut none_card = card.clone();
         none_card.claim = None;
         let json2 = serde_json::to_string(&none_card).unwrap();
-        assert!(!json2.contains("\"claim\""), "None claim must be omitted: {json2}");
+        assert!(
+            !json2.contains("\"claim\""),
+            "None claim must be omitted: {json2}"
+        );
     }
 
     #[test]
@@ -974,7 +988,9 @@ mod tests {
     fn start_workflow_sets_discovery_and_scaffolds_work_item_dir() {
         let root = tmp_root();
         let board = TaskBoard::default();
-        let c = board.add_card(&root, "feature X", "", "todo", "human").unwrap();
+        let c = board
+            .add_card(&root, "feature X", "", "todo", "human")
+            .unwrap();
         let started = board.start_workflow(&root, &c.id, "human").unwrap();
         assert_eq!(started.workflow.as_ref().unwrap().stage, Stage::Discovery);
         let wid = std::path::Path::new(&root)

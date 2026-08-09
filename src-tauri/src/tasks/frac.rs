@@ -67,9 +67,9 @@ mod tests {
     #[test]
     fn first_and_last_bounds() {
         let first = key_between("", "U");
-        assert!(first < "U".to_string());
+        assert!(first.as_str() < "U");
         let last = key_between("U", "");
-        assert!("U".to_string() < last);
+        assert!("U" < last.as_str());
     }
 
     #[test]
@@ -107,10 +107,10 @@ mod tests {
         // a > b (reversed): must not panic, must be valid UTF-8, and (per the fallback) sort after a.
         let k = key_between("Z", "A");
         assert!(std::str::from_utf8(k.as_bytes()).is_ok());
-        assert!(k > "Z".to_string());
+        assert!(k.as_str() > "Z");
         // a == b: also must not panic.
         let k2 = key_between("M", "M");
         assert!(std::str::from_utf8(k2.as_bytes()).is_ok());
-        assert!(k2 > "M".to_string());
+        assert!(k2.as_str() > "M");
     }
 }

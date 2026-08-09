@@ -1429,7 +1429,7 @@ fn reveal_path(path: String) -> Result<(), String> {
 
     #[cfg(target_os = "macos")]
     {
-        return match Command::new("open")
+        match Command::new("open")
             .args(["-R", &path])
             .no_window()
             .status()
@@ -1437,7 +1437,7 @@ fn reveal_path(path: String) -> Result<(), String> {
             Ok(s) if s.success() => Ok(()),
             Ok(s) => Err(format!("opener exited with {s}")),
             Err(e) => Err(format!("failed to launch opener: {e}")),
-        };
+        }
     }
     #[cfg(windows)]
     {
@@ -1467,27 +1467,6 @@ fn reveal_path(path: String) -> Result<(), String> {
             Ok(s) => Err(format!("opener exited with {s}")),
             Err(e) => Err(format!("failed to launch opener: {e}")),
         };
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn opts_into_mailbox_requires_channels_and_no_mission() {
-        assert!(
-            !opts_into_mailbox(false, &[]),
-            "no channels -> not opted in"
-        );
-        assert!(
-            opts_into_mailbox(false, &["project".to_string()]),
-            "channels + no mission -> opted in"
-        );
-        assert!(
-            !opts_into_mailbox(true, &["project".to_string()]),
-            "a fleet mission already grants fleet MCP -- this predicate is mailbox-opt-in specifically"
-        );
     }
 }
 
@@ -1705,4 +1684,25 @@ pub fn run() {
                 app_handle.state::<Arc<PtyManager>>().kill_all();
             }
         });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn opts_into_mailbox_requires_channels_and_no_mission() {
+        assert!(
+            !opts_into_mailbox(false, &[]),
+            "no channels -> not opted in"
+        );
+        assert!(
+            opts_into_mailbox(false, &["project".to_string()]),
+            "channels + no mission -> opted in"
+        );
+        assert!(
+            !opts_into_mailbox(true, &["project".to_string()]),
+            "a fleet mission already grants fleet MCP -- this predicate is mailbox-opt-in specifically"
+        );
+    }
 }

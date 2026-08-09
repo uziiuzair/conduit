@@ -287,6 +287,11 @@ fn token_ok(query: Option<&str>, expected: &str) -> bool {
 
 /// Accept a WebSocket, enforcing the token gate during the handshake when one is set.
 /// A bad/missing token is rejected with 401 before the upgrade completes.
+///
+/// `result_large_err`: the Err type is tungstenite's `ErrorResponse`, whose shape the
+/// handshake callback signature fixes for us. Boxing it is not an option — the callback
+/// must return exactly that type — and this runs once per connection, not in a loop.
+#[allow(clippy::result_large_err)]
 fn accept_ws(stream: TcpStream, token: &Option<String>) -> Option<WebSocket<TcpStream>> {
     match token {
         Some(expected) => {

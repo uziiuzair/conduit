@@ -367,6 +367,11 @@ impl FleetState {
     /// Whether any session's agent is actively working (`status == "running"`). Read by the
     /// shutdown guard to decide whether to prompt before killing agents. This mirror is fed by
     /// the same hook events as the frontend `live` map, for every hooked session.
+    ///
+    /// Currently unused: the shutdown guard settled on `live_running_agent` in lib.rs, which
+    /// cross-checks this mirror against a real PTY so a stale "running" cannot cause a
+    /// spurious prompt. Kept as the unqualified form of the same question.
+    #[allow(dead_code)]
     pub fn any_running(&self) -> bool {
         self.status
             .lock()

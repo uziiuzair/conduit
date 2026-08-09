@@ -753,7 +753,10 @@ fn dispatch_tool(name: &str, args: &Value, ctx: &Ctx) -> Result<String, String> 
         }
         "task_workflow_start" => {
             let root = caller_project_root(ctx)?;
-            let id = args.get("id").and_then(|v| v.as_str()).ok_or("missing id")?;
+            let id = args
+                .get("id")
+                .and_then(|v| v.as_str())
+                .ok_or("missing id")?;
             // Scaffold the shared assets first (idempotent; each takes its own lock, so they must
             // NOT be called from inside start_workflow), then attach the workflow.
             ctx.tasks.ensure_agents(&root).ok();
@@ -764,14 +767,26 @@ fn dispatch_tool(name: &str, args: &Value, ctx: &Ctx) -> Result<String, String> 
         }
         "task_advance" => {
             let root = caller_project_root(ctx)?;
-            let id = args.get("id").and_then(|v| v.as_str()).ok_or("missing id")?;
+            let id = args
+                .get("id")
+                .and_then(|v| v.as_str())
+                .ok_or("missing id")?;
             // Only the claim holder may advance.
             let snap = ctx.tasks.snapshot(&root);
-            match snap.cards.iter().find(|c| c.id == id).and_then(|c| c.claim.as_ref()) {
+            match snap
+                .cards
+                .iter()
+                .find(|c| c.id == id)
+                .and_then(|c| c.claim.as_ref())
+            {
                 Some(cl) if cl.by == ctx.conductor_id => {}
                 _ => return Err("advance requires holding this card's claim".to_string()),
             }
-            let outcome = match args.get("outcome").and_then(|v| v.as_str()).ok_or("missing outcome")? {
+            let outcome = match args
+                .get("outcome")
+                .and_then(|v| v.as_str())
+                .ok_or("missing outcome")?
+            {
                 "completed" => crate::tasks::stage_machine::Outcome::Completed,
                 "failed_checks" => crate::tasks::stage_machine::Outcome::FailedChecks,
                 "design_conflict" => crate::tasks::stage_machine::Outcome::DesignConflict,
@@ -779,7 +794,9 @@ fn dispatch_tool(name: &str, args: &Value, ctx: &Ctx) -> Result<String, String> 
                 other => return Err(format!("outcome not allowed from an agent: {other}")),
             };
             let note = args.get("note").and_then(|v| v.as_str()).unwrap_or("");
-            let card = ctx.tasks.advance(&root, id, outcome, &ctx.conductor_id, note)?;
+            let card = ctx
+                .tasks
+                .advance(&root, id, outcome, &ctx.conductor_id, note)?;
             emit_board_changed(ctx);
             serde_json::to_string(&card).map_err(|e| e.to_string())
         }
@@ -1363,7 +1380,13 @@ mod tests {
                 "worker should be allowed {t}"
             );
         }
-        for denied in ["fleet_spawn", "fleet_send", "fleet_stop", "fleet_peek", "fleet_list"] {
+        for denied in [
+            "fleet_spawn",
+            "fleet_send",
+            "fleet_stop",
+            "fleet_peek",
+            "fleet_list",
+        ] {
             assert!(
                 authorize(&store, &worker.id, denied).is_err(),
                 "worker must be denied {denied}"

@@ -58,7 +58,9 @@ pub fn is_human_gate(stage: Stage) -> bool {
 /// and terminal/intake stages.
 pub fn role_of(stage: Stage) -> Option<&'static str> {
     match stage {
-        Stage::Discovery | Stage::RequirementDraft | Stage::ImplementationPlan => Some("delivery-planner"),
+        Stage::Discovery | Stage::RequirementDraft | Stage::ImplementationPlan => {
+            Some("delivery-planner")
+        }
         Stage::UxInput => Some("ux-designer"),
         Stage::ArchitectureInput => Some("solution-architect"),
         Stage::Implementation | Stage::Verification => Some("implementer"),
@@ -73,10 +75,21 @@ pub fn reads_of(stage: Stage) -> &'static [&'static str] {
         Stage::Discovery => &["request.md", "knowledge/components/", "knowledge/domain/"],
         Stage::RequirementDraft => &["discovery.md"],
         Stage::UxInput => &["requirements.md", "knowledge/patterns/"],
-        Stage::ArchitectureInput => &["requirements.md", "ux-spec.md", "knowledge/decisions/", "knowledge/patterns/", "knowledge/anti-patterns/"],
+        Stage::ArchitectureInput => &[
+            "requirements.md",
+            "ux-spec.md",
+            "knowledge/decisions/",
+            "knowledge/patterns/",
+            "knowledge/anti-patterns/",
+        ],
         Stage::ImplementationPlan => &["architecture.md", "ux-spec.md"],
         Stage::Implementation => &["implementation-plan.md"],
-        Stage::Verification => &["architecture.md", "ux-spec.md", "knowledge/decisions/", "knowledge/anti-patterns/"],
+        Stage::Verification => &[
+            "architecture.md",
+            "ux-spec.md",
+            "knowledge/decisions/",
+            "knowledge/anti-patterns/",
+        ],
         _ => &[],
     }
 }
@@ -134,19 +147,34 @@ mod tests {
     #[test]
     fn business_clarification_is_a_human_gate() {
         assert!(is_human_gate(BusinessClarification));
-        assert_eq!(next(RequirementDraft, Outcome::Completed), Transition::HumanGate(BusinessClarification));
+        assert_eq!(
+            next(RequirementDraft, Outcome::Completed),
+            Transition::HumanGate(BusinessClarification)
+        );
     }
 
     #[test]
     fn changes_requested_reworks_back_to_draft() {
-        assert_eq!(next(BusinessClarification, Outcome::ChangesRequested), Transition::Rework(RequirementDraft));
+        assert_eq!(
+            next(BusinessClarification, Outcome::ChangesRequested),
+            Transition::Rework(RequirementDraft)
+        );
     }
 
     #[test]
     fn verification_rework_targets_match_the_failure() {
-        assert_eq!(next(Verification, Outcome::FailedChecks), Transition::Rework(Implementation));
-        assert_eq!(next(Verification, Outcome::DesignConflict), Transition::Rework(ArchitectureInput));
-        assert_eq!(next(Verification, Outcome::UxConflict), Transition::Rework(UxInput));
+        assert_eq!(
+            next(Verification, Outcome::FailedChecks),
+            Transition::Rework(Implementation)
+        );
+        assert_eq!(
+            next(Verification, Outcome::DesignConflict),
+            Transition::Rework(ArchitectureInput)
+        );
+        assert_eq!(
+            next(Verification, Outcome::UxConflict),
+            Transition::Rework(UxInput)
+        );
     }
 
     #[test]

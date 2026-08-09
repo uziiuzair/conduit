@@ -84,7 +84,10 @@ mod tests {
         let bytes = encode_png(&rgba, 2, 2).expect("encode should succeed");
 
         // PNG magic bytes.
-        assert_eq!(&bytes[..8], &[0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A]);
+        assert_eq!(
+            &bytes[..8],
+            &[0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A]
+        );
 
         // Decode back: dimensions and pixels must survive the round-trip.
         let decoder = png::Decoder::new(&bytes[..]);

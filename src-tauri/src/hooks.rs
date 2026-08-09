@@ -915,7 +915,10 @@ mod tests {
                 for (k, v) in env {
                     c.env(k, v);
                 }
-                assert!(c.status().unwrap().success(), "hook command exited non-zero");
+                assert!(
+                    c.status().unwrap().success(),
+                    "hook command exited non-zero"
+                );
                 fs::read_to_string(self.dir.join("url")).unwrap_or_default()
             }
 
@@ -1043,7 +1046,10 @@ mod tests {
         let legacy = json!({ "hooks": [ { "type": "command", "command":
             "curl -s -m 2 -X POST --data-binary @- \
              \"http://127.0.0.1:8423/hook?session=%CONDUIT_SESSION_ID%&event=Stop\" >NUL 2>&1 || ver >NUL" } ] });
-        assert!(is_conduit_entry(&legacy), "must still match the shipped format");
+        assert!(
+            is_conduit_entry(&legacy),
+            "must still match the shipped format"
+        );
 
         // A foreign tool that merely reads Conduit's variable is NOT ours, and deleting
         // its hook would be a bug in someone else's app.

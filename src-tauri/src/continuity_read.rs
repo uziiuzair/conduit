@@ -78,7 +78,11 @@ fn read_presence(
     if session_ids.is_empty() {
         return Ok(vec![]);
     }
-    let placeholders = session_ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+    let placeholders = session_ids
+        .iter()
+        .map(|_| "?")
+        .collect::<Vec<_>>()
+        .join(",");
     let sql = format!(
         "SELECT agent_label, status, last_seen_at FROM agent_sessions \
          WHERE agent_label IN ({placeholders}) AND status <> 'gone'"
@@ -192,7 +196,8 @@ CREATE INDEX IF NOT EXISTS handoffs_to_agent_idx ON handoffs (to_agent_session_i
     /// - a completed handoff for `projX` card `c1` (must be excluded: not pending)
     fn build_fixture(path: &std::path::Path) {
         let conn = rusqlite::Connection::open(path).expect("open fixture db");
-        conn.execute_batch(FIXTURE_DDL).expect("create fixture schema");
+        conn.execute_batch(FIXTURE_DDL)
+            .expect("create fixture schema");
 
         conn.execute(
             "INSERT INTO agent_sessions (id, agent_label, cwd_hash, status, started_at, last_seen_at) \
@@ -232,7 +237,11 @@ CREATE INDEX IF NOT EXISTS handoffs_to_agent_idx ON handoffs (to_agent_session_i
         let v = view_for_project("projX", &["s2".into(), "s9".into()]);
 
         assert_eq!(
-            v.presence.iter().find(|p| p.session_id == "s2").unwrap().status,
+            v.presence
+                .iter()
+                .find(|p| p.session_id == "s2")
+                .unwrap()
+                .status,
             "active"
         );
         assert_eq!(v.handoffs.len(), 1);
