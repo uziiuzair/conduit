@@ -3,6 +3,23 @@
 All notable changes to Conduit are documented here. This project uses
 [semantic versioning](https://semver.org/).
 
+## 0.19.0 — 2026-08-10
+
+- **Added — Sessions keep running after you quit.** Each session now runs inside tmux, so
+  agents keep working when Conduit is closed and the next launch reattaches to the live
+  session instead of replaying the conversation. Scrollback and anything mid-run survive
+  too, including for agents that have no resume of their own. On by default where tmux is
+  installed; Settings → General has the toggle, and the quit prompt now says the agent will
+  keep running rather than that it will be stopped.
+- **Added — Canvas view.** A third way to look at a project, next to the terminals and the
+  board: every session as a card on a pan/zoom plane you can arrange spatially. Drag cards
+  where you want them, zoom with pinch or ⌘-scroll, Fit to bring everything back into view,
+  and double-click a card to open that session. Positions are remembered per project.
+- **Fixed — Sessions no longer go silent after a restart.** Status badges, the To-dos panel,
+  and usage could stop updating for a session if Conduit restarted onto a different port.
+  Hook events now resolve the port when they fire rather than when the session started, so a
+  session recovers on its own.
+
 ## 0.18.0 — 2026-07-24
 
 - **Added — Bundled formatter fallback.** Format Document now works even when a project has
