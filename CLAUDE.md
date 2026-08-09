@@ -43,9 +43,21 @@ This writes to `…/ConduitTauri-dev/state.json`, so dev and the installed app c
 
 - **Rust** has `#[cfg(test)]` unit tests. Add tests for any new pure logic (parsers,
   helpers) and run `cargo test`. Prefer testing pure functions over wiring.
-- **The frontend has no test runner.** Verify UI changes with `pnpm exec tsc --noEmit` /
-  `pnpm build` **and by launching the app** — never claim a UI change "works" from a
-  typecheck alone.
+- **The frontend has a vitest suite** (`pnpm test`, `vitest.config.ts`, node env).
+  Convention is **colocated**: `src/foo.ts` is tested by `src/foo.test.ts`. Add tests for
+  new pure logic here the same way you would in Rust.
+- **`.github/workflows/ci.yml` runs all of it** on every PR and push to `main` —
+  typecheck + `pnpm test` + `pnpm build` on one job, `cargo fmt --check` + `cargo clippy
+  -D warnings` + `cargo test` on another. Clippy is strict; fix the lint rather than
+  weakening the gate.
+- **Component tests are deliberately absent.** Testing `Terminal.tsx` needs a mounted
+  xterm, a PTY, and the Tauri bridge, and a shallow render would assert nothing worth
+  maintaining. Verify UI changes with `pnpm exec tsc --noEmit` / `pnpm build` **and by
+  launching the app** — never claim a UI change "works" from a typecheck alone.
+- **`src/store.seam.test.ts` guards the session-directory seam** — it fails if anything
+  outside the sanctioned consumers references `workingDirOf`. If you add a consumer that
+  genuinely needs intent rather than reality, add it to that test's allowlist with a
+  reason.
 
 ## Bumping the version
 

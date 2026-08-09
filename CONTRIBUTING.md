@@ -19,10 +19,21 @@ Run the same checks CI/build would:
 
 ```bash
 pnpm exec tsc --noEmit          # type-check the frontend
+pnpm test                       # vitest suite
 cargo fmt --manifest-path src-tauri/Cargo.toml      # format Rust
-cargo clippy --manifest-path src-tauri/Cargo.toml   # lint Rust
+cargo clippy --manifest-path src-tauri/Cargo.toml -- -D warnings   # lint Rust
+cargo test --manifest-path src-tauri/Cargo.toml     # Rust unit tests
 pnpm tauri build --bundles app  # ensure it builds end to end
 ```
+
+Everything above except the final bundle is also enforced by
+[`.github/workflows/ci.yml`](.github/workflows/ci.yml) on every pull request, so a red
+check tells you which half broke without opening the log.
+
+**Where tests go.** Frontend tests are colocated — `src/foo.ts` is tested by
+`src/foo.test.ts`. Rust tests live in a `#[cfg(test)]` module at the bottom of the file
+they cover. Prefer testing pure functions over wiring in both languages; there are no
+component tests on purpose (see CLAUDE.md's "Testing reality").
 
 Please keep changes scoped and match the surrounding style.
 

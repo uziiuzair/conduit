@@ -1,0 +1,79 @@
+name: CI
+
+# The gate CONTRIBUTING.md's pre-PR checklist describes. Until this existed, every
+# check in that list was enforced by discipline alone.
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+# A new push to the same branch supersedes the run in flight — a PR that gets three
+# commits in a minute should burn one runner, not three.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # Split from `rust` on purpose: the two fail for unrelated reasons, and a red check
+  # should say which half broke without anyone opening the log.
+  frontend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Version comes from package.json "packageManager" — do not also set `version:`
+      # here, action-setup errors on two sources (same note as release.yml).
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Type check
+        run: pnpm exec tsc --noEmit
+
+      - name: Tests
+        run: pnpm test
+
+      # Catches what a typecheck cannot: a bad import path, a Vite plugin
+      # misconfiguration, a Monaco chunk that fails to resolve.
+      - name: Build
+        run: pnpm build
+
+  rust:
+    # macOS, not ubuntu: Conduit's primary target is macOS and several modules are
+    # `#[cfg(not(windows))]` or reach for macOS-only tooling (the Keychain read in
+    # the usage path). A Linux run would compile a different program than the one
+    # that ships. The 10x runner multiplier is acceptable for a job this short —
+    # release.yml is the one where it would matter.
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust (stable)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Format
+        run: cargo fmt --manifest-path src-tauri/Cargo.toml --check
+
+      # -D warnings from the start: the tree is clean today (verified), and a
+      # warning-tolerant lint job stops being read within a month.
+      - name: Clippy
+        run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
+
+      - name: Tests
+        run: cargo test --manifest-path src-tauri/Cargo.toml
