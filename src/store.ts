@@ -261,6 +261,18 @@ export interface TodoItem {
   activeForm?: string;
 }
 
+/** One session's context-window fill (mirrors Rust `context_window::ContextUsage`). */
+export interface ContextUsage {
+  /** Input tokens in play for the next turn: fresh input plus everything cached. */
+  used: number;
+  /** The model's context window — the denominator. */
+  window: number;
+  /** `used / window`, already clamped to 0..1 by the backend. */
+  fraction: number;
+  /** The model the latest usage line named, when it named one. */
+  model: string | null;
+}
+
 export interface LiveState {
   status: SessionStatus;
   todos: TodoItem[];
@@ -869,6 +881,13 @@ interface AppState {
    *  disabled rather than flashing a false "unavailable". */
   tmuxAvailable: boolean | null;
   probeTmux: () => Promise<void>;
+  /** Per-session context-window fill, read from each session's Claude transcript. Absent
+   *  = nothing to draw (no transcript, no assistant turn yet, or a non-Claude agent).
+   *
+   *  Deliberately NOT persisted: the source is a file on disk that outlives the app, so a
+   *  fresh read at startup is both cheaper and more truthful than a cached number. */
+  sessionContext: Record<string, ContextUsage>;
+  refreshSessionContext: (sessionId: string) => Promise<void>;
   /** Persisted. When true, the sidebar (and its resizer) is hidden. */
   sidebarCollapsed: boolean;
   toggleSidebar: () => void;
@@ -1218,6 +1237,7 @@ export const useStore = create<AppState>((set, get) => {
     restoreSessionsOnOpen: readRestoreSessionsOnOpen(),
     persistSessions: readPersistSessions(),
     tmuxAvailable: null,
+    sessionContext: {},
     sidebarCollapsed: readSidebarCollapsed(),
     rightCollapsed: readRightCollapsed(),
     showSettings: false,
@@ -1740,6 +1760,8 @@ export const useStore = create<AppState>((set, get) => {
       set((s) => {
         const live = { ...s.live };
         delete live[sessionId];
+        const sessionContext = { ...s.sessionContext };
+        delete sessionContext[sessionId];
         const projects = s.projects.map((p) =>
           p.id === projectId
             ? { ...p, sessions: p.sessions.filter((x) => x.id !== sessionId) }
@@ -1761,7 +1783,7 @@ export const useStore = create<AppState>((set, get) => {
             delete maximized[projectId];
           }
         }
-        return { projects, live, layouts, maximized };
+        return { projects, live, sessionContext, layouts, maximized };
       });
     },
 
@@ -2331,6 +2353,25 @@ export const useStore = create<AppState>((set, get) => {
       // localStorage. Fire-and-forget: a failure here leaves the backend on its previous
       // setting, which is a stale preference and not a broken session.
       void invoke("set_session_persistence", { enabled: v }).catch(() => {});
+    },
+
+    refreshSessionContext: async (sessionId) => {
+      let usage: ContextUsage | null = null;
+      try {
+        usage = await invoke<ContextUsage | null>("session_context", { sessionId });
+      } catch {
+        usage = null;
+      }
+      set((s) => {
+        const cur = s.sessionContext[sessionId];
+        if (!usage) {
+          // Keep the last known fill rather than blanking the meter: a transcript that
+          // momentarily fails to read has not emptied the context window.
+          return {};
+        }
+        if (cur && cur.used === usage.used && cur.window === usage.window) return {};
+        return { sessionContext: { ...s.sessionContext, [sessionId]: usage } };
+      });
     },
 
     probeTmux: async () => {

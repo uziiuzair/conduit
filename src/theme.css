@@ -1309,6 +1309,7 @@ button {
 }
 
 .tab {
+  position: relative;
   display: flex;
   align-items: center;
   gap: 6px;
@@ -1318,6 +1319,43 @@ button {
   font-size: 12px;
   color: var(--text-mid);
   border-bottom: 2px solid transparent;
+}
+
+/* Context-window fill for a session tab: a hairline above the tab's own bottom border, so
+   it never competes with the active-tab accent underline. Only drawn when there is a real
+   reading — see ContextMeter.tsx. */
+.tab-ctx {
+  position: absolute;
+  left: 10px;
+  right: 10px;
+  bottom: 1px;
+  height: 2px;
+  border-radius: 1px;
+  background: var(--border);
+  overflow: hidden;
+}
+
+.tab-ctx-fill {
+  display: block;
+  height: 100%;
+  transform-origin: left center;
+  background: var(--text-dim);
+  transition: transform 0.3s ease, background-color 0.3s ease;
+}
+
+/* Quiet until the window is genuinely tight; the thresholds live in contextMeter.ts. */
+.tab-ctx.warn .tab-ctx-fill {
+  background: var(--amber);
+}
+
+.tab-ctx.danger .tab-ctx-fill {
+  background: var(--red);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .tab-ctx-fill {
+    transition: none;
+  }
 }
 
 .tab:hover {

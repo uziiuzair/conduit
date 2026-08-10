@@ -16,6 +16,7 @@ import { TerminalView } from "./Terminal";
 import { CodeEditorPane } from "./CodeEditorPane";
 import { BoardView } from "./BoardView";
 import { CanvasControls, CanvasUnderlay } from "./CanvasView";
+import { ContextMeter } from "./ContextMeter";
 import { FOOTER_H, HEADER_H, LIVE_ZOOM_MIN, nodeH, nodeW } from "../canvas";
 import { useProjectCanvas } from "../hooks/useProjectCanvas";
 import { TerminalIcon, FileIcon, CodeIcon, CloseIcon } from "./Icons";
@@ -468,6 +469,7 @@ function GroupTabStrip({
   const dirty = useStore((s) => s.dirty);
   const moveTab = useStore((s) => s.moveTab);
   const sessionDirs = useStore((s) => s.sessionDirs);
+  const sessionContext = useStore((s) => s.sessionContext);
 
   // Insertion caret for tab reorder / move-into-strip: index in [0, tabs.length].
   const [caretIndex, setCaretIndex] = useState<number | null>(null);
@@ -562,6 +564,7 @@ function GroupTabStrip({
             >
               <CloseIcon size={10} />
             </button>
+            {t.kind === "session" && <ContextMeter usage={sessionContext[t.ref]} />}
           </div>
         </Fragment>
       ))}

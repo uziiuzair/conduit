@@ -12,6 +12,7 @@ mod broker;
 mod claude_status;
 mod claude_usage;
 mod clipboard;
+mod context_window;
 mod continuity;
 mod continuity_read;
 mod fleet;
@@ -472,6 +473,28 @@ fn set_session_persistence(enabled: bool, pty: State<Arc<PtyManager>>) {
     {
         let _ = (enabled, pty);
     }
+}
+
+/// One session's context-window fill, read from its Claude transcript.
+///
+/// `None` covers every uninteresting case identically -- no transcript yet, a session that
+/// has not had an assistant turn, a non-Claude agent, an unreadable file -- because the
+/// caller's response to all of them is the same: draw no meter.
+///
+/// The transcript store is resolved per session rather than from the app's own environment,
+/// since a session assigned to a non-default account writes under that account's
+/// `CLAUDE_CONFIG_DIR` and its transcript is simply not in the default tree.
+#[tauri::command]
+fn session_context(
+    session_id: String,
+    store: State<Arc<store::Store>>,
+) -> Option<context_window::ContextUsage> {
+    let projects = match store.session_account_config_dir(&session_id) {
+        Some(cfg) if !cfg.is_empty() => std::path::PathBuf::from(cfg).join("projects"),
+        _ => pty::claude_projects_dir()?,
+    };
+    let path = pty::transcript_path(&session_id, &projects)?;
+    context_window::for_transcript(&path)
 }
 
 /// Whether any session with a LIVE PTY is currently marked running. Cross-checks the fleet
@@ -1598,6 +1621,7 @@ pub fn run() {
             pty_kill,
             pty_is_running,
             tmux_available,
+            session_context,
             set_session_persistence,
             any_agent_running,
             load_projects,
