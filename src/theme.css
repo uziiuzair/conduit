@@ -362,6 +362,25 @@ button {
   box-shadow: inset 0 -2px 0 0 var(--accent);
 }
 
+/* Collapse track for one sidebar row.
+   `grid-template-rows: 1fr → 0fr` is the one height animation the browser can interpolate
+   without re-measuring the row's content every frame, which animating max-height does. The
+   child must be able to shrink (min-height: 0) and clip (overflow: hidden) for the track
+   to actually govern its height. */
+.session-row-slot {
+  display: grid;
+  grid-template-rows: 1fr;
+  transition: grid-template-rows 0.2s ease;
+}
+
+.session-row-slot.collapsed {
+  grid-template-rows: 0fr;
+}
+
+.session-row-slot > * {
+  min-height: 0;
+}
+
 .session-row {
   display: flex;
   align-items: center;
@@ -371,9 +390,7 @@ button {
   font-size: 12px;
   color: var(--text-bright);
   overflow: hidden;
-  max-height: 44px;
-  transition: max-height 0.2s ease, opacity 0.16s ease, padding 0.2s ease,
-    margin 0.2s ease, transform 0.2s ease, background 0.12s ease;
+  transition: opacity 0.16s ease, transform 0.2s ease, background 0.12s ease;
 }
 
 .session-row:hover {
@@ -403,25 +420,20 @@ button {
   display: flex;
   align-items: center;
   gap: 7px;
+  width: 100%;
   padding: 4px 7px;
   font-size: 12px;
   color: var(--accent);
   overflow: hidden;
-  max-height: 44px;
-  transition: max-height 0.2s ease, opacity 0.16s ease, padding 0.2s ease,
-    margin 0.2s ease, transform 0.2s ease;
+  transition: opacity 0.16s ease, transform 0.2s ease;
 }
 
-/* Folded away while the project is collapsed — clipped to zero height + faded so
-   the expand/collapse reads as one smooth motion (rows stay mounted so both
-   directions animate). Active/selected rows never get this class. */
+/* Folded away while the project is collapsed. The height belongs to `.session-row-slot`;
+   this is only the fade and the small lift, so the expand/collapse still reads as one
+   motion (rows stay mounted so both directions animate). Active/selected rows never get
+   this class. */
 .session-row.collapsed-hidden,
 .new-session.collapsed-hidden {
-  max-height: 0;
-  padding-top: 0;
-  padding-bottom: 0;
-  margin-top: 0;
-  margin-bottom: 0;
   opacity: 0;
   transform: translateY(-3px);
   pointer-events: none;
@@ -2534,18 +2546,9 @@ button {
 .agy-group-label {
   font-size: 10px; opacity: 0.75; margin: 4px 0 1px;
 }
-.agy-meter { margin: 4px 0; }
-.agy-meter-head { display: flex; justify-content: space-between; opacity: 0.9; }
-.agy-meter-bar {
-  height: 6px; border-radius: 3px;
-  background: color-mix(in srgb, var(--agy) 14%, transparent);
-  margin-top: 3px; overflow: hidden;
-}
-.agy-meter-fill { height: 100%; background: var(--agy); transition: width 0.3s ease; }
-.agy-meter-fill.warn { background: var(--amber); }
-.agy-meter-fill.hot { background: var(--red); }
-.agy-meter-fill.disabled { background: var(--text-mid); opacity: 0.5; }
-.agy-meter-fill.ctx { background: color-mix(in srgb, var(--agy) 70%, var(--text-mid)); }
+/* The `.agy-meter*` family lived here until agy's meter was folded into the unified
+   UsagePanel; nothing has rendered those classes since. Deleted rather than left as dead
+   weight — one of them was also the last `transition: width` in this file's meters. */
 .agy-context { margin-top: 6px; opacity: 0.9; }
 .agy-usage-hint { color: var(--text-mid); font-size: 11px; margin-top: 2px; }
 .agy-enable-btn {
@@ -2645,10 +2648,14 @@ button {
 .usage-row.antigravity .usage-meter-fill {
   --meter-base: var(--agy);
 }
+/* Scaled, not width-sized: the fill animates on the compositor instead of relaying out the
+   row on every tick. `width: 100%` plus a left origin means scaleX(f) IS the fraction. */
 .usage-meter-fill {
+  width: 100%;
   height: 100%;
+  transform-origin: left center;
   background: var(--meter-base, var(--accent));
-  transition: width 0.3s ease, background 0.3s ease;
+  transition: transform 0.3s ease, background 0.3s ease;
 }
 .usage-meter-fill.disabled {
   background: var(--text-mid) !important;
@@ -4132,9 +4139,11 @@ button {
   overflow: hidden;
 }
 .update-notice-progress-fill {
+  width: 100%;
   height: 100%;
+  transform-origin: left center;
   background: var(--accent);
-  transition: width 0.15s ease;
+  transition: transform 0.15s ease;
 }
 
 .about-updates {

@@ -277,13 +277,12 @@ function ProjectBlock({ project }: { project: Project }) {
         {project.sessions.map((s) => (
           <SessionRow key={s.id} project={project} session={s} collapsed={collapsed} />
         ))}
-        <button
-          className={`new-session ${collapsed ? "collapsed-hidden" : ""}`}
-          onClick={() => setShowNew(true)}
-        >
-          <PlusIcon size={12} />
-          <span>New session</span>
-        </button>
+        <div className={`session-row-slot ${collapsed ? "collapsed" : ""}`}>
+          <button className={`new-session ${collapsed ? "collapsed-hidden" : ""}`} onClick={() => setShowNew(true)}>
+            <PlusIcon size={12} />
+            <span>New session</span>
+          </button>
+        </div>
       </div>
       {showNew && (
         <NewSessionDialog
@@ -338,6 +337,11 @@ function SessionRow({
   const hidden = collapsed && !selected && !hasAccessory;
 
   return (
+    // The collapse animates the WRAPPER's grid track rather than the row's max-height, so
+    // the browser interpolates one grid value instead of relaying the row out on every
+    // frame. The row keeps the opacity and the small lift, which are already compositor
+    // work. See `.session-row-slot`.
+    <div className={`session-row-slot ${hidden ? "collapsed" : ""}`}>
     <div
       className={`session-row ${selected ? "selected" : ""} ${hidden ? "collapsed-hidden" : ""} ${
         dragSelf ? "dragging" : ""
@@ -429,6 +433,7 @@ function SessionRow({
       )}
       {!editing && <TrustChip session={session} />}
       <StatusAccessory status={status} activity={activity} compacting={compacting} />
+    </div>
     </div>
   );
 }

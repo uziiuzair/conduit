@@ -60,7 +60,10 @@ export function UpdateNotice() {
       </div>
       {downloading ? (
         <div className="update-notice-progress" aria-label={`Downloading ${pct}%`}>
-          <div className="update-notice-progress-fill" style={{ width: `${pct}%` }} />
+          <div
+            className="update-notice-progress-fill"
+            style={{ transform: `scaleX(${pct / 100})` }}
+          />
         </div>
       ) : (
         <div className="update-notice-actions">

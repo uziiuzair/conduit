@@ -187,7 +187,8 @@ function Meter({ w, threshold }: { w: UWindow; threshold: number }) {
         <div
           className={`usage-meter-fill ${fillClass}`}
           style={{
-            width: `${fillPct}%`,
+            // Scaled rather than width-sized — see .usage-meter-fill.
+            transform: `scaleX(${fillPct / 100})`,
             background: `color-mix(in srgb, var(--red) ${redWeight}%, var(--meter-base))`,
           }}
         />
