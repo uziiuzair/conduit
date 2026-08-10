@@ -42,7 +42,7 @@ pub fn socket() -> String {
 }
 
 /// Prefix identifying a Conduit-owned tmux session. Also what the orphan sweep matches on.
-const PREFIX: &str = "cdt-";
+pub const PREFIX: &str = "cdt-";
 
 /// Per-session tmux name. This is the PERSISTENCE KEY -- changing it after release
 /// orphans every existing session, so it must stay stable.

@@ -31,6 +31,8 @@ mod plugins;
 mod pty;
 mod scrollback;
 mod search;
+#[cfg_attr(windows, allow(dead_code))]
+mod session_budget;
 mod status_rules;
 mod store;
 mod tasks;
@@ -1597,6 +1599,25 @@ pub fn run() {
                         .flat_map(|s| [format!("{}::term", s.id), s.id])
                         .collect();
                     crate::tmux::sweep_orphans(tmux, &live);
+
+                    // Session budget. The orphan sweep above only removes sessions whose
+                    // Conduit session was deleted; this retires ones that still exist but
+                    // have been abandoned long enough to be costing the host memory it
+                    // needs. Nothing is reaped on a healthy machine -- see session_budget.
+                    let cfg = crate::session_budget::Config::from_env();
+                    loop {
+                        let now = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .map(|d| d.as_secs() as i64)
+                            .unwrap_or(0);
+                        let reaped = crate::session_budget::sweep(tmux, &cfg, now);
+                        if !reaped.is_empty()
+                            && std::env::var("CONDUIT_HOOK_LOG").as_deref() == Ok("1")
+                        {
+                            eprintln!("[reap] retired {} idle session(s)", reaped.len());
+                        }
+                        std::thread::sleep(std::time::Duration::from_secs(300));
+                    }
                 });
             }
 
