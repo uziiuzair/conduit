@@ -15,7 +15,7 @@ import {
 import { TerminalView } from "./Terminal";
 import { CodeEditorPane } from "./CodeEditorPane";
 import { BoardView } from "./BoardView";
-import { CanvasToolbar, CanvasUnderlay } from "./CanvasView";
+import { CanvasControls, CanvasUnderlay } from "./CanvasView";
 import { FOOTER_H, HEADER_H, LIVE_ZOOM_MIN, nodeH, nodeW } from "../canvas";
 import { useProjectCanvas } from "../hooks/useProjectCanvas";
 import { TerminalIcon, FileIcon, CodeIcon, CloseIcon } from "./Icons";
@@ -234,6 +234,25 @@ export function WorkspaceCenter({
   return (
     <div className="center">
       <div className="workspace" ref={wsRef}>
+        {layout && activeProject && canvasMode && (
+          <div className="group-chrome" style={{ left: 0, width: "100%" }}>
+            <GroupTabStrip
+              projectId={projectId!}
+              project={activeProject}
+              group={activeGroup(layout) ?? layout.groups[0]}
+              home={home}
+              isActiveGroup
+              soloGroup
+              dragging={dragging}
+              dragRef={dragData}
+              onTabDragStart={onTabDragStart}
+              onTabDragEnd={onTabDragEnd}
+              onTabContext={onTabContext}
+              canvasViewportRef={canvasViewportRef}
+            />
+          </div>
+        )}
+
         {layout &&
           activeProject &&
           !canvasMode &&
@@ -397,11 +416,7 @@ export function WorkspaceCenter({
           </div>
         )}
 
-        {/* Sibling of the underlay, not a child: the underlay sits BELOW the terminal
-            stack, and a child cannot escape its parent's stacking context. */}
-        {projectId && canvasMode && (
-          <CanvasToolbar projectId={projectId} viewportRef={canvasViewportRef} />
-        )}
+
 
         {tabMenu && activeProject && projectId && (
           <TabContextMenu
@@ -428,6 +443,7 @@ function GroupTabStrip({
   onTabDragStart,
   onTabDragEnd,
   onTabContext,
+  canvasViewportRef,
 }: {
   projectId: string;
   project: Project;
@@ -440,6 +456,8 @@ function GroupTabStrip({
   onTabDragStart: (fromGroupId: string, tab: WsTab) => void;
   onTabDragEnd: () => void;
   onTabContext: (e: React.MouseEvent, groupId: string, tab: WsTab) => void;
+  /** Present only for the canvas-mode strip, which hosts the canvas controls. */
+  canvasViewportRef?: React.RefObject<HTMLDivElement | null>;
 }) {
   const setActiveTab = useStore((s) => s.setActiveTab);
   const setActiveGroup = useStore((s) => s.setActiveGroup);
@@ -583,6 +601,11 @@ function GroupTabStrip({
           <span className="board-tab-dot" />
           <span>Canvas</span>
         </button>
+      )}
+      {/* Canvas controls live in the persistent header rather than a floating bar of
+          their own: one header, and nothing overlapping the top row of nodes. */}
+      {centerMode === "canvas" && canvasViewportRef && (
+        <CanvasControls projectId={projectId} viewportRef={canvasViewportRef} />
       )}
       {wd &&
         (soloGroup ? (

@@ -725,36 +725,25 @@ button {
 .term-stack.canvas-mode .term-host.visible {
   pointer-events: auto;
 }
-.canvas-toolbar {
-  position: absolute; top: var(--tabstrip-h); left: 0; right: 0;
-  z-index: 5;
-  display: flex; align-items: center; gap: 10px;
-  height: 38px; padding: 0 14px;
-  border-bottom: 1px solid var(--border);
-  background: color-mix(in srgb, var(--sidebar-bg) 88%, transparent);
-  backdrop-filter: blur(6px);
-}
-.canvas-title { font-size: 12px; font-weight: 600; color: var(--text-hi); }
-.canvas-count { font-size: 11px; color: var(--text-dim); }
-.canvas-toolbar-spacer { flex: 1; }
+/* Canvas controls, inline in the persistent tab-strip header. */
+.canvas-controls { display: flex; align-items: center; gap: 6px; flex: none; padding-right: 6px; }
 .canvas-lod {
-  font-size: 10px; letter-spacing: 0.04em; text-transform: uppercase;
-  color: var(--text-dim); padding: 2px 7px; border-radius: 999px; background: var(--hover);
+  font-size: 9px; letter-spacing: 0.05em; text-transform: uppercase;
+  color: var(--text-dim); padding: 2px 6px; border-radius: 999px; background: var(--hover);
 }
 .canvas-btn {
-  font-size: 11px; padding: 3px 9px; border-radius: 5px;
+  font-size: 11px; padding: 2px 8px; border-radius: 5px;
   border: 1px solid var(--border); background: transparent; color: var(--text-mid);
-  cursor: pointer; font-variant-numeric: tabular-nums;
+  cursor: pointer; font-variant-numeric: tabular-nums; white-space: nowrap;
 }
 .canvas-btn:hover { background: var(--hover); color: var(--text-hi); }
-/* The exit. Given the only emphasis in the toolbar because it is the one control a
-   first-time user goes looking for and cannot otherwise find. */
+/* The exit. The only emphasized control here because it is the one a first-time user
+   goes looking for. */
 .canvas-btn.primary {
   border-color: color-mix(in srgb, var(--accent) 50%, var(--border));
   color: var(--text-hi);
 }
 .canvas-btn.primary:hover { background: color-mix(in srgb, var(--accent) 16%, transparent); }
-.canvas-hint { font-size: 10px; color: var(--text-dim); }
 
 /* The frame. Its BODY is deliberately empty while live — that hole is where the real
    terminal shows through from the layer above. */

@@ -230,11 +230,11 @@ export function CanvasUnderlay({
 }
 
 /**
- * The canvas toolbar. A SIBLING of the underlay rather than a child, because the underlay
- * sits below the terminal stack in the stacking order and a child cannot escape its
- * parent's stacking context — the toolbar has to be able to paint above the terminals.
+ * Canvas controls, mounted INSIDE the persistent tab-strip header rather than in a bar of
+ * their own. A floating toolbar meant two stacked headers and a strip of chrome sitting on
+ * top of the first row of nodes; the header was already always-visible, so it hosts these.
  */
-export function CanvasToolbar({
+export function CanvasControls({
   projectId,
   viewportRef,
 }: {
@@ -243,6 +243,7 @@ export function CanvasToolbar({
 }) {
   const { canvas, setCanvas } = useProjectCanvas(projectId);
   const setCenterMode = useStore((s) => s.setCenterMode);
+  const isLive = canvas.zoom >= LIVE_ZOOM_MIN;
   const exitCanvas = useCallback(
     () => setCenterMode(projectId, "terminals"),
     [projectId, setCenterMode],
@@ -260,27 +261,27 @@ export function CanvasToolbar({
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, [exitCanvas]);
-  const live = canvas.zoom >= LIVE_ZOOM_MIN;
-  const fitToContent = () => {
-    const el = viewportRef.current;
-    if (el) setCanvas(fit(canvas, el.clientWidth, el.clientHeight));
-  };
+
   return (
-    <div className="canvas-toolbar">
-      <span className="canvas-title">Canvas</span>
-      <span className="canvas-count">
-        {canvas.nodes.length} session{canvas.nodes.length === 1 ? "" : "s"}
+    <span className="canvas-controls">
+      <span
+        className="canvas-lod"
+        title={
+          isLive
+            ? "Terminals are live at this zoom"
+            : `Zoom past ${Math.round(LIVE_ZOOM_MIN * 100)}% to show live terminals`
+        }
+      >
+        {isLive ? "live" : "overview"}
       </span>
-      <span className="canvas-toolbar-spacer" />
-      <span className="canvas-hint">double-click a title to open it in panes</span>
-      <span className="canvas-lod" title={
-        live
-          ? "Terminals are live at this zoom"
-          : `Zoom past ${Math.round(LIVE_ZOOM_MIN * 100)}% to show live terminals`
-      }>
-        {live ? "live" : "overview"}
-      </span>
-      <button className="canvas-btn" onClick={fitToContent} title="Fit all sessions in view">
+      <button
+        className="canvas-btn"
+        onClick={() => {
+          const el = viewportRef.current;
+          if (el) setCanvas(fit(canvas, el.clientWidth, el.clientHeight));
+        }}
+        title="Fit all sessions in view"
+      >
         Fit
       </button>
       <button
@@ -290,13 +291,10 @@ export function CanvasToolbar({
       >
         {Math.round(canvas.zoom * 100)}%
       </button>
-      {/* The way out. The pane header's Canvas toggle is hidden in this mode, so without
-          this the only exits are a node double-click or two presses of the board
-          shortcut — neither of which is discoverable. */}
       <button className="canvas-btn primary" onClick={exitCanvas} title="Back to panes (Esc)">
-        Exit canvas
+        Close canvas
       </button>
-    </div>
+    </span>
   );
 }
 
