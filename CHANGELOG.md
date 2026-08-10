@@ -3,6 +3,41 @@
 All notable changes to Conduit are documented here. This project uses
 [semantic versioning](https://semver.org/).
 
+## 0.20.0 — 2026-08-10
+
+- **Added — Command palette (⌘K).** Reach any action by typing its name: switch to a session
+  (searchable by its branch), jump to another project, start a session with or without a
+  worktree, toggle the board, canvas, sidebar, right panel or maximized pane, zoom, and open
+  any Settings page directly. Matching is loose, so "tgcv" finds Toggle Canvas.
+- **Added — Search past conversations.** Type three or more characters in the palette and it
+  also searches every transcript Conduit can reach, showing the surrounding sentence. Enter
+  jumps to that session; a conversation whose session no longer exists says so instead.
+- **Added — Context-window meter.** Every session tab now shows how full its context window
+  is, amber past 70% and red past 90%, with the token counts and the model in its tooltip.
+- **Added — Agents panel.** When a session fans out into subagents you can finally see them:
+  the right panel's new Agents tab shows each one's activity — what it said, the tools it
+  ran, and a one-line summary of each result.
+- **Added — Terminals survive a reboot, not just a quit.** Recent output is kept on disk and
+  replayed when a session comes back with no live tmux to reattach to, so a terminal is no
+  longer blank after a restart of the machine.
+- **Added — Abandoned sessions are retired.** Sessions kept running by persistence used to
+  accumulate indefinitely. They are now retired when the machine is genuinely short of
+  memory (or the count has run away), never merely because they are old, and never while
+  attached or recently used. A retired session reopens exactly like one that survived a
+  reboot.
+- **Fixed — Finished sessions no longer sit on "needs input".** Claude's idle notification
+  fires after every completed turn, and Conduit was treating it as a request for attention.
+  Notifications are now told apart, so only the ones that genuinely want you raise a badge.
+- **Fixed — A session interrupted with Esc no longer shows as running forever.** The same
+  idle signal now retires a turn that ended without a stop event, and a 20-minute watchdog
+  catches the rest (a killed CLI, a slept machine). A Conductor that died mid-turn could
+  previously never be woken again.
+- **Fixed — A finished turn stays finished.** A late tool event arriving behind the end of a
+  turn no longer flips the session back to running with nothing left to clear it.
+- **Fixed — tmux is no longer missing in silence.** When session persistence is on but tmux
+  isn't installed, Conduit now says so and offers the right install command for the machine
+  instead of failing quietly.
+
 ## 0.19.0 — 2026-08-10
 
 - **Added — Sessions keep running after you quit.** Each session now runs inside tmux, so

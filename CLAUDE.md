@@ -200,6 +200,41 @@ its status-line `agent_state` (`agy_usage::agent_state_is_active` -> `FleetState
 since agy fires no Claude-style lifecycle hooks. Design:
 `docs/superpowers/specs/2026-07-12-session-restore-and-safe-shutdown-design.md`.
 
+## Where the session status rules live
+
+The per-session status (`idle`/`running`/`needsInput`/`done`) is derived TWICE from the same
+hook stream — `fleet.rs`'s `apply_event` (what `fleet_list` and the Conductor read) and the
+`switch` in `App.tsx` (what the sidebar dot renders). The time-aware rules that govern both
+live in **one module per side and must not fork**: `src-tauri/src/status_rules.rs` and
+`src/statusRules.ts`. They own three things — the 20-minute stale-`running` watchdog (swept by
+`FleetState::sweep_stale_working`, broadcast as the `session-stale` event so the frontend map
+agrees), the 3-second done-holdoff against out-of-order tool hooks, and the classification of
+`notification` by `notification_type` (`idle_prompt` only ever retires a stuck turn; unknown
+types are a no-op). Design:
+`docs/superpowers/specs/2026-08-10-nodeterm-lessons-round-2-design.md`.
+
+## Where the transcript readers live
+
+Four separate consumers read Claude's transcript store, and all of them resolve it per
+session (`store.session_account_config_dir` → `<cfg>/projects`, else `pty::claude_projects_dir`)
+because a session on a non-default account writes elsewhere: `transcript.rs` (mobile chat
+items), `context_window.rs` (the per-tab context meter — scans BACKWARDS with a substring
+pre-filter and reads only the trailing 1 MB; the window is resolved by model FAMILY because
+Claude Code runs opus/sonnet at 1M while the id stays bare), `subagents.rs` (the right panel's
+Agents tab), and `transcript_index.rs` (palette search over past conversations). All are
+read-only and degrade to "show less" rather than erroring.
+
+## Where session persistence's safety net lives
+
+`tmux.rs` wraps spawns; two modules keep that honest. `scrollback.rs` persists 256 KB of each
+terminal's recent output (cut on a UTF-8 boundary) and replays it into the FIRST frame of a
+COLD spawn only — warmth is decided by `tmux::has_session` BEFORE the wrap, since
+`new-session -A` erases the difference afterwards. `session_budget.rs` retires abandoned
+sessions under memory pressure. Its safety contract is load-bearing: a reap kills the tmux
+session and **nothing else** — never the snapshot, never the session record — so a reaped
+session is indistinguishable from one that lost its tmux server to a reboot. `pty::kill` (a
+destroy) is the only place a snapshot is deleted.
+
 ## Where the fleet/Conductor orchestration lives
 
 A per-project **Conductor** (a Claude session flagged `role: Conductor`) observes and
