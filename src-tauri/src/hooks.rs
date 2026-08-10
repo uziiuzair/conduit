@@ -371,19 +371,39 @@ fn handle_approve(
         "approval_request".to_string(),
         json!({ "request_id": id, "tool": tool, "input": input }),
     );
-    let decision = rx
-        .recv_timeout(Duration::from_secs(300))
-        .unwrap_or(Decision::Deny {
-            reason: "approval timed out".into(),
-        });
-    broker.resolve(&id, decision.clone()); // ensure cleared (no-op if already gone)
+    let decision = rx.recv_timeout(APPROVAL_WAIT).ok();
+    if let Some(d) = &decision {
+        broker.resolve(&id, d.clone()); // ensure cleared (no-op if already gone)
+    } else {
+        broker.forget(&id);
+    }
     let _ = request.respond(Response::from_string(
-        approve_response(&decision).to_string(),
+        approve_response(decision.as_ref()).to_string(),
     ));
 }
 
+/// How long the hook holds its request open waiting for a human.
+///
+/// Must stay comfortably inside Claude's own hook timeout (60s by default) -- past that
+/// Claude kills the hook and the answer arrives to nobody, so a longer wait is not a more
+/// patient feature, it is a broken one. The previous 300s could never have delivered a
+/// decision at all.
+const APPROVAL_WAIT: Duration = Duration::from_secs(45);
+
 /// The `PreToolUse` hook output Claude reads from the hook's stdout.
-fn approve_response(decision: &Decision) -> Value {
+///
+/// `None` means nobody answered in time, and the response is deliberately EMPTY: an empty
+/// object carries no `permissionDecision`, so Claude falls through to its own interactive
+/// prompt exactly as if Conduit were not involved.
+///
+/// This is FAIL-OPEN, and the direction matters. The obvious alternative -- deny on timeout
+/// -- looks like the safe default and is the opposite: it aborts a tool call that no human
+/// ever saw, on the grounds that nobody was watching. Silence means "ask the human directly",
+/// not "answer no on their behalf".
+fn approve_response(decision: Option<&Decision>) -> Value {
+    let Some(decision) = decision else {
+        return json!({});
+    };
     let mut out = serde_json::Map::new();
     out.insert("hookEventName".into(), json!("PreToolUse"));
     match decision {
@@ -1060,16 +1080,48 @@ mod tests {
 
     #[test]
     fn approve_response_allow_and_deny_shapes() {
-        let allow = approve_response(&Decision::Allow);
+        let allow = approve_response(Some(&Decision::Allow));
         assert_eq!(allow["hookSpecificOutput"]["hookEventName"], "PreToolUse");
         assert_eq!(allow["hookSpecificOutput"]["permissionDecision"], "allow");
-        let deny = approve_response(&Decision::Deny {
+        let deny = approve_response(Some(&Decision::Deny {
             reason: "nope".into(),
-        });
+        }));
         assert_eq!(deny["hookSpecificOutput"]["permissionDecision"], "deny");
         assert_eq!(
             deny["hookSpecificOutput"]["permissionDecisionReason"],
             "nope"
+        );
+    }
+
+    #[test]
+    fn nobody_answering_falls_through_to_claudes_own_prompt() {
+        // FAIL-OPEN. An empty object carries no permissionDecision, so Claude asks the
+        // human itself. Denying here would abort a tool call no human ever saw, on the
+        // grounds that nobody was watching.
+        let none = approve_response(None);
+        assert_eq!(none, serde_json::json!({}));
+        assert!(none.get("hookSpecificOutput").is_none());
+    }
+
+    #[test]
+    fn the_wait_fits_inside_claudes_own_hook_timeout() {
+        // Claude kills a hook at 60s by default; a longer wait cannot deliver a decision at
+        // all, it just guarantees the hook is killed first. (The previous value was 300s.)
+        assert!(
+            APPROVAL_WAIT < Duration::from_secs(60),
+            "APPROVAL_WAIT must stay under Claude's hook timeout"
+        );
+    }
+
+    #[test]
+    fn a_timed_out_request_is_forgotten_rather_than_left_answerable() {
+        let broker = Broker::default();
+        let (id, _rx) = broker.register("s1".into(), "Bash".into(), serde_json::json!({}));
+        assert_eq!(broker.pending_for("s1").len(), 1);
+        broker.forget(&id);
+        assert!(
+            broker.pending_for("s1").is_empty(),
+            "a hook that gave up waiting must not leave a question on screen"
         );
     }
 

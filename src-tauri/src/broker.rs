@@ -104,6 +104,16 @@ impl Broker {
         }
     }
 
+    /// Drop a pending request without deciding it.
+    ///
+    /// The timeout path: the hook has given up waiting and is about to fall through to
+    /// Claude's own prompt, so the entry must go — otherwise an answer arriving a moment
+    /// later would be silently discarded while still looking, to any UI reading `pending`,
+    /// like a question someone can still answer.
+    pub fn forget(&self, id: &str) {
+        let _ = self.pending.lock().map(|mut p| p.remove(id));
+    }
+
     /// Open requests for a session (so a freshly-attached phone can catch up).
     /// Dormant with the rest of the approval broker -- see `Decision`.
     #[allow(dead_code)]
