@@ -4,7 +4,9 @@ import {
   FOOTER_H,
   HEADER_H,
   LIVE_ZOOM_MIN,
+  NOTE_H,
   NOTE_HEAD_H,
+  NOTE_W,
   addNote,
   fit,
   linkEndpoints,
@@ -22,8 +24,10 @@ import {
   toCanvasPoint,
   zoomAt,
 } from "../canvas";
+import { meterLevel, meterTitle } from "../contextMeter";
 import { useProjectCanvas } from "../hooks/useProjectCanvas";
 import { AgentGlyph } from "./AgentGlyph";
+import { deleteSession } from "./Sidebar";
 
 /**
  * The spatial view of a project: one node per session, each showing that session's REAL
@@ -59,6 +63,9 @@ export function CanvasUnderlay({
   const selectSession = useStore((s) => s.selectSession);
   const setCenterMode = useStore((s) => s.setCenterMode);
   const addSession = useStore((s) => s.addSession);
+  const removeSession = useStore((s) => s.removeSession);
+  const projects = useStore((s) => s.projects);
+  const sessionContext = useStore((s) => s.sessionContext);
   const { canvas, setCanvas } = useProjectCanvas(projectId);
 
   // ref === null means panning the plane; mode distinguishes moving from resizing, since
@@ -82,6 +89,8 @@ export function CanvasUnderlay({
     y: number;
     /** Set when the click landed on a note, which gets its own items. */
     noteId?: string;
+    /** Set when the click landed on a session card, which gets its own items. */
+    nodeRef?: string;
   } | null>(null);
 
   const fitToContent = useCallback(() => {
@@ -177,16 +186,27 @@ export function CanvasUnderlay({
 
   const endDrag = () => setDrag(null);
 
-  /** Right-click anywhere on the plane. `noteId` when the click landed on a note. */
-  const openMenu = (e: React.MouseEvent, noteId?: string) => {
+  /** Right-click on the plane, a note, or a card — `on` says which. */
+  const openMenu = (e: React.MouseEvent, on: { noteId?: string; nodeRef?: string } = {}) => {
     const el = viewportRef.current;
     if (!el) return;
     e.preventDefault();
     e.stopPropagation();
     const rect = el.getBoundingClientRect();
     const p = toCanvasPoint(canvas, e.clientX - rect.left, e.clientY - rect.top);
-    setMenu({ screenX: e.clientX, screenY: e.clientY, x: p.x, y: p.y, noteId });
+    setMenu({ screenX: e.clientX, screenY: e.clientY, x: p.x, y: p.y, ...on });
   };
+
+  /** A note about a specific session, dropped just below its card and already linked. */
+  const addNoteAbout = (ref: string) => {
+    const node = canvas.nodes.find((n) => n.ref === ref);
+    if (!node) return;
+    const id = crypto.randomUUID();
+    setCanvas(linkNote(addNote(canvas, id, node.x, node.y + nodeH(node) + 16), id, ref));
+    setMenu(null);
+  };
+
+  const closeMenu = useCallback(() => setMenu(null), []);
 
   const addNoteHere = () => {
     if (!menu) return;
@@ -274,7 +294,7 @@ export function CanvasUnderlay({
             key={note.id}
             className="canvas-note"
             style={{ left: note.x, top: note.y, width: note.w, height: note.h }}
-            onContextMenu={(e) => openMenu(e, note.id)}
+            onContextMenu={(e) => openMenu(e, { noteId: note.id })}
           >
             <div
               className="canvas-note-head"
@@ -333,6 +353,7 @@ export function CanvasUnderlay({
               key={node.ref}
               className={`canvas-card status-${status} ${showTerminals ? "live" : "compact"}`}
               style={{ left: node.x, top: node.y, width: nodeW(node), height: nodeH(node) }}
+              onContextMenu={(e) => openMenu(e, { nodeRef: node.ref })}
             >
               <div
                 className="canvas-card-head"
@@ -371,6 +392,17 @@ export function CanvasUnderlay({
                 ) : (
                   <span className="canvas-branch dim">project root</span>
                 )}
+                {/* Context fill, same reading as the session's tab. On a card it is a
+                    number rather than a hairline: a card is big enough to read one, and at
+                    canvas distances a 2px bar says nothing. */}
+                {sessionContext[node.ref] && (
+                  <span
+                    className={`canvas-ctx ${meterLevel(sessionContext[node.ref].fraction)}`}
+                    title={meterTitle(sessionContext[node.ref])}
+                  >
+                    {Math.round(sessionContext[node.ref].fraction * 100)}%
+                  </span>
+                )}
                 <span
                   className="canvas-resize"
                   title="Drag to resize"
@@ -398,7 +430,7 @@ export function CanvasUnderlay({
           linkedRef={
             menu.noteId ? notesOf(canvas).find((n) => n.id === menu.noteId)?.linkedRef : undefined
           }
-          onClose={() => setMenu(null)}
+          onClose={closeMenu}
           onAddSession={addSessionHere}
           onAddNote={addNoteHere}
           onLinkNote={(ref) => {
@@ -408,6 +440,20 @@ export function CanvasUnderlay({
           onDeleteNote={() => {
             if (menu.noteId) setCanvas(removeNote(canvas, menu.noteId));
             setMenu(null);
+          }}
+          onOpenSession={() => {
+            if (!menu.nodeRef) return;
+            setMenu(null);
+            selectSession(projectId, menu.nodeRef);
+            setCenterMode(projectId, "terminals");
+          }}
+          onNoteAbout={() => menu.nodeRef && addNoteAbout(menu.nodeRef)}
+          onDeleteSession={() => {
+            const ref = menu.nodeRef;
+            setMenu(null);
+            // Reuses the sidebar's own delete, confirms and all — the confirms ARE the
+            // safety here, and a thinner second path would drift away from them.
+            if (ref) void deleteSession(projects, projectId, ref, removeSession);
           }}
         />
       )}
@@ -425,8 +471,11 @@ function CanvasMenu({
   onAddNote,
   onLinkNote,
   onDeleteNote,
+  onOpenSession,
+  onNoteAbout,
+  onDeleteSession,
 }: {
-  menu: { screenX: number; screenY: number; noteId?: string };
+  menu: { screenX: number; screenY: number; noteId?: string; nodeRef?: string };
   /** Link targets, when the menu is a note's. */
   sessions: Array<{ id: string; name: string }>;
   /** The note's current link, so the list can mark it. */
@@ -436,6 +485,9 @@ function CanvasMenu({
   onAddNote: () => void;
   onLinkNote: (ref: string | null) => void;
   onDeleteNote: () => void;
+  onOpenSession: () => void;
+  onNoteAbout: () => void;
+  onDeleteSession: () => void;
 }) {
   const ref = useRef<HTMLDivElement>(null);
 
@@ -465,54 +517,68 @@ function CanvasMenu({
     return () => window.removeEventListener("keydown", onKey, true);
   }, [onClose]);
 
-  // Any click outside dismisses. Registered on the next tick so the right-click that
-  // opened the menu cannot immediately close it.
-  useEffect(() => {
-    const t = setTimeout(() => window.addEventListener("pointerdown", onClose), 0);
-    return () => {
-      clearTimeout(t);
-      window.removeEventListener("pointerdown", onClose);
-    };
-  }, [onClose]);
-
   return (
-    <div
-      ref={ref}
-      className="context-menu canvas-menu"
-      style={{ left: menu.screenX, top: menu.screenY }}
-      onPointerDown={(e) => e.stopPropagation()}
-      onContextMenu={(e) => e.preventDefault()}
-    >
-      {menu.noteId ? (
-        <>
-          {/* A flat list rather than a submenu: a project has a handful of sessions, and a
-              submenu would put a hover-and-wait between the user and the only thing this
-              menu is for. */}
-          <div className="context-menu-label">This note is about…</div>
-          {sessions.length === 0 && <div className="context-menu-empty">No sessions yet</div>}
-          {sessions.map((s) => (
-            <button
-              key={s.id}
-              className={linkedRef === s.id ? "checked" : ""}
-              onClick={() => onLinkNote(linkedRef === s.id ? null : s.id)}
-              title={linkedRef === s.id ? "Click to unlink" : `Link this note to ${s.name}`}
-            >
-              {s.name}
+    <>
+      {/* A real backdrop rather than a window listener. Anything can swallow a pointer
+          event before it reaches window — xterm does, for selection — and a menu that
+          sometimes cannot be dismissed is worse than one with no click-away at all. An
+          element that covers the screen cannot be bypassed. */}
+      <div
+        className="canvas-menu-backdrop"
+        onPointerDown={onClose}
+        onContextMenu={(e) => {
+          // A second right-click closes rather than opening a menu on the backdrop.
+          e.preventDefault();
+          onClose();
+        }}
+      />
+      <div
+        ref={ref}
+        className="context-menu canvas-menu"
+        style={{ left: menu.screenX, top: menu.screenY }}
+        onPointerDown={(e) => e.stopPropagation()}
+        onContextMenu={(e) => e.preventDefault()}
+      >
+        {menu.noteId ? (
+          <>
+            {/* A flat list rather than a submenu: a project has a handful of sessions, and
+                a submenu would put a hover-and-wait between the user and the only thing
+                this menu is for. */}
+            <div className="context-menu-label">This note is about…</div>
+            {sessions.length === 0 && <div className="context-menu-empty">No sessions yet</div>}
+            {sessions.map((s) => (
+              <button
+                key={s.id}
+                className={linkedRef === s.id ? "checked" : ""}
+                onClick={() => onLinkNote(linkedRef === s.id ? null : s.id)}
+                title={linkedRef === s.id ? "Click to unlink" : `Link this note to ${s.name}`}
+              >
+                {s.name}
+              </button>
+            ))}
+            {linkedRef && <button onClick={() => onLinkNote(null)}>Unlink</button>}
+            <div className="context-menu-sep" />
+            <button className="danger" onClick={onDeleteNote}>
+              Delete note
             </button>
-          ))}
-          {linkedRef && <button onClick={() => onLinkNote(null)}>Unlink</button>}
-          <div className="context-menu-sep" />
-          <button className="danger" onClick={onDeleteNote}>
-            Delete note
-          </button>
-        </>
-      ) : (
-        <>
-          <button onClick={onAddSession}>New session here</button>
-          <button onClick={onAddNote}>Add sticky note</button>
-        </>
-      )}
-    </div>
+          </>
+        ) : menu.nodeRef ? (
+          <>
+            <button onClick={onOpenSession}>Open in panes</button>
+            <button onClick={onNoteAbout}>Add a note about this</button>
+            <div className="context-menu-sep" />
+            <button className="danger" onClick={onDeleteSession}>
+              Delete session…
+            </button>
+          </>
+        ) : (
+          <>
+            <button onClick={onAddSession}>New session here</button>
+            <button onClick={onAddNote}>Add sticky note</button>
+          </>
+        )}
+      </div>
+    </>
   );
 }
 
@@ -569,13 +635,28 @@ export function CanvasControls({
       >
         {isLive ? "live" : "overview"}
       </span>
+      {/* The right-click menu is the fuller route; this exists so "you can put notes here"
+          is discoverable without knowing to right-click first. Drops the note in the middle
+          of what is currently on screen. */}
+      <button
+        className="canvas-btn"
+        onClick={() => {
+          const el = viewportRef.current;
+          if (!el) return;
+          const c = toCanvasPoint(canvas, el.clientWidth / 2, el.clientHeight / 2);
+          setCanvas(addNote(canvas, crypto.randomUUID(), c.x - NOTE_W / 2, c.y - NOTE_H / 2));
+        }}
+        title="Add a sticky note in the middle of the view"
+      >
+        + Note
+      </button>
       <button
         className="canvas-btn"
         onClick={() => {
           const el = viewportRef.current;
           if (el) setCanvas(fit(canvas, el.clientWidth, el.clientHeight));
         }}
-        title="Fit all sessions in view"
+        title="Fit everything in view"
       >
         Fit
       </button>

@@ -817,6 +817,32 @@ button {
   color: color-mix(in srgb, var(--amber) 70%, var(--text-bright));
 }
 
+/* Catches the click that dismisses the canvas menu. Covers the window so nothing — an
+   xterm swallowing pointer events for selection, say — can sit between a click and the
+   dismissal. Just below the menu's own z-index. */
+.canvas-menu-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 999;
+}
+
+/* Context-window fill on a card. A number, not a bar: a card has room for one, and at
+   canvas distances a 2px hairline says nothing. */
+.canvas-ctx {
+  flex: none;
+  font-family: var(--mono-font);
+  font-size: 10px;
+  color: var(--text-dim);
+}
+
+.canvas-ctx.warn {
+  color: var(--amber);
+}
+
+.canvas-ctx.danger {
+  color: var(--red);
+}
+
 /* Tethers. Under every box on the plane, so each line is clipped to the gap between the
    two things it joins. */
 .canvas-links {

@@ -75,7 +75,14 @@ function dropHalf(e: React.DragEvent<HTMLDivElement>): "before" | "after" {
   return e.clientY < r.top + r.height / 2 ? "before" : "after";
 }
 
-async function deleteSession(
+/**
+ * Delete a session, with the confirms that make it safe: a louder one while the agent is
+ * mid-task, and a separate question about its git worktree.
+ *
+ * Exported so the canvas can offer the same action rather than growing a second, thinner
+ * delete path — the confirms ARE the feature here, and two copies would drift.
+ */
+export async function deleteSession(
   projects: Project[],
   projectId: string,
   sessionId: string,
