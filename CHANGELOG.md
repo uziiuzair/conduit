@@ -16,6 +16,11 @@ All notable changes to Conduit are documented here. This project uses
   clicked, instead of wherever the next free slot happens to be. Notes are free text you can
   drag, resize, and delete like anything else on the plane, and they are saved with the
   project's layout.
+- **Added — Notes can say which session they are about.** Right-click a note to link it to a
+  session: a dashed line joins the two on the canvas and the note carries that session's
+  name, so a note still says what it belongs to when the card is off-screen. It is a label
+  only — nothing about a link is sent to the agent. Deleting the session keeps the note and
+  drops just the link.
 - **Added — Context-window meter.** Every session tab now shows how full its context window
   is, amber past 70% and red past 90%, with the token counts and the model in its tooltip.
 - **Added — Agents panel.** When a session fans out into subagents you can finally see them:
