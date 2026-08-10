@@ -483,6 +483,41 @@ button {
   color: var(--red);
 }
 
+/* Heading above a list of choices inside a menu (e.g. which session a note is about). */
+.context-menu-label {
+  padding: 5px 9px 3px;
+  font-size: 10px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+}
+
+.context-menu-empty {
+  padding: 4px 9px 6px;
+  font-size: 12px;
+  color: var(--text-dim);
+}
+
+.context-menu-sep {
+  height: 1px;
+  margin: 4px 0;
+  background: var(--border);
+}
+
+/* The currently-linked session. A leading tick rather than a background, so the row still
+   reads as a button you can click again to unlink. Scoped to the canvas menu so the tick
+   column never appears in the tab or file-tree menus, which have no checkable rows. */
+.context-menu.canvas-menu button::before {
+  content: "";
+  display: inline-block;
+  width: 12px;
+  color: var(--accent);
+}
+
+.context-menu.canvas-menu button.checked::before {
+  content: "✓";
+}
+
 .add-bar {
   border-top: 1px solid var(--border);
 }
@@ -759,13 +794,45 @@ button {
   overflow: hidden;
 }
 
-/* Drag strip. Deliberately blank: the note's content is the text, and a title bar with
-   nothing in it would just steal room from the writing surface. */
+/* Drag strip. Empty until the note is linked, at which point it names the session — the
+   text itself stays the note's content. */
 .canvas-note-head {
+  display: flex;
+  align-items: center;
   flex: none;
+  padding: 0 6px;
   cursor: grab;
   background: color-mix(in srgb, var(--amber) 18%, transparent);
   border-bottom: 1px solid color-mix(in srgb, var(--amber) 25%, transparent);
+}
+
+/* Which session this note is about. Says it in words as well as with the tether, because a
+   tether to a card that is off-screen tells you nothing. */
+.canvas-note-link {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 10px;
+  letter-spacing: 0.02em;
+  color: color-mix(in srgb, var(--amber) 70%, var(--text-bright));
+}
+
+/* Tethers. Under every box on the plane, so each line is clipped to the gap between the
+   two things it joins. */
+.canvas-links {
+  position: absolute;
+  left: 0;
+  top: 0;
+  overflow: visible;
+  width: 1px;
+  height: 1px;
+  pointer-events: none;
+}
+
+.canvas-links line {
+  stroke: color-mix(in srgb, var(--amber) 45%, transparent);
+  stroke-width: 1.5;
+  stroke-dasharray: 5 4;
 }
 
 .canvas-note-head:active {

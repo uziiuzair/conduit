@@ -7,6 +7,8 @@ import {
   NOTE_HEAD_H,
   addNote,
   fit,
+  linkEndpoints,
+  linkNote,
   moveNode,
   moveNote,
   nodeH,
@@ -223,6 +225,19 @@ export function CanvasUnderlay({
 
   const byId = useMemo(() => new Map((project?.sessions ?? []).map((s) => [s.id, s])), [project]);
 
+  // Note/card pairs to draw a tether between. A link whose session is gone is cleared by
+  // reconcile, so anything unresolvable here is a card that has not been placed yet.
+  const tethers = useMemo(
+    () =>
+      notesOf(canvas)
+        .filter((n) => n.linkedRef)
+        .map((note) => ({ note, node: canvas.nodes.find((n) => n.ref === note.linkedRef) }))
+        .filter((p): p is { note: (typeof p)["note"]; node: NonNullable<(typeof p)["node"]> } =>
+          Boolean(p.node),
+        ),
+    [canvas],
+  );
+
   return (
     <div
       ref={viewportRef}
@@ -240,6 +255,18 @@ export function CanvasUnderlay({
         className="canvas-plane"
         style={{ transform: `translate(${canvas.pan.x}px, ${canvas.pan.y}px) scale(${canvas.zoom})` }}
       >
+        {/* Tethers, drawn UNDER everything. Each runs centre to centre and is then clipped
+            for free by the boxes painting over it, so what remains is exactly the gap
+            between a note and the session it is about. */}
+        {tethers.length > 0 && (
+          <svg className="canvas-links" aria-hidden>
+            {tethers.map(({ note, node }) => {
+              const { x1, y1, x2, y2 } = linkEndpoints(note, node);
+              return <line key={note.id} x1={x1} y1={y1} x2={x2} y2={y2} />;
+            })}
+          </svg>
+        )}
+
         {/* Notes first, so a note never paints over a session card. They are a separate
             list from `nodes` — see canvas.ts for why. */}
         {notesOf(canvas).map((note) => (
@@ -256,8 +283,16 @@ export function CanvasUnderlay({
                 e.stopPropagation();
                 onPointerDown(e, note.id, "move", "note");
               }}
-              title="Drag to move · right-click to delete"
-            />
+              title="Drag to move · right-click to link or delete"
+            >
+              {/* Names the session even when its card is off-screen or the tether is too
+                  long to follow by eye — which is most of why a link is worth having. */}
+              {note.linkedRef && byId.has(note.linkedRef) && (
+                <span className="canvas-note-link" title={`About ${byId.get(note.linkedRef)!.name}`}>
+                  {byId.get(note.linkedRef)!.name}
+                </span>
+              )}
+            </div>
             {/* An always-editable textarea rather than a click-to-edit mode: a sticky note
                 that needs to be unlocked before it can be written on is a worse sticky
                 note, and there is nothing here to protect from a stray keystroke. */}
@@ -359,9 +394,17 @@ export function CanvasUnderlay({
       {menu && (
         <CanvasMenu
           menu={menu}
+          sessions={project?.sessions ?? []}
+          linkedRef={
+            menu.noteId ? notesOf(canvas).find((n) => n.id === menu.noteId)?.linkedRef : undefined
+          }
           onClose={() => setMenu(null)}
           onAddSession={addSessionHere}
           onAddNote={addNoteHere}
+          onLinkNote={(ref) => {
+            if (menu.noteId) setCanvas(linkNote(canvas, menu.noteId, ref));
+            setMenu(null);
+          }}
           onDeleteNote={() => {
             if (menu.noteId) setCanvas(removeNote(canvas, menu.noteId));
             setMenu(null);
@@ -375,15 +418,23 @@ export function CanvasUnderlay({
 /** The canvas right-click menu. Flips into the viewport the same way the tab menu does. */
 function CanvasMenu({
   menu,
+  sessions,
+  linkedRef,
   onClose,
   onAddSession,
   onAddNote,
+  onLinkNote,
   onDeleteNote,
 }: {
   menu: { screenX: number; screenY: number; noteId?: string };
+  /** Link targets, when the menu is a note's. */
+  sessions: Array<{ id: string; name: string }>;
+  /** The note's current link, so the list can mark it. */
+  linkedRef?: string;
   onClose: () => void;
   onAddSession: () => void;
   onAddNote: () => void;
+  onLinkNote: (ref: string | null) => void;
   onDeleteNote: () => void;
 }) {
   const ref = useRef<HTMLDivElement>(null);
@@ -427,15 +478,34 @@ function CanvasMenu({
   return (
     <div
       ref={ref}
-      className="context-menu"
+      className="context-menu canvas-menu"
       style={{ left: menu.screenX, top: menu.screenY }}
       onPointerDown={(e) => e.stopPropagation()}
       onContextMenu={(e) => e.preventDefault()}
     >
       {menu.noteId ? (
-        <button className="danger" onClick={onDeleteNote}>
-          Delete note
-        </button>
+        <>
+          {/* A flat list rather than a submenu: a project has a handful of sessions, and a
+              submenu would put a hover-and-wait between the user and the only thing this
+              menu is for. */}
+          <div className="context-menu-label">This note is about…</div>
+          {sessions.length === 0 && <div className="context-menu-empty">No sessions yet</div>}
+          {sessions.map((s) => (
+            <button
+              key={s.id}
+              className={linkedRef === s.id ? "checked" : ""}
+              onClick={() => onLinkNote(linkedRef === s.id ? null : s.id)}
+              title={linkedRef === s.id ? "Click to unlink" : `Link this note to ${s.name}`}
+            >
+              {s.name}
+            </button>
+          ))}
+          {linkedRef && <button onClick={() => onLinkNote(null)}>Unlink</button>}
+          <div className="context-menu-sep" />
+          <button className="danger" onClick={onDeleteNote}>
+            Delete note
+          </button>
+        </>
       ) : (
         <>
           <button onClick={onAddSession}>New session here</button>

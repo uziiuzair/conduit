@@ -35,6 +35,16 @@ export interface CanvasNote {
   w: number;
   h: number;
   text: string;
+  /**
+   * Session this note is ABOUT, if any.
+   *
+   * Purely an association for the reader — it draws a tether on the canvas and names the
+   * session on the note. It is deliberately not context: nothing in it reaches the agent,
+   * the spawn path, or any prompt. "Which note goes with what" is a filing question, and
+   * answering it by quietly injecting text into a session would be a different feature
+   * with a different set of risks.
+   */
+  linkedRef?: string;
 }
 
 export interface CanvasState {
@@ -114,7 +124,31 @@ export function reconcile(state: CanvasState, sessionIds: string[]): CanvasState
     taken.add(`${x},${y}`);
     added.push({ ref, x, y });
   }
-  return { ...state, nodes: [...kept, ...added] };
+
+  // A note whose linked session is gone keeps the note and loses only the link. The note
+  // is the user's writing and is never ours to delete; the link is a pointer to something
+  // that no longer exists, and leaving it would draw a tether to nowhere.
+  const notes = notesOf(state);
+  const dangling = notes.some((n) => n.linkedRef !== undefined && !live.has(n.linkedRef));
+  const nextNotes = dangling
+    ? notes.map((n) =>
+        n.linkedRef !== undefined && !live.has(n.linkedRef) ? stripLink(n) : n,
+      )
+    : notes;
+
+  return {
+    ...state,
+    nodes: [...kept, ...added],
+    ...(state.notes === undefined && !dangling ? {} : { notes: nextNotes }),
+  };
+}
+
+/** A copy of `note` with no link. Written as a delete so the field is absent, not
+ *  `undefined` — persisted state round-trips through JSON, which drops one and keeps the
+ *  other, and an absent field is what every note that never had a link looks like. */
+function stripLink(note: CanvasNote): CanvasNote {
+  const { linkedRef: _drop, ...rest } = note;
+  return rest;
 }
 
 /** The grid slot a hand-placed node happens to occupy, so auto-placement avoids it. */
@@ -291,6 +325,42 @@ export const resizeNote = (state: CanvasState, id: string, w: number, h: number)
 
 export const setNoteText = (state: CanvasState, id: string, text: string): CanvasState =>
   patchNote(state, id, (n) => ({ ...n, text }));
+
+/**
+ * Point a note at a session, or at nothing (`null`).
+ *
+ * Association only — see `CanvasNote.linkedRef`. Linking never reads, writes, or sends
+ * anything to the session itself.
+ */
+export function linkNote(state: CanvasState, id: string, ref: string | null): CanvasState {
+  const notes = notesOf(state);
+  const i = notes.findIndex((n) => n.id === id);
+  if (i === -1) return state;
+  const cur = notes[i];
+  if ((cur.linkedRef ?? null) === ref) return state;
+  const copy = [...notes];
+  copy[i] = ref === null ? stripLink(cur) : { ...cur, linkedRef: ref };
+  return { ...state, notes: copy };
+}
+
+/**
+ * The tether between a note and the card it is linked to: centre to centre.
+ *
+ * Centres rather than nearest edges, because the boxes are drawn OVER the line — whatever
+ * of it falls inside either box is hidden, so the visible segment is already exactly the
+ * gap between them, and edge maths would buy a worse result for more code.
+ */
+export function linkEndpoints(
+  note: CanvasNote,
+  node: CanvasNode,
+): { x1: number; y1: number; x2: number; y2: number } {
+  return {
+    x1: note.x + note.w / 2,
+    y1: note.y + note.h / 2,
+    x2: node.x + nodeW(node) / 2,
+    y2: node.y + nodeH(node) / 2,
+  };
+}
 
 export function removeNote(state: CanvasState, id: string): CanvasState {
   const notes = notesOf(state);

@@ -9,6 +9,8 @@ import {
   NOTE_H,
   NOTE_W,
   addNote,
+  linkEndpoints,
+  linkNote,
   moveNote,
   nodeH,
   nodeW,
@@ -259,6 +261,70 @@ describe("sticky notes", () => {
     const s = fit(only, 800, 600);
     expect(s.zoom).toBeLessThanOrEqual(MAX_ZOOM);
     expect(notesOf(s)[0].x * s.zoom + s.pan.x).toBeGreaterThanOrEqual(-0.001);
+  });
+});
+
+describe("note links", () => {
+  const withNote = () => addNote(reconcile(emptyCanvas(), ["s1", "s2"]), "n1", 0, 0);
+
+  it("points a note at a session and back at nothing", () => {
+    let s = linkNote(withNote(), "n1", "s1");
+    expect(notesOf(s)[0].linkedRef).toBe("s1");
+    s = linkNote(s, "n1", "s2");
+    expect(notesOf(s)[0].linkedRef).toBe("s2");
+    s = linkNote(s, "n1", null);
+    // Absent, not undefined: persisted state round-trips through JSON, which drops one and
+    // keeps the other, and absent is what a note that never had a link looks like.
+    expect("linkedRef" in notesOf(s)[0]).toBe(false);
+  });
+
+  it("returns the same object when the link did not change", () => {
+    const s = linkNote(withNote(), "n1", "s1");
+    expect(linkNote(s, "n1", "s1")).toBe(s);
+    expect(linkNote(s, "nope", "s1")).toBe(s);
+    // Unlinking a note that was never linked is also a no-op.
+    const fresh = withNote();
+    expect(linkNote(fresh, "n1", null)).toBe(fresh);
+  });
+
+  it("keeps the note but drops the link when the session is deleted", () => {
+    // The note is the user's writing and is never ours to delete. The link points at
+    // something that no longer exists, and a tether to nowhere is worse than none.
+    const s = linkNote(withNote(), "n1", "s1");
+    const after = reconcile(s, ["s2"]);
+    expect(notesOf(after)).toHaveLength(1);
+    expect(notesOf(after)[0].text).toBe("");
+    expect("linkedRef" in notesOf(after)[0]).toBe(false);
+  });
+
+  it("leaves a live link alone across a reconcile", () => {
+    const s = linkNote(withNote(), "n1", "s1");
+    expect(notesOf(reconcile(s, ["s1", "s2"]))[0].linkedRef).toBe("s1");
+  });
+
+  it("still reconciles a canvas that has no notes at all", () => {
+    const s = reconcile(emptyCanvas(), ["s1"]);
+    expect(reconcile(s, ["s1"])).toEqual(s);
+    expect(s.notes).toBeUndefined();
+  });
+});
+
+describe("linkEndpoints", () => {
+  it("runs centre to centre, which the boxes then clip by painting over it", () => {
+    const note = { id: "n", x: 0, y: 0, w: 200, h: 100, text: "" };
+    const node = { ref: "s", x: 400, y: 300, w: 600, h: 400 };
+    expect(linkEndpoints(note, node)).toEqual({ x1: 100, y1: 50, x2: 700, y2: 500 });
+  });
+
+  it("uses the default card size for a node that was never resized", () => {
+    const note = { id: "n", x: 0, y: 0, w: 100, h: 100, text: "" };
+    const node = { ref: "s", x: 0, y: 0 };
+    expect(linkEndpoints(note, node)).toEqual({
+      x1: 50,
+      y1: 50,
+      x2: CARD_W / 2,
+      y2: CARD_H / 2,
+    });
   });
 });
 
