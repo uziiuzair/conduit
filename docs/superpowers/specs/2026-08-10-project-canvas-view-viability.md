@@ -112,11 +112,31 @@ This is the whole spatial-map value — see everything, place it meaningfully, k
 what is running — with none of the rendering risk. It is a self-contained feature that touches
 no terminal code.
 
-**Stage 2 — Live terminals above a zoom threshold.**
-Above the legibility threshold, promote visible cards to live terminals using the
-font-scaling technique. Cap the number of simultaneously live nodes and demote the rest to
-cards by distance from the viewport center. This is where the real work is, and it should not
-begin until Stage 1 has been used enough to know whether it is wanted.
+**Stage 2 — Live terminals above a zoom threshold. (Implemented.)**
+Above `LIVE_ZOOM_MIN` (0.55) the nodes show their real terminals; below it they render as
+compact summaries.
+
+The implementation turned out far cheaper than this document assumed, because of something
+the codebase already did. Every session's `TerminalView` is permanently mounted in one
+`.term-stack` and positioned *purely by a `style` prop* — so canvas mode does not create,
+mirror, or move a terminal. It supplies different coordinates for the same elements, and
+applies the pan/zoom transform to the stack as a whole. The card frames became an
+**underlay** beneath the stack, with each terminal occupying the card body below its header
+strip. One mounted set, two CSS expressions of it — exactly what this document claimed the
+keep-alive invariant would buy, and it did.
+
+Two consequences worth recording. Because the transform is applied to the stack rather than
+to each host box, the hosts never change size, so `ResizeObserver` does not fire and
+`cols`/`rows` stay fixed — zooming never reflows an agent's output. And because the header
+strip is not covered by the terminal, a node stays draggable by its header while its body
+takes keystrokes.
+
+The font-scaling technique this document proposed is therefore **not implemented and not
+currently needed**: terminals are crisp at 100%, acceptably soft between the threshold and
+100%, and hidden below it. Revisit only if that middle band proves annoying in use.
+
+Still open: a cap on simultaneously live nodes, demoting the furthest from the viewport
+centre. Not yet needed at the session counts seen in practice.
 
 **Stage 3 — A custom glyph renderer.**
 Explicitly not recommended. If Stage 2 proves insufficient, the correct response is to narrow

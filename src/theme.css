@@ -689,19 +689,49 @@ button {
 
 .board-overlay { position: absolute; top: var(--tabstrip-h); left: 0; right: 0; bottom: 0; z-index: 3; background: var(--panel-bg); overflow: hidden; display: flex; }
 
-/* Canvas view. Same overlay contract as the board: it covers the terminals, it never
-   unmounts them. */
-.canvas-overlay { position: absolute; top: var(--tabstrip-h); left: 0; right: 0; bottom: 0; z-index: 3; background: var(--panel-bg); overflow: hidden; display: flex; }
-.canvas-view { flex: 1; display: flex; flex-direction: column; min-width: 0; }
-.canvas-toolbar {
-  display: flex; align-items: center; gap: 10px; flex: none;
-  height: 46px; padding: 0 18px;
-  border-bottom: 1px solid var(--border);
-  background: linear-gradient(180deg, color-mix(in srgb, var(--accent) 5%, var(--sidebar-bg)), var(--sidebar-bg));
+/* ---- Canvas view -------------------------------------------------------------
+   Layering is the whole design here. The underlay (card frames) sits BELOW
+   .term-stack so the real, already-mounted terminals paint inside the frames; the
+   toolbar is a sibling above both. Nothing here mounts or reparents a terminal —
+   canvas mode only changes the CSS that positions them. */
+.canvas-underlay {
+  position: absolute; top: var(--tabstrip-h); left: 0; right: 0; bottom: 0;
+  z-index: 1;
+  overflow: hidden;
+  background: var(--panel-bg);
+  cursor: grab;
+  /* A dot grid gives pan and zoom something to read against — without it, moving an
+     empty region looks like nothing happened. */
+  background-image: radial-gradient(circle, var(--border) 1px, transparent 1px);
+  background-size: 24px 24px;
 }
-.canvas-title { font-size: 13px; font-weight: 600; color: var(--text-hi); }
+.canvas-underlay.panning { cursor: grabbing; }
+.canvas-plane { position: absolute; top: 0; left: 0; transform-origin: 0 0; }
+
+/* In canvas mode the stack is the pannable plane itself, so it shares the underlay's
+   transform and clips to the same box. z-index puts it above the frames. */
+.term-stack.canvas-mode {
+  z-index: 2;
+  background: transparent;
+  overflow: visible;
+  transform-origin: 0 0;
+}
+.canvas-toolbar {
+  position: absolute; top: var(--tabstrip-h); left: 0; right: 0;
+  z-index: 5;
+  display: flex; align-items: center; gap: 10px;
+  height: 38px; padding: 0 14px;
+  border-bottom: 1px solid var(--border);
+  background: color-mix(in srgb, var(--sidebar-bg) 88%, transparent);
+  backdrop-filter: blur(6px);
+}
+.canvas-title { font-size: 12px; font-weight: 600; color: var(--text-hi); }
 .canvas-count { font-size: 11px; color: var(--text-dim); }
 .canvas-toolbar-spacer { flex: 1; }
+.canvas-lod {
+  font-size: 10px; letter-spacing: 0.04em; text-transform: uppercase;
+  color: var(--text-dim); padding: 2px 7px; border-radius: 999px; background: var(--hover);
+}
 .canvas-btn {
   font-size: 11px; padding: 3px 9px; border-radius: 5px;
   border: 1px solid var(--border); background: transparent; color: var(--text-mid);
@@ -709,44 +739,41 @@ button {
 }
 .canvas-btn:hover { background: var(--hover); color: var(--text-hi); }
 
-.canvas-viewport {
-  position: relative; flex: 1; overflow: hidden;
-  cursor: grab;
-  /* A dot grid gives pan and zoom something to read against — without it, moving an
-     empty region looks like nothing happened. */
-  background-image: radial-gradient(circle, var(--border) 1px, transparent 1px);
-  background-size: 24px 24px;
-}
-.canvas-viewport.panning { cursor: grabbing; }
-.canvas-plane { position: absolute; top: 0; left: 0; transform-origin: 0 0; will-change: transform; }
-
+/* The frame. Its BODY is deliberately empty while live — that hole is where the real
+   terminal shows through from the layer above. */
 .canvas-card {
   position: absolute;
-  display: flex; flex-direction: column; gap: 6px;
-  padding: 11px 13px;
+  display: flex; flex-direction: column;
   border: 1px solid var(--border); border-radius: 9px;
-  background: var(--sidebar-bg);
-  cursor: grab;
-  user-select: none;
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.25);
+  background: var(--panel-bg);
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.35);
+  overflow: hidden;
 }
-.canvas-card:hover { border-color: color-mix(in srgb, var(--accent) 45%, var(--border)); }
-.canvas-card:active { cursor: grabbing; }
-/* The one card you most need to find on a busy canvas gets the only accent border. */
 .canvas-card.status-needsInput { border-color: var(--accent); }
+.canvas-card.status-running { border-color: color-mix(in srgb, var(--accent) 45%, var(--border)); }
 
-.canvas-card-head { display: flex; align-items: center; gap: 7px; min-width: 0; }
+.canvas-card-head {
+  display: flex; align-items: center; gap: 7px; flex: none;
+  padding: 0 10px;
+  border-bottom: 1px solid var(--border);
+  background: var(--sidebar-bg);
+  cursor: grab; user-select: none;
+}
+.canvas-card-head:active { cursor: grabbing; }
 .canvas-card-name {
   flex: 1; min-width: 0; font-size: 12px; font-weight: 600; color: var(--text-hi);
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
-.canvas-card-meta { min-width: 0; }
-.canvas-branch {
-  font-family: var(--mono-font); font-size: 10px; color: var(--text-mid);
-  display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+.canvas-card-body {
+  flex: 1; display: flex; flex-direction: column; justify-content: center; gap: 6px;
+  padding: 12px 14px;
 }
-.canvas-branch.dim { color: var(--text-dim); font-style: italic; font-family: inherit; }
-.canvas-card-status { font-size: 10px; color: var(--text-dim); margin-top: auto; }
+.canvas-card-status { font-size: 12px; color: var(--text-mid); }
+.canvas-branch {
+  font-family: var(--mono-font); font-size: 10px; color: var(--text-dim);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.canvas-branch.dim { font-style: italic; font-family: inherit; }
 
 .canvas-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--text-dim); flex: none; }
 .canvas-dot.status-running { background: var(--accent); animation: canvas-pulse 1.6s ease-in-out infinite; }

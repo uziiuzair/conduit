@@ -20,15 +20,32 @@ export interface CanvasState {
   zoom: number;
 }
 
-/** Card footprint in canvas units. Fixed: Stage 1 cards do not resize. */
-export const CARD_W = 260;
-export const CARD_H = 116;
-const GAP = 28;
+/** Card footprint in canvas units. A node is a real terminal, so this is sized to be
+ *  usable at 100% zoom rather than to be a thumbnail. */
+export const CARD_W = 560;
+export const CARD_H = 340;
+/** Title bar height. The live terminal occupies the card BELOW this strip, which is what
+ *  leaves the header clickable for dragging while the body takes keystrokes. */
+export const HEADER_H = 30;
+const GAP = 36;
 /** Cards per row when auto-placing. Keeps a fresh project readable rather than a long line. */
-const COLS = 4;
+const COLS = 3;
 
 export const MIN_ZOOM = 0.25;
 export const MAX_ZOOM = 2;
+
+/**
+ * Below this zoom the live terminals are hidden and cards render as compact summaries.
+ *
+ * Two independent reasons, either of which alone would justify it. Legibility: a
+ * scaled terminal is a resampled bitmap, and 13px type below ~0.55 is mush no matter how
+ * it is rendered. Cost: every visible node is a live xterm with a WebGL/canvas surface,
+ * and a zoomed-out project is exactly when there are most of them on screen.
+ *
+ * This is the line that lets Conduit skip the custom glyph renderer nodeterm needed
+ * (~11,900 lines) to keep terminals legible at arbitrary zoom.
+ */
+export const LIVE_ZOOM_MIN = 0.55;
 
 export const emptyCanvas = (): CanvasState => ({ nodes: [], pan: { x: 0, y: 0 }, zoom: 1 });
 

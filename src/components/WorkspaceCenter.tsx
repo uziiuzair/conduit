@@ -15,7 +15,9 @@ import {
 import { TerminalView } from "./Terminal";
 import { CodeEditorPane } from "./CodeEditorPane";
 import { BoardView } from "./BoardView";
-import { CanvasView } from "./CanvasView";
+import { CanvasToolbar, CanvasUnderlay } from "./CanvasView";
+import { CARD_H, CARD_W, HEADER_H, LIVE_ZOOM_MIN } from "../canvas";
+import { useProjectCanvas } from "../hooks/useProjectCanvas";
 import { TerminalIcon, FileIcon, CodeIcon, CloseIcon } from "./Icons";
 
 /** Payload carried by a native tab drag (shared between WorkspaceCenter and GroupTabStrip). */
@@ -63,6 +65,10 @@ export function WorkspaceCenter({
 }) {
   const layout = useStore((s) => (projectId ? s.layouts[projectId] : undefined));
   const centerMode = useStore((s) => (projectId ? s.centerMode[projectId] ?? "terminals" : "terminals"));
+  const canvasMode = centerMode === "canvas";
+  // Read unconditionally (hooks cannot be conditional); it is inert outside canvas mode.
+  const { canvas } = useProjectCanvas(projectId ?? null);
+  const canvasViewportRef = useRef<HTMLDivElement>(null);
   const setGroupWeights = useStore((s) => s.setGroupWeights);
   const moveTab = useStore((s) => s.moveTab);
   const splitTab = useStore((s) => s.splitTab);
@@ -130,6 +136,35 @@ export function WorkspaceCenter({
     if (ownerProjectId !== projectId || !layout) {
       return { visible: false, inActiveGroup: false, style: { display: "none" } as React.CSSProperties };
     }
+    // Canvas mode positions the SAME mounted terminals by absolute canvas coordinates
+    // instead of group percentages. This is the whole trick behind live terminals in
+    // canvas nodes: one mounted set, two CSS expressions of it. The pan/zoom transform
+    // is applied to .term-stack as a whole, so these coordinates stay in canvas units.
+    //
+    // `right`/`bottom` are cleared explicitly because .term-host is `inset: 0`, and
+    // leaving them at 0 would fight the width/height set here.
+    if (canvasMode) {
+      const node = canvas.nodes.find((n) => n.ref === sessionId);
+      if (!node) {
+        return { visible: false, inActiveGroup: false, style: { display: "none" } as React.CSSProperties };
+      }
+      return {
+        // Hidden below the legibility threshold — the card renders a summary instead.
+        // Hidden is CSS-only, so the PTY and the xterm are untouched either way.
+        visible: canvas.zoom >= LIVE_ZOOM_MIN,
+        inActiveGroup: false, // never steal the keyboard just because a node scrolled by
+        style: {
+          left: node.x,
+          top: node.y + HEADER_H,
+          width: CARD_W,
+          height: CARD_H - HEADER_H,
+          right: "auto",
+          bottom: "auto",
+          padding: "6px 8px",
+          borderRadius: "0 0 8px 8px",
+        } as React.CSSProperties,
+      };
+    }
     const gi = groupIndexOfRef(sessionId);
     if (gi === -1)
       return { visible: false, inActiveGroup: false, style: { display: "none" } as React.CSSProperties };
@@ -146,7 +181,8 @@ export function WorkspaceCenter({
     };
   };
 
-  const nothingVisible = !layout || layout.groups.every((g) => g.tabs.length === 0);
+  const nothingVisible =
+    !canvasMode && (!layout || layout.groups.every((g) => g.tabs.length === 0));
   const soloGroup = (layout?.groups.length ?? 0) <= 1;
 
   const startDrag = (e: React.MouseEvent, boundary: number) => {
@@ -199,6 +235,7 @@ export function WorkspaceCenter({
       <div className="workspace" ref={wsRef}>
         {layout &&
           activeProject &&
+          !canvasMode &&
           layout.groups.map((g, i) =>
             g.tabs.length > 0 && (!isMax || i === maxIdx) ? (
               <div
@@ -225,6 +262,7 @@ export function WorkspaceCenter({
 
         {layout &&
           !isMax &&
+          !canvasMode &&
           layout.groups.slice(1).map((g, i) => (
             <div
               className="group-divider"
@@ -234,7 +272,23 @@ export function WorkspaceCenter({
             />
           ))}
 
-        <div className="term-stack">
+        {/* Underlay FIRST so the terminal stack paints above it — the card frames are
+            chrome around live terminals, not a replacement for them. */}
+        {projectId && canvasMode && (
+          <CanvasUnderlay projectId={projectId} viewportRef={canvasViewportRef} />
+        )}
+
+        <div
+          className={`term-stack ${canvasMode ? "canvas-mode" : ""}`}
+          style={
+            canvasMode
+              ? {
+                  transform: `translate(${canvas.pan.x}px, ${canvas.pan.y}px) scale(${canvas.zoom})`,
+                  transformOrigin: "0 0",
+                }
+              : undefined
+          }
+        >
           {allSessions.map(({ project, session }) => {
             const pl = placeSession(project.id, session.id);
             const gi = project.id === projectId ? groupIndexOfRef(session.id) : -1;
@@ -342,12 +396,10 @@ export function WorkspaceCenter({
           </div>
         )}
 
-        {/* Overlay, not a replacement: the terminals stay mounted underneath, which is
-            what keeps their PTYs alive while the canvas is open. */}
-        {projectId && centerMode === "canvas" && (
-          <div className="canvas-overlay">
-            <CanvasView projectId={projectId} />
-          </div>
+        {/* Sibling of the underlay, not a child: the underlay sits BELOW the terminal
+            stack, and a child cannot escape its parent's stacking context. */}
+        {projectId && canvasMode && (
+          <CanvasToolbar projectId={projectId} viewportRef={canvasViewportRef} />
         )}
 
         {tabMenu && activeProject && projectId && (

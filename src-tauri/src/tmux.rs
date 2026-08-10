@@ -17,10 +17,29 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-/// Conduit's private tmux socket. Private on purpose, in both directions: Conduit's
-/// sessions never show up in the user's own `tmux ls`, and a `tmux kill-server` in their
-/// terminal never touches ours.
-pub const SOCKET: &str = "conduit";
+/// Conduit's private tmux socket, namespaced by data dir.
+///
+/// Private in both directions: Conduit's sessions never show up in the user's own
+/// `tmux ls`, and a `tmux kill-server` in their terminal never touches ours.
+///
+/// Namespaced because the ORPHAN SWEEP is destructive and its notion of "live" comes from
+/// one data dir. `CONDUIT_DATA_DIR_NAME` is how a dev build is isolated from the installed
+/// app, so on a shared socket the dev build would boot, see the installed app's `cdt-*`
+/// sessions, find none of them in its own (empty) store, and kill every running agent.
+/// One socket per data dir makes each install's sweep structurally unable to see anyone
+/// else's sessions.
+pub fn socket() -> String {
+    match std::env::var("CONDUIT_DATA_DIR_NAME") {
+        Ok(name) if !name.is_empty() && name != "ConduitTauri" => {
+            let safe: String = name
+                .chars()
+                .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+                .collect();
+            format!("conduit-{safe}")
+        }
+        _ => "conduit".to_string(),
+    }
+}
 
 /// Prefix identifying a Conduit-owned tmux session. Also what the orphan sweep matches on.
 const PREFIX: &str = "cdt-";
@@ -127,7 +146,7 @@ pub fn ensure_conf(tmux: &Path, scrollback: u32) -> Option<PathBuf> {
         return None;
     }
     let _ = Command::new(tmux)
-        .args(["-L", SOCKET, "source-file"])
+        .args(["-L", &socket(), "source-file"])
         .arg(&path)
         .output();
     Some(path)
@@ -160,7 +179,7 @@ pub fn wrap_command(
         "exec {tmux}{conf} -L {socket} new-session -A -D -s {name} -c {dir} sh -c {inner}",
         tmux = crate::pty::shell_quote(&tmux.to_string_lossy()),
         conf = conf_flag,
-        socket = SOCKET,
+        socket = socket(),
         name = crate::pty::shell_quote(name),
         dir = crate::pty::shell_quote(dir),
         inner = crate::pty::shell_quote(inner),
@@ -173,7 +192,7 @@ pub fn kill_session(tmux: &Path, session_id: &str) {
     let _ = Command::new(tmux)
         .args([
             "-L",
-            SOCKET,
+            &socket(),
             "kill-session",
             "-t",
             &session_name(session_id),
@@ -185,7 +204,7 @@ pub fn kill_session(tmux: &Path, session_id: &str) {
 /// not running, or owns nothing.
 pub fn list_sessions(tmux: &Path) -> Vec<String> {
     let out = Command::new(tmux)
-        .args(["-L", SOCKET, "list-sessions", "-F", "#{session_name}"])
+        .args(["-L", &socket(), "list-sessions", "-F", "#{session_name}"])
         .output();
     let Ok(out) = out else { return Vec::new() };
     if !out.status.success() {
@@ -220,7 +239,7 @@ pub fn orphans(existing: &[String], live_session_ids: &[String]) -> Vec<String> 
 pub fn sweep_orphans(tmux: &Path, live_session_ids: &[String]) {
     for name in orphans(&list_sessions(tmux), live_session_ids) {
         let _ = Command::new(tmux)
-            .args(["-L", SOCKET, "kill-session", "-t", &name])
+            .args(["-L", &socket(), "kill-session", "-t", &name])
             .output();
     }
 }
@@ -328,6 +347,25 @@ mod tests {
         // reachable by deleting the last project, and one that must sweep rather than
         // leave processes running forever.
         assert_eq!(orphans(&["cdt-a".to_string()], &[]), vec!["cdt-a"]);
+    }
+
+    #[test]
+    fn socket_is_namespaced_by_the_data_dir_override() {
+        // Serialized implicitly: these are the only tests touching this var.
+        std::env::remove_var("CONDUIT_DATA_DIR_NAME");
+        assert_eq!(socket(), "conduit");
+        std::env::set_var("CONDUIT_DATA_DIR_NAME", "ConduitTauri");
+        assert_eq!(
+            socket(),
+            "conduit",
+            "the default name is not a separate namespace"
+        );
+        std::env::set_var("CONDUIT_DATA_DIR_NAME", "ConduitTauri-dev");
+        assert_eq!(socket(), "conduit-ConduitTauri-dev");
+        // A socket name reaches a command line, so anything exotic is flattened.
+        std::env::set_var("CONDUIT_DATA_DIR_NAME", "a b/../$(x)");
+        assert_eq!(socket(), "conduit-a-b------x-");
+        std::env::remove_var("CONDUIT_DATA_DIR_NAME");
     }
 
     #[test]
