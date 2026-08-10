@@ -4,12 +4,20 @@ import {
   FOOTER_H,
   HEADER_H,
   LIVE_ZOOM_MIN,
+  NOTE_HEAD_H,
+  addNote,
   fit,
   moveNode,
+  moveNote,
   nodeH,
   nodeW,
+  notesOf,
+  removeNote,
   resizeNode,
+  resizeNote,
+  setNoteText,
   toCanvasDelta,
+  toCanvasPoint,
   zoomAt,
 } from "../canvas";
 import { useProjectCanvas } from "../hooks/useProjectCanvas";
@@ -48,17 +56,31 @@ export function CanvasUnderlay({
   const live = useStore((s) => s.live);
   const selectSession = useStore((s) => s.selectSession);
   const setCenterMode = useStore((s) => s.setCenterMode);
+  const addSession = useStore((s) => s.addSession);
   const { canvas, setCanvas } = useProjectCanvas(projectId);
 
-  // ref === null means panning the plane; mode distinguishes moving a node from
-  // resizing one, since both are pointer drags over the same element tree.
+  // ref === null means panning the plane; mode distinguishes moving from resizing, since
+  // both are pointer drags over the same element tree; kind says which array the id
+  // addresses — sessions and notes are separate lists (see canvas.ts).
   const [drag, setDrag] = useState<{
     ref: string | null;
+    kind: "node" | "note";
     mode: "pan" | "move" | "resize";
     lastX: number;
     lastY: number;
   } | null>(null);
   const showTerminals = canvas.zoom >= LIVE_ZOOM_MIN;
+
+  // Right-click menu. Holds the click in BOTH coordinate systems: screen for placing the
+  // menu itself, canvas for placing whatever it creates.
+  const [menu, setMenu] = useState<{
+    screenX: number;
+    screenY: number;
+    x: number;
+    y: number;
+    /** Set when the click landed on a note, which gets its own items. */
+    noteId?: string;
+  } | null>(null);
 
   const fitToContent = useCallback(() => {
     const el = viewportRef.current;
@@ -111,10 +133,11 @@ export function CanvasUnderlay({
     e: React.PointerEvent,
     ref: string | null,
     mode: "pan" | "move" | "resize",
+    kind: "node" | "note" = "node",
   ) => {
     if (e.button !== 0) return;
     (e.currentTarget as Element).setPointerCapture?.(e.pointerId);
-    setDrag({ ref, mode, lastX: e.clientX, lastY: e.clientY });
+    setDrag({ ref, kind, mode, lastX: e.clientX, lastY: e.clientY });
   };
 
   const onPointerMove = (e: React.PointerEvent) => {
@@ -125,21 +148,78 @@ export function CanvasUnderlay({
       // Pan is in SCREEN units — the plane moves with the cursor 1:1 at any zoom.
       setCanvas({ ...canvas, pan: { x: canvas.pan.x + dxScreen, y: canvas.pan.y + dyScreen } });
     } else {
-      const node = canvas.nodes.find((n) => n.ref === drag.ref);
-      if (node) {
-        // Move and resize are in CANVAS units, so the node tracks the cursor at any zoom.
-        const { dx, dy } = toCanvasDelta(dxScreen, dyScreen, canvas.zoom);
-        setCanvas(
-          drag.mode === "resize"
-            ? resizeNode(canvas, drag.ref, nodeW(node) + dx, nodeH(node) + dy)
-            : moveNode(canvas, drag.ref, node.x + dx, node.y + dy),
-        );
+      // Move and resize are in CANVAS units, so the thing tracks the cursor at any zoom.
+      const { dx, dy } = toCanvasDelta(dxScreen, dyScreen, canvas.zoom);
+      if (drag.kind === "note") {
+        const note = notesOf(canvas).find((n) => n.id === drag.ref);
+        if (note) {
+          setCanvas(
+            drag.mode === "resize"
+              ? resizeNote(canvas, note.id, note.w + dx, note.h + dy)
+              : moveNote(canvas, note.id, note.x + dx, note.y + dy),
+          );
+        }
+      } else {
+        const node = canvas.nodes.find((n) => n.ref === drag.ref);
+        if (node) {
+          setCanvas(
+            drag.mode === "resize"
+              ? resizeNode(canvas, drag.ref, nodeW(node) + dx, nodeH(node) + dy)
+              : moveNode(canvas, drag.ref, node.x + dx, node.y + dy),
+          );
+        }
       }
     }
     setDrag({ ...drag, lastX: e.clientX, lastY: e.clientY });
   };
 
   const endDrag = () => setDrag(null);
+
+  /** Right-click anywhere on the plane. `noteId` when the click landed on a note. */
+  const openMenu = (e: React.MouseEvent, noteId?: string) => {
+    const el = viewportRef.current;
+    if (!el) return;
+    e.preventDefault();
+    e.stopPropagation();
+    const rect = el.getBoundingClientRect();
+    const p = toCanvasPoint(canvas, e.clientX - rect.left, e.clientY - rect.top);
+    setMenu({ screenX: e.clientX, screenY: e.clientY, x: p.x, y: p.y, noteId });
+  };
+
+  const addNoteHere = () => {
+    if (!menu) return;
+    setCanvas(addNote(canvas, crypto.randomUUID(), menu.x, menu.y));
+    setMenu(null);
+  };
+
+  /**
+   * Create a session and put its card where the click was.
+   *
+   * The card is written into the canvas directly rather than letting `reconcile`
+   * auto-place it: auto-placement fills the first free grid slot, which is the right
+   * answer for a session that arrived from somewhere else and the wrong one for a session
+   * the user asked for at a specific spot. `reconcile` then sees the node already exists
+   * and leaves it alone.
+   */
+  const addSessionHere = () => {
+    if (!menu) return;
+    const { x, y } = menu;
+    setMenu(null);
+    const before = new Set((project?.sessions ?? []).map((s) => s.id));
+    void (async () => {
+      await addSession(projectId);
+      const st = useStore.getState();
+      const fresh = (st.projects.find((p) => p.id === projectId)?.sessions ?? []).find(
+        (s) => !before.has(s.id),
+      );
+      if (!fresh) return;
+      // Re-read rather than closing over `canvas`: the await let the store move on, and
+      // the session that was just created is itself one of the changes.
+      const cur = st.canvases[projectId];
+      if (!cur || cur.nodes.some((n) => n.ref === fresh.id)) return;
+      setCanvas({ ...cur, nodes: [...cur.nodes, { ref: fresh.id, x, y }] });
+    })();
+  };
 
   const byId = useMemo(() => new Map((project?.sessions ?? []).map((s) => [s.id, s])), [project]);
 
@@ -154,11 +234,59 @@ export function CanvasUnderlay({
       onPointerMove={onPointerMove}
       onPointerUp={endDrag}
       onPointerCancel={endDrag}
+      onContextMenu={(e) => openMenu(e)}
     >
       <div
         className="canvas-plane"
         style={{ transform: `translate(${canvas.pan.x}px, ${canvas.pan.y}px) scale(${canvas.zoom})` }}
       >
+        {/* Notes first, so a note never paints over a session card. They are a separate
+            list from `nodes` — see canvas.ts for why. */}
+        {notesOf(canvas).map((note) => (
+          <div
+            key={note.id}
+            className="canvas-note"
+            style={{ left: note.x, top: note.y, width: note.w, height: note.h }}
+            onContextMenu={(e) => openMenu(e, note.id)}
+          >
+            <div
+              className="canvas-note-head"
+              style={{ height: NOTE_HEAD_H }}
+              onPointerDown={(e) => {
+                e.stopPropagation();
+                onPointerDown(e, note.id, "move", "note");
+              }}
+              title="Drag to move · right-click to delete"
+            />
+            {/* An always-editable textarea rather than a click-to-edit mode: a sticky note
+                that needs to be unlocked before it can be written on is a worse sticky
+                note, and there is nothing here to protect from a stray keystroke. */}
+            <textarea
+              className="canvas-note-text"
+              value={note.text}
+              placeholder="Note…"
+              spellCheck={false}
+              onChange={(e) => setCanvas(setNoteText(canvas, note.id, e.target.value))}
+              // The plane pans on pointerdown; without this, clicking into a note to type
+              // would drag the whole canvas instead of placing a cursor. Stopping here
+              // also stops the menu's own dismiss-on-outside-click listener from ever
+              // seeing the event, so close it explicitly.
+              onPointerDown={(e) => {
+                e.stopPropagation();
+                setMenu(null);
+              }}
+            />
+            <span
+              className="canvas-note-resize"
+              title="Drag to resize"
+              onPointerDown={(e) => {
+                e.stopPropagation();
+                onPointerDown(e, note.id, "resize", "note");
+              }}
+            />
+          </div>
+        ))}
+
         {/* Keyed by session id, in `canvas.nodes` order, which reconcile() and moveNode()
             both preserve. Never sort this list. */}
         {canvas.nodes.map((node) => {
@@ -222,8 +350,97 @@ export function CanvasUnderlay({
         })}
       </div>
 
-      {canvas.nodes.length === 0 && (
-        <div className="canvas-empty">This project has no sessions yet.</div>
+      {canvas.nodes.length === 0 && notesOf(canvas).length === 0 && (
+        <div className="canvas-empty">
+          Nothing here yet — right-click to add a session or a note.
+        </div>
+      )}
+
+      {menu && (
+        <CanvasMenu
+          menu={menu}
+          onClose={() => setMenu(null)}
+          onAddSession={addSessionHere}
+          onAddNote={addNoteHere}
+          onDeleteNote={() => {
+            if (menu.noteId) setCanvas(removeNote(canvas, menu.noteId));
+            setMenu(null);
+          }}
+        />
+      )}
+    </div>
+  );
+}
+
+/** The canvas right-click menu. Flips into the viewport the same way the tab menu does. */
+function CanvasMenu({
+  menu,
+  onClose,
+  onAddSession,
+  onAddNote,
+  onDeleteNote,
+}: {
+  menu: { screenX: number; screenY: number; noteId?: string };
+  onClose: () => void;
+  onAddSession: () => void;
+  onAddNote: () => void;
+  onDeleteNote: () => void;
+}) {
+  const ref = useRef<HTMLDivElement>(null);
+
+  useLayoutEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    const r = el.getBoundingClientRect();
+    const pad = 6;
+    let left = menu.screenX;
+    let top = menu.screenY;
+    if (left + r.width > window.innerWidth - pad) left = Math.max(pad, menu.screenX - r.width);
+    if (top + r.height > window.innerHeight - pad) top = Math.max(pad, menu.screenY - r.height);
+    el.style.left = `${left}px`;
+    el.style.top = `${top}px`;
+  }, [menu]);
+
+  // Escape closes the MENU, and must not reach the canvas's own Escape handler — otherwise
+  // dismissing a menu would also leave the canvas. Capture phase on window, which runs
+  // before that handler's bubble-phase listener.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== "Escape") return;
+      e.stopPropagation();
+      onClose();
+    };
+    window.addEventListener("keydown", onKey, true);
+    return () => window.removeEventListener("keydown", onKey, true);
+  }, [onClose]);
+
+  // Any click outside dismisses. Registered on the next tick so the right-click that
+  // opened the menu cannot immediately close it.
+  useEffect(() => {
+    const t = setTimeout(() => window.addEventListener("pointerdown", onClose), 0);
+    return () => {
+      clearTimeout(t);
+      window.removeEventListener("pointerdown", onClose);
+    };
+  }, [onClose]);
+
+  return (
+    <div
+      ref={ref}
+      className="context-menu"
+      style={{ left: menu.screenX, top: menu.screenY }}
+      onPointerDown={(e) => e.stopPropagation()}
+      onContextMenu={(e) => e.preventDefault()}
+    >
+      {menu.noteId ? (
+        <button className="danger" onClick={onDeleteNote}>
+          Delete note
+        </button>
+      ) : (
+        <>
+          <button onClick={onAddSession}>New session here</button>
+          <button onClick={onAddNote}>Add sticky note</button>
+        </>
       )}
     </div>
   );
@@ -251,13 +468,19 @@ export function CanvasControls({
     [projectId, setCenterMode],
   );
 
-  // Escape leaves the canvas — but ONLY when the keystroke did not land in a terminal.
-  // Escape inside a live agent session is how you interrupt it, and stealing that to
-  // change views would be far worse than having no shortcut at all.
+  // Escape leaves the canvas — but ONLY when the keystroke did not land somewhere that
+  // owns it. Escape inside a live agent session is how you interrupt it, and stealing that
+  // to change views would be far worse than having no shortcut at all; Escape while typing
+  // in a sticky note is a way to stop typing, not a way to lose the view you are typing in.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.key !== "Escape") return;
-      if ((e.target as Element | null)?.closest?.(".term-host")) return;
+      const target = e.target as Element | null;
+      if (target?.closest?.(".term-host")) return;
+      if (target?.closest?.("textarea, input, [contenteditable='true']")) {
+        (target as HTMLElement).blur?.();
+        return;
+      }
       exitCanvas();
     };
     window.addEventListener("keydown", onKey);

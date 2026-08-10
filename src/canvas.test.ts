@@ -4,9 +4,20 @@ import {
   CARD_W,
   MIN_CARD_H,
   MIN_CARD_W,
+  MIN_NOTE_H,
+  MIN_NOTE_W,
+  NOTE_H,
+  NOTE_W,
+  addNote,
+  moveNote,
   nodeH,
   nodeW,
+  notesOf,
+  removeNote,
   resizeNode,
+  resizeNote,
+  setNoteText,
+  toCanvasPoint,
   MAX_ZOOM,
   MIN_ZOOM,
   clampZoom,
@@ -173,6 +184,91 @@ describe("fit", () => {
   it("survives an empty canvas and a zero-size viewport", () => {
     expect(fit(emptyCanvas(), 800, 600).zoom).toBe(1);
     expect(fit({ ...emptyCanvas(), nodes: [at("a", 0, 0)] }, 0, 0).zoom).toBe(1);
+  });
+});
+
+describe("sticky notes", () => {
+  it("adds a note at the point it was asked for", () => {
+    const s = addNote(emptyCanvas(), "n1", 120, 240);
+    expect(notesOf(s)).toEqual([
+      { id: "n1", x: 120, y: 240, w: NOTE_W, h: NOTE_H, text: "" },
+    ]);
+  });
+
+  it("reads as no notes on a canvas saved before notes existed", () => {
+    // The field is optional precisely so old persisted state loads; this is that contract.
+    const legacy = { nodes: [], pan: { x: 0, y: 0 }, zoom: 1 };
+    expect(notesOf(legacy)).toEqual([]);
+    expect(notesOf(addNote(legacy, "n1", 0, 0))).toHaveLength(1);
+  });
+
+  it("moves, resizes, and edits without disturbing the others", () => {
+    let s = addNote(addNote(emptyCanvas(), "a", 0, 0), "b", 500, 0);
+    s = moveNote(s, "b", 700, 100);
+    s = resizeNote(s, "b", 400, 300);
+    s = setNoteText(s, "b", "check the reaper grace window");
+    expect(notesOf(s)[0]).toEqual({ id: "a", x: 0, y: 0, w: NOTE_W, h: NOTE_H, text: "" });
+    expect(notesOf(s)[1]).toEqual({
+      id: "b",
+      x: 700,
+      y: 100,
+      w: 400,
+      h: 300,
+      text: "check the reaper grace window",
+    });
+  });
+
+  it("clamps a resize to a size that still holds a line of text", () => {
+    const s = resizeNote(addNote(emptyCanvas(), "a", 0, 0), "a", 5, 5);
+    expect([notesOf(s)[0].w, notesOf(s)[0].h]).toEqual([MIN_NOTE_W, MIN_NOTE_H]);
+  });
+
+  it("returns the same object when nothing changed", () => {
+    const s = addNote(emptyCanvas(), "a", 10, 10);
+    expect(moveNote(s, "a", 10, 10)).toBe(s);
+    expect(setNoteText(s, "a", "")).toBe(s);
+    expect(moveNote(s, "nope", 1, 1)).toBe(s);
+    expect(removeNote(s, "nope")).toBe(s);
+  });
+
+  it("removes a note", () => {
+    const s = removeNote(addNote(addNote(emptyCanvas(), "a", 0, 0), "b", 0, 0), "a");
+    expect(notesOf(s).map((n) => n.id)).toEqual(["b"]);
+  });
+
+  it("survives a reconcile, which owns sessions and must not touch notes", () => {
+    // The reason notes are a separate array: reconcile drops nodes whose session is gone,
+    // and a note has no session to be gone.
+    const s = addNote(reconcile(emptyCanvas(), ["s1"]), "n1", 40, 40);
+    const after = reconcile(s, []);
+    expect(after.nodes).toEqual([]);
+    expect(notesOf(after)).toHaveLength(1);
+  });
+
+  it("is included in fit, so a note off to one side is not left off-screen", () => {
+    const withNote = addNote({ ...emptyCanvas(), nodes: [at("a", 0, 0)] }, "n1", 2400, 1600);
+    const s = fit(withNote, 800, 600);
+    const n = notesOf(s)[0];
+    expect(n.x * s.zoom + s.pan.x).toBeGreaterThanOrEqual(-0.001);
+    expect((n.x + n.w) * s.zoom + s.pan.x).toBeLessThanOrEqual(800.001);
+    expect((n.y + n.h) * s.zoom + s.pan.y).toBeLessThanOrEqual(600.001);
+  });
+
+  it("fits a canvas that has only notes", () => {
+    const only = addNote(emptyCanvas(), "n1", 900, 900);
+    const s = fit(only, 800, 600);
+    expect(s.zoom).toBeLessThanOrEqual(MAX_ZOOM);
+    expect(notesOf(s)[0].x * s.zoom + s.pan.x).toBeGreaterThanOrEqual(-0.001);
+  });
+});
+
+describe("toCanvasPoint", () => {
+  it("inverts the plane transform, so a right-click lands where it was aimed", () => {
+    const s = { ...emptyCanvas(), pan: { x: 120, y: -40 }, zoom: 1.5 };
+    const p = toCanvasPoint(s, 300, 200);
+    // Round-trip through the forward transform the renderer applies.
+    expect(p.x * s.zoom + s.pan.x).toBeCloseTo(300, 6);
+    expect(p.y * s.zoom + s.pan.y).toBeCloseTo(200, 6);
   });
 });
 

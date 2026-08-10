@@ -18,10 +18,31 @@ export interface CanvasNode {
   h?: number;
 }
 
+/**
+ * A free-text sticky note on the canvas.
+ *
+ * Deliberately a SEPARATE array from `nodes` rather than a node with a kind. Nodes are
+ * reconciled against the project's live sessions — a node whose session is gone is dropped —
+ * and a note has no session to be reconciled against. Folding the two together would mean
+ * every reconcile had to remember which nodes are exempt from its own rule, which is exactly
+ * the kind of special case that eventually deletes someone's notes.
+ */
+export interface CanvasNote {
+  /** Generated at creation; stable for the note's life and its React key. */
+  id: string;
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+  text: string;
+}
+
 export interface CanvasState {
   nodes: CanvasNode[];
   pan: { x: number; y: number };
   zoom: number;
+  /** Optional so every canvas persisted before notes existed still loads. */
+  notes?: CanvasNote[];
 }
 
 /** Card footprint in canvas units. A node is a real terminal, so this is sized to be
@@ -167,13 +188,19 @@ export function fit(
   viewportH: number,
   padding = 48,
 ): CanvasState {
-  if (state.nodes.length === 0 || viewportW <= 0 || viewportH <= 0) {
+  // Notes count as content: a note placed off to one side is something the user put there
+  // on purpose, and a Fit that leaves it outside the viewport has not fitted anything.
+  const boxes = [
+    ...state.nodes.map((n) => ({ x: n.x, y: n.y, w: nodeW(n), h: nodeH(n) })),
+    ...notesOf(state).map((n) => ({ x: n.x, y: n.y, w: n.w, h: n.h })),
+  ];
+  if (boxes.length === 0 || viewportW <= 0 || viewportH <= 0) {
     return { ...state, pan: { x: padding, y: padding }, zoom: 1 };
   }
-  const minX = Math.min(...state.nodes.map((n) => n.x));
-  const minY = Math.min(...state.nodes.map((n) => n.y));
-  const maxX = Math.max(...state.nodes.map((n) => n.x + nodeW(n)));
-  const maxY = Math.max(...state.nodes.map((n) => n.y + nodeH(n)));
+  const minX = Math.min(...boxes.map((b) => b.x));
+  const minY = Math.min(...boxes.map((b) => b.y));
+  const maxX = Math.max(...boxes.map((b) => b.x + b.w));
+  const maxY = Math.max(...boxes.map((b) => b.y + b.h));
   const zoom = clampZoom(
     Math.min((viewportW - padding * 2) / (maxX - minX), (viewportH - padding * 2) / (maxY - minY)),
   );
@@ -193,3 +220,80 @@ export const toCanvasDelta = (dx: number, dy: number, zoom: number) => ({
   dx: dx / zoom,
   dy: dy / zoom,
 });
+
+/**
+ * A point in the viewport to a point on the plane — the inverse of `screen = canvas * zoom
+ * + pan`. What "put the new thing where I right-clicked" needs.
+ */
+export const toCanvasPoint = (state: CanvasState, screenX: number, screenY: number) => ({
+  x: (screenX - state.pan.x) / state.zoom,
+  y: (screenY - state.pan.y) / state.zoom,
+});
+
+// ---- sticky notes ----
+
+/** Default note footprint. Smaller than a card: a note is a sentence, not a terminal. */
+export const NOTE_W = 240;
+export const NOTE_H = 160;
+/** Floor on a note resize — below this the textarea has no usable line. */
+export const MIN_NOTE_W = 120;
+export const MIN_NOTE_H = 80;
+/** Drag strip along a note's top, so the body stays available for selecting text. */
+export const NOTE_HEAD_H = 20;
+
+/** A canvas's notes, defaulting to none for state saved before notes existed. */
+export const notesOf = (state: CanvasState): CanvasNote[] => state.notes ?? [];
+
+/**
+ * Add a note whose TOP-LEFT is at (x, y).
+ *
+ * The id is supplied rather than generated so this stays pure — the caller owns the only
+ * nondeterministic part, and tests get to name their notes.
+ */
+export function addNote(state: CanvasState, id: string, x: number, y: number): CanvasState {
+  const note: CanvasNote = { id, x, y, w: NOTE_W, h: NOTE_H, text: "" };
+  return { ...state, notes: [...notesOf(state), note] };
+}
+
+/** Update one note in place, preserving array order. Same object back when nothing changed. */
+function patchNote(
+  state: CanvasState,
+  id: string,
+  patch: (n: CanvasNote) => CanvasNote,
+): CanvasState {
+  const notes = notesOf(state);
+  const i = notes.findIndex((n) => n.id === id);
+  if (i === -1) return state;
+  const next = patch(notes[i]);
+  if (
+    next.x === notes[i].x &&
+    next.y === notes[i].y &&
+    next.w === notes[i].w &&
+    next.h === notes[i].h &&
+    next.text === notes[i].text
+  ) {
+    return state;
+  }
+  const copy = [...notes];
+  copy[i] = next;
+  return { ...state, notes: copy };
+}
+
+export const moveNote = (state: CanvasState, id: string, x: number, y: number): CanvasState =>
+  patchNote(state, id, (n) => ({ ...n, x, y }));
+
+export const resizeNote = (state: CanvasState, id: string, w: number, h: number): CanvasState =>
+  patchNote(state, id, (n) => ({
+    ...n,
+    w: Math.max(MIN_NOTE_W, w),
+    h: Math.max(MIN_NOTE_H, h),
+  }));
+
+export const setNoteText = (state: CanvasState, id: string, text: string): CanvasState =>
+  patchNote(state, id, (n) => ({ ...n, text }));
+
+export function removeNote(state: CanvasState, id: string): CanvasState {
+  const notes = notesOf(state);
+  const kept = notes.filter((n) => n.id !== id);
+  return kept.length === notes.length ? state : { ...state, notes: kept };
+}

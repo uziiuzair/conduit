@@ -746,6 +746,67 @@ button {
 
 /* The frame. Its BODY is deliberately empty while live — that hole is where the real
    terminal shows through from the layer above. */
+/* Sticky note. Warm and paper-like against the cards' panel grey, so at a glance it reads
+   as something a human wrote rather than another session. */
+.canvas-note {
+  position: absolute;
+  display: flex;
+  flex-direction: column;
+  border: 1px solid color-mix(in srgb, var(--amber) 35%, var(--border));
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--amber) 12%, var(--panel-bg));
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.3);
+  overflow: hidden;
+}
+
+/* Drag strip. Deliberately blank: the note's content is the text, and a title bar with
+   nothing in it would just steal room from the writing surface. */
+.canvas-note-head {
+  flex: none;
+  cursor: grab;
+  background: color-mix(in srgb, var(--amber) 18%, transparent);
+  border-bottom: 1px solid color-mix(in srgb, var(--amber) 25%, transparent);
+}
+
+.canvas-note-head:active {
+  cursor: grabbing;
+}
+
+.canvas-note-text {
+  flex: 1 1 auto;
+  min-height: 0;
+  padding: 7px 9px;
+  font-family: var(--ui-font);
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--text-bright);
+  background: transparent;
+  border: none;
+  outline: none;
+  resize: none;
+}
+
+.canvas-note-text::placeholder {
+  color: var(--text-dim);
+}
+
+.canvas-note-resize {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  width: 14px;
+  height: 14px;
+  cursor: nwse-resize;
+  background: linear-gradient(
+    135deg,
+    transparent 0 50%,
+    color-mix(in srgb, var(--amber) 45%, transparent) 50% 62%,
+    transparent 62% 74%,
+    color-mix(in srgb, var(--amber) 45%, transparent) 74% 86%,
+    transparent 86%
+  );
+}
+
 .canvas-card {
   position: absolute;
   display: flex; flex-direction: column;
