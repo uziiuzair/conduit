@@ -29,6 +29,7 @@ mod notify;
 mod plugins;
 mod pty;
 mod search;
+mod status_rules;
 mod store;
 mod tasks;
 mod telemetry;
@@ -1560,6 +1561,23 @@ pub fn run() {
                         .flat_map(|s| [format!("{}::term", s.id), s.id])
                         .collect();
                     crate::tmux::sweep_orphans(tmux, &live);
+                });
+            }
+
+            // Stale-working watchdog. A session leaves `running` only when something says
+            // so, and several exits say nothing at all -- Esc during a tool call (Claude
+            // aborts the tool and never runs `Stop`), a killed CLI, a slept machine. The
+            // sweep is the single decider (see `status_rules`); the broadcast is what keeps
+            // the frontend's own `live` map from disagreeing with `fleet_list`.
+            {
+                let fleet_for_sweep = fleet.clone();
+                let app_for_sweep = app.handle().clone();
+                std::thread::spawn(move || loop {
+                    std::thread::sleep(std::time::Duration::from_secs(60));
+                    let swept = fleet_for_sweep.sweep_stale_working();
+                    if !swept.is_empty() {
+                        let _ = app_for_sweep.emit("session-stale", swept);
+                    }
                 });
             }
 

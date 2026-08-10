@@ -14,6 +14,7 @@ import {
   type AgyUsage,
 } from "./store";
 import { type AgentId } from "./agents";
+import { holdsOffWorking, notificationStatus } from "./statusRules";
 import { type ThemePref } from "./themes";
 import { useClaudeAmbient } from "./hooks/useClaudeAmbient";
 import { useSessionDirs } from "./hooks/useSessionDirs";
@@ -174,6 +175,12 @@ export default function App() {
         case "pretool": {
           // Fires before each tool runs: a more responsive "running" plus a
           // live label of what it's doing. TodoWrite is shown in the To-dos panel.
+          //
+          // Held off briefly after a turn ends: Claude runs hooks in parallel, so this can
+          // arrive behind that turn's `stop` and would otherwise leave a finished session
+          // showing as busy forever. See statusRules.ts.
+          const cur = st.live[session];
+          if (holdsOffWorking(cur?.status, cur?.updatedAt, Date.now())) break;
           st.setStatus(session, "running");
           st.setCompacting(session, false);
           st.setActivity(session, toolActivity(agentOf(session), body?.tool_name, body?.tool_input));
@@ -199,15 +206,41 @@ export default function App() {
           notifyIfAway(session, "finished");
           break;
         case "notification": {
+          // One event name, four situations. `statusRules` says which — and undefined
+          // means this one is informational, so the badge (and any alert) stays put.
+          const cur = st.live[session];
+          const next = notificationStatus(body?.notification_type, cur?.status);
+          if (next === undefined) break;
+          if (next === "idle") {
+            // The `idle_prompt` rescue: the CLI is back at its prompt with no turn-end hook
+            // ever having fired (Esc during a tool call). Nothing was accomplished, so this
+            // is a silent correction, not something to notify about.
+            st.setStatus(session, "idle");
+            st.setActivity(session, undefined);
+            break;
+          }
           const active =
             globalSelectedSessionId(st) === session && document.hasFocus();
           if (!active) {
-            st.setStatus(session, "needsInput");
+            st.setStatus(session, next);
             doNotify(session, body?.message ?? "needs your input");
           }
           break;
         }
       }
+    });
+    return () => {
+      void unlisten.then((f) => f());
+    };
+  }, []);
+
+  // The Rust stale-working watchdog's verdict. A session leaves `running` only when
+  // something says so, and Esc during a tool call / a killed CLI / a slept machine all say
+  // nothing at all. Rust is the single decider (see status_rules.rs); this listener is how
+  // its answer reaches the sidebar instead of the frontend inventing a second timeout.
+  useEffect(() => {
+    const unlisten = listen<string[]>("session-stale", ({ payload }) => {
+      useStore.getState().markStale(payload ?? []);
     });
     return () => {
       void unlisten.then((f) => f());

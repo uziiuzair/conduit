@@ -209,7 +209,7 @@ pub fn start(
             // fleet_list on a timer. Only for a wake-eligible event (worker stop /
             // needsInput), only when the Conductor is not mid-turn, and debounced so a
             // burst of near-simultaneous worker events collapses into one nudge.
-            if crate::fleet::is_wake_event(&event) {
+            if crate::fleet::is_wake_event(&event, &parsed) {
                 if let Some(snap) = store.fleet_snapshot(&session) {
                     if let Some(conductor) = crate::fleet::resolve_wake_target(&snap, &session) {
                         let status = fleet

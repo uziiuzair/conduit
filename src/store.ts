@@ -268,6 +268,12 @@ export interface LiveState {
   activity?: string;
   /** True between a PreCompact event and the next activity, for a "compacting" hint. */
   compacting?: boolean;
+  /**
+   * When `status` was last asserted, epoch ms. Drives the done-holdoff and the staleness
+   * rules in `statusRules.ts` — see that file for why the frontend needs its own copy of
+   * the clock rather than trusting the event order.
+   */
+  updatedAt?: number;
 }
 
 const EMPTY_LIVE: LiveState = { status: "idle", todos: [] };
@@ -1111,6 +1117,8 @@ interface AppState {
   startProjectRename: (projectId: string) => void;
   cancelProjectRename: () => void;
   setStatus: (id: string, status: SessionStatus) => void;
+  /** Apply the Rust stale-working sweep's verdict to the frontend's own `live` map. */
+  markStale: (ids: string[]) => void;
   setTodos: (id: string, todos: TodoItem[]) => void;
   setActivity: (id: string, activity: string | undefined) => void;
   setCompacting: (id: string, compacting: boolean) => void;
@@ -2365,8 +2373,26 @@ export const useStore = create<AppState>((set, get) => {
 
     setStatus: (id, status) =>
       set((s) => ({
-        live: { ...s.live, [id]: { ...(s.live[id] ?? EMPTY_LIVE), status } },
+        live: {
+          ...s.live,
+          [id]: { ...(s.live[id] ?? EMPTY_LIVE), status, updatedAt: Date.now() },
+        },
       })),
+    markStale: (ids) =>
+      set((s) => {
+        // The Rust watchdog swept these; mirror its answer so the sidebar and `fleet_list`
+        // agree. Guarded on `running` because an event may have arrived in the gap between
+        // the sweep and this broadcast, and that event is newer than the sweep's evidence.
+        const live = { ...s.live };
+        let changed = false;
+        for (const id of ids) {
+          const cur = live[id];
+          if (cur?.status !== "running") continue;
+          live[id] = { ...cur, status: "idle", activity: undefined, updatedAt: Date.now() };
+          changed = true;
+        }
+        return changed ? { live } : {};
+      }),
     setTodos: (id, todos) =>
       set((s) => ({
         live: { ...s.live, [id]: { ...(s.live[id] ?? EMPTY_LIVE), todos } },
