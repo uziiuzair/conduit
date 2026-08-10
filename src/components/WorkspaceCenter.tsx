@@ -593,13 +593,19 @@ function GroupTabStrip({
         <button
           type="button"
           className={`header-btn board-tab ${centerMode === "canvas" ? "active" : ""}`}
-          title="Canvas — every session as a card on a pan/zoom plane"
+          title={
+            centerMode === "canvas"
+              ? "Back to panes (Esc)"
+              : "Canvas — every session as a card on a pan/zoom plane"
+          }
           onClick={() =>
             setCenterMode(projectId, centerMode === "canvas" ? "terminals" : "canvas")
           }
         >
           <span className="board-tab-dot" />
-          <span>Canvas</span>
+          {/* One button, both directions. A separate "Close canvas" beside an active
+              "Canvas" toggle was the same action twice. */}
+          <span>{centerMode === "canvas" ? "Hide canvas" : "Canvas"}</span>
         </button>
       )}
       {/* Canvas controls live in the persistent header rather than a floating bar of

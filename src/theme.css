@@ -125,6 +125,12 @@ button {
   top: 0;
   height: var(--tabstrip-h, 34px);
   overflow: hidden;
+  /* Above the terminal stack (2) and the canvas underlay (1), below the group divider (6)
+     and every menu/modal (1000+). The canvas stack is `overflow: visible` so a panned node
+     paints outside its box and up into this band; the header has to win. `.tab-strip` is
+     opaque, so nothing bleeds through. In pane mode the two never overlap, so this is
+     inert there. */
+  z-index: 4;
 }
 
 /* Draggable boundary between two groups (spans full workspace height). */
@@ -737,13 +743,6 @@ button {
   cursor: pointer; font-variant-numeric: tabular-nums; white-space: nowrap;
 }
 .canvas-btn:hover { background: var(--hover); color: var(--text-hi); }
-/* The exit. The only emphasized control here because it is the one a first-time user
-   goes looking for. */
-.canvas-btn.primary {
-  border-color: color-mix(in srgb, var(--accent) 50%, var(--border));
-  color: var(--text-hi);
-}
-.canvas-btn.primary:hover { background: color-mix(in srgb, var(--accent) 16%, transparent); }
 
 /* The frame. Its BODY is deliberately empty while live — that hole is where the real
    terminal shows through from the layer above. */

@@ -244,6 +244,8 @@ export function CanvasControls({
   const { canvas, setCanvas } = useProjectCanvas(projectId);
   const setCenterMode = useStore((s) => s.setCenterMode);
   const isLive = canvas.zoom >= LIVE_ZOOM_MIN;
+  // The visible way out is the header's Canvas toggle, which flips to "Hide canvas" while
+  // the canvas is open. This is only the keyboard route to the same action.
   const exitCanvas = useCallback(
     () => setCenterMode(projectId, "terminals"),
     [projectId, setCenterMode],
@@ -290,9 +292,6 @@ export function CanvasControls({
         title="Reset zoom to 100%"
       >
         {Math.round(canvas.zoom * 100)}%
-      </button>
-      <button className="canvas-btn primary" onClick={exitCanvas} title="Back to panes (Esc)">
-        Close canvas
       </button>
     </span>
   );
