@@ -8,6 +8,7 @@ export function GeneralSettings() {
   const persistSessions = useStore((s) => s.persistSessions);
   const setPersistSessions = useStore((s) => s.setPersistSessions);
   const tmuxAvailable = useStore((s) => s.tmuxAvailable);
+  const tmuxInstall = useStore((s) => s.tmuxInstall);
   const probeTmux = useStore((s) => s.probeTmux);
 
   // Probe on first open rather than at app boot: it shells out, and nothing before
@@ -47,8 +48,18 @@ export function GeneralSettings() {
           {tmuxAvailable === false && (
             <em className="dialog-hint">
               {" "}
-              Needs tmux, which isn’t installed. Install it with <code>brew install tmux</code>{" "}
-              and reopen Settings.
+              Needs tmux, which isn’t installed.
+              {/* The command comes from the backend: it depends on the platform and on what
+                  is already there, so a hardcoded `brew install tmux` is wrong on every
+                  Linux and on a Mac without Homebrew. */}
+              {tmuxInstall ? (
+                <>
+                  {" "}
+                  Install it with <code>{tmuxInstall.command}</code> and reopen Settings.
+                </>
+              ) : (
+                <> Install tmux with your system’s package manager and reopen Settings.</>
+              )}
             </em>
           )}
           {tmuxAvailable === null && <em className="dialog-hint"> Checking for tmux…</em>}

@@ -439,6 +439,11 @@ fn pty_is_running(session_id: String, pty: State<Arc<PtyManager>>) -> bool {
 struct TmuxInfo {
     available: bool,
     path: Option<String>,
+    /// How to install tmux on this host, when there is a sensible suggestion. Resolved here
+    /// rather than in the UI because the right answer depends on the platform AND on what is
+    /// already installed -- a hardcoded `brew install tmux` is wrong on every Linux and on a
+    /// Mac without Homebrew.
+    install: Option<tmux::InstallHint>,
 }
 
 #[tauri::command]
@@ -446,9 +451,15 @@ fn tmux_available(pty: State<Arc<PtyManager>>) -> TmuxInfo {
     #[cfg(not(windows))]
     {
         let path = pty.tmux_path().map(|p| p.to_string_lossy().into_owned());
+        let available = path.is_some();
         TmuxInfo {
-            available: path.is_some(),
+            available,
             path,
+            install: if available {
+                None
+            } else {
+                tmux::install_hint_here()
+            },
         }
     }
     // tmux is Unix-only, and Conduit on Windows keeps the non-persistent path.
@@ -458,6 +469,7 @@ fn tmux_available(pty: State<Arc<PtyManager>>) -> TmuxInfo {
         TmuxInfo {
             available: false,
             path: None,
+            install: None,
         }
     }
 }

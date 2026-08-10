@@ -85,6 +85,89 @@ pub fn find_tmux() -> Option<PathBuf> {
     find_in_path("tmux", std::env::var("PATH").ok().as_deref())
 }
 
+/// A one-shot command that installs tmux on this host, with a caption for the button.
+#[derive(Clone, Debug, PartialEq, serde::Serialize)]
+pub struct InstallHint {
+    pub command: String,
+    /// Says up front when more than tmux is being installed.
+    pub label: String,
+}
+
+/// The install command to suggest for `platform`, or None when there is nothing sensible to
+/// suggest (Windows; a Linux with no package manager we recognize).
+///
+/// `has` answers "is this command on PATH", injected so the mapping is testable without the
+/// test machine's own tooling deciding the answer.
+///
+/// macOS without Homebrew is the case worth spelling out: macOS ships no package manager, so
+/// the suggestion chains the official Homebrew installer and then calls the *fresh* brew by
+/// ABSOLUTE path. A bare `brew install tmux` would fail immediately after the install
+/// succeeded, because the brew that now exists is not on the PATH of the shell that just ran
+/// the installer.
+pub fn install_hint(platform: &str, has: impl Fn(&str) -> bool) -> Option<InstallHint> {
+    let hint = |command: &str, label: &str| {
+        Some(InstallHint {
+            command: command.to_string(),
+            label: label.to_string(),
+        })
+    };
+    match platform {
+        "macos" => {
+            if has("brew") {
+                return hint("brew install tmux", "Install tmux");
+            }
+            hint(
+                "/bin/bash -c \"$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)\" \
+                 && { [ -x /opt/homebrew/bin/brew ] && /opt/homebrew/bin/brew install tmux \
+                 || /usr/local/bin/brew install tmux; }",
+                "Install Homebrew and tmux",
+            )
+        }
+        "linux" => {
+            // Debian family first (the most common target), then the other majors.
+            for (mgr, cmd) in [
+                (
+                    "apt-get",
+                    "sudo apt-get update && sudo apt-get install -y tmux",
+                ),
+                ("dnf", "sudo dnf install -y tmux"),
+                ("pacman", "sudo pacman -S --noconfirm tmux"),
+                ("zypper", "sudo zypper install -y tmux"),
+                ("apk", "sudo apk add tmux"),
+            ] {
+                if has(mgr) {
+                    return hint(cmd, "Install tmux");
+                }
+            }
+            None
+        }
+        // tmux is Unix-only; Conduit on Windows keeps the non-persistent path.
+        _ => None,
+    }
+}
+
+/// `install_hint` for the running host, resolving `has` against the real PATH.
+pub fn install_hint_here() -> Option<InstallHint> {
+    let platform = if cfg!(target_os = "macos") {
+        "macos"
+    } else if cfg!(target_os = "linux") {
+        "linux"
+    } else {
+        "other"
+    };
+    install_hint(platform, |bin| {
+        // Homebrew's own locations first: a Mac that has brew but hasn't opened a shell
+        // that adds it to PATH still has brew.
+        if bin == "brew"
+            && (Path::new("/opt/homebrew/bin/brew").is_file()
+                || Path::new("/usr/local/bin/brew").is_file())
+        {
+            return true;
+        }
+        find_in_path(bin, std::env::var("PATH").ok().as_deref()).is_some()
+    })
+}
+
 /// Scan a `PATH`-shaped string for an executable. Split out so it can be tested without
 /// depending on the machine's real environment.
 pub fn find_in_path(bin: &str, path: Option<&str>) -> Option<PathBuf> {
@@ -378,5 +461,56 @@ mod tests {
             find_in_path("sh", Some("::/nonexistent:/bin")),
             Some(PathBuf::from("/bin/sh"))
         );
+    }
+
+    #[test]
+    fn a_mac_with_homebrew_just_installs_tmux() {
+        let h = install_hint("macos", |b| b == "brew").unwrap();
+        assert_eq!(h.command, "brew install tmux");
+        assert_eq!(h.label, "Install tmux");
+    }
+
+    #[test]
+    fn a_mac_without_homebrew_installs_brew_first_and_calls_it_by_absolute_path() {
+        let h = install_hint("macos", |_| false).unwrap();
+        assert!(
+            h.command.contains("Homebrew/install"),
+            "chains the official installer"
+        );
+        // The trap this guards: the freshly installed brew is not on the launching shell's
+        // PATH, so a bare `brew install tmux` fails right after the install succeeds.
+        assert!(h.command.contains("/opt/homebrew/bin/brew install tmux"));
+        assert!(h.command.contains("/usr/local/bin/brew install tmux"));
+        assert!(
+            !h.command.contains("&& brew install"),
+            "must never call a bare brew after installing it"
+        );
+        // The label warns that this does more than install tmux.
+        assert!(h.label.contains("Homebrew"));
+    }
+
+    #[test]
+    fn linux_prefers_the_debian_family_then_falls_through_the_majors() {
+        let apt = install_hint("linux", |b| b == "apt-get" || b == "dnf").unwrap();
+        assert!(
+            apt.command.starts_with("sudo apt-get"),
+            "apt wins when both exist"
+        );
+        for (mgr, expect) in [
+            ("dnf", "sudo dnf install -y tmux"),
+            ("pacman", "sudo pacman -S --noconfirm tmux"),
+            ("zypper", "sudo zypper install -y tmux"),
+            ("apk", "sudo apk add tmux"),
+        ] {
+            let h = install_hint("linux", |b| b == mgr).unwrap();
+            assert_eq!(h.command, expect, "for {mgr}");
+        }
+    }
+
+    #[test]
+    fn nothing_is_suggested_when_nothing_sensible_exists() {
+        assert!(install_hint("linux", |_| false).is_none());
+        assert!(install_hint("windows", |_| true).is_none());
+        assert!(install_hint("other", |_| true).is_none());
     }
 }

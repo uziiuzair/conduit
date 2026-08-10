@@ -3779,6 +3779,73 @@ button {
 }
 
 /* ---- Auto-update notice ---- */
+/* "tmux isn't installed, so sessions won't survive a quit." A strip along the bottom rather
+   than a corner card: it explains a setting that silently isn't working, which is a sentence
+   to read once, not a task to action. Sits left of the update card's corner. */
+.tmux-notice {
+  position: fixed;
+  left: 16px;
+  bottom: 16px;
+  z-index: 999;
+  max-width: min(720px, calc(100vw - 400px));
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 12px;
+  border-radius: 8px;
+  background: var(--sidebar-bg);
+  border: 1px solid var(--border);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
+  font-size: 12px;
+  color: var(--text-mid);
+}
+
+.tmux-notice-text {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.tmux-notice-cmd {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--mono-font);
+  font-size: 11px;
+  color: var(--text-dim);
+  background: var(--panel-bg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 2px 6px;
+}
+
+.tmux-notice-btn {
+  flex: none;
+  font-size: 11px;
+  color: var(--text-bright);
+  background: var(--selection-bg);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  padding: 4px 9px;
+  cursor: pointer;
+}
+
+.tmux-notice-btn:hover {
+  border-color: var(--accent);
+}
+
+.tmux-notice-btn.subtle {
+  color: var(--text-dim);
+  background: transparent;
+  border-color: transparent;
+}
+
+.tmux-notice-btn.subtle:hover {
+  color: var(--text-mid);
+  border-color: var(--border);
+}
+
 .update-notice {
   position: fixed;
   right: 16px;

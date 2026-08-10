@@ -261,6 +261,13 @@ export interface TodoItem {
   activeForm?: string;
 }
 
+/** A one-shot install command for tmux plus its button caption (mirrors Rust
+ *  `tmux::InstallHint`). */
+export interface TmuxInstallHint {
+  command: string;
+  label: string;
+}
+
 /** One session's context-window fill (mirrors Rust `context_window::ContextUsage`). */
 export interface ContextUsage {
   /** Input tokens in play for the next turn: fresh input plus everything cached. */
@@ -550,6 +557,13 @@ function readRightCollapsed(): boolean {
 }
 function writeRightCollapsed(v: boolean): void {
   try { localStorage.setItem(RIGHT_COLLAPSED_KEY, v ? "1" : "0"); } catch { /* quota — non-fatal */ }
+}
+
+// "tmux isn't installed, so sessions won't survive a quit" — shown once, dismissible
+// forever. Same shape as the collapse prefs above.
+const TMUX_NOTICE_KEY = "conduit.tmuxNoticeDismissed";
+function readTmuxNoticeDismissed(): boolean {
+  try { return localStorage.getItem(TMUX_NOTICE_KEY) === "1"; } catch { return false; }
 }
 
 // Editor UX prefs (native View menu). Same localStorage pattern as the collapse flags;
@@ -880,6 +894,13 @@ interface AppState {
    *  `null` = not yet probed, which the Settings toggle renders as neither on nor
    *  disabled rather than flashing a false "unavailable". */
   tmuxAvailable: boolean | null;
+  /** How to install tmux on this host, when tmux is missing and there is a sensible
+   *  suggestion. Resolved by the backend — the right command depends on the platform and
+   *  on what is already installed. */
+  tmuxInstall: TmuxInstallHint | null;
+  /** Persisted. The tmux notice has been dismissed; nothing nags again. */
+  tmuxNoticeDismissed: boolean;
+  dismissTmuxNotice: () => void;
   probeTmux: () => Promise<void>;
   /** Per-session context-window fill, read from each session's Claude transcript. Absent
    *  = nothing to draw (no transcript, no assistant turn yet, or a non-Claude agent).
@@ -1237,6 +1258,8 @@ export const useStore = create<AppState>((set, get) => {
     restoreSessionsOnOpen: readRestoreSessionsOnOpen(),
     persistSessions: readPersistSessions(),
     tmuxAvailable: null,
+    tmuxInstall: null,
+    tmuxNoticeDismissed: readTmuxNoticeDismissed(),
     sessionContext: {},
     sidebarCollapsed: readSidebarCollapsed(),
     rightCollapsed: readRightCollapsed(),
@@ -2374,12 +2397,23 @@ export const useStore = create<AppState>((set, get) => {
       });
     },
 
+    dismissTmuxNotice: () => {
+      try {
+        localStorage.setItem(TMUX_NOTICE_KEY, "1");
+      } catch {
+        /* quota — non-fatal */
+      }
+      set({ tmuxNoticeDismissed: true });
+    },
+
     probeTmux: async () => {
       try {
-        const info = await invoke<{ available: boolean; path: string | null }>(
-          "tmux_available",
-        );
-        set({ tmuxAvailable: info.available });
+        const info = await invoke<{
+          available: boolean;
+          path: string | null;
+          install: TmuxInstallHint | null;
+        }>("tmux_available");
+        set({ tmuxAvailable: info.available, tmuxInstall: info.install ?? null });
         // Push the persisted preference down at boot. Without this the backend would
         // start on its own default and disagree with the toggle the user is looking at.
         void invoke("set_session_persistence", {

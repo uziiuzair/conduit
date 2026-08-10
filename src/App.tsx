@@ -25,6 +25,7 @@ import { WorkspaceCenter } from "./components/WorkspaceCenter";
 import { RightColumn } from "./components/RightColumn";
 import { Onboarding } from "./components/Onboarding";
 import { UpdateNotice } from "./components/UpdateNotice";
+import { TmuxNotice } from "./components/TmuxNotice";
 import { Toasts } from "./components/Toasts";
 import { Settings } from "./components/Settings";
 import { QuickOpen } from "./components/QuickOpen";
@@ -606,6 +607,7 @@ export default function App() {
         </div>
       </div>
       <UpdateNotice />
+      <TmuxNotice />
       <Toasts />
       {showSettings && (
         <Settings onClose={() => setShowSettings(false)} initialTab={settingsTab} />
