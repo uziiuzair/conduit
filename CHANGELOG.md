@@ -12,6 +12,10 @@ All notable changes to Conduit are documented here. This project uses
 - **Added — Search past conversations.** Type three or more characters in the palette and it
   also searches every transcript Conduit can reach, showing the surrounding sentence. Enter
   jumps to that session; a conversation whose session no longer exists says so instead.
+- **Added — Right-click the canvas.** Add a session or a sticky note exactly where you
+  clicked, instead of wherever the next free slot happens to be. Notes are free text you can
+  drag, resize, and delete like anything else on the plane, and they are saved with the
+  project's layout.
 - **Added — Context-window meter.** Every session tab now shows how full its context window
   is, amber past 70% and red past 90%, with the token counts and the model in its tooltip.
 - **Added — Agents panel.** When a session fans out into subagents you can finally see them:
