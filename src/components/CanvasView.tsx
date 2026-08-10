@@ -1,6 +1,17 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useStore } from "../store";
-import { CARD_H, CARD_W, HEADER_H, LIVE_ZOOM_MIN, fit, moveNode, toCanvasDelta, zoomAt } from "../canvas";
+import {
+  FOOTER_H,
+  HEADER_H,
+  LIVE_ZOOM_MIN,
+  fit,
+  moveNode,
+  nodeH,
+  nodeW,
+  resizeNode,
+  toCanvasDelta,
+  zoomAt,
+} from "../canvas";
 import { useProjectCanvas } from "../hooks/useProjectCanvas";
 import { AgentGlyph } from "./AgentGlyph";
 
@@ -39,9 +50,14 @@ export function CanvasUnderlay({
   const setCenterMode = useStore((s) => s.setCenterMode);
   const { canvas, setCanvas } = useProjectCanvas(projectId);
 
-  const [drag, setDrag] = useState<{ ref: string | null; lastX: number; lastY: number } | null>(
-    null,
-  );
+  // ref === null means panning the plane; mode distinguishes moving a node from
+  // resizing one, since both are pointer drags over the same element tree.
+  const [drag, setDrag] = useState<{
+    ref: string | null;
+    mode: "pan" | "move" | "resize";
+    lastX: number;
+    lastY: number;
+  } | null>(null);
   const showTerminals = canvas.zoom >= LIVE_ZOOM_MIN;
 
   const fitToContent = useCallback(() => {
@@ -62,41 +78,62 @@ export function CanvasUnderlay({
 
   // Wheel: pan by default, zoom with ctrl/cmd — which is also what a trackpad pinch
   // sends. Non-passive so preventDefault actually stops the page rubber-banding.
+  //
+  // Bound to the PARENT in the capture phase, not to the viewport. The terminal stack is a
+  // sibling painted above the underlay, so a wheel event over a terminal never reaches the
+  // underlay at all — and zoom has to work with the cursor over a node, which is most of
+  // the canvas. Capturing at the common ancestor sees both.
+  //
+  // Plain scroll is then routed by target: inside a terminal it belongs to that terminal's
+  // scrollback and we leave it alone; anywhere else it pans.
   useEffect(() => {
     const el = viewportRef.current;
-    if (!el) return;
+    const host = el?.parentElement ?? el;
+    if (!el || !host) return;
     const onWheel = (e: WheelEvent) => {
-      e.preventDefault();
       const rect = el.getBoundingClientRect();
       if (e.ctrlKey || e.metaKey) {
+        e.preventDefault();
         setCanvas(
           zoomAt(canvas, Math.exp(-e.deltaY / 200), e.clientX - rect.left, e.clientY - rect.top),
         );
-      } else {
-        setCanvas({ ...canvas, pan: { x: canvas.pan.x - e.deltaX, y: canvas.pan.y - e.deltaY } });
+        return;
       }
+      if ((e.target as Element | null)?.closest?.(".term-host")) return; // terminal scrollback
+      e.preventDefault();
+      setCanvas({ ...canvas, pan: { x: canvas.pan.x - e.deltaX, y: canvas.pan.y - e.deltaY } });
     };
-    el.addEventListener("wheel", onWheel, { passive: false });
-    return () => el.removeEventListener("wheel", onWheel);
+    host.addEventListener("wheel", onWheel, { passive: false, capture: true });
+    return () => host.removeEventListener("wheel", onWheel, { capture: true });
   }, [canvas, setCanvas]);
 
-  const onPointerDown = (e: React.PointerEvent, ref: string | null) => {
+  const onPointerDown = (
+    e: React.PointerEvent,
+    ref: string | null,
+    mode: "pan" | "move" | "resize",
+  ) => {
     if (e.button !== 0) return;
     (e.currentTarget as Element).setPointerCapture?.(e.pointerId);
-    setDrag({ ref, lastX: e.clientX, lastY: e.clientY });
+    setDrag({ ref, mode, lastX: e.clientX, lastY: e.clientY });
   };
 
   const onPointerMove = (e: React.PointerEvent) => {
     if (!drag) return;
     const dxScreen = e.clientX - drag.lastX;
     const dyScreen = e.clientY - drag.lastY;
-    if (drag.ref === null) {
+    if (drag.mode === "pan" || drag.ref === null) {
+      // Pan is in SCREEN units — the plane moves with the cursor 1:1 at any zoom.
       setCanvas({ ...canvas, pan: { x: canvas.pan.x + dxScreen, y: canvas.pan.y + dyScreen } });
     } else {
       const node = canvas.nodes.find((n) => n.ref === drag.ref);
       if (node) {
+        // Move and resize are in CANVAS units, so the node tracks the cursor at any zoom.
         const { dx, dy } = toCanvasDelta(dxScreen, dyScreen, canvas.zoom);
-        setCanvas(moveNode(canvas, drag.ref, node.x + dx, node.y + dy));
+        setCanvas(
+          drag.mode === "resize"
+            ? resizeNode(canvas, drag.ref, nodeW(node) + dx, nodeH(node) + dy)
+            : moveNode(canvas, drag.ref, node.x + dx, node.y + dy),
+        );
       }
     }
     setDrag({ ...drag, lastX: e.clientX, lastY: e.clientY });
@@ -112,7 +149,7 @@ export function CanvasUnderlay({
       className={`canvas-underlay ${drag?.ref === null ? "panning" : ""}`}
       onPointerDown={(e) => {
         if (e.target === e.currentTarget || (e.target as Element).classList.contains("canvas-plane"))
-          onPointerDown(e, null);
+          onPointerDown(e, null, "pan");
       }}
       onPointerMove={onPointerMove}
       onPointerUp={endDrag}
@@ -132,14 +169,14 @@ export function CanvasUnderlay({
             <div
               key={node.ref}
               className={`canvas-card status-${status} ${showTerminals ? "live" : "compact"}`}
-              style={{ left: node.x, top: node.y, width: CARD_W, height: CARD_H }}
+              style={{ left: node.x, top: node.y, width: nodeW(node), height: nodeH(node) }}
             >
               <div
                 className="canvas-card-head"
                 style={{ height: HEADER_H }}
                 onPointerDown={(e) => {
                   e.stopPropagation();
-                  onPointerDown(e, node.ref);
+                  onPointerDown(e, node.ref, "move");
                 }}
                 onDoubleClick={() => {
                   selectSession(projectId, node.ref);
@@ -158,13 +195,28 @@ export function CanvasUnderlay({
               {!showTerminals && (
                 <div className="canvas-card-body">
                   <span className="canvas-card-status">{statusLabel(status)}</span>
-                  {session.useWorktree && session.branch ? (
-                    <span className="canvas-branch">{session.branch}</span>
-                  ) : (
-                    <span className="canvas-branch dim">project root</span>
-                  )}
                 </div>
               )}
+
+              {/* Footer strip. The terminal stops above it, so everything here stays
+                  clickable even while the node is live. */}
+              <div className="canvas-card-foot" style={{ height: FOOTER_H }}>
+                {session.useWorktree && session.branch ? (
+                  <span className="canvas-branch" title={session.branch}>
+                    {session.branch}
+                  </span>
+                ) : (
+                  <span className="canvas-branch dim">project root</span>
+                )}
+                <span
+                  className="canvas-resize"
+                  title="Drag to resize"
+                  onPointerDown={(e) => {
+                    e.stopPropagation();
+                    onPointerDown(e, node.ref, "resize");
+                  }}
+                />
+              </div>
             </div>
           );
         })}

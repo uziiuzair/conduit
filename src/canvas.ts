@@ -12,6 +12,10 @@ export interface CanvasNode {
   ref: string;
   x: number;
   y: number;
+  /** Per-node size. Absent = the default card size, which is what every node created
+   *  before resizing existed will have — so this stays optional rather than migrating. */
+  w?: number;
+  h?: number;
 }
 
 export interface CanvasState {
@@ -27,9 +31,22 @@ export const CARD_H = 340;
 /** Title bar height. The live terminal occupies the card BELOW this strip, which is what
  *  leaves the header clickable for dragging while the body takes keystrokes. */
 export const HEADER_H = 30;
+/** Footer strip height. The terminal stops short of it for the same reason it starts below
+ *  the header: the terminal paints ABOVE the card frame, so any affordance that has to stay
+ *  clickable — here the resize grip — needs a band the terminal does not cover. */
+export const FOOTER_H = 18;
 const GAP = 36;
 /** Cards per row when auto-placing. Keeps a fresh project readable rather than a long line. */
 const COLS = 3;
+
+/** Floor on a resize. Small enough to tuck a node away, large enough that the terminal
+ *  inside still has usable columns rather than becoming a one-word-per-line ribbon. */
+export const MIN_CARD_W = 320;
+export const MIN_CARD_H = 160;
+
+/** A node's effective size, defaulting to the card size when it has never been resized. */
+export const nodeW = (n: CanvasNode): number => n.w ?? CARD_W;
+export const nodeH = (n: CanvasNode): number => n.h ?? CARD_H;
 
 export const MIN_ZOOM = 0.25;
 export const MAX_ZOOM = 2;
@@ -106,6 +123,25 @@ export function moveNode(state: CanvasState, ref: string, x: number, y: number):
 }
 
 /**
+ * Resize one node from its bottom-right corner. Position is untouched, so the node grows
+ * away from its top-left and a resize never also looks like a move.
+ *
+ * Unlike zoom, this DOES change the terminal host's box, so its ResizeObserver fires and
+ * xterm refits — the agent's output reflows to the new column count, which is what a
+ * resize should do and what a zoom should not.
+ */
+export function resizeNode(state: CanvasState, ref: string, w: number, h: number): CanvasState {
+  const i = state.nodes.findIndex((n) => n.ref === ref);
+  if (i === -1) return state;
+  const next = { w: Math.max(MIN_CARD_W, w), h: Math.max(MIN_CARD_H, h) };
+  const cur = state.nodes[i];
+  if (nodeW(cur) === next.w && nodeH(cur) === next.h) return state;
+  const nodes = [...state.nodes];
+  nodes[i] = { ...cur, ...next }; // index preserved — see the file header
+  return { ...state, nodes };
+}
+
+/**
  * Zoom about a screen point, so the canvas position under the cursor stays under it.
  * Zooming about the origin instead is the thing that makes a canvas feel broken.
  */
@@ -136,8 +172,8 @@ export function fit(
   }
   const minX = Math.min(...state.nodes.map((n) => n.x));
   const minY = Math.min(...state.nodes.map((n) => n.y));
-  const maxX = Math.max(...state.nodes.map((n) => n.x + CARD_W));
-  const maxY = Math.max(...state.nodes.map((n) => n.y + CARD_H));
+  const maxX = Math.max(...state.nodes.map((n) => n.x + nodeW(n)));
+  const maxY = Math.max(...state.nodes.map((n) => n.y + nodeH(n)));
   const zoom = clampZoom(
     Math.min((viewportW - padding * 2) / (maxX - minX), (viewportH - padding * 2) / (maxY - minY)),
   );

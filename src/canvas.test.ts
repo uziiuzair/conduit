@@ -2,6 +2,11 @@ import { describe, expect, it } from "vitest";
 import {
   CARD_H,
   CARD_W,
+  MIN_CARD_H,
+  MIN_CARD_W,
+  nodeH,
+  nodeW,
+  resizeNode,
   MAX_ZOOM,
   MIN_ZOOM,
   clampZoom,
@@ -78,6 +83,45 @@ describe("moveNode", () => {
   });
 });
 
+describe("resizeNode", () => {
+  it("resizes without moving the node or changing its index", () => {
+    const s0 = reconcile(emptyCanvas(), ["a", "b", "c"]);
+    const before = s0.nodes[1];
+    const s1 = resizeNode(s0, "b", 700, 500);
+    expect(s1.nodes.map((n) => n.ref)).toEqual(["a", "b", "c"]);
+    expect(s1.nodes[1].x).toBe(before.x);
+    expect(s1.nodes[1].y).toBe(before.y);
+    expect([nodeW(s1.nodes[1]), nodeH(s1.nodes[1])]).toEqual([700, 500]);
+  });
+
+  it("clamps to a size whose terminal still has usable columns", () => {
+    const s0 = reconcile(emptyCanvas(), ["a"]);
+    const s1 = resizeNode(s0, "a", 10, 10);
+    expect([nodeW(s1.nodes[0]), nodeH(s1.nodes[0])]).toEqual([MIN_CARD_W, MIN_CARD_H]);
+  });
+
+  it("returns the same object when the size did not change", () => {
+    const s0 = reconcile(emptyCanvas(), ["a"]);
+    expect(resizeNode(s0, "a", CARD_W, CARD_H)).toBe(s0);
+    expect(resizeNode(s0, "nope", 400, 400)).toBe(s0);
+  });
+
+  it("defaults an un-resized node to the card size", () => {
+    const s0 = reconcile(emptyCanvas(), ["a"]);
+    expect(nodeW(s0.nodes[0])).toBe(CARD_W);
+    expect(nodeH(s0.nodes[0])).toBe(CARD_H);
+  });
+
+  it("survives a reconcile", () => {
+    // Resizing then adding a session must not reset the size — `reconcile` spreads the
+    // node, so this is really a guard against a future rewrite that rebuilds nodes.
+    const s0 = resizeNode(reconcile(emptyCanvas(), ["a"]), "a", 800, 600);
+    const s1 = reconcile(s0, ["a", "b"]);
+    const a = s1.nodes.find((n) => n.ref === "a")!;
+    expect([nodeW(a), nodeH(a)]).toEqual([800, 600]);
+  });
+});
+
 describe("zoomAt", () => {
   it("keeps the canvas point under the cursor fixed", () => {
     const s0 = { ...emptyCanvas(), pan: { x: 30, y: 40 }, zoom: 1 };
@@ -100,6 +144,15 @@ describe("zoomAt", () => {
 });
 
 describe("fit", () => {
+  it("accounts for a resized node's real extent", () => {
+    // fit() used to assume every node was CARD_W x CARD_H; a widened node would then hang
+    // off the right edge of a "fitted" view.
+    const wide = { ...emptyCanvas(), nodes: [{ ref: "a", x: 0, y: 0, w: 1600, h: 900 }] };
+    const s = fit(wide, 800, 600);
+    expect(1600 * s.zoom + s.pan.x).toBeLessThanOrEqual(800.001);
+    expect(900 * s.zoom + s.pan.y).toBeLessThanOrEqual(600.001);
+  });
+
   it("brings every node inside the viewport", () => {
     const s = fit({ ...emptyCanvas(), nodes: [at("a", 0, 0), at("b", 2000, 1400)] }, 800, 600);
     for (const n of s.nodes) {

@@ -709,12 +709,21 @@ button {
 .canvas-plane { position: absolute; top: 0; left: 0; transform-origin: 0 0; }
 
 /* In canvas mode the stack is the pannable plane itself, so it shares the underlay's
-   transform and clips to the same box. z-index puts it above the frames. */
+   transform. z-index puts it above the frames.
+
+   pointer-events is the load-bearing line. .term-stack is full-bleed (inset: 0), so
+   sitting above the underlay it would hit-test the ENTIRE canvas -- transparent is still
+   clickable -- and swallow every pan, zoom, and header drag before the underlay saw them.
+   Only the terminal hosts themselves take input; everywhere else falls through. */
 .term-stack.canvas-mode {
   z-index: 2;
   background: transparent;
   overflow: visible;
   transform-origin: 0 0;
+  pointer-events: none;
+}
+.term-stack.canvas-mode .term-host.visible {
+  pointer-events: auto;
 }
 .canvas-toolbar {
   position: absolute; top: var(--tabstrip-h); left: 0; right: 0;
@@ -769,11 +778,37 @@ button {
   padding: 12px 14px;
 }
 .canvas-card-status { font-size: 12px; color: var(--text-mid); }
+
+/* Footer strip: the band the terminal deliberately stops above, so the grip stays
+   clickable while the node is live. `margin-top: auto` pins it to the bottom whether or
+   not the summary body is rendered. */
+.canvas-card-foot {
+  display: flex; align-items: center; gap: 8px; flex: none;
+  margin-top: auto;
+  padding: 0 4px 0 10px;
+  border-top: 1px solid var(--border);
+  background: var(--sidebar-bg);
+}
 .canvas-branch {
+  flex: 1; min-width: 0;
   font-family: var(--mono-font); font-size: 10px; color: var(--text-dim);
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 .canvas-branch.dim { font-style: italic; font-family: inherit; }
+
+/* The grip. Two short strokes reading as a corner, which is the conventional resize
+   affordance — a plain square reads as a button. */
+.canvas-resize {
+  width: 14px; height: 14px; flex: none;
+  cursor: nwse-resize;
+  background-image: linear-gradient(
+    135deg,
+    transparent 0 45%, var(--text-dim) 45% 55%, transparent 55% 70%,
+    var(--text-dim) 70% 80%, transparent 80%
+  );
+  opacity: 0.55;
+}
+.canvas-resize:hover { opacity: 1; }
 
 .canvas-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--text-dim); flex: none; }
 .canvas-dot.status-running { background: var(--accent); animation: canvas-pulse 1.6s ease-in-out infinite; }

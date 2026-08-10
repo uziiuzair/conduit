@@ -16,7 +16,7 @@ import { TerminalView } from "./Terminal";
 import { CodeEditorPane } from "./CodeEditorPane";
 import { BoardView } from "./BoardView";
 import { CanvasToolbar, CanvasUnderlay } from "./CanvasView";
-import { CARD_H, CARD_W, HEADER_H, LIVE_ZOOM_MIN } from "../canvas";
+import { FOOTER_H, HEADER_H, LIVE_ZOOM_MIN, nodeH, nodeW } from "../canvas";
 import { useProjectCanvas } from "../hooks/useProjectCanvas";
 import { TerminalIcon, FileIcon, CodeIcon, CloseIcon } from "./Icons";
 
@@ -156,12 +156,13 @@ export function WorkspaceCenter({
         style: {
           left: node.x,
           top: node.y + HEADER_H,
-          width: CARD_W,
-          height: CARD_H - HEADER_H,
+          width: nodeW(node),
+          // Stops above the footer strip so the resize grip stays reachable — the
+          // terminal paints above the card frame and would otherwise cover it.
+          height: nodeH(node) - HEADER_H - FOOTER_H,
           right: "auto",
           bottom: "auto",
           padding: "6px 8px",
-          borderRadius: "0 0 8px 8px",
         } as React.CSSProperties,
       };
     }
