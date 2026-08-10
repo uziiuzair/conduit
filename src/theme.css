@@ -3934,6 +3934,26 @@ button {
   text-overflow: ellipsis;
 }
 
+/* Command palette row metadata. `meta` is searchable text (a branch, a path); `note` is a
+   reason and is deliberately NOT part of the search corpus — see commands.ts. */
+.palette-cmd-meta,
+.palette-cmd-note {
+  margin-left: auto;
+  padding-left: 10px;
+  font-size: 11px;
+  color: var(--text-dim);
+  flex: none;
+}
+
+.palette-cmd-meta + .palette-cmd-note {
+  margin-left: 0;
+}
+
+.palette-row.disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
 .palette-mark {
   color: var(--accent);
   font-weight: 600;

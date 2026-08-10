@@ -70,10 +70,17 @@ pub fn build<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<Menu<R>> {
     let quick_open = MenuItemBuilder::with_id("quick-open", "Go to File…")
         .accelerator("CmdOrCtrl+P")
         .build(app)?;
+    // A native accelerator rather than a window keydown handler, for the same reason
+    // Go to File is one: the palette has to open while a terminal has focus, and xterm
+    // consumes key events before they reach the webview.
+    let command_palette = MenuItemBuilder::with_id("command-palette", "Command Palette…")
+        .accelerator("CmdOrCtrl+K")
+        .build(app)?;
     let file_menu = SubmenuBuilder::new(app, "File")
         .item(&new_session)
         .item(&open_project)
         .separator()
+        .item(&command_palette)
         .item(&quick_open)
         .separator()
         .item(&save)

@@ -29,6 +29,7 @@ import { Toasts } from "./components/Toasts";
 import { Settings } from "./components/Settings";
 import { QuickOpen } from "./components/QuickOpen";
 import { SearchPalette } from "./components/SearchPalette";
+import { CommandPalette } from "./components/CommandPalette";
 import { useTelemetry } from "./hooks/useTelemetry";
 import { useUpdater } from "./hooks/useUpdater";
 import { useFileWatch } from "./hooks/useFileWatch";
@@ -97,7 +98,7 @@ export default function App() {
   }, []);
 
   // ⌘P / ⌘⇧F palettes (menu-dispatched; rendered at the app root like Settings).
-  const [palette, setPalette] = useState<"quickopen" | "search" | null>(null);
+  const [palette, setPalette] = useState<"quickopen" | "search" | "commands" | null>(null);
 
   useEffect(() => {
     void load();
@@ -335,6 +336,9 @@ export default function App() {
           break;
         case "toggle-board":
           if (st.selectedProjectId) st.toggleCenterMode(st.selectedProjectId);
+          break;
+        case "command-palette":
+          setPalette("commands");
           break;
         case "quick-open":
           setPalette("quickopen");
@@ -606,8 +610,11 @@ export default function App() {
       {showSettings && (
         <Settings onClose={() => setShowSettings(false)} initialTab={settingsTab} />
       )}
+      {/* The command palette is the one palette that works with no project open — half its
+          rows (open a project, settings, view toggles) are exactly what you want then. */}
+      {palette === "commands" && <CommandPalette onClose={() => setPalette(null)} />}
       {(() => {
-        if (!palette) return null;
+        if (palette !== "quickopen" && palette !== "search") return null;
         const p = projects.find((x) => x.id === selectedProjectId);
         if (!p) return null;
         return palette === "quickopen" ? (
