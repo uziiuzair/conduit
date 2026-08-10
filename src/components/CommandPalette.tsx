@@ -1,9 +1,26 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { invoke } from "@tauri-apps/api/core";
 import { type Command, rankCommands } from "../commands";
-import { liveState, useStore } from "../store";
+import { findSession, liveState, useStore } from "../store";
 import type { SettingsTab } from "./Settings";
 
 const RESULT_LIMIT = 60;
+/** Past conversations are a slower, wider search — fewer rows, and only once typing settles. */
+const TRANSCRIPT_LIMIT = 8;
+const TRANSCRIPT_DEBOUNCE_MS = 220;
+/** Below this a query matches half the corpus and the rows are noise. */
+const TRANSCRIPT_MIN_QUERY = 3;
+/** The one section that keeps its heading even under an active query. */
+const TRANSCRIPT_SECTION = "Past conversations";
+
+/** Mirrors Rust `transcript_index::TranscriptHit`. */
+interface TranscriptHit {
+  sessionId: string;
+  title: string;
+  snippet: string;
+  cwd: string;
+  updatedAt: number;
+}
 
 /** Settings pages worth a direct row — the ones people go to on purpose. */
 const SETTINGS_PAGES: Array<[SettingsTab, string]> = [
@@ -141,10 +158,59 @@ export function CommandPalette({ onClose }: { onClose: () => void }) {
 
   // Snapshot the actions once per open; see buildCommands.
   const commands = useMemo(() => buildCommands(onClose), [onClose]);
-  const results = useMemo(
+  const ranked = useMemo(
     () => rankCommands(query, commands, RESULT_LIMIT),
     [query, commands],
   );
+
+  // Past conversations, searched on a debounce. These are APPENDED rather than re-ranked
+  // with the commands: they were already matched against the same query on the backend, and
+  // running them through the command matcher would score prose against a subsequence rule
+  // built for short labels.
+  const [hits, setHits] = useState<TranscriptHit[]>([]);
+  useEffect(() => {
+    const q = query.trim();
+    if (q.length < TRANSCRIPT_MIN_QUERY) {
+      setHits([]);
+      return;
+    }
+    let alive = true;
+    const t = setTimeout(() => {
+      void invoke<TranscriptHit[]>("search_transcripts", { query: q, limit: TRANSCRIPT_LIMIT })
+        .then((v) => {
+          if (alive) setHits(v);
+        })
+        .catch(() => {});
+    }, TRANSCRIPT_DEBOUNCE_MS);
+    return () => {
+      alive = false;
+      clearTimeout(t);
+    };
+  }, [query]);
+
+  const results = useMemo(() => {
+    if (hits.length === 0) return ranked;
+    const st = useStore.getState();
+    const rows: Command[] = hits.map((h) => {
+      // A transcript outlives the session record: an old conversation may belong to a
+      // session that was deleted, or to a project that is no longer open. Say so on the row
+      // instead of offering a jump that would do nothing.
+      const found = findSession(st.projects, h.sessionId);
+      return {
+        id: `transcript:${h.sessionId}`,
+        label: h.title || h.sessionId.slice(0, 8),
+        section: TRANSCRIPT_SECTION,
+        note: found ? h.snippet : "session no longer exists",
+        disabled: !found,
+        run: () => {
+          if (!found) return;
+          onClose();
+          st.selectSession(found.project.id, found.session.id);
+        },
+      };
+    });
+    return [...ranked, ...rows];
+  }, [ranked, hits, onClose]);
 
   useEffect(() => inputRef.current?.focus(), []);
   useEffect(() => setSel(0), [query]);
@@ -194,8 +260,12 @@ export function CommandPalette({ onClose }: { onClose: () => void }) {
           {results.map((c, i) => {
             // Section headings only make sense while the curated order survives; once a
             // query has re-ranked the list, a heading would label a row that no longer
-            // belongs under it.
-            const heading = !query.trim() && c.section !== lastSection ? c.section : undefined;
+            // belongs under it. Past conversations are the exception: they are appended as
+            // a block rather than ranked in, so their heading always tells the truth (and
+            // is what explains why prose is suddenly showing up under a command search).
+            const showHeading =
+                c.section !== lastSection && (!query.trim() || c.section === TRANSCRIPT_SECTION);
+            const heading = showHeading ? c.section : undefined;
             lastSection = c.section;
             return (
               <div key={c.id}>

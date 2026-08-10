@@ -41,6 +41,7 @@ mod telemetry;
 #[cfg_attr(windows, allow(dead_code))]
 mod tmux;
 mod transcript;
+mod transcript_index;
 mod updates;
 mod usage_tally;
 mod worktree;
@@ -530,6 +531,41 @@ fn session_subagents(
         },
     };
     subagents::for_session(&projects, &session_id)
+}
+
+/// Search past conversations for a phrase.
+///
+/// Searches the DEFAULT transcript store plus every registered account's, deduplicated by
+/// session id — a session's transcript lives under whichever account ran it, and someone
+/// searching their own history does not think in accounts.
+#[tauri::command]
+fn search_transcripts(
+    query: String,
+    limit: usize,
+    store: State<Arc<store::Store>>,
+) -> Vec<transcript_index::TranscriptHit> {
+    let mut roots: Vec<std::path::PathBuf> = Vec::new();
+    if let Some(d) = pty::claude_projects_dir() {
+        roots.push(d);
+    }
+    for account in store.list_accounts() {
+        let p = std::path::PathBuf::from(&account.config_dir).join("projects");
+        if !roots.contains(&p) {
+            roots.push(p);
+        }
+    }
+    let mut seen = std::collections::HashSet::new();
+    let mut hits = Vec::new();
+    for root in roots {
+        for hit in transcript_index::search(&root, &query, limit) {
+            if seen.insert(hit.session_id.clone()) {
+                hits.push(hit);
+            }
+        }
+    }
+    hits.sort_by_key(|h| std::cmp::Reverse(h.updated_at));
+    hits.truncate(limit);
+    hits
 }
 
 /// Whether any session with a LIVE PTY is currently marked running. Cross-checks the fleet
@@ -1698,6 +1734,7 @@ pub fn run() {
             tmux_available,
             session_context,
             session_subagents,
+            search_transcripts,
             set_session_persistence,
             any_agent_running,
             load_projects,
