@@ -35,6 +35,7 @@ mod search;
 mod session_budget;
 mod status_rules;
 mod store;
+mod subagents;
 mod tasks;
 mod telemetry;
 #[cfg_attr(windows, allow(dead_code))]
@@ -510,6 +511,25 @@ fn session_context(
     };
     let path = pty::transcript_path(&session_id, &projects)?;
     context_window::for_transcript(&path)
+}
+
+/// A session's Task subagents and what each is doing.
+///
+/// Empty for the overwhelmingly common case of a session that has not fanned out. Resolved
+/// against the session's own account config dir for the same reason `session_context` is.
+#[tauri::command]
+fn session_subagents(
+    session_id: String,
+    store: State<Arc<store::Store>>,
+) -> Vec<subagents::Subagent> {
+    let projects = match store.session_account_config_dir(&session_id) {
+        Some(cfg) if !cfg.is_empty() => std::path::PathBuf::from(cfg).join("projects"),
+        _ => match pty::claude_projects_dir() {
+            Some(d) => d,
+            None => return Vec::new(),
+        },
+    };
+    subagents::for_session(&projects, &session_id)
 }
 
 /// Whether any session with a LIVE PTY is currently marked running. Cross-checks the fleet
@@ -1677,6 +1697,7 @@ pub fn run() {
             pty_is_running,
             tmux_available,
             session_context,
+            session_subagents,
             set_session_persistence,
             any_agent_running,
             load_projects,

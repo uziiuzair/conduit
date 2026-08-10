@@ -305,7 +305,7 @@ export interface ContextMenuState {
   sessionId?: string;
 }
 
-export type TopTab = "files" | "changes" | "todos";
+export type TopTab = "files" | "changes" | "todos" | "subagents";
 export type BottomTab = "terminal" | "git";
 
 // ---- Claude ambient (status + usage) — mirror Rust serde camelCase ----

@@ -3779,6 +3779,80 @@ button {
 }
 
 /* ---- Auto-update notice ---- */
+/* Subagent activity log (right panel → Agents). Monospace because it is a transcript of
+   commands and their results, not prose about them. */
+.subagents {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 4px 0;
+}
+
+.subagent-head {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  width: 100%;
+  padding: 4px 10px;
+  font-size: 12px;
+  color: var(--text-mid);
+  background: none;
+  border: none;
+  text-align: left;
+  cursor: pointer;
+}
+
+.subagent-head:hover {
+  background: var(--hover);
+  color: var(--text-bright);
+}
+
+.subagent-caret {
+  flex: none;
+  color: var(--text-dim);
+}
+
+.subagent-id {
+  flex: none;
+  font-family: var(--mono-font);
+  font-size: 11px;
+}
+
+/* The collapsed row's one-line preview: the last thing this agent did. */
+.subagent-last {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--mono-font);
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
+.subagent-log {
+  padding: 2px 10px 8px 22px;
+  border-left: 1px solid var(--border);
+  margin-left: 15px;
+}
+
+.subagent-line {
+  font-family: var(--mono-font);
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--text-mid);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.subagent-line.tool {
+  color: var(--text-bright);
+}
+
+.subagent-line.result {
+  color: var(--text-dim);
+}
+
 /* "tmux isn't installed, so sessions won't survive a quit." A strip along the bottom rather
    than a corner card: it explains a setting that silently isn't working, which is a sentence
    to read once, not a task to action. Sits left of the update card's corner. */
