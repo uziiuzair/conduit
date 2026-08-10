@@ -747,6 +747,14 @@ button {
   cursor: pointer; font-variant-numeric: tabular-nums;
 }
 .canvas-btn:hover { background: var(--hover); color: var(--text-hi); }
+/* The exit. Given the only emphasis in the toolbar because it is the one control a
+   first-time user goes looking for and cannot otherwise find. */
+.canvas-btn.primary {
+  border-color: color-mix(in srgb, var(--accent) 50%, var(--border));
+  color: var(--text-hi);
+}
+.canvas-btn.primary:hover { background: color-mix(in srgb, var(--accent) 16%, transparent); }
+.canvas-hint { font-size: 10px; color: var(--text-dim); }
 
 /* The frame. Its BODY is deliberately empty while live — that hole is where the real
    terminal shows through from the layer above. */

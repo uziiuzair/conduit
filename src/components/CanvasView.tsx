@@ -242,6 +242,24 @@ export function CanvasToolbar({
   viewportRef: React.RefObject<HTMLDivElement | null>;
 }) {
   const { canvas, setCanvas } = useProjectCanvas(projectId);
+  const setCenterMode = useStore((s) => s.setCenterMode);
+  const exitCanvas = useCallback(
+    () => setCenterMode(projectId, "terminals"),
+    [projectId, setCenterMode],
+  );
+
+  // Escape leaves the canvas — but ONLY when the keystroke did not land in a terminal.
+  // Escape inside a live agent session is how you interrupt it, and stealing that to
+  // change views would be far worse than having no shortcut at all.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== "Escape") return;
+      if ((e.target as Element | null)?.closest?.(".term-host")) return;
+      exitCanvas();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [exitCanvas]);
   const live = canvas.zoom >= LIVE_ZOOM_MIN;
   const fitToContent = () => {
     const el = viewportRef.current;
@@ -254,6 +272,7 @@ export function CanvasToolbar({
         {canvas.nodes.length} session{canvas.nodes.length === 1 ? "" : "s"}
       </span>
       <span className="canvas-toolbar-spacer" />
+      <span className="canvas-hint">double-click a title to open it in panes</span>
       <span className="canvas-lod" title={
         live
           ? "Terminals are live at this zoom"
@@ -270,6 +289,12 @@ export function CanvasToolbar({
         title="Reset zoom to 100%"
       >
         {Math.round(canvas.zoom * 100)}%
+      </button>
+      {/* The way out. The pane header's Canvas toggle is hidden in this mode, so without
+          this the only exits are a node double-click or two presses of the board
+          shortcut — neither of which is discoverable. */}
+      <button className="canvas-btn primary" onClick={exitCanvas} title="Back to panes (Esc)">
+        Exit canvas
       </button>
     </div>
   );
