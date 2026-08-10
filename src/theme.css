@@ -2548,7 +2548,7 @@ button {
 }
 /* The `.agy-meter*` family lived here until agy's meter was folded into the unified
    UsagePanel; nothing has rendered those classes since. Deleted rather than left as dead
-   weight — one of them was also the last `transition: width` in this file's meters. */
+   weight — one of them also held the last width-based meter tween in this file. */
 .agy-context { margin-top: 6px; opacity: 0.9; }
 .agy-usage-hint { color: var(--text-mid); font-size: 11px; margin-top: 2px; }
 .agy-enable-btn {
