@@ -283,6 +283,26 @@ pub fn kill_session(tmux: &Path, session_id: &str) {
         .output();
 }
 
+/// Is there already a live tmux session for this Conduit session?
+///
+/// Asked at spawn time, before `new-session -A` runs, because attach-or-create deliberately
+/// erases the difference and afterwards nothing can tell an attach from a create. The
+/// answer decides whether the scrollback snapshot is replayed: on an attach tmux repaints
+/// the pane itself, so a replay would print the same screen twice.
+pub fn has_session(tmux: &Path, session_id: &str) -> bool {
+    Command::new(tmux)
+        .args([
+            "-L",
+            &socket(),
+            "has-session",
+            "-t",
+            &session_name(session_id),
+        ])
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
 /// Names of every live Conduit-owned tmux session, or an empty vec if tmux is absent,
 /// not running, or owns nothing.
 pub fn list_sessions(tmux: &Path) -> Vec<String> {

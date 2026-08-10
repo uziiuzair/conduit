@@ -33,8 +33,13 @@ type Subscribers = Arc<Mutex<Vec<(u64, SyncSender<String>)>>>;
 /// Bounded buffer (frames) per remote subscriber before frames start dropping.
 const SUBSCRIBER_BUFFER: usize = 1024;
 
-/// How many recent output bytes to retain per session for `fleet_peek`.
-const OUTPUT_RING_BYTES: usize = 64 * 1024;
+/// How many recent output bytes to retain per session.
+///
+/// Read by two consumers with different needs: `fleet_peek` wants a readable tail, and the
+/// scrollback snapshot wants raw bytes covering a few screens. Sized for the larger of the
+/// two (see `scrollback::MAX_BYTES`) — one buffer is cheaper than two, and `fleet_peek`
+/// asks for the slice it wants anyway.
+const OUTPUT_RING_BYTES: usize = crate::scrollback::MAX_BYTES;
 
 /// Lines of scrollback tmux keeps per persistent session. With `mouse on` this is the
 /// history the wheel actually scrolls (see `tmux::conf_body`), so it is the user-visible
@@ -68,10 +73,17 @@ impl RingBuffer {
 
     /// Last `max_bytes` of buffered output, lossy-UTF8 and ANSI-stripped.
     pub fn tail_string(&self, max_bytes: usize) -> String {
+        strip_ansi(&String::from_utf8_lossy(&self.tail_bytes(max_bytes)))
+    }
+
+    /// Last `max_bytes` of buffered output, RAW.
+    ///
+    /// The escape sequences `tail_string` strips are exactly what a scrollback replay needs
+    /// — colors, cursor moves, the lot. Two readers, two shapes, one buffer.
+    pub fn tail_bytes(&self, max_bytes: usize) -> Vec<u8> {
         let q = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         let start = q.len().saturating_sub(max_bytes);
-        let bytes: Vec<u8> = q.iter().skip(start).copied().collect();
-        strip_ansi(&String::from_utf8_lossy(&bytes))
+        q.iter().skip(start).copied().collect()
     }
 }
 
@@ -154,6 +166,13 @@ pub struct PtyManager {
     /// wasted work, and the answer cannot change without the app restarting.
     #[cfg(not(windows))]
     tmux: std::sync::OnceLock<Option<PathBuf>>,
+    /// Sessions whose most recent spawn ATTACHED to a tmux session that was already running.
+    ///
+    /// Tracked as the exception rather than the rule, so every other path — no tmux, the
+    /// setting off, Windows — is cold by default and gets its scrollback replayed. A warm
+    /// reattach must not: tmux repaints the pane itself, and a replay on top of that prints
+    /// the same screen twice.
+    warm_spawns: DashMap<String, ()>,
 }
 
 impl PtyManager {
@@ -164,6 +183,7 @@ impl PtyManager {
             persist: AtomicBool::new(true),
             #[cfg(not(windows))]
             tmux: std::sync::OnceLock::new(),
+            warm_spawns: DashMap::new(),
         }
     }
 
@@ -335,13 +355,22 @@ impl PtyManager {
             // Falls through to the direct spawn when tmux is missing or the setting is off,
             // so the unpersisted path stays byte-for-byte what it is today.
             let inner = match self.persistence_active() {
-                Some(tmux) => crate::tmux::wrap_command(
-                    tmux,
-                    Some(&crate::tmux::conf_path()),
-                    &crate::tmux::session_name(&session_id),
-                    &working_directory,
-                    &inner,
-                ),
+                Some(tmux) => {
+                    // Asked BEFORE the wrap, because `new-session -A` erases the difference:
+                    // afterwards there is no way to tell an attach from a create. A warm
+                    // reattach must NOT replay the scrollback snapshot -- tmux is about to
+                    // repaint the same content, and replaying would print it twice.
+                    if crate::tmux::has_session(tmux, &session_id) {
+                        self.warm_spawns.insert(session_id.clone(), ());
+                    }
+                    crate::tmux::wrap_command(
+                        tmux,
+                        Some(&crate::tmux::conf_path()),
+                        &crate::tmux::session_name(&session_id),
+                        &working_directory,
+                        &inner,
+                    )
+                }
                 None => inner,
             };
             let mut cmd = CommandBuilder::new(&shell);
@@ -450,6 +479,18 @@ impl PtyManager {
                 suppress_remote: suppress_flag,
             }),
         );
+
+        // Cold restore, pushed through the SAME sink as live output and before the reader
+        // thread starts — so it is the first frame the terminal receives and can never
+        // interleave with what the agent prints next. Doing this from the frontend after
+        // the spawn call returns would race exactly there.
+        //
+        // Nothing is emitted for a warm reattach: tmux repaints the pane itself, and a
+        // replay on top of that would show the same screen twice.
+        if let Some(snapshot) = self.take_cold_scrollback(&session_id) {
+            let encoded = base64::engine::general_purpose::STANDARD.encode(&snapshot);
+            let _ = sink.lock().map(|s| s.send(encoded));
+        }
 
         // The reader self-reaps its map entry when the child exits on its own (below), so
         // hand it a clone of the session map and this id. Windows-only: macOS keeps its
@@ -638,6 +679,40 @@ impl PtyManager {
         self.sessions.iter().map(|e| e.key().clone()).collect()
     }
 
+    /// Persist every live session's recent output as a cold-restore snapshot.
+    ///
+    /// Called on a slow timer and once more at quit. Cheap enough to be unconditional: the
+    /// buffer is already in memory, and the write is a few hundred kilobytes per session.
+    pub fn save_scrollback(&self) {
+        for entry in self.sessions.iter() {
+            let Ok(session) = entry.value().lock() else {
+                continue;
+            };
+            let bytes = session.output.tail_bytes(crate::scrollback::MAX_BYTES);
+            if bytes.is_empty() {
+                continue;
+            }
+            crate::scrollback::save(entry.key(), &bytes);
+        }
+    }
+
+    /// The scrollback to replay for a session that has just spawned, if any.
+    ///
+    /// Returns `None` for a warm reattach, since tmux is about to repaint the pane itself.
+    /// CONSUMES the answer: a session is cold once, and a second call within the same run
+    /// (a re-attach, a remount) must not replay the snapshot again on top of live output.
+    pub fn take_cold_scrollback(&self, session_id: &str) -> Option<Vec<u8>> {
+        if self.warm_spawns.remove(session_id).is_some() {
+            return None;
+        }
+        let snapshot = crate::scrollback::load(session_id)?;
+        // Consumed by deleting it: the next save (seconds away, on the flush timer) rewrites
+        // it from the live buffer, and in between a crash simply costs one cold restore its
+        // scrollback rather than replaying stale content twice.
+        crate::scrollback::remove(session_id);
+        Some(snapshot)
+    }
+
     pub fn kill(&self, session_id: &str) {
         if let Some((_, m)) = self.sessions.remove(session_id) {
             if let Ok(mut session) = m.lock() {
@@ -666,6 +741,12 @@ impl PtyManager {
         if let Some(tmux) = self.tmux_path() {
             crate::tmux::kill_session(tmux, session_id);
         }
+        // Destroy means destroy: the snapshot goes too. This is the ONLY place it is
+        // deleted for a session that still exists in the store -- the reaper explicitly
+        // must not, because a reaped session has to come back looking like it survived a
+        // reboot, and it cannot do that without its scrollback.
+        self.warm_spawns.remove(session_id);
+        crate::scrollback::remove(session_id);
     }
 
     /// App quit. Drops every PTY and -- unlike `kill` -- deliberately leaves the tmux
@@ -675,6 +756,11 @@ impl PtyManager {
     /// The instinct when reading this is to make it consistent with `kill`. Don't; that
     /// would silently restore the old behavior where quitting kills every agent.
     pub fn kill_all(&self) {
+        // Last chance to capture what each terminal was showing. On a normal quit tmux keeps
+        // the session and the next launch reattaches warm, so this snapshot is never used --
+        // it is here for the launch AFTER a reboot, when there is no tmux left to reattach
+        // to and the snapshot is the only record of the screen.
+        self.save_scrollback();
         let ids: Vec<String> = self.sessions.iter().map(|e| e.key().clone()).collect();
         for id in ids {
             if let Some((_, m)) = self.sessions.remove(&id) {

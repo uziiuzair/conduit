@@ -29,6 +29,7 @@ mod menu;
 mod notify;
 mod plugins;
 mod pty;
+mod scrollback;
 mod search;
 mod status_rules;
 mod store;
@@ -1596,6 +1597,27 @@ pub fn run() {
                         .flat_map(|s| [format!("{}::term", s.id), s.id])
                         .collect();
                     crate::tmux::sweep_orphans(tmux, &live);
+                });
+            }
+
+            // Cold-restore scrollback: keep each terminal's recent output on disk so a
+            // launch after a REBOOT (no tmux left to reattach to) doesn't come back empty.
+            // Also sweeps snapshots belonging to sessions that no longer exist.
+            {
+                let store_for_sb = store.clone();
+                let pty_for_sb = pty.clone();
+                std::thread::spawn(move || {
+                    let live: Vec<String> = store_for_sb
+                        .list()
+                        .into_iter()
+                        .flat_map(|p| p.sessions)
+                        .flat_map(|s| [format!("{}::term", s.id), s.id])
+                        .collect();
+                    crate::scrollback::sweep(&live);
+                    loop {
+                        std::thread::sleep(std::time::Duration::from_secs(20));
+                        pty_for_sb.save_scrollback();
+                    }
                 });
             }
 
