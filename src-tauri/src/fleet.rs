@@ -43,12 +43,27 @@ fn now_ms() -> u64 {
 
 /// Mirror the frontend App.tsx event->status switch. Pure; unit-tested.
 pub fn apply_event(s: &mut FleetStatus, event: &str, body: &Value) {
+    apply_event_at(s, event, body, now_ms());
+}
+
+/// `apply_event` with the clock injected, so the time-aware rules in `status_rules` are
+/// testable without sleeping. Returns early (leaving `updated_at` alone) for an event that
+/// is deliberately ignored -- a held-off tool signal or an informational notification --
+/// because refreshing the timestamp there would keep resetting the staleness window for a
+/// session nothing is actually happening in.
+pub fn apply_event_at(s: &mut FleetStatus, event: &str, body: &Value, now: u64) {
     match event {
         "prompt" => {
+            // A real new turn. Never held off: the user typed, so whatever the previous
+            // status was, this session is busy again.
             s.status = "running".into();
             s.activity = None;
         }
         "pretool" => {
+            // Tool-level chatter, which Claude may deliver out of order with `Stop`.
+            if crate::status_rules::holds_off_working(&s.status, s.updated_at, now) {
+                return;
+            }
             s.status = "running".into();
             s.activity = body
                 .get("tool_name")
@@ -84,7 +99,18 @@ pub fn apply_event(s: &mut FleetStatus, event: &str, body: &Value) {
         // "result" above) happens in hooks.rs.
         "note" => {}
         "notification" => {
-            s.status = "needsInput".into();
+            // Four different situations arrive under one event name; `status_rules` says
+            // which (and `None` means this one is informational -- leave the badge alone).
+            let kind = body.get("notification_type").and_then(|v| v.as_str());
+            let Some(next) = crate::status_rules::notification_status(kind, &s.status) else {
+                return;
+            };
+            s.status = next.into();
+            if next == "idle" {
+                // The `idle_prompt` rescue of a stuck turn: the tool it was mid-way through
+                // is not running any more, so the activity label would be a lie.
+                s.activity = None;
+            }
         }
         "sessionstart" | "sessionend" => {
             s.status = "idle".into();
@@ -92,7 +118,7 @@ pub fn apply_event(s: &mut FleetStatus, event: &str, body: &Value) {
         }
         _ => {}
     }
-    s.updated_at = now_ms();
+    s.updated_at = now;
 }
 
 /// System prompt appended (via `--append-system-prompt`) to the Conductor session.
@@ -261,8 +287,23 @@ const WAKE_DEBOUNCE: Duration = Duration::from_millis(2000);
 /// SPEC-D: the raw hook events that should attempt to wake the project's Conductor --
 /// a worker finishing (`stop`) or needing attention (`notification`, mapped to the
 /// `needsInput` status by `apply_event`).
-pub fn is_wake_event(event: &str) -> bool {
-    matches!(event, "stop" | "notification")
+///
+/// The body is consulted for `notification`, because only some notifications mean a worker
+/// wants a human. Waking the Conductor on the rest would be pure noise -- `idle_prompt` in
+/// particular fires after every normally finished turn, immediately behind the `stop` that
+/// already woke it.
+pub fn is_wake_event(event: &str, body: &Value) -> bool {
+    match event {
+        "stop" => true,
+        "notification" => {
+            let kind = body.get("notification_type").and_then(|v| v.as_str());
+            // "" as the current status: no session is ever at that status, so the
+            // `idle_prompt` rescue (which needs `running`) correctly declines here and
+            // only the genuinely-wants-you kinds answer.
+            crate::status_rules::notification_status(kind, "") == Some("needsInput")
+        }
+        _ => false,
+    }
 }
 
 /// SPEC-D: true if a Conductor at this status may safely receive an injected wake nudge
@@ -367,6 +408,11 @@ impl FleetState {
     /// Whether any session's agent is actively working (`status == "running"`). Read by the
     /// shutdown guard to decide whether to prompt before killing agents. This mirror is fed by
     /// the same hook events as the frontend `live` map, for every hooked session.
+    ///
+    /// Currently unused: the shutdown guard settled on `live_running_agent` in lib.rs, which
+    /// cross-checks this mirror against a real PTY so a stale "running" cannot cause a
+    /// spurious prompt. Kept as the unqualified form of the same question.
+    #[allow(dead_code)]
     pub fn any_running(&self) -> bool {
         self.status
             .lock()
@@ -395,6 +441,40 @@ impl FleetState {
         let mut map = self.status.lock().unwrap_or_else(|e| e.into_inner());
         let entry = map.entry(session.to_string()).or_default();
         entry.status = if running { "running" } else { "idle" }.to_string();
+        // Without this the entry keeps whatever timestamp its last hook event left, so an
+        // agy session -- which reaches this mirror only through `set_running` and fires no
+        // Claude-style hooks at all -- would look stale to the sweep the moment it started.
+        entry.updated_at = now_ms();
+    }
+
+    /// Move every session that has been `running` with no event for longer than
+    /// [`status_rules::WORKING_STALE_MS`](crate::status_rules::WORKING_STALE_MS) to `idle`,
+    /// and return the ids that moved.
+    ///
+    /// This is the single decider for staleness. Some exits from a turn announce
+    /// themselves and some say nothing at all (Esc during a tool call, a killed CLI, a
+    /// slept machine), and a session stuck on `running` is not merely a wrong dot: the
+    /// Conductor wake gate is `conductor_wakeable` == `status != "running"`, so a
+    /// Conductor that died mid-turn could never be woken again. The caller broadcasts the
+    /// returned ids so the frontend's own `live` map lands on the same answer instead of
+    /// each surface inventing its own timeout.
+    pub fn sweep_stale_working(&self) -> Vec<String> {
+        self.sweep_stale_working_at(now_ms())
+    }
+
+    /// `sweep_stale_working` with the clock injected (tests).
+    pub fn sweep_stale_working_at(&self, now: u64) -> Vec<String> {
+        let mut map = self.status.lock().unwrap_or_else(|e| e.into_inner());
+        let mut swept = Vec::new();
+        for (id, s) in map.iter_mut() {
+            if crate::status_rules::is_stale_working(&s.status, s.updated_at, now) {
+                s.status = "idle".into();
+                s.activity = None;
+                s.updated_at = now;
+                swept.push(id.clone());
+            }
+        }
+        swept
     }
 
     /// SPEC-D: whether enough time has passed since `conductor_id` was last woken.
@@ -530,6 +610,118 @@ mod tests {
         // A second session running keeps the guard true regardless of the first.
         fleet.record("s2", "pretool", &serde_json::json!({"tool_name":"Bash"}));
         assert!(fleet.any_running());
+    }
+
+    #[test]
+    fn a_late_tool_hook_cannot_resurrect_a_turn_that_just_ended() {
+        // Claude runs hooks in parallel, so the last tool's PostToolUse can land after the
+        // turn's Stop. Before the holdoff this flipped the session back to `running` and
+        // nothing ever cleared it.
+        let mut s = FleetStatus::default();
+        let t = 1_000_000;
+        apply_event_at(&mut s, "prompt", &serde_json::json!({}), t);
+        apply_event_at(&mut s, "stop", &serde_json::json!({}), t + 10);
+        assert_eq!(s.status, "done");
+
+        apply_event_at(
+            &mut s,
+            "pretool",
+            &serde_json::json!({"tool_name":"Bash"}),
+            t + 900,
+        );
+        assert_eq!(s.status, "done", "a straggler inside the window is ignored");
+        assert!(
+            s.activity.is_none(),
+            "and it must not paint an activity label either"
+        );
+
+        // Past the window the same event is ordinary traffic again.
+        apply_event_at(
+            &mut s,
+            "pretool",
+            &serde_json::json!({"tool_name":"Bash"}),
+            t + 9_000,
+        );
+        assert_eq!(s.status, "running");
+    }
+
+    #[test]
+    fn a_new_turn_is_never_held_off() {
+        // The holdoff exists for out-of-order tool chatter only. A `prompt` means the human
+        // typed, so it must take effect even one millisecond after a Stop.
+        let mut s = FleetStatus::default();
+        let t = 1_000_000;
+        apply_event_at(&mut s, "stop", &serde_json::json!({}), t);
+        apply_event_at(&mut s, "prompt", &serde_json::json!({}), t + 1);
+        assert_eq!(s.status, "running");
+    }
+
+    #[test]
+    fn idle_prompt_rescues_a_stuck_session_and_leaves_a_finished_one_alone() {
+        let idle = serde_json::json!({ "notification_type": "idle_prompt" });
+        let t = 1_000_000;
+
+        // Esc during a tool call: no Stop hook ever runs, so this is the only way out.
+        let mut stuck = FleetStatus::default();
+        apply_event_at(
+            &mut stuck,
+            "pretool",
+            &serde_json::json!({"tool_name":"Bash"}),
+            t,
+        );
+        assert_eq!(stuck.status, "running");
+        apply_event_at(&mut stuck, "notification", &idle, t + 5_000);
+        assert_eq!(stuck.status, "idle");
+        assert!(
+            stuck.activity.is_none(),
+            "the tool it was in is not running any more"
+        );
+
+        // The same event fires after a normal turn end, where it used to plant a permanent
+        // "needs input" badge on a session that wanted nothing.
+        let mut finished = FleetStatus::default();
+        apply_event_at(&mut finished, "stop", &serde_json::json!({}), t);
+        let before = finished.updated_at;
+        apply_event_at(&mut finished, "notification", &idle, t + 5_000);
+        assert_eq!(finished.status, "done");
+        assert_eq!(
+            before, finished.updated_at,
+            "an ignored event must not refresh the clock"
+        );
+    }
+
+    #[test]
+    fn a_permission_prompt_still_asks_for_a_human() {
+        let mut s = FleetStatus::default();
+        let body = serde_json::json!({ "notification_type": "permission_prompt" });
+        apply_event(&mut s, "pretool", &serde_json::json!({"tool_name":"Bash"}));
+        apply_event(&mut s, "notification", &body);
+        assert_eq!(s.status, "needsInput");
+    }
+
+    #[test]
+    fn the_sweep_retires_a_session_stuck_running_and_nothing_else() {
+        let fleet = FleetState::default();
+        let t = 1_000_000_000;
+        fleet.record("stuck", "pretool", &serde_json::json!({"tool_name":"Bash"}));
+        fleet.record("busy", "pretool", &serde_json::json!({"tool_name":"Bash"}));
+        fleet.record("finished", "stop", &serde_json::json!({}));
+        // Backdate only `stuck`; the others keep their fresh `record` timestamps.
+        {
+            let mut map = fleet.status.lock().unwrap();
+            map.get_mut("stuck").unwrap().updated_at = t - 21 * 60_000;
+        }
+
+        let swept = fleet.sweep_stale_working_at(t);
+        assert_eq!(swept, vec!["stuck".to_string()]);
+        let snap = fleet.snapshot();
+        assert_eq!(snap["stuck"].status, "idle");
+        assert!(snap["stuck"].activity.is_none());
+        assert_eq!(snap["busy"].status, "running", "a live turn is untouched");
+        assert_eq!(snap["finished"].status, "done", "and so is a finished one");
+
+        // Idempotent: a second pass has nothing left to do.
+        assert!(fleet.sweep_stale_working_at(t).is_empty());
     }
 
     #[test]
@@ -684,11 +876,24 @@ mod tests {
 
     #[test]
     fn is_wake_event_matches_stop_and_notification_only() {
-        assert!(is_wake_event("stop"));
-        assert!(is_wake_event("notification"));
-        assert!(!is_wake_event("prompt"));
-        assert!(!is_wake_event("pretool"));
-        assert!(!is_wake_event("sessionend"));
+        let none = serde_json::json!({});
+        assert!(is_wake_event("stop", &none));
+        assert!(is_wake_event("notification", &none));
+        assert!(!is_wake_event("prompt", &none));
+        assert!(!is_wake_event("pretool", &none));
+        assert!(!is_wake_event("sessionend", &none));
+    }
+
+    #[test]
+    fn only_a_notification_that_wants_a_human_wakes_the_conductor() {
+        let wants = serde_json::json!({ "notification_type": "permission_prompt" });
+        assert!(is_wake_event("notification", &wants));
+        // `idle_prompt` fires right behind the `stop` that already woke the Conductor, and
+        // the informational kinds mean nothing to it at all.
+        for quiet in ["idle_prompt", "auth_success", "agent_completed"] {
+            let body = serde_json::json!({ "notification_type": quiet });
+            assert!(!is_wake_event("notification", &body), "{quiet}");
+        }
     }
 
     #[test]

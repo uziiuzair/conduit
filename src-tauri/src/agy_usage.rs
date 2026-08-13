@@ -415,6 +415,10 @@ fn list_conversations(home: &Path) -> Vec<(String, SystemTime)> {
 
 /// The newest agy conversation id in `home`'s store, or None. Kept for the simple case; the
 /// per-session capture uses [`AgyResumeState`] to disambiguate a shared home.
+///
+/// Unused on the shipped path for exactly that reason -- two sessions sharing an agy home
+/// would both capture the newest id. Kept as the documented simple case.
+#[allow(dead_code)]
 pub fn newest_conversation_id(home: &Path) -> Option<String> {
     list_conversations(home)
         .into_iter()

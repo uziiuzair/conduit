@@ -33,8 +33,19 @@ type Subscribers = Arc<Mutex<Vec<(u64, SyncSender<String>)>>>;
 /// Bounded buffer (frames) per remote subscriber before frames start dropping.
 const SUBSCRIBER_BUFFER: usize = 1024;
 
-/// How many recent output bytes to retain per session for `fleet_peek`.
-const OUTPUT_RING_BYTES: usize = 64 * 1024;
+/// How many recent output bytes to retain per session.
+///
+/// Read by two consumers with different needs: `fleet_peek` wants a readable tail, and the
+/// scrollback snapshot wants raw bytes covering a few screens. Sized for the larger of the
+/// two (see `scrollback::MAX_BYTES`) — one buffer is cheaper than two, and `fleet_peek`
+/// asks for the slice it wants anyway.
+const OUTPUT_RING_BYTES: usize = crate::scrollback::MAX_BYTES;
+
+/// Lines of scrollback tmux keeps per persistent session. With `mouse on` this is the
+/// history the wheel actually scrolls (see `tmux::conf_body`), so it is the user-visible
+/// scrollback depth, not an internal buffer. ~50k lines costs a few MB per session.
+#[cfg(not(windows))]
+const TMUX_SCROLLBACK: u32 = 50_000;
 
 /// A bounded byte ring buffer of recent PTY output, shared with the reader thread.
 /// Backs the Conductor's `fleet_peek` (xterm keeps scrollback in the frontend, so
@@ -62,10 +73,17 @@ impl RingBuffer {
 
     /// Last `max_bytes` of buffered output, lossy-UTF8 and ANSI-stripped.
     pub fn tail_string(&self, max_bytes: usize) -> String {
+        strip_ansi(&String::from_utf8_lossy(&self.tail_bytes(max_bytes)))
+    }
+
+    /// Last `max_bytes` of buffered output, RAW.
+    ///
+    /// The escape sequences `tail_string` strips are exactly what a scrollback replay needs
+    /// — colors, cursor moves, the lot. Two readers, two shapes, one buffer.
+    pub fn tail_bytes(&self, max_bytes: usize) -> Vec<u8> {
         let q = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         let start = q.len().saturating_sub(max_bytes);
-        let bytes: Vec<u8> = q.iter().skip(start).copied().collect();
-        strip_ansi(&String::from_utf8_lossy(&bytes))
+        q.iter().skip(start).copied().collect()
     }
 }
 
@@ -135,13 +153,69 @@ pub struct PtyManager {
     // Arc so the per-session reader thread can hold a clone and remove its own entry
     // when the child exits on its own (otherwise the dead session leaks forever).
     sessions: Arc<DashMap<String, Mutex<PtySession>>>,
+    /// Whether new sessions are wrapped in tmux so they outlive the app. Mirrors the
+    /// frontend's `persistSessions` setting, pushed down by `set_session_persistence`
+    /// rather than threaded through `spawn` -- which already takes 24 arguments.
+    ///
+    /// Turning it OFF never kills anything: sessions already running under tmux keep
+    /// working until they are destroyed. A setting toggle that silently discarded
+    /// running work would be a worse bug than the one this feature fixes.
+    #[cfg(not(windows))]
+    persist: AtomicBool,
+    /// Resolved once — probing four fixed paths plus `$PATH` on every spawn would be
+    /// wasted work, and the answer cannot change without the app restarting.
+    #[cfg(not(windows))]
+    tmux: std::sync::OnceLock<Option<PathBuf>>,
+    /// Sessions whose most recent spawn ATTACHED to a tmux session that was already running.
+    ///
+    /// Tracked as the exception rather than the rule, so every other path — no tmux, the
+    /// setting off, Windows — is cold by default and gets its scrollback replayed. A warm
+    /// reattach must not: tmux repaints the pane itself, and a replay on top of that prints
+    /// the same screen twice.
+    warm_spawns: DashMap<String, ()>,
 }
 
 impl PtyManager {
     pub fn new() -> Self {
         Self {
             sessions: Arc::new(DashMap::new()),
+            #[cfg(not(windows))]
+            persist: AtomicBool::new(true),
+            #[cfg(not(windows))]
+            tmux: std::sync::OnceLock::new(),
+            warm_spawns: DashMap::new(),
         }
+    }
+
+    /// Absolute tmux path, or None when tmux is unavailable. Resolved on first use.
+    #[cfg(not(windows))]
+    pub fn tmux_path(&self) -> Option<&PathBuf> {
+        self.tmux
+            .get_or_init(|| {
+                let found = crate::tmux::find_tmux();
+                if let Some(p) = &found {
+                    // The tmux server outlives the app and will not re-read `-f` on
+                    // relaunch, so the config has to be pushed into a running server.
+                    crate::tmux::ensure_conf(p, TMUX_SCROLLBACK);
+                }
+                found
+            })
+            .as_ref()
+    }
+
+    /// Mirror the frontend's `persistSessions` setting. See the field's note.
+    #[cfg(not(windows))]
+    pub fn set_persist(&self, on: bool) {
+        self.persist.store(on, Ordering::SeqCst);
+    }
+
+    /// tmux available AND persistence enabled — the two conditions for wrapping a spawn.
+    #[cfg(not(windows))]
+    fn persistence_active(&self) -> Option<&PathBuf> {
+        if !self.persist.load(Ordering::SeqCst) {
+            return None;
+        }
+        self.tmux_path()
     }
 
     pub fn has(&self, session_id: &str) -> bool {
@@ -272,6 +346,33 @@ impl PtyManager {
                     resume_token.as_deref(),
                 )
             };
+            // Persistence: run `inner` inside a tmux session named after this session id,
+            // so the agent survives the app quitting. `new-session -A` is attach-or-create,
+            // which makes resume conditional for free -- on create tmux runs `inner` (with
+            // whatever `--resume` flag the adapter built into it); on attach tmux ignores
+            // the command, so a live agent is never resumed out from under itself.
+            //
+            // Falls through to the direct spawn when tmux is missing or the setting is off,
+            // so the unpersisted path stays byte-for-byte what it is today.
+            let inner = match self.persistence_active() {
+                Some(tmux) => {
+                    // Asked BEFORE the wrap, because `new-session -A` erases the difference:
+                    // afterwards there is no way to tell an attach from a create. A warm
+                    // reattach must NOT replay the scrollback snapshot -- tmux is about to
+                    // repaint the same content, and replaying would print it twice.
+                    if crate::tmux::has_session(tmux, &session_id) {
+                        self.warm_spawns.insert(session_id.clone(), ());
+                    }
+                    crate::tmux::wrap_command(
+                        tmux,
+                        Some(&crate::tmux::conf_path()),
+                        &crate::tmux::session_name(&session_id),
+                        &working_directory,
+                        &inner,
+                    )
+                }
+                None => inner,
+            };
             let mut cmd = CommandBuilder::new(&shell);
             cmd.args(["-i", "-l", "-c", inner.as_str()]);
             cmd
@@ -296,6 +397,14 @@ impl PtyManager {
         if !shell_only {
             cmd.env("CONDUIT_SESSION_ID", &session_id);
             cmd.env("CONDUIT_HOOK_PORT", hook_port.to_string());
+            // The port ABOVE is fixed for this session's lifetime; the path below is how
+            // it stays correct anyway. Hook commands source this file before posting, so a
+            // session that outlives an app restart onto a different port finds the live
+            // one instead of posting into a closed socket. See `hooks::write_endpoint_file`.
+            cmd.env(
+                "CONDUIT_HOOK_ENDPOINT",
+                crate::hooks::endpoint_file_path().as_os_str(),
+            );
             // Continuity identity env: only set when a plugin dir was actually resolved
             // (i.e. continuity is on for this spawn -- see `continuity::continuity_enabled`).
             // SESSION_ID gives continuity a distinct identity per Conduit session; AGENT_ID
@@ -370,6 +479,18 @@ impl PtyManager {
                 suppress_remote: suppress_flag,
             }),
         );
+
+        // Cold restore, pushed through the SAME sink as live output and before the reader
+        // thread starts — so it is the first frame the terminal receives and can never
+        // interleave with what the agent prints next. Doing this from the frontend after
+        // the spawn call returns would race exactly there.
+        //
+        // Nothing is emitted for a warm reattach: tmux repaints the pane itself, and a
+        // replay on top of that would show the same screen twice.
+        if let Some(snapshot) = self.take_cold_scrollback(&session_id) {
+            let encoded = base64::engine::general_purpose::STANDARD.encode(&snapshot);
+            let _ = sink.lock().map(|s| s.send(encoded));
+        }
 
         // The reader self-reaps its map entry when the child exits on its own (below), so
         // hand it a clone of the session map and this id. Windows-only: macOS keeps its
@@ -558,6 +679,40 @@ impl PtyManager {
         self.sessions.iter().map(|e| e.key().clone()).collect()
     }
 
+    /// Persist every live session's recent output as a cold-restore snapshot.
+    ///
+    /// Called on a slow timer and once more at quit. Cheap enough to be unconditional: the
+    /// buffer is already in memory, and the write is a few hundred kilobytes per session.
+    pub fn save_scrollback(&self) {
+        for entry in self.sessions.iter() {
+            let Ok(session) = entry.value().lock() else {
+                continue;
+            };
+            let bytes = session.output.tail_bytes(crate::scrollback::MAX_BYTES);
+            if bytes.is_empty() {
+                continue;
+            }
+            crate::scrollback::save(entry.key(), &bytes);
+        }
+    }
+
+    /// The scrollback to replay for a session that has just spawned, if any.
+    ///
+    /// Returns `None` for a warm reattach, since tmux is about to repaint the pane itself.
+    /// CONSUMES the answer: a session is cold once, and a second call within the same run
+    /// (a re-attach, a remount) must not replay the snapshot again on top of live output.
+    pub fn take_cold_scrollback(&self, session_id: &str) -> Option<Vec<u8>> {
+        if self.warm_spawns.remove(session_id).is_some() {
+            return None;
+        }
+        let snapshot = crate::scrollback::load(session_id)?;
+        // Consumed by deleting it: the next save (seconds away, on the flush timer) rewrites
+        // it from the live buffer, and in between a crash simply costs one cold restore its
+        // scrollback rather than replaying stale content twice.
+        crate::scrollback::remove(session_id);
+        Some(snapshot)
+    }
+
     pub fn kill(&self, session_id: &str) {
         if let Some((_, m)) = self.sessions.remove(session_id) {
             if let Ok(mut session) = m.lock() {
@@ -576,12 +731,52 @@ impl PtyManager {
                 let _ = session.child.wait(); // reap so we don't leave a zombie
             }
         }
+        // Every caller of `kill` means DESTROY -- session removed, project removed,
+        // worktree removed, fleet_stop, or the companion shell being respawned at a new
+        // directory. Killing the PTY alone would only detach the tmux client and strand
+        // the session (and its agent) running forever with nothing able to reattach.
+        //
+        // This is deliberately asymmetric with `kill_all` below. See its note.
+        #[cfg(not(windows))]
+        if let Some(tmux) = self.tmux_path() {
+            crate::tmux::kill_session(tmux, session_id);
+        }
+        // Destroy means destroy: the snapshot goes too. This is the ONLY place it is
+        // deleted for a session that still exists in the store -- the reaper explicitly
+        // must not, because a reaped session has to come back looking like it survived a
+        // reboot, and it cannot do that without its scrollback.
+        self.warm_spawns.remove(session_id);
+        crate::scrollback::remove(session_id);
     }
 
+    /// App quit. Drops every PTY and -- unlike `kill` -- deliberately leaves the tmux
+    /// sessions alone, which is the entire point of persistence: the agents keep working
+    /// and the next launch reattaches to them.
+    ///
+    /// The instinct when reading this is to make it consistent with `kill`. Don't; that
+    /// would silently restore the old behavior where quitting kills every agent.
     pub fn kill_all(&self) {
+        // Last chance to capture what each terminal was showing. On a normal quit tmux keeps
+        // the session and the next launch reattaches warm, so this snapshot is never used --
+        // it is here for the launch AFTER a reboot, when there is no tmux left to reattach
+        // to and the snapshot is the only record of the screen.
+        self.save_scrollback();
         let ids: Vec<String> = self.sessions.iter().map(|e| e.key().clone()).collect();
         for id in ids {
-            self.kill(&id);
+            if let Some((_, m)) = self.sessions.remove(&id) {
+                if let Ok(mut session) = m.lock() {
+                    #[cfg(windows)]
+                    if let Some(pid) = session.child.process_id() {
+                        use crate::NoWindow;
+                        let _ = std::process::Command::new("taskkill")
+                            .args(["/T", "/F", "/PID", &pid.to_string()])
+                            .no_window()
+                            .status();
+                    }
+                    let _ = session.child.kill();
+                    let _ = session.child.wait();
+                }
+            }
         }
     }
 }

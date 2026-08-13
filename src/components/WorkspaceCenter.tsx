@@ -15,6 +15,10 @@ import {
 import { TerminalView } from "./Terminal";
 import { CodeEditorPane } from "./CodeEditorPane";
 import { BoardView } from "./BoardView";
+import { CanvasControls, CanvasUnderlay } from "./CanvasView";
+import { ContextMeter } from "./ContextMeter";
+import { FOOTER_H, HEADER_H, LIVE_ZOOM_MIN, nodeH, nodeW } from "../canvas";
+import { useProjectCanvas } from "../hooks/useProjectCanvas";
 import { TerminalIcon, FileIcon, CodeIcon, CloseIcon } from "./Icons";
 
 /** Payload carried by a native tab drag (shared between WorkspaceCenter and GroupTabStrip). */
@@ -62,6 +66,10 @@ export function WorkspaceCenter({
 }) {
   const layout = useStore((s) => (projectId ? s.layouts[projectId] : undefined));
   const centerMode = useStore((s) => (projectId ? s.centerMode[projectId] ?? "terminals" : "terminals"));
+  const canvasMode = centerMode === "canvas";
+  // Read unconditionally (hooks cannot be conditional); it is inert outside canvas mode.
+  const { canvas } = useProjectCanvas(projectId ?? null);
+  const canvasViewportRef = useRef<HTMLDivElement>(null);
   const setGroupWeights = useStore((s) => s.setGroupWeights);
   const moveTab = useStore((s) => s.moveTab);
   const splitTab = useStore((s) => s.splitTab);
@@ -129,6 +137,36 @@ export function WorkspaceCenter({
     if (ownerProjectId !== projectId || !layout) {
       return { visible: false, inActiveGroup: false, style: { display: "none" } as React.CSSProperties };
     }
+    // Canvas mode positions the SAME mounted terminals by absolute canvas coordinates
+    // instead of group percentages. This is the whole trick behind live terminals in
+    // canvas nodes: one mounted set, two CSS expressions of it. The pan/zoom transform
+    // is applied to .term-stack as a whole, so these coordinates stay in canvas units.
+    //
+    // `right`/`bottom` are cleared explicitly because .term-host is `inset: 0`, and
+    // leaving them at 0 would fight the width/height set here.
+    if (canvasMode) {
+      const node = canvas.nodes.find((n) => n.ref === sessionId);
+      if (!node) {
+        return { visible: false, inActiveGroup: false, style: { display: "none" } as React.CSSProperties };
+      }
+      return {
+        // Hidden below the legibility threshold — the card renders a summary instead.
+        // Hidden is CSS-only, so the PTY and the xterm are untouched either way.
+        visible: canvas.zoom >= LIVE_ZOOM_MIN,
+        inActiveGroup: false, // never steal the keyboard just because a node scrolled by
+        style: {
+          left: node.x,
+          top: node.y + HEADER_H,
+          width: nodeW(node),
+          // Stops above the footer strip so the resize grip stays reachable — the
+          // terminal paints above the card frame and would otherwise cover it.
+          height: nodeH(node) - HEADER_H - FOOTER_H,
+          right: "auto",
+          bottom: "auto",
+          padding: "6px 8px",
+        } as React.CSSProperties,
+      };
+    }
     const gi = groupIndexOfRef(sessionId);
     if (gi === -1)
       return { visible: false, inActiveGroup: false, style: { display: "none" } as React.CSSProperties };
@@ -145,7 +183,8 @@ export function WorkspaceCenter({
     };
   };
 
-  const nothingVisible = !layout || layout.groups.every((g) => g.tabs.length === 0);
+  const nothingVisible =
+    !canvasMode && (!layout || layout.groups.every((g) => g.tabs.length === 0));
   const soloGroup = (layout?.groups.length ?? 0) <= 1;
 
   const startDrag = (e: React.MouseEvent, boundary: number) => {
@@ -196,8 +235,28 @@ export function WorkspaceCenter({
   return (
     <div className="center">
       <div className="workspace" ref={wsRef}>
+        {layout && activeProject && canvasMode && (
+          <div className="group-chrome" style={{ left: 0, width: "100%" }}>
+            <GroupTabStrip
+              projectId={projectId!}
+              project={activeProject}
+              group={activeGroup(layout) ?? layout.groups[0]}
+              home={home}
+              isActiveGroup
+              soloGroup
+              dragging={dragging}
+              dragRef={dragData}
+              onTabDragStart={onTabDragStart}
+              onTabDragEnd={onTabDragEnd}
+              onTabContext={onTabContext}
+              canvasViewportRef={canvasViewportRef}
+            />
+          </div>
+        )}
+
         {layout &&
           activeProject &&
+          !canvasMode &&
           layout.groups.map((g, i) =>
             g.tabs.length > 0 && (!isMax || i === maxIdx) ? (
               <div
@@ -224,6 +283,7 @@ export function WorkspaceCenter({
 
         {layout &&
           !isMax &&
+          !canvasMode &&
           layout.groups.slice(1).map((g, i) => (
             <div
               className="group-divider"
@@ -233,7 +293,23 @@ export function WorkspaceCenter({
             />
           ))}
 
-        <div className="term-stack">
+        {/* Underlay FIRST so the terminal stack paints above it — the card frames are
+            chrome around live terminals, not a replacement for them. */}
+        {projectId && canvasMode && (
+          <CanvasUnderlay projectId={projectId} viewportRef={canvasViewportRef} />
+        )}
+
+        <div
+          className={`term-stack ${canvasMode ? "canvas-mode" : ""}`}
+          style={
+            canvasMode
+              ? {
+                  transform: `translate(${canvas.pan.x}px, ${canvas.pan.y}px) scale(${canvas.zoom})`,
+                  transformOrigin: "0 0",
+                }
+              : undefined
+          }
+        >
           {allSessions.map(({ project, session }) => {
             const pl = placeSession(project.id, session.id);
             const gi = project.id === projectId ? groupIndexOfRef(session.id) : -1;
@@ -341,6 +417,8 @@ export function WorkspaceCenter({
           </div>
         )}
 
+
+
         {tabMenu && activeProject && projectId && (
           <TabContextMenu
             projectId={projectId}
@@ -366,6 +444,7 @@ function GroupTabStrip({
   onTabDragStart,
   onTabDragEnd,
   onTabContext,
+  canvasViewportRef,
 }: {
   projectId: string;
   project: Project;
@@ -378,6 +457,8 @@ function GroupTabStrip({
   onTabDragStart: (fromGroupId: string, tab: WsTab) => void;
   onTabDragEnd: () => void;
   onTabContext: (e: React.MouseEvent, groupId: string, tab: WsTab) => void;
+  /** Present only for the canvas-mode strip, which hosts the canvas controls. */
+  canvasViewportRef?: React.RefObject<HTMLDivElement | null>;
 }) {
   const setActiveTab = useStore((s) => s.setActiveTab);
   const setActiveGroup = useStore((s) => s.setActiveGroup);
@@ -388,6 +469,7 @@ function GroupTabStrip({
   const dirty = useStore((s) => s.dirty);
   const moveTab = useStore((s) => s.moveTab);
   const sessionDirs = useStore((s) => s.sessionDirs);
+  const sessionContext = useStore((s) => s.sessionContext);
 
   // Insertion caret for tab reorder / move-into-strip: index in [0, tabs.length].
   const [caretIndex, setCaretIndex] = useState<number | null>(null);
@@ -482,6 +564,7 @@ function GroupTabStrip({
             >
               <CloseIcon size={10} />
             </button>
+            {t.kind === "session" && <ContextMeter usage={sessionContext[t.ref]} />}
           </div>
         </Fragment>
       ))}
@@ -508,6 +591,30 @@ function GroupTabStrip({
           <span className="board-tab-dot" />
           <span>Board</span>
         </button>
+      )}
+      {isActiveGroup && (
+        <button
+          type="button"
+          className={`header-btn board-tab ${centerMode === "canvas" ? "active" : ""}`}
+          title={
+            centerMode === "canvas"
+              ? "Back to panes (Esc)"
+              : "Canvas — every session as a card on a pan/zoom plane"
+          }
+          onClick={() =>
+            setCenterMode(projectId, centerMode === "canvas" ? "terminals" : "canvas")
+          }
+        >
+          <span className="board-tab-dot" />
+          {/* One button, both directions. A separate "Close canvas" beside an active
+              "Canvas" toggle was the same action twice. */}
+          <span>{centerMode === "canvas" ? "Hide canvas" : "Canvas"}</span>
+        </button>
+      )}
+      {/* Canvas controls live in the persistent header rather than a floating bar of
+          their own: one header, and nothing overlapping the top row of nodes. */}
+      {centerMode === "canvas" && canvasViewportRef && (
+        <CanvasControls projectId={projectId} viewportRef={canvasViewportRef} />
       )}
       {wd &&
         (soloGroup ? (

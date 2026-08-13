@@ -1,0 +1,17 @@
+{
+  "detector": {
+    "ignoreRules": [],
+    "ignoreFiles": [],
+    "ignoreValues": [
+      {
+        "rule": "side-tab",
+        "value": "*",
+        "files": [
+          "src/theme.css"
+        ],
+        "createdAt": "2026-08-10T08:51:34.267Z",
+        "reason": "Blockquote left rule is quotation typography, not an accent tab; .mcp-scope-note callout confirmed intentional by user"
+      }
+    ]
+  }
+}

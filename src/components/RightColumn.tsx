@@ -14,6 +14,7 @@ import {
 import { joinPath } from "../paths";
 import { GitGraph, type GraphCommit } from "./GitGraph";
 import { FileTree } from "./FileTree";
+import { SubagentsView } from "./SubagentsView";
 import { TerminalView } from "./Terminal";
 import {
   RefreshIcon,
@@ -211,6 +212,11 @@ export function RightColumn({
             onClick={() => setTopTab("changes")}
           />
           <PanelTab label="To-dos" active={topTab === "todos"} onClick={() => setTopTab("todos")} />
+          <PanelTab
+            label="Agents"
+            active={topTab === "subagents"}
+            onClick={() => setTopTab("subagents")}
+          />
           <div className="tab-strip-fill" data-tauri-drag-region />
           <button className="panel-action" title="Refresh" onClick={refresh}>
             <RefreshIcon size={12} />
@@ -235,10 +241,12 @@ export function RightColumn({
               dir={workingDirectory}
               onDiscarded={refreshGit}
             />
-          ) : activeSessionId ? (
-            <TodosView sessionId={activeSessionId} />
-          ) : (
+          ) : !activeSessionId ? (
             <p className="placeholder">No session in this group.</p>
+          ) : topTab === "subagents" ? (
+            <SubagentsView sessionId={activeSessionId} />
+          ) : (
+            <TodosView sessionId={activeSessionId} />
           )}
         </div>
       </div>

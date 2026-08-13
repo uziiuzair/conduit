@@ -8,9 +8,7 @@
 /// counts as 0 so a malformed string never spuriously reads as "newer".
 pub fn is_newer(candidate: &str, baseline: &str) -> bool {
     fn parts(v: &str) -> (u64, u64, u64) {
-        let mut it = v
-            .split('.')
-            .map(|c| c.trim().parse::<u64>().unwrap_or(0));
+        let mut it = v.split('.').map(|c| c.trim().parse::<u64>().unwrap_or(0));
         (
             it.next().unwrap_or(0),
             it.next().unwrap_or(0),

@@ -14,19 +14,23 @@ import {
   type AgyUsage,
 } from "./store";
 import { type AgentId } from "./agents";
+import { holdsOffWorking, notificationStatus } from "./statusRules";
 import { type ThemePref } from "./themes";
 import { useClaudeAmbient } from "./hooks/useClaudeAmbient";
 import { useSessionDirs } from "./hooks/useSessionDirs";
+import { useSessionContext } from "./hooks/useSessionContext";
 import { getLastFocusedEditor } from "./monaco/setup";
 import { Sidebar } from "./components/Sidebar";
 import { WorkspaceCenter } from "./components/WorkspaceCenter";
 import { RightColumn } from "./components/RightColumn";
 import { Onboarding } from "./components/Onboarding";
 import { UpdateNotice } from "./components/UpdateNotice";
+import { TmuxNotice } from "./components/TmuxNotice";
 import { Toasts } from "./components/Toasts";
 import { Settings } from "./components/Settings";
 import { QuickOpen } from "./components/QuickOpen";
 import { SearchPalette } from "./components/SearchPalette";
+import { CommandPalette } from "./components/CommandPalette";
 import { useTelemetry } from "./hooks/useTelemetry";
 import { useUpdater } from "./hooks/useUpdater";
 import { useFileWatch } from "./hooks/useFileWatch";
@@ -55,6 +59,7 @@ export default function App() {
   // sidebar-hosted poller).
   useClaudeAmbient();
   useSessionDirs();
+  useSessionContext();
   const projects = useStore((s) => s.projects);
   const selectedProjectId = useStore((s) => s.selectedProjectId);
   const home = useStore((s) => s.homeDir);
@@ -94,7 +99,7 @@ export default function App() {
   }, []);
 
   // ⌘P / ⌘⇧F palettes (menu-dispatched; rendered at the app root like Settings).
-  const [palette, setPalette] = useState<"quickopen" | "search" | null>(null);
+  const [palette, setPalette] = useState<"quickopen" | "search" | "commands" | null>(null);
 
   useEffect(() => {
     void load();
@@ -174,6 +179,12 @@ export default function App() {
         case "pretool": {
           // Fires before each tool runs: a more responsive "running" plus a
           // live label of what it's doing. TodoWrite is shown in the To-dos panel.
+          //
+          // Held off briefly after a turn ends: Claude runs hooks in parallel, so this can
+          // arrive behind that turn's `stop` and would otherwise leave a finished session
+          // showing as busy forever. See statusRules.ts.
+          const cur = st.live[session];
+          if (holdsOffWorking(cur?.status, cur?.updatedAt, Date.now())) break;
           st.setStatus(session, "running");
           st.setCompacting(session, false);
           st.setActivity(session, toolActivity(agentOf(session), body?.tool_name, body?.tool_input));
@@ -199,15 +210,41 @@ export default function App() {
           notifyIfAway(session, "finished");
           break;
         case "notification": {
+          // One event name, four situations. `statusRules` says which — and undefined
+          // means this one is informational, so the badge (and any alert) stays put.
+          const cur = st.live[session];
+          const next = notificationStatus(body?.notification_type, cur?.status);
+          if (next === undefined) break;
+          if (next === "idle") {
+            // The `idle_prompt` rescue: the CLI is back at its prompt with no turn-end hook
+            // ever having fired (Esc during a tool call). Nothing was accomplished, so this
+            // is a silent correction, not something to notify about.
+            st.setStatus(session, "idle");
+            st.setActivity(session, undefined);
+            break;
+          }
           const active =
             globalSelectedSessionId(st) === session && document.hasFocus();
           if (!active) {
-            st.setStatus(session, "needsInput");
+            st.setStatus(session, next);
             doNotify(session, body?.message ?? "needs your input");
           }
           break;
         }
       }
+    });
+    return () => {
+      void unlisten.then((f) => f());
+    };
+  }, []);
+
+  // The Rust stale-working watchdog's verdict. A session leaves `running` only when
+  // something says so, and Esc during a tool call / a killed CLI / a slept machine all say
+  // nothing at all. Rust is the single decider (see status_rules.rs); this listener is how
+  // its answer reaches the sidebar instead of the frontend inventing a second timeout.
+  useEffect(() => {
+    const unlisten = listen<string[]>("session-stale", ({ payload }) => {
+      useStore.getState().markStale(payload ?? []);
     });
     return () => {
       void unlisten.then((f) => f());
@@ -225,6 +262,15 @@ export default function App() {
     return () => {
       void unlisten.then((f) => f());
     };
+  }, []);
+
+  // Session persistence: probe for tmux and push the persisted preference down to Rust
+  // before anything spawns, so the first session of the launch is wrapped (or not)
+  // according to the setting rather than the backend's own default. The quit guard also
+  // reads the result — it decides between "will be stopped" and "keeps running", and
+  // getting that backwards changes whether someone cancels.
+  useEffect(() => {
+    void useStore.getState().probeTmux();
   }, []);
 
   // Native menu clicks relayed by Rust as a "menu" event whose payload is the item id.
@@ -292,6 +338,9 @@ export default function App() {
         case "toggle-board":
           if (st.selectedProjectId) st.toggleCenterMode(st.selectedProjectId);
           break;
+        case "command-palette":
+          setPalette("commands");
+          break;
         case "quick-open":
           setPalette("quickopen");
           break;
@@ -326,9 +375,24 @@ export default function App() {
               const names = running.map((s) => s.name).join(", ");
               const who = names || "an agent";
               const plural = running.length > 1;
+              // With session persistence on, quitting no longer stops the agent — it keeps
+              // running under tmux and the next launch attaches to it. Still worth asking
+              // (a user quitting mid-turn should know), but the old copy would now be a
+              // lie, and "will be stopped" vs "keeps working" is the difference between
+              // cancelling and not.
+              const persists = cur.persistSessions && cur.tmuxAvailable !== false;
+              const subject = plural ? `${running.length} sessions are` : `${who} is`;
+              const suffix = names && plural ? ` (${names})` : "";
               const okRun = await ask(
-                `${plural ? `${running.length} sessions are` : `${who} is`} still working${names && plural ? ` (${names})` : ""}. Quit and stop ${plural ? "them" : "it"}? Conversation history is kept.`,
-                { title: "Conduit", kind: "warning", okLabel: "Quit Anyway", cancelLabel: "Cancel" },
+                persists
+                  ? `${subject} still working${suffix}. Quit? ${plural ? "They" : "It"} will keep running in the background, and Conduit will reattach next launch.`
+                  : `${subject} still working${suffix}. Quit and stop ${plural ? "them" : "it"}? Conversation history is kept.`,
+                {
+                  title: "Conduit",
+                  kind: persists ? "info" : "warning",
+                  okLabel: persists ? "Quit" : "Quit Anyway",
+                  cancelLabel: "Cancel",
+                },
               );
               if (!okRun) return; // cancel — window stays open (prevent_close already held it)
             }
@@ -543,12 +607,16 @@ export default function App() {
         </div>
       </div>
       <UpdateNotice />
+      <TmuxNotice />
       <Toasts />
       {showSettings && (
         <Settings onClose={() => setShowSettings(false)} initialTab={settingsTab} />
       )}
+      {/* The command palette is the one palette that works with no project open — half its
+          rows (open a project, settings, view toggles) are exactly what you want then. */}
+      {palette === "commands" && <CommandPalette onClose={() => setPalette(null)} />}
       {(() => {
-        if (!palette) return null;
+        if (palette !== "quickopen" && palette !== "search") return null;
         const p = projects.find((x) => x.id === selectedProjectId);
         if (!p) return null;
         return palette === "quickopen" ? (

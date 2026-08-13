@@ -12,6 +12,7 @@ mod broker;
 mod claude_status;
 mod claude_usage;
 mod clipboard;
+mod context_window;
 mod continuity;
 mod continuity_read;
 mod fleet;
@@ -28,11 +29,19 @@ mod menu;
 mod notify;
 mod plugins;
 mod pty;
+mod scrollback;
 mod search;
+#[cfg_attr(windows, allow(dead_code))]
+mod session_budget;
+mod status_rules;
 mod store;
+mod subagents;
 mod tasks;
 mod telemetry;
+#[cfg_attr(windows, allow(dead_code))]
+mod tmux;
 mod transcript;
+mod transcript_index;
 mod updates;
 mod usage_tally;
 mod worktree;
@@ -426,6 +435,137 @@ fn pty_kill(session_id: String, pty: State<Arc<PtyManager>>) {
 #[tauri::command]
 fn pty_is_running(session_id: String, pty: State<Arc<PtyManager>>) -> bool {
     pty.has(&session_id)
+}
+
+/// What the Settings toggle needs to know: can this machine persist sessions at all, and
+/// which tmux would it use. `available: false` is what makes the toggle render disabled
+/// with an install hint instead of silently doing nothing when switched on.
+#[derive(serde::Serialize)]
+struct TmuxInfo {
+    available: bool,
+    path: Option<String>,
+    /// How to install tmux on this host, when there is a sensible suggestion. Resolved here
+    /// rather than in the UI because the right answer depends on the platform AND on what is
+    /// already installed -- a hardcoded `brew install tmux` is wrong on every Linux and on a
+    /// Mac without Homebrew.
+    install: Option<tmux::InstallHint>,
+}
+
+#[tauri::command]
+fn tmux_available(pty: State<Arc<PtyManager>>) -> TmuxInfo {
+    #[cfg(not(windows))]
+    {
+        let path = pty.tmux_path().map(|p| p.to_string_lossy().into_owned());
+        let available = path.is_some();
+        TmuxInfo {
+            available,
+            path,
+            install: if available {
+                None
+            } else {
+                tmux::install_hint_here()
+            },
+        }
+    }
+    // tmux is Unix-only, and Conduit on Windows keeps the non-persistent path.
+    #[cfg(windows)]
+    {
+        let _ = pty;
+        TmuxInfo {
+            available: false,
+            path: None,
+            install: None,
+        }
+    }
+}
+
+/// Push the frontend's `persistSessions` setting down to the PTY manager. Called at boot
+/// and whenever the toggle changes. Turning it off never kills a running session — see
+/// the field note on `PtyManager::persist`.
+#[tauri::command]
+fn set_session_persistence(enabled: bool, pty: State<Arc<PtyManager>>) {
+    #[cfg(not(windows))]
+    pty.set_persist(enabled);
+    #[cfg(windows)]
+    {
+        let _ = (enabled, pty);
+    }
+}
+
+/// One session's context-window fill, read from its Claude transcript.
+///
+/// `None` covers every uninteresting case identically -- no transcript yet, a session that
+/// has not had an assistant turn, a non-Claude agent, an unreadable file -- because the
+/// caller's response to all of them is the same: draw no meter.
+///
+/// The transcript store is resolved per session rather than from the app's own environment,
+/// since a session assigned to a non-default account writes under that account's
+/// `CLAUDE_CONFIG_DIR` and its transcript is simply not in the default tree.
+#[tauri::command]
+fn session_context(
+    session_id: String,
+    store: State<Arc<store::Store>>,
+) -> Option<context_window::ContextUsage> {
+    let projects = match store.session_account_config_dir(&session_id) {
+        Some(cfg) if !cfg.is_empty() => std::path::PathBuf::from(cfg).join("projects"),
+        _ => pty::claude_projects_dir()?,
+    };
+    let path = pty::transcript_path(&session_id, &projects)?;
+    context_window::for_transcript(&path)
+}
+
+/// A session's Task subagents and what each is doing.
+///
+/// Empty for the overwhelmingly common case of a session that has not fanned out. Resolved
+/// against the session's own account config dir for the same reason `session_context` is.
+#[tauri::command]
+fn session_subagents(
+    session_id: String,
+    store: State<Arc<store::Store>>,
+) -> Vec<subagents::Subagent> {
+    let projects = match store.session_account_config_dir(&session_id) {
+        Some(cfg) if !cfg.is_empty() => std::path::PathBuf::from(cfg).join("projects"),
+        _ => match pty::claude_projects_dir() {
+            Some(d) => d,
+            None => return Vec::new(),
+        },
+    };
+    subagents::for_session(&projects, &session_id)
+}
+
+/// Search past conversations for a phrase.
+///
+/// Searches the DEFAULT transcript store plus every registered account's, deduplicated by
+/// session id — a session's transcript lives under whichever account ran it, and someone
+/// searching their own history does not think in accounts.
+#[tauri::command]
+fn search_transcripts(
+    query: String,
+    limit: usize,
+    store: State<Arc<store::Store>>,
+) -> Vec<transcript_index::TranscriptHit> {
+    let mut roots: Vec<std::path::PathBuf> = Vec::new();
+    if let Some(d) = pty::claude_projects_dir() {
+        roots.push(d);
+    }
+    for account in store.list_accounts() {
+        let p = std::path::PathBuf::from(&account.config_dir).join("projects");
+        if !roots.contains(&p) {
+            roots.push(p);
+        }
+    }
+    let mut seen = std::collections::HashSet::new();
+    let mut hits = Vec::new();
+    for root in roots {
+        for hit in transcript_index::search(&root, &query, limit) {
+            if seen.insert(hit.session_id.clone()) {
+                hits.push(hit);
+            }
+        }
+    }
+    hits.sort_by_key(|h| std::cmp::Reverse(h.updated_at));
+    hits.truncate(limit);
+    hits
 }
 
 /// Whether any session with a LIVE PTY is currently marked running. Cross-checks the fleet
@@ -1384,7 +1524,7 @@ fn reveal_path(path: String) -> Result<(), String> {
 
     #[cfg(target_os = "macos")]
     {
-        return match Command::new("open")
+        match Command::new("open")
             .args(["-R", &path])
             .no_window()
             .status()
@@ -1392,7 +1532,7 @@ fn reveal_path(path: String) -> Result<(), String> {
             Ok(s) if s.success() => Ok(()),
             Ok(s) => Err(format!("opener exited with {s}")),
             Err(e) => Err(format!("failed to launch opener: {e}")),
-        };
+        }
     }
     #[cfg(windows)]
     {
@@ -1422,27 +1562,6 @@ fn reveal_path(path: String) -> Result<(), String> {
             Ok(s) => Err(format!("opener exited with {s}")),
             Err(e) => Err(format!("failed to launch opener: {e}")),
         };
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn opts_into_mailbox_requires_channels_and_no_mission() {
-        assert!(
-            !opts_into_mailbox(false, &[]),
-            "no channels -> not opted in"
-        );
-        assert!(
-            opts_into_mailbox(false, &["project".to_string()]),
-            "channels + no mission -> opted in"
-        );
-        assert!(
-            !opts_into_mailbox(true, &["project".to_string()]),
-            "a fleet mission already grants fleet MCP -- this predicate is mailbox-opt-in specifically"
-        );
     }
 }
 
@@ -1515,6 +1634,87 @@ pub fn run() {
                 agy_resume,
             );
             bridge::start(app.handle().clone());
+
+            // Sweep tmux sessions whose Conduit session no longer exists. Persistence
+            // means a tmux session outlives the app, so one whose owner was deleted while
+            // the app was closed would otherwise hold its agent (and whatever it spawned)
+            // running forever with nothing able to reattach. Off the main thread: the
+            // probe shells out, and boot should not wait on it.
+            #[cfg(not(windows))]
+            {
+                let store_for_sweep = store.clone();
+                let pty_for_sweep = pty.clone();
+                std::thread::spawn(move || {
+                    let Some(tmux) = pty_for_sweep.tmux_path() else {
+                        return;
+                    };
+                    let live: Vec<String> = store_for_sweep
+                        .list()
+                        .into_iter()
+                        .flat_map(|p| p.sessions)
+                        .flat_map(|s| [format!("{}::term", s.id), s.id])
+                        .collect();
+                    crate::tmux::sweep_orphans(tmux, &live);
+
+                    // Session budget. The orphan sweep above only removes sessions whose
+                    // Conduit session was deleted; this retires ones that still exist but
+                    // have been abandoned long enough to be costing the host memory it
+                    // needs. Nothing is reaped on a healthy machine -- see session_budget.
+                    let cfg = crate::session_budget::Config::from_env();
+                    loop {
+                        let now = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .map(|d| d.as_secs() as i64)
+                            .unwrap_or(0);
+                        let reaped = crate::session_budget::sweep(tmux, &cfg, now);
+                        if !reaped.is_empty()
+                            && std::env::var("CONDUIT_HOOK_LOG").as_deref() == Ok("1")
+                        {
+                            eprintln!("[reap] retired {} idle session(s)", reaped.len());
+                        }
+                        std::thread::sleep(std::time::Duration::from_secs(300));
+                    }
+                });
+            }
+
+            // Cold-restore scrollback: keep each terminal's recent output on disk so a
+            // launch after a REBOOT (no tmux left to reattach to) doesn't come back empty.
+            // Also sweeps snapshots belonging to sessions that no longer exist.
+            {
+                let store_for_sb = store.clone();
+                let pty_for_sb = pty.clone();
+                std::thread::spawn(move || {
+                    let live: Vec<String> = store_for_sb
+                        .list()
+                        .into_iter()
+                        .flat_map(|p| p.sessions)
+                        .flat_map(|s| [format!("{}::term", s.id), s.id])
+                        .collect();
+                    crate::scrollback::sweep(&live);
+                    loop {
+                        std::thread::sleep(std::time::Duration::from_secs(20));
+                        pty_for_sb.save_scrollback();
+                    }
+                });
+            }
+
+            // Stale-working watchdog. A session leaves `running` only when something says
+            // so, and several exits say nothing at all -- Esc during a tool call (Claude
+            // aborts the tool and never runs `Stop`), a killed CLI, a slept machine. The
+            // sweep is the single decider (see `status_rules`); the broadcast is what keeps
+            // the frontend's own `live` map from disagreeing with `fleet_list`.
+            {
+                let fleet_for_sweep = fleet.clone();
+                let app_for_sweep = app.handle().clone();
+                std::thread::spawn(move || loop {
+                    std::thread::sleep(std::time::Duration::from_secs(60));
+                    let swept = fleet_for_sweep.sweep_stale_working();
+                    if !swept.is_empty() {
+                        let _ = app_for_sweep.emit("session-stale", swept);
+                    }
+                });
+            }
+
             fleet_mcp::start(app.handle().clone(), store, pty, fleet, board, tasks);
 
             // Native menu bar. Custom items forward to the frontend as a single "menu"
@@ -1531,6 +1731,11 @@ pub fn run() {
             pty_resize,
             pty_kill,
             pty_is_running,
+            tmux_available,
+            session_context,
+            session_subagents,
+            search_transcripts,
+            set_session_persistence,
             any_agent_running,
             load_projects,
             add_project,
@@ -1634,4 +1839,25 @@ pub fn run() {
                 app_handle.state::<Arc<PtyManager>>().kill_all();
             }
         });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn opts_into_mailbox_requires_channels_and_no_mission() {
+        assert!(
+            !opts_into_mailbox(false, &[]),
+            "no channels -> not opted in"
+        );
+        assert!(
+            opts_into_mailbox(false, &["project".to_string()]),
+            "channels + no mission -> opted in"
+        );
+        assert!(
+            !opts_into_mailbox(true, &["project".to_string()]),
+            "a fleet mission already grants fleet MCP -- this predicate is mailbox-opt-in specifically"
+        );
+    }
 }

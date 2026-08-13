@@ -8,7 +8,13 @@ use std::sync::mpsc::{sync_channel, Receiver, SyncSender};
 use std::sync::Mutex;
 
 /// The decision returned to Claude's PreToolUse hook.
+///
+/// `Allow` is never constructed today: the approval broker is built but DORMANT (the
+/// mobile approval flow's remaining tasks are unshipped), so only the deny path runs.
+/// It is part of the wire contract the hook already understands, and deleting it would
+/// mean re-deriving the protocol when the flow is finished.
 #[derive(Clone, Debug, PartialEq)]
+#[cfg_attr(not(test), allow(dead_code))]
 pub enum Decision {
     Allow,
     Deny { reason: String },
@@ -32,6 +38,10 @@ pub struct Presence {
     attached: Mutex<HashMap<String, u32>>,
 }
 
+/// Attach/detach bookkeeping for the dormant approval broker: it decides whether a
+/// request can be surfaced to a phone or must fall through to the terminal prompt.
+/// Unused until that flow ships -- see `Decision`.
+#[allow(dead_code)]
 impl Presence {
     pub fn attach(&self, session: &str) {
         if let Ok(mut m) = self.attached.lock() {
@@ -94,7 +104,19 @@ impl Broker {
         }
     }
 
+    /// Drop a pending request without deciding it.
+    ///
+    /// The timeout path: the hook has given up waiting and is about to fall through to
+    /// Claude's own prompt, so the entry must go — otherwise an answer arriving a moment
+    /// later would be silently discarded while still looking, to any UI reading `pending`,
+    /// like a question someone can still answer.
+    pub fn forget(&self, id: &str) {
+        let _ = self.pending.lock().map(|mut p| p.remove(id));
+    }
+
     /// Open requests for a session (so a freshly-attached phone can catch up).
+    /// Dormant with the rest of the approval broker -- see `Decision`.
+    #[allow(dead_code)]
     pub fn pending_for(&self, session: &str) -> Vec<ApprovalRequest> {
         self.pending
             .lock()

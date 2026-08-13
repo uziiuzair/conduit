@@ -119,9 +119,9 @@ fn local_prettier(from: &Path) -> Option<PathBuf> {
         if candidate.is_file() {
             return Some(candidate);
         }
-        match dir.parent() {
-            Some(p) => dir = p,
-            None => return None,
+        {
+            let p = dir.parent()?;
+            dir = p
         }
     }
 }

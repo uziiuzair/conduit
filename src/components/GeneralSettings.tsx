@@ -1,9 +1,22 @@
+import { useEffect } from "react";
 import { useStore } from "../store";
 
 /** Settings → General: startup / session behavior toggles. */
 export function GeneralSettings() {
   const restoreSessionsOnOpen = useStore((s) => s.restoreSessionsOnOpen);
   const setRestoreSessionsOnOpen = useStore((s) => s.setRestoreSessionsOnOpen);
+  const persistSessions = useStore((s) => s.persistSessions);
+  const setPersistSessions = useStore((s) => s.setPersistSessions);
+  const tmuxAvailable = useStore((s) => s.tmuxAvailable);
+  const tmuxInstall = useStore((s) => s.tmuxInstall);
+  const probeTmux = useStore((s) => s.probeTmux);
+
+  // Probe on first open rather than at app boot: it shells out, and nothing before
+  // this panel needs the answer. `null` until it lands, which the copy below renders
+  // as "checking" instead of flashing a false "not installed".
+  useEffect(() => {
+    if (tmuxAvailable === null) void probeTmux();
+  }, [tmuxAvailable, probeTmux]);
 
   return (
     <div className="general-settings">
@@ -17,6 +30,39 @@ export function GeneralSettings() {
           Restore sessions when opening a project — relaunch and resume every session of a
           project the moment you open it (Claude and agy reopen the conversation where you left
           off), instead of waiting for a click. Off = sessions spawn only when you click their tab.
+        </span>
+      </label>
+
+      <label className="dialog-toggle">
+        <input
+          type="checkbox"
+          checked={persistSessions && tmuxAvailable !== false}
+          disabled={tmuxAvailable === false}
+          onChange={(e) => setPersistSessions(e.target.checked)}
+        />
+        <span>
+          Keep sessions running after you quit — each session runs inside tmux, so agents keep
+          working when Conduit is closed and the next launch attaches to the live session instead
+          of replaying the conversation. Scrollback and anything mid-run survive too. Off = a
+          session ends when Conduit does.
+          {tmuxAvailable === false && (
+            <em className="dialog-hint">
+              {" "}
+              Needs tmux, which isn’t installed.
+              {/* The command comes from the backend: it depends on the platform and on what
+                  is already there, so a hardcoded `brew install tmux` is wrong on every
+                  Linux and on a Mac without Homebrew. */}
+              {tmuxInstall ? (
+                <>
+                  {" "}
+                  Install it with <code>{tmuxInstall.command}</code> and reopen Settings.
+                </>
+              ) : (
+                <> Install tmux with your system’s package manager and reopen Settings.</>
+              )}
+            </em>
+          )}
+          {tmuxAvailable === null && <em className="dialog-hint"> Checking for tmux…</em>}
         </span>
       </label>
     </div>

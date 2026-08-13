@@ -125,6 +125,12 @@ button {
   top: 0;
   height: var(--tabstrip-h, 34px);
   overflow: hidden;
+  /* Above the terminal stack (2) and the canvas underlay (1), below the group divider (6)
+     and every menu/modal (1000+). The canvas stack is `overflow: visible` so a panned node
+     paints outside its box and up into this band; the header has to win. `.tab-strip` is
+     opaque, so nothing bleeds through. In pane mode the two never overlap, so this is
+     inert there. */
+  z-index: 4;
 }
 
 /* Draggable boundary between two groups (spans full workspace height). */
@@ -356,6 +362,25 @@ button {
   box-shadow: inset 0 -2px 0 0 var(--accent);
 }
 
+/* Collapse track for one sidebar row.
+   `grid-template-rows: 1fr → 0fr` is the one height animation the browser can interpolate
+   without re-measuring the row's content every frame, which animating max-height does. The
+   child must be able to shrink (min-height: 0) and clip (overflow: hidden) for the track
+   to actually govern its height. */
+.session-row-slot {
+  display: grid;
+  grid-template-rows: 1fr;
+  transition: grid-template-rows 0.2s ease;
+}
+
+.session-row-slot.collapsed {
+  grid-template-rows: 0fr;
+}
+
+.session-row-slot > * {
+  min-height: 0;
+}
+
 .session-row {
   display: flex;
   align-items: center;
@@ -365,9 +390,7 @@ button {
   font-size: 12px;
   color: var(--text-bright);
   overflow: hidden;
-  max-height: 44px;
-  transition: max-height 0.2s ease, opacity 0.16s ease, padding 0.2s ease,
-    margin 0.2s ease, transform 0.2s ease, background 0.12s ease;
+  transition: opacity 0.16s ease, transform 0.2s ease, background 0.12s ease;
 }
 
 .session-row:hover {
@@ -397,25 +420,20 @@ button {
   display: flex;
   align-items: center;
   gap: 7px;
+  width: 100%;
   padding: 4px 7px;
   font-size: 12px;
   color: var(--accent);
   overflow: hidden;
-  max-height: 44px;
-  transition: max-height 0.2s ease, opacity 0.16s ease, padding 0.2s ease,
-    margin 0.2s ease, transform 0.2s ease;
+  transition: opacity 0.16s ease, transform 0.2s ease;
 }
 
-/* Folded away while the project is collapsed — clipped to zero height + faded so
-   the expand/collapse reads as one smooth motion (rows stay mounted so both
-   directions animate). Active/selected rows never get this class. */
+/* Folded away while the project is collapsed. The height belongs to `.session-row-slot`;
+   this is only the fade and the small lift, so the expand/collapse still reads as one
+   motion (rows stay mounted so both directions animate). Active/selected rows never get
+   this class. */
 .session-row.collapsed-hidden,
 .new-session.collapsed-hidden {
-  max-height: 0;
-  padding-top: 0;
-  padding-bottom: 0;
-  margin-top: 0;
-  margin-bottom: 0;
   opacity: 0;
   transform: translateY(-3px);
   pointer-events: none;
@@ -475,6 +493,41 @@ button {
 
 .context-menu button.danger {
   color: var(--red);
+}
+
+/* Heading above a list of choices inside a menu (e.g. which session a note is about). */
+.context-menu-label {
+  padding: 5px 9px 3px;
+  font-size: 10px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+}
+
+.context-menu-empty {
+  padding: 4px 9px 6px;
+  font-size: 12px;
+  color: var(--text-dim);
+}
+
+.context-menu-sep {
+  height: 1px;
+  margin: 4px 0;
+  background: var(--border);
+}
+
+/* The currently-linked session. A leading tick rather than a background, so the row still
+   reads as a button you can click again to unlink. Scoped to the canvas menu so the tick
+   column never appears in the tab or file-tree menus, which have no checkable rows. */
+.context-menu.canvas-menu button::before {
+  content: "";
+  display: inline-block;
+  width: 12px;
+  color: var(--accent);
+}
+
+.context-menu.canvas-menu button.checked::before {
+  content: "✓";
 }
 
 .add-bar {
@@ -688,6 +741,250 @@ button {
 .board-tab.active .board-tab-dot { box-shadow: 0 0 8px color-mix(in srgb, var(--accent) 65%, transparent); }
 
 .board-overlay { position: absolute; top: var(--tabstrip-h); left: 0; right: 0; bottom: 0; z-index: 3; background: var(--panel-bg); overflow: hidden; display: flex; }
+
+/* ---- Canvas view -------------------------------------------------------------
+   Layering is the whole design here. The underlay (card frames) sits BELOW
+   .term-stack so the real, already-mounted terminals paint inside the frames; the
+   toolbar is a sibling above both. Nothing here mounts or reparents a terminal —
+   canvas mode only changes the CSS that positions them. */
+.canvas-underlay {
+  position: absolute; top: var(--tabstrip-h); left: 0; right: 0; bottom: 0;
+  z-index: 1;
+  overflow: hidden;
+  background: var(--panel-bg);
+  cursor: grab;
+  /* A dot grid gives pan and zoom something to read against — without it, moving an
+     empty region looks like nothing happened. */
+  background-image: radial-gradient(circle, var(--border) 1px, transparent 1px);
+  background-size: 24px 24px;
+}
+.canvas-underlay.panning { cursor: grabbing; }
+.canvas-plane { position: absolute; top: 0; left: 0; transform-origin: 0 0; }
+
+/* In canvas mode the stack is the pannable plane itself, so it shares the underlay's
+   transform. z-index puts it above the frames.
+
+   pointer-events is the load-bearing line. .term-stack is full-bleed (inset: 0), so
+   sitting above the underlay it would hit-test the ENTIRE canvas -- transparent is still
+   clickable -- and swallow every pan, zoom, and header drag before the underlay saw them.
+   Only the terminal hosts themselves take input; everywhere else falls through. */
+.term-stack.canvas-mode {
+  z-index: 2;
+  background: transparent;
+  overflow: visible;
+  transform-origin: 0 0;
+  pointer-events: none;
+}
+.term-stack.canvas-mode .term-host.visible {
+  pointer-events: auto;
+}
+/* Canvas controls, inline in the persistent tab-strip header. */
+.canvas-controls { display: flex; align-items: center; gap: 6px; flex: none; padding-right: 6px; }
+.canvas-lod {
+  font-size: 9px; letter-spacing: 0.05em; text-transform: uppercase;
+  color: var(--text-dim); padding: 2px 6px; border-radius: 999px; background: var(--hover);
+}
+.canvas-btn {
+  font-size: 11px; padding: 2px 8px; border-radius: 5px;
+  border: 1px solid var(--border); background: transparent; color: var(--text-mid);
+  cursor: pointer; font-variant-numeric: tabular-nums; white-space: nowrap;
+}
+.canvas-btn:hover { background: var(--hover); color: var(--text-hi); }
+
+/* The frame. Its BODY is deliberately empty while live — that hole is where the real
+   terminal shows through from the layer above. */
+/* Sticky note. Warm and paper-like against the cards' panel grey, so at a glance it reads
+   as something a human wrote rather than another session. */
+.canvas-note {
+  position: absolute;
+  display: flex;
+  flex-direction: column;
+  border: 1px solid color-mix(in srgb, var(--amber) 35%, var(--border));
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--amber) 12%, var(--panel-bg));
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.3);
+  overflow: hidden;
+}
+
+/* Drag strip. Empty until the note is linked, at which point it names the session — the
+   text itself stays the note's content. */
+.canvas-note-head {
+  display: flex;
+  align-items: center;
+  flex: none;
+  padding: 0 6px;
+  cursor: grab;
+  background: color-mix(in srgb, var(--amber) 18%, transparent);
+  border-bottom: 1px solid color-mix(in srgb, var(--amber) 25%, transparent);
+}
+
+/* Which session this note is about. Says it in words as well as with the tether, because a
+   tether to a card that is off-screen tells you nothing. */
+.canvas-note-link {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 10px;
+  letter-spacing: 0.02em;
+  color: color-mix(in srgb, var(--amber) 70%, var(--text-bright));
+}
+
+/* Catches the click that dismisses the canvas menu. Covers the window so nothing — an
+   xterm swallowing pointer events for selection, say — can sit between a click and the
+   dismissal. Just below the menu's own z-index. */
+.canvas-menu-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 999;
+}
+
+/* Context-window fill on a card. A number, not a bar: a card has room for one, and at
+   canvas distances a 2px hairline says nothing. */
+.canvas-ctx {
+  flex: none;
+  font-family: var(--mono-font);
+  font-size: 10px;
+  color: var(--text-dim);
+}
+
+.canvas-ctx.warn {
+  color: var(--amber);
+}
+
+.canvas-ctx.danger {
+  color: var(--red);
+}
+
+/* Tethers. Under every box on the plane, so each line is clipped to the gap between the
+   two things it joins. */
+.canvas-links {
+  position: absolute;
+  left: 0;
+  top: 0;
+  overflow: visible;
+  width: 1px;
+  height: 1px;
+  pointer-events: none;
+}
+
+.canvas-links line {
+  stroke: color-mix(in srgb, var(--amber) 45%, transparent);
+  stroke-width: 1.5;
+  stroke-dasharray: 5 4;
+}
+
+.canvas-note-head:active {
+  cursor: grabbing;
+}
+
+.canvas-note-text {
+  flex: 1 1 auto;
+  min-height: 0;
+  padding: 7px 9px;
+  font-family: var(--ui-font);
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--text-bright);
+  background: transparent;
+  border: none;
+  outline: none;
+  resize: none;
+}
+
+.canvas-note-text::placeholder {
+  color: var(--text-dim);
+}
+
+.canvas-note-resize {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  width: 14px;
+  height: 14px;
+  cursor: nwse-resize;
+  background: linear-gradient(
+    135deg,
+    transparent 0 50%,
+    color-mix(in srgb, var(--amber) 45%, transparent) 50% 62%,
+    transparent 62% 74%,
+    color-mix(in srgb, var(--amber) 45%, transparent) 74% 86%,
+    transparent 86%
+  );
+}
+
+.canvas-card {
+  position: absolute;
+  display: flex; flex-direction: column;
+  border: 1px solid var(--border); border-radius: 9px;
+  background: var(--panel-bg);
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.35);
+  overflow: hidden;
+}
+.canvas-card.status-needsInput { border-color: var(--accent); }
+.canvas-card.status-running { border-color: color-mix(in srgb, var(--accent) 45%, var(--border)); }
+
+.canvas-card-head {
+  display: flex; align-items: center; gap: 7px; flex: none;
+  padding: 0 10px;
+  border-bottom: 1px solid var(--border);
+  background: var(--sidebar-bg);
+  cursor: grab; user-select: none;
+}
+.canvas-card-head:active { cursor: grabbing; }
+.canvas-card-name {
+  flex: 1; min-width: 0; font-size: 12px; font-weight: 600; color: var(--text-hi);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.canvas-card-body {
+  flex: 1; display: flex; flex-direction: column; justify-content: center; gap: 6px;
+  padding: 12px 14px;
+}
+.canvas-card-status { font-size: 12px; color: var(--text-mid); }
+
+/* Footer strip: the band the terminal deliberately stops above, so the grip stays
+   clickable while the node is live. `margin-top: auto` pins it to the bottom whether or
+   not the summary body is rendered. */
+.canvas-card-foot {
+  display: flex; align-items: center; gap: 8px; flex: none;
+  margin-top: auto;
+  padding: 0 4px 0 10px;
+  border-top: 1px solid var(--border);
+  background: var(--sidebar-bg);
+}
+.canvas-branch {
+  flex: 1; min-width: 0;
+  font-family: var(--mono-font); font-size: 10px; color: var(--text-dim);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.canvas-branch.dim { font-style: italic; font-family: inherit; }
+
+/* The grip. Two short strokes reading as a corner, which is the conventional resize
+   affordance — a plain square reads as a button. */
+.canvas-resize {
+  width: 14px; height: 14px; flex: none;
+  cursor: nwse-resize;
+  background-image: linear-gradient(
+    135deg,
+    transparent 0 45%, var(--text-dim) 45% 55%, transparent 55% 70%,
+    var(--text-dim) 70% 80%, transparent 80%
+  );
+  opacity: 0.55;
+}
+.canvas-resize:hover { opacity: 1; }
+
+.canvas-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--text-dim); flex: none; }
+.canvas-dot.status-running { background: var(--accent); animation: canvas-pulse 1.6s ease-in-out infinite; }
+.canvas-dot.status-needsInput { background: #e0a33e; }
+.canvas-dot.status-done { background: #4c9a6a; }
+@keyframes canvas-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.35; } }
+@media (prefers-reduced-motion: reduce) {
+  .canvas-dot.status-running { animation: none; }
+}
+
+.canvas-empty {
+  position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
+  font-size: 12px; color: var(--text-dim); pointer-events: none;
+}
 .board-view { flex: 1; display: flex; flex-direction: column; min-width: 0; }
 
 .board-toolbar {
@@ -1178,6 +1475,7 @@ button {
 }
 
 .tab {
+  position: relative;
   display: flex;
   align-items: center;
   gap: 6px;
@@ -1187,6 +1485,43 @@ button {
   font-size: 12px;
   color: var(--text-mid);
   border-bottom: 2px solid transparent;
+}
+
+/* Context-window fill for a session tab: a hairline above the tab's own bottom border, so
+   it never competes with the active-tab accent underline. Only drawn when there is a real
+   reading — see ContextMeter.tsx. */
+.tab-ctx {
+  position: absolute;
+  left: 10px;
+  right: 10px;
+  bottom: 1px;
+  height: 2px;
+  border-radius: 1px;
+  background: var(--border);
+  overflow: hidden;
+}
+
+.tab-ctx-fill {
+  display: block;
+  height: 100%;
+  transform-origin: left center;
+  background: var(--text-dim);
+  transition: transform 0.3s ease, background-color 0.3s ease;
+}
+
+/* Quiet until the window is genuinely tight; the thresholds live in contextMeter.ts. */
+.tab-ctx.warn .tab-ctx-fill {
+  background: var(--amber);
+}
+
+.tab-ctx.danger .tab-ctx-fill {
+  background: var(--red);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .tab-ctx-fill {
+    transition: none;
+  }
 }
 
 .tab:hover {
@@ -2041,6 +2376,21 @@ button {
   opacity: 0.5;
   cursor: not-allowed;
 }
+/* Inline follow-on inside a toggle's label: why it is unavailable, or that we are
+   still finding out. Dimmer than the label so it reads as a footnote, not a second
+   instruction. */
+.dialog-hint {
+  color: var(--text-dim, var(--text-mid));
+  font-style: normal;
+  opacity: 0.75;
+}
+.dialog-hint code {
+  font-family: var(--mono-font);
+  font-size: 11px;
+  padding: 0 3px;
+  border-radius: 3px;
+  background: var(--hover);
+}
 .dialog-actions {
   display: flex;
   justify-content: flex-end;
@@ -2196,18 +2546,9 @@ button {
 .agy-group-label {
   font-size: 10px; opacity: 0.75; margin: 4px 0 1px;
 }
-.agy-meter { margin: 4px 0; }
-.agy-meter-head { display: flex; justify-content: space-between; opacity: 0.9; }
-.agy-meter-bar {
-  height: 6px; border-radius: 3px;
-  background: color-mix(in srgb, var(--agy) 14%, transparent);
-  margin-top: 3px; overflow: hidden;
-}
-.agy-meter-fill { height: 100%; background: var(--agy); transition: width 0.3s ease; }
-.agy-meter-fill.warn { background: var(--amber); }
-.agy-meter-fill.hot { background: var(--red); }
-.agy-meter-fill.disabled { background: var(--text-mid); opacity: 0.5; }
-.agy-meter-fill.ctx { background: color-mix(in srgb, var(--agy) 70%, var(--text-mid)); }
+/* The `.agy-meter*` family lived here until agy's meter was folded into the unified
+   UsagePanel; nothing has rendered those classes since. Deleted rather than left as dead
+   weight — one of them also held the last width-based meter tween in this file. */
 .agy-context { margin-top: 6px; opacity: 0.9; }
 .agy-usage-hint { color: var(--text-mid); font-size: 11px; margin-top: 2px; }
 .agy-enable-btn {
@@ -2307,10 +2648,14 @@ button {
 .usage-row.antigravity .usage-meter-fill {
   --meter-base: var(--agy);
 }
+/* Scaled, not width-sized: the fill animates on the compositor instead of relaying out the
+   row on every tick. `width: 100%` plus a left origin means scaleX(f) IS the fraction. */
 .usage-meter-fill {
+  width: 100%;
   height: 100%;
+  transform-origin: left center;
   background: var(--meter-base, var(--accent));
-  transition: width 0.3s ease, background 0.3s ease;
+  transition: transform 0.3s ease, background 0.3s ease;
 }
 .usage-meter-fill.disabled {
   background: var(--text-mid) !important;
@@ -3595,6 +3940,147 @@ button {
 }
 
 /* ---- Auto-update notice ---- */
+/* Subagent activity log (right panel → Agents). Monospace because it is a transcript of
+   commands and their results, not prose about them. */
+.subagents {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 4px 0;
+}
+
+.subagent-head {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  width: 100%;
+  padding: 4px 10px;
+  font-size: 12px;
+  color: var(--text-mid);
+  background: none;
+  border: none;
+  text-align: left;
+  cursor: pointer;
+}
+
+.subagent-head:hover {
+  background: var(--hover);
+  color: var(--text-bright);
+}
+
+.subagent-caret {
+  flex: none;
+  color: var(--text-dim);
+}
+
+.subagent-id {
+  flex: none;
+  font-family: var(--mono-font);
+  font-size: 11px;
+}
+
+/* The collapsed row's one-line preview: the last thing this agent did. */
+.subagent-last {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--mono-font);
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
+.subagent-log {
+  padding: 2px 10px 8px 22px;
+  border-left: 1px solid var(--border);
+  margin-left: 15px;
+}
+
+.subagent-line {
+  font-family: var(--mono-font);
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--text-mid);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.subagent-line.tool {
+  color: var(--text-bright);
+}
+
+.subagent-line.result {
+  color: var(--text-dim);
+}
+
+/* "tmux isn't installed, so sessions won't survive a quit." A strip along the bottom rather
+   than a corner card: it explains a setting that silently isn't working, which is a sentence
+   to read once, not a task to action. Sits left of the update card's corner. */
+.tmux-notice {
+  position: fixed;
+  left: 16px;
+  bottom: 16px;
+  z-index: 999;
+  max-width: min(720px, calc(100vw - 400px));
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 12px;
+  border-radius: 8px;
+  background: var(--sidebar-bg);
+  border: 1px solid var(--border);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
+  font-size: 12px;
+  color: var(--text-mid);
+}
+
+.tmux-notice-text {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.tmux-notice-cmd {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--mono-font);
+  font-size: 11px;
+  color: var(--text-dim);
+  background: var(--panel-bg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 2px 6px;
+}
+
+.tmux-notice-btn {
+  flex: none;
+  font-size: 11px;
+  color: var(--text-bright);
+  background: var(--selection-bg);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  padding: 4px 9px;
+  cursor: pointer;
+}
+
+.tmux-notice-btn:hover {
+  border-color: var(--accent);
+}
+
+.tmux-notice-btn.subtle {
+  color: var(--text-dim);
+  background: transparent;
+  border-color: transparent;
+}
+
+.tmux-notice-btn.subtle:hover {
+  color: var(--text-mid);
+  border-color: var(--border);
+}
+
 .update-notice {
   position: fixed;
   right: 16px;
@@ -3653,9 +4139,11 @@ button {
   overflow: hidden;
 }
 .update-notice-progress-fill {
+  width: 100%;
   height: 100%;
+  transform-origin: left center;
   background: var(--accent);
-  transition: width 0.15s ease;
+  transition: transform 0.15s ease;
 }
 
 .about-updates {
@@ -3748,6 +4236,26 @@ button {
 .palette-text {
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+/* Command palette row metadata. `meta` is searchable text (a branch, a path); `note` is a
+   reason and is deliberately NOT part of the search corpus — see commands.ts. */
+.palette-cmd-meta,
+.palette-cmd-note {
+  margin-left: auto;
+  padding-left: 10px;
+  font-size: 11px;
+  color: var(--text-dim);
+  flex: none;
+}
+
+.palette-cmd-meta + .palette-cmd-note {
+  margin-left: 0;
+}
+
+.palette-row.disabled {
+  opacity: 0.5;
+  cursor: default;
 }
 
 .palette-mark {

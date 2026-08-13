@@ -22,6 +22,7 @@ import {
   splitTab as reduceSplitTab,
 } from "./layout";
 import { cleanupEdits } from "./trim";
+import type { CanvasState } from "./canvas";
 import type * as Monaco from "monaco-editor";
 import type { SettingsTab } from "./components/Settings";
 import type { PluginDescriptor, PluginPermission } from "./plugins/types";
@@ -245,8 +246,10 @@ export interface CardHandoff {
 }
 export interface ContinuityView { presence: Presence[]; handoffs: CardHandoff[] }
 
-/** Center pane mode, per project: the terminal workspace or the task board. */
-export type CenterMode = "terminals" | "board";
+/** Center pane mode, per project: the terminal workspace, the task board, or the
+ *  spatial canvas. Every mode is an OVERLAY over the still-mounted terminals — none of
+ *  them may unmount or reparent a TerminalView. */
+export type CenterMode = "terminals" | "board" | "canvas";
 
 export type SessionStatus = "idle" | "running" | "needsInput" | "done";
 export type TodoStatus = "pending" | "in_progress" | "completed";
@@ -258,6 +261,25 @@ export interface TodoItem {
   activeForm?: string;
 }
 
+/** A one-shot install command for tmux plus its button caption (mirrors Rust
+ *  `tmux::InstallHint`). */
+export interface TmuxInstallHint {
+  command: string;
+  label: string;
+}
+
+/** One session's context-window fill (mirrors Rust `context_window::ContextUsage`). */
+export interface ContextUsage {
+  /** Input tokens in play for the next turn: fresh input plus everything cached. */
+  used: number;
+  /** The model's context window — the denominator. */
+  window: number;
+  /** `used / window`, already clamped to 0..1 by the backend. */
+  fraction: number;
+  /** The model the latest usage line named, when it named one. */
+  model: string | null;
+}
+
 export interface LiveState {
   status: SessionStatus;
   todos: TodoItem[];
@@ -265,6 +287,12 @@ export interface LiveState {
   activity?: string;
   /** True between a PreCompact event and the next activity, for a "compacting" hint. */
   compacting?: boolean;
+  /**
+   * When `status` was last asserted, epoch ms. Drives the done-holdoff and the staleness
+   * rules in `statusRules.ts` — see that file for why the frontend needs its own copy of
+   * the clock rather than trusting the event order.
+   */
+  updatedAt?: number;
 }
 
 const EMPTY_LIVE: LiveState = { status: "idle", todos: [] };
@@ -277,7 +305,7 @@ export interface ContextMenuState {
   sessionId?: string;
 }
 
-export type TopTab = "files" | "changes" | "todos";
+export type TopTab = "files" | "changes" | "todos" | "subagents";
 export type BottomTab = "terminal" | "git";
 
 // ---- Claude ambient (status + usage) — mirror Rust serde camelCase ----
@@ -464,6 +492,55 @@ function writeRestoreSessionsOnOpen(v: boolean): void {
   }
 }
 
+// Canvas view: card positions / pan / zoom per project. Same persisted-pref pattern as the
+// toggles above. A corrupt or hand-edited value falls back to "no saved canvas", which
+// `reconcile` then repopulates by auto-placing every session — a canvas that lays itself
+// out again is a much better failure than one that throws on load.
+const CANVASES_KEY = "conduit.canvases";
+function readCanvases(): Record<string, CanvasState> {
+  try {
+    const raw = localStorage.getItem(CANVASES_KEY);
+    if (!raw) return {};
+    const parsed: unknown = JSON.parse(raw);
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return {};
+    return parsed as Record<string, CanvasState>;
+  } catch {
+    return {};
+  }
+}
+function writeCanvases(v: Record<string, CanvasState>): void {
+  try {
+    localStorage.setItem(CANVASES_KEY, JSON.stringify(v));
+  } catch {
+    /* quota — non-fatal */
+  }
+}
+
+// Session persistence (tmux): run each session inside a tmux session so the agent keeps
+// working after Conduit quits, and the next launch ATTACHES to it instead of replaying a
+// transcript. Default ON, and a no-op on a machine without tmux (the toggle renders
+// disabled — `tmux_available` is what it asks). Composes with restore-on-open above:
+// that one decides WHETHER to open a session eagerly, this one decides whether opening it
+// is an attach or a cold spawn.
+//
+// Turning it off never kills anything already running; it only stops new spawns from
+// using tmux. Same persisted-pref pattern as everything else here.
+const PERSIST_SESSIONS_KEY = "conduit.persistSessions";
+function readPersistSessions(): boolean {
+  try {
+    return localStorage.getItem(PERSIST_SESSIONS_KEY) !== "0"; // default on (absent => true)
+  } catch {
+    return true;
+  }
+}
+function writePersistSessions(v: boolean): void {
+  try {
+    localStorage.setItem(PERSIST_SESSIONS_KEY, v ? "1" : "0");
+  } catch {
+    /* quota — non-fatal */
+  }
+}
+
 // Sidebar / right-panel collapse state (native menu: View > Toggle Sidebar / Toggle
 // Right Panel). Small persisted UI prefs, same pattern as telemetryOptOut above.
 // Default: both expanded (false).
@@ -480,6 +557,13 @@ function readRightCollapsed(): boolean {
 }
 function writeRightCollapsed(v: boolean): void {
   try { localStorage.setItem(RIGHT_COLLAPSED_KEY, v ? "1" : "0"); } catch { /* quota — non-fatal */ }
+}
+
+// "tmux isn't installed, so sessions won't survive a quit" — shown once, dismissible
+// forever. Same shape as the collapse prefs above.
+const TMUX_NOTICE_KEY = "conduit.tmuxNoticeDismissed";
+function readTmuxNoticeDismissed(): boolean {
+  try { return localStorage.getItem(TMUX_NOTICE_KEY) === "1"; } catch { return false; }
 }
 
 // Editor UX prefs (native View menu). Same localStorage pattern as the collapse flags;
@@ -801,6 +885,30 @@ interface AppState {
    *  resumes all its sessions instead of waiting for a click. */
   restoreSessionsOnOpen: boolean;
   setRestoreSessionsOnOpen: (v: boolean) => void;
+  /** Persisted. When true (default), sessions run inside tmux and survive quitting the
+   *  app — the next launch attaches to the live agent rather than resuming a transcript.
+   *  Ignored on a machine without tmux; see `tmuxAvailable`. */
+  persistSessions: boolean;
+  setPersistSessions: (v: boolean) => void;
+  /** Whether this machine has tmux at all, resolved once at boot from the Rust side.
+   *  `null` = not yet probed, which the Settings toggle renders as neither on nor
+   *  disabled rather than flashing a false "unavailable". */
+  tmuxAvailable: boolean | null;
+  /** How to install tmux on this host, when tmux is missing and there is a sensible
+   *  suggestion. Resolved by the backend — the right command depends on the platform and
+   *  on what is already installed. */
+  tmuxInstall: TmuxInstallHint | null;
+  /** Persisted. The tmux notice has been dismissed; nothing nags again. */
+  tmuxNoticeDismissed: boolean;
+  dismissTmuxNotice: () => void;
+  probeTmux: () => Promise<void>;
+  /** Per-session context-window fill, read from each session's Claude transcript. Absent
+   *  = nothing to draw (no transcript, no assistant turn yet, or a non-Claude agent).
+   *
+   *  Deliberately NOT persisted: the source is a file on disk that outlives the app, so a
+   *  fresh read at startup is both cheaper and more truthful than a cached number. */
+  sessionContext: Record<string, ContextUsage>;
+  refreshSessionContext: (sessionId: string) => Promise<void>;
   /** Persisted. When true, the sidebar (and its resizer) is hidden. */
   sidebarCollapsed: boolean;
   toggleSidebar: () => void;
@@ -1049,6 +1157,8 @@ interface AppState {
   startProjectRename: (projectId: string) => void;
   cancelProjectRename: () => void;
   setStatus: (id: string, status: SessionStatus) => void;
+  /** Apply the Rust stale-working sweep's verdict to the frontend's own `live` map. */
+  markStale: (ids: string[]) => void;
   setTodos: (id: string, todos: TodoItem[]) => void;
   setActivity: (id: string, activity: string | undefined) => void;
   setCompacting: (id: string, compacting: boolean) => void;
@@ -1075,6 +1185,14 @@ interface AppState {
   continuity: Record<string, ContinuityView>;
   setCenterMode: (projectId: string, mode: CenterMode) => void;
   toggleCenterMode: (projectId: string) => void;
+
+  // ---- Canvas view (per project) ----
+  /** Card positions, pan and zoom per project. Persisted to localStorage rather than to
+   *  the Rust-side ProjectLayout: these are per-machine view preferences (like sidebar
+   *  collapse), and keeping them out of persisted project state means a canvas layout
+   *  cannot corrupt a project. Migrating into ProjectLayout stays open — see the spec. */
+  canvases: Record<string, CanvasState>;
+  setCanvas: (projectId: string, next: CanvasState) => void;
   setBoard: (projectId: string, snapshot: BoardSnapshot) => void;
   setContinuity: (projectId: string, view: ContinuityView) => void;
 }
@@ -1138,6 +1256,11 @@ export const useStore = create<AppState>((set, get) => {
     usagePrefs: readUsagePrefs(),
     sessionDirs: {},
     restoreSessionsOnOpen: readRestoreSessionsOnOpen(),
+    persistSessions: readPersistSessions(),
+    tmuxAvailable: null,
+    tmuxInstall: null,
+    tmuxNoticeDismissed: readTmuxNoticeDismissed(),
+    sessionContext: {},
     sidebarCollapsed: readSidebarCollapsed(),
     rightCollapsed: readRightCollapsed(),
     showSettings: false,
@@ -1660,6 +1783,8 @@ export const useStore = create<AppState>((set, get) => {
       set((s) => {
         const live = { ...s.live };
         delete live[sessionId];
+        const sessionContext = { ...s.sessionContext };
+        delete sessionContext[sessionId];
         const projects = s.projects.map((p) =>
           p.id === projectId
             ? { ...p, sessions: p.sessions.filter((x) => x.id !== sessionId) }
@@ -1681,7 +1806,7 @@ export const useStore = create<AppState>((set, get) => {
             delete maximized[projectId];
           }
         }
-        return { projects, live, layouts, maximized };
+        return { projects, live, sessionContext, layouts, maximized };
       });
     },
 
@@ -2244,6 +2369,61 @@ export const useStore = create<AppState>((set, get) => {
       set({ restoreSessionsOnOpen: v });
     },
 
+    setPersistSessions: (v) => {
+      writePersistSessions(v);
+      set({ persistSessions: v });
+      // The Rust side decides per spawn, so it needs the value rather than reading
+      // localStorage. Fire-and-forget: a failure here leaves the backend on its previous
+      // setting, which is a stale preference and not a broken session.
+      void invoke("set_session_persistence", { enabled: v }).catch(() => {});
+    },
+
+    refreshSessionContext: async (sessionId) => {
+      let usage: ContextUsage | null = null;
+      try {
+        usage = await invoke<ContextUsage | null>("session_context", { sessionId });
+      } catch {
+        usage = null;
+      }
+      set((s) => {
+        const cur = s.sessionContext[sessionId];
+        if (!usage) {
+          // Keep the last known fill rather than blanking the meter: a transcript that
+          // momentarily fails to read has not emptied the context window.
+          return {};
+        }
+        if (cur && cur.used === usage.used && cur.window === usage.window) return {};
+        return { sessionContext: { ...s.sessionContext, [sessionId]: usage } };
+      });
+    },
+
+    dismissTmuxNotice: () => {
+      try {
+        localStorage.setItem(TMUX_NOTICE_KEY, "1");
+      } catch {
+        /* quota — non-fatal */
+      }
+      set({ tmuxNoticeDismissed: true });
+    },
+
+    probeTmux: async () => {
+      try {
+        const info = await invoke<{
+          available: boolean;
+          path: string | null;
+          install: TmuxInstallHint | null;
+        }>("tmux_available");
+        set({ tmuxAvailable: info.available, tmuxInstall: info.install ?? null });
+        // Push the persisted preference down at boot. Without this the backend would
+        // start on its own default and disagree with the toggle the user is looking at.
+        void invoke("set_session_persistence", {
+          enabled: info.available && get().persistSessions,
+        }).catch(() => {});
+      } catch {
+        set({ tmuxAvailable: false });
+      }
+    },
+
     toggleSidebar: () =>
       set((s) => {
         const next = !s.sidebarCollapsed;
@@ -2268,8 +2448,26 @@ export const useStore = create<AppState>((set, get) => {
 
     setStatus: (id, status) =>
       set((s) => ({
-        live: { ...s.live, [id]: { ...(s.live[id] ?? EMPTY_LIVE), status } },
+        live: {
+          ...s.live,
+          [id]: { ...(s.live[id] ?? EMPTY_LIVE), status, updatedAt: Date.now() },
+        },
       })),
+    markStale: (ids) =>
+      set((s) => {
+        // The Rust watchdog swept these; mirror its answer so the sidebar and `fleet_list`
+        // agree. Guarded on `running` because an event may have arrived in the gap between
+        // the sweep and this broadcast, and that event is newer than the sweep's evidence.
+        const live = { ...s.live };
+        let changed = false;
+        for (const id of ids) {
+          const cur = live[id];
+          if (cur?.status !== "running") continue;
+          live[id] = { ...cur, status: "idle", activity: undefined, updatedAt: Date.now() };
+          changed = true;
+        }
+        return changed ? { live } : {};
+      }),
     setTodos: (id, todos) =>
       set((s) => ({
         live: { ...s.live, [id]: { ...(s.live[id] ?? EMPTY_LIVE), todos } },
@@ -2496,10 +2694,18 @@ export const useStore = create<AppState>((set, get) => {
 
     // ---- Task board (Conductor board) ----
     centerMode: {},
+    canvases: readCanvases(),
     boards: {},
     continuity: {},
     setCenterMode: (projectId, mode) =>
       set((s) => ({ centerMode: { ...s.centerMode, [projectId]: mode } })),
+
+    setCanvas: (projectId, next) =>
+      set((s) => {
+        const canvases = { ...s.canvases, [projectId]: next };
+        writeCanvases(canvases);
+        return { canvases };
+      }),
     toggleCenterMode: (projectId) =>
       set((s) => {
         const cur = s.centerMode[projectId] ?? "terminals";

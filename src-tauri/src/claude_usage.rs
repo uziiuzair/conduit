@@ -130,7 +130,7 @@ pub fn parse_stats_cache(body: &str) -> LocalUsage {
             })
             .filter(|m| m.tokens > 0)
             .collect();
-        models.sort_by(|a, b| b.tokens.cmp(&a.tokens));
+        models.sort_by_key(|m| std::cmp::Reverse(m.tokens));
         out.total_tokens = models.iter().map(|m| m.tokens).sum();
         out.tokens_by_model = models;
         out.messages = cache.total_messages;
@@ -153,7 +153,7 @@ pub fn parse_stats_cache(body: &str) -> LocalUsage {
                 tokens: *t,
             })
             .collect();
-        models.sort_by(|a, b| b.tokens.cmp(&a.tokens));
+        models.sort_by_key(|m| std::cmp::Reverse(m.tokens));
         out.total_tokens = models.iter().map(|m| m.tokens).sum();
         out.tokens_by_model = models;
     }

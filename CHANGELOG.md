@@ -3,6 +3,67 @@
 All notable changes to Conduit are documented here. This project uses
 [semantic versioning](https://semver.org/).
 
+## 0.20.0 — 2026-08-10
+
+- **Added — Command palette (⌘K).** Reach any action by typing its name: switch to a session
+  (searchable by its branch), jump to another project, start a session with or without a
+  worktree, toggle the board, canvas, sidebar, right panel or maximized pane, zoom, and open
+  any Settings page directly. Matching is loose, so "tgcv" finds Toggle Canvas.
+- **Added — Search past conversations.** Type three or more characters in the palette and it
+  also searches every transcript Conduit can reach, showing the surrounding sentence. Enter
+  jumps to that session; a conversation whose session no longer exists says so instead.
+- **Added — Right-click the canvas.** Add a session or a sticky note exactly where you
+  clicked, instead of wherever the next free slot happens to be. Notes are free text you can
+  drag, resize, and delete like anything else on the plane, and they are saved with the
+  project's layout.
+- **Added — Notes can say which session they are about.** Right-click a note to link it to a
+  session: a dashed line joins the two on the canvas and the note carries that session's
+  name, so a note still says what it belongs to when the card is off-screen. It is a label
+  only — nothing about a link is sent to the agent. Deleting the session keeps the note and
+  drops just the link.
+- **Added — Context-window meter.** Every session tab now shows how full its context window
+  is, amber past 70% and red past 90%, with the token counts and the model in its tooltip.
+- **Added — Agents panel.** When a session fans out into subagents you can finally see them:
+  the right panel's new Agents tab shows each one's activity — what it said, the tools it
+  ran, and a one-line summary of each result.
+- **Added — Terminals survive a reboot, not just a quit.** Recent output is kept on disk and
+  replayed when a session comes back with no live tmux to reattach to, so a terminal is no
+  longer blank after a restart of the machine.
+- **Added — Abandoned sessions are retired.** Sessions kept running by persistence used to
+  accumulate indefinitely. They are now retired when the machine is genuinely short of
+  memory (or the count has run away), never merely because they are old, and never while
+  attached or recently used. A retired session reopens exactly like one that survived a
+  reboot.
+- **Fixed — Finished sessions no longer sit on "needs input".** Claude's idle notification
+  fires after every completed turn, and Conduit was treating it as a request for attention.
+  Notifications are now told apart, so only the ones that genuinely want you raise a badge.
+- **Fixed — A session interrupted with Esc no longer shows as running forever.** The same
+  idle signal now retires a turn that ended without a stop event, and a 20-minute watchdog
+  catches the rest (a killed CLI, a slept machine). A Conductor that died mid-turn could
+  previously never be woken again.
+- **Fixed — A finished turn stays finished.** A late tool event arriving behind the end of a
+  turn no longer flips the session back to running with nothing left to clear it.
+- **Fixed — tmux is no longer missing in silence.** When session persistence is on but tmux
+  isn't installed, Conduit now says so and offers the right install command for the machine
+  instead of failing quietly.
+
+## 0.19.0 — 2026-08-10
+
+- **Added — Sessions keep running after you quit.** Each session now runs inside tmux, so
+  agents keep working when Conduit is closed and the next launch reattaches to the live
+  session instead of replaying the conversation. Scrollback and anything mid-run survive
+  too, including for agents that have no resume of their own. On by default where tmux is
+  installed; Settings → General has the toggle, and the quit prompt now says the agent will
+  keep running rather than that it will be stopped.
+- **Added — Canvas view.** A third way to look at a project, next to the terminals and the
+  board: every session as a card on a pan/zoom plane you can arrange spatially. Drag cards
+  where you want them, zoom with pinch or ⌘-scroll, Fit to bring everything back into view,
+  and double-click a card to open that session. Positions are remembered per project.
+- **Fixed — Sessions no longer go silent after a restart.** Status badges, the To-dos panel,
+  and usage could stop updating for a session if Conduit restarted onto a different port.
+  Hook events now resolve the port when they fire rather than when the session started, so a
+  session recovers on its own.
+
 ## 0.18.0 — 2026-07-24
 
 - **Added — Bundled formatter fallback.** Format Document now works even when a project has
