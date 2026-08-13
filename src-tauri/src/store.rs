@@ -1466,6 +1466,57 @@ mod tests {
     }
 
     #[test]
+    fn stopped_and_mcp_allowlist_survive_a_save_load_round_trip() {
+        // Hibernation is only useful if it outlives a restart -- otherwise restore-on-open
+        // relaunches what the user stopped. This is that guarantee, through real state.json.
+        let dir = temp_dir("hibernate_roundtrip");
+        let store = Store::for_test(&dir);
+        let p = store.add_project("/repo".into());
+        let s = store
+            .add_session(
+                &p.id,
+                "Session 1".into(),
+                false,
+                crate::agent::AgentId::Claude,
+                SessionRole::Worker,
+            )
+            .unwrap();
+        assert!(!s.stopped, "a new session starts live");
+        assert!(s.mcp_servers.is_none(), "a new session inherits MCP");
+
+        store.set_session_stopped(&s.id, true);
+        store.set_session_mcp_servers(&s.id, Some(vec!["ctx7".into()]));
+
+        let raw = fs::read(dir.join("state.json")).unwrap();
+        let state: PersistState = serde_json::from_slice(&raw).unwrap();
+        let loaded = &state.projects[0].sessions[0];
+        assert!(loaded.stopped);
+        assert_eq!(
+            loaded.mcp_servers.as_deref(),
+            Some(&["ctx7".to_string()][..])
+        );
+
+        store.set_session_stopped(&s.id, false);
+        let raw = fs::read(dir.join("state.json")).unwrap();
+        let state: PersistState = serde_json::from_slice(&raw).unwrap();
+        assert!(
+            !state.projects[0].sessions[0].stopped,
+            "starting clears the flag"
+        );
+    }
+
+    #[test]
+    fn a_session_saved_before_hibernate_existed_loads_live_and_unrestricted() {
+        // Back-compat: an existing state.json has neither field. It must load as a normal
+        // live session that inherits every MCP server -- not as a stopped one, and not as
+        // one with an empty allowlist (which would mean "no MCP servers at all").
+        let legacy = r#"{"id":"s1","name":"Old","useWorktree":false,"agent":"claude"}"#;
+        let s: Session = serde_json::from_str(legacy).unwrap();
+        assert!(!s.stopped);
+        assert!(s.mcp_servers.is_none());
+    }
+
+    #[test]
     fn reorder_project_moves_and_clamps() {
         let dir = temp_dir("reorder_p");
         let store = Store::for_test(&dir);
