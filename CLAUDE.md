@@ -180,12 +180,18 @@ servers it loads. Both are driven by two `#[serde(default)]` fields on `Session`
 (`store.rs`): `stopped` and `mcp_servers`.
 
 - **Hibernate.** `stop_session` / `start_session` / `stop_idle_sessions` in `lib.rs` (bulk
-  selection is the pure, tested `idle_stop_targets`). The kill itself is the `stopped` effect
-  in `Terminal.tsx` — **the one sanctioned path that kills an agent PTY without deleting the
-  session.** The keep-alive rule is otherwise unchanged: tab switches, layout changes and
-  directory changes must still never touch an agent terminal. The effect fires on
-  *transitions* only (`prevStoppedRef`) and never calls `term.reset()`, which is why
-  scrollback survives a stop/start cycle. Opening a stopped session resumes it
+  selection is the pure, tested `idle_stop_targets`). They call **`PtyManager::retire`, never
+  `kill`** — the two share one `tear_down` and differ only in `Teardown::keeps_snapshot()`.
+  `kill` is DESTROY and deletes the scrollback snapshot; a retired session must keep it, so it
+  comes back like one `session_budget` reaped or one that lost its tmux server to a reboot.
+  **Do not "simplify" a retire into a kill.** The frontend must not tear down either: the
+  `stopped` effect in `Terminal.tsx` only manages the pane, because a stray `pty_kill` there
+  would destroy the snapshot the command just preserved.
+  The keep-alive rule is otherwise unchanged: tab switches, layout changes and directory
+  changes must still never touch an agent terminal. The effect fires on *transitions* only
+  (`prevStoppedRef`); the pane is cleared at the NEXT spawn (`resetOnSpawnRef`), not at the
+  stop, because a resume is a cold spawn whose first frame is the snapshot replay — clearing
+  late is what stops the same screen printing twice. Opening a stopped session resumes it
   (`selectSession` / `openToSide` clear the flag); the eager restore-on-open effect skips it,
   which is why `stopped` is persisted rather than component state.
 - **MCP allowlist (Claude only).** `agent::session_mcp_config_json` builds a per-session
@@ -258,7 +264,10 @@ COLD spawn only — warmth is decided by `tmux::has_session` BEFORE the wrap, si
 sessions under memory pressure. Its safety contract is load-bearing: a reap kills the tmux
 session and **nothing else** — never the snapshot, never the session record — so a reaped
 session is indistinguishable from one that lost its tmux server to a reboot. `pty::kill` (a
-destroy) is the only place a snapshot is deleted.
+destroy) is the only place a snapshot is deleted; `pty::retire` is the same teardown with the
+snapshot kept, and is what user-initiated hibernation uses (see "Where session hibernate …"
+above). Automatic reaping and a deliberate stop end in the same state on purpose — one
+restore path, not two.
 
 ## Where the fleet/Conductor orchestration lives
 

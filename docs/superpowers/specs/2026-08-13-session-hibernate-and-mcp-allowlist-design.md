@@ -58,11 +58,27 @@ passes nothing and inherits the full user-scope set. The MCP cost is therefore
   what a lean session should.
 - Change nothing for users who touch neither feature.
 
+## Relationship to `session_budget`
+
+This design was written before tmux session persistence landed on `main`, which brought
+`session_budget.rs` — a reaper that retires long-idle **detached** tmux sessions when the
+host is genuinely short of memory. The two are complements, not rivals:
+
+| | `session_budget` | this feature |
+| --- | --- | --- |
+| Trigger | memory pressure, automatic | a user gesture, immediate |
+| Targets | detached, long-idle sessions | whatever the user points at, attached included |
+| Reversible | yes — reopens like a reboot | yes, by the same mechanism |
+
+The reaper never touches an attached session and never fires on a healthy machine, so it
+cannot answer "I am done with this session, take its 600 MB back now." Both end in the same
+state, and deliberately so: one teardown verb (`retire`), one restore path (cold spawn +
+snapshot replay).
+
 ## Non-goals
 
-- **Auto-hibernate on an idle timer.** Deferred; the manual stop and the bulk
-  "stop idle sessions" command cover the acute problem, and an automatic killer needs
-  more confidence in the idle signal than we have today.
+- **Auto-hibernate on an idle timer.** Deferred, and now largely unnecessary: the pressure
+  case is `session_budget`'s. What remains is the deliberate stop, which is this feature.
 - **Reducing a single `claude` process's own footprint.** Out of Conduit's control.
 - **MCP allowlists for non-Claude agents.** `--strict-mcp-config` is verified present in
   the installed Claude CLI. The equivalent for gemini/codex/opencode is not verified, and
@@ -93,10 +109,20 @@ fine — intent is what must survive a restart.
 Three new Tauri commands. Each is a single call so the kill and the persisted flag cannot
 drift apart:
 
-- **`stop_session(session_id)`** — `pty.kill(id)`, `pty.kill("{id}::term")`,
+- **`stop_session(session_id)`** — `pty.retire(id)`, `pty.retire("{id}::term")`,
   `store.set_session_stopped(id, true)`, `fleet.set_running(id, false)`. Idempotent.
   Session ids are globally unique, so no project id is needed (same shape as
   `set_session_account`).
+
+  **`retire`, never `kill`.** Under tmux, `PtyManager::kill` means DESTROY: it kills the
+  tmux session *and deletes the scrollback snapshot* ("Destroy means destroy"). Hibernation
+  is the opposite — the session is coming back, and the snapshot is the only record of its
+  screen once tmux is gone. `retire` is the same teardown with the snapshot kept (and
+  freshened first), which makes a stopped session indistinguishable from one
+  `session_budget` reaped or one that lost its tmux server to a reboot. That equivalence is
+  a contract the reaper already depends on; hibernation joins it rather than inventing a
+  third state. The two verbs differ only in `Teardown::keeps_snapshot()`, which is a tested
+  table rather than a comment.
 - **`start_session(session_id)`** — clears the flag only. The frontend's `TerminalView`
   owns spawning; a command that spawned directly would need cols/rows it does not have.
 - **`stop_idle_sessions(project_id) -> Vec<String>`** — stops every session in the
@@ -126,10 +152,13 @@ buffer, then `pty_kill` both PTYs.
 `claude --resume <id> || claude` (`agent.rs`) for Claude, `agy --conversation=<uuid>` for
 agy — so the conversation comes back.
 
-Deliberately **no `term.reset()`**. The xterm instance stays mounted across a stop, so its
-scrollback survives the whole cycle; resetting would throw away the one thing hibernation
-does not have to cost. The buffer reads as a continuous session with a stop marker in the
-middle.
+A stopped tab keeps showing where its session got to — the xterm instance stays mounted, so
+the buffer is still there under a stop marker. The **clear happens at the next spawn**, not
+at the stop, because a resumed session is a COLD spawn and Rust's first frame is the
+scrollback snapshot (`take_cold_scrollback`). Without the clear, the user would see the same
+screen twice — precisely the duplication `warm_spawns` exists to prevent on the reattach
+path. The snapshot is the better copy anyway: unlike the live buffer, it survives quitting
+the app.
 
 This is the same kill-and-respawn-in-place mechanism the unified-session-directory work
 already shipped for the companion shell (`Terminal.tsx`), including its generation guard.

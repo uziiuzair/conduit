@@ -94,6 +94,12 @@ export function TerminalView({
    *  Channel closes over its generation so a doomed PTY's late output (including the
    *  "[process exited]" notice) can't paint into the reset terminal. */
   const spawnGenRef = useRef(0);
+  /** Set when this session is hibernated; consumed by the next spawn, which clears the
+   *  pane so Rust's cold-spawn scrollback replay isn't printed on top of the same screen.
+   *  A ref (not the stop effect doing the reset directly) because the resume can arrive
+   *  through either the stop transition or the reveal path, depending on whether the pane
+   *  was on screen when the flag cleared. */
+  const resetOnSpawnRef = useRef(false);
 
   const restoreOnOpen = useStore((s) => s.restoreSessionsOnOpen);
   const selectedProjectId = useStore((s) => s.selectedProjectId);
@@ -104,6 +110,16 @@ export function TerminalView({
   const spawnPty = (cols: number, rows: number) => {
     if (spawnedRef.current) return;
     spawnedRef.current = true;
+    // Resuming a hibernated session: clear the pane first. Its tmux session is gone, so the
+    // spawn below is COLD, and a cold spawn's first frame is the scrollback snapshot Rust
+    // replays (`take_cold_scrollback`). That snapshot is the same screen this terminal is
+    // still showing — without the reset the user would see it twice, the exact duplication
+    // `warm_spawns` exists to prevent on the reattach path. The snapshot is the better copy
+    // anyway: it also survives quitting the app, which the live buffer does not.
+    if (resetOnSpawnRef.current) {
+      resetOnSpawnRef.current = false;
+      termRef.current?.reset();
+    }
     // Read the dir from the ref, not the render closure: a deferred respawn (below)
     // may run after newer renders, and must spawn into the LATEST resolved dir.
     const wd = wdRef.current;
@@ -494,19 +510,22 @@ export function TerminalView({
     if (was === stopped) return; // first run, or a re-render with no transition
 
     if (stopped) {
-      if (!spawnedRef.current) return; // never spawned — nothing to kill
+      if (!spawnedRef.current) return; // never spawned — nothing to do
       // Bump the generation FIRST so the doomed PTY's trailing frames (including its
       // "[process exited]" notice) can't paint over the stop marker below.
       spawnGenRef.current++;
       spawnedRef.current = false;
       spawnedDirRef.current = null;
-      // Deliberately NO reset(): keeping the scrollback is the whole difference between
-      // hibernating a session and deleting it.
+      resetOnSpawnRef.current = true;
+      // Deliberately NO reset() here: a stopped tab keeps showing where the session got to.
+      // The clear happens at the NEXT spawn, just before Rust replays the snapshot.
       termRef.current?.write(
         "\r\n\x1b[2m── session stopped — click this tab to resume ──\x1b[0m\r\n",
       );
-      void invoke("pty_kill", { sessionId }).catch(() => {});
-      void invoke("pty_kill", { sessionId: `${sessionId}::term` }).catch(() => {});
+      // No pty_kill here. Tearing down the processes belongs to the `stop_session` /
+      // `stop_idle_sessions` command that set this flag, and it uses RETIRE. `pty_kill` is
+      // DESTROY — it would delete the scrollback snapshot the resume depends on, so a
+      // second teardown from this side would quietly undo the feature.
       return;
     }
 
