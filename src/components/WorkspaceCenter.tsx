@@ -327,6 +327,7 @@ export function WorkspaceCenter({
                     : undefined
                 }
                 role={session.role}
+                stopped={session.stopped ?? false}
                 visible={pl.visible}
                 focusOnReveal={pl.inActiveGroup}
                 // Clicking into the terminal body activates its group, like the editor

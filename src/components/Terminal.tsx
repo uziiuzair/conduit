@@ -37,6 +37,12 @@ interface Props {
   /** "conductor" attaches the fleet MCP server + persona at spawn; default "worker". */
   role?: SessionRole;
   /**
+   * The user stopped this session (hibernate). Its PTYs are killed and NOT respawned
+   * until this goes false again. The xterm instance stays mounted throughout — the
+   * keep-alive rule is untouched — so scrollback survives a whole stop/start cycle.
+   */
+  stopped?: boolean;
+  /**
    * Grab keyboard focus when this terminal becomes visible. The center agent terminal
    * wants this so switching Claude tabs lands your cursor in Claude. The secondary
    * right-panel shell opts out (except when the user explicitly opens the Terminal tab)
@@ -66,6 +72,7 @@ export function TerminalView({
   shellOnly = false,
   dirReady = true,
   role,
+  stopped = false,
   focusOnReveal = true,
   onFocusGroup,
   style,
@@ -389,7 +396,7 @@ export function TerminalView({
       const rows = term.rows;
 
       if (!spawnedRef.current) {
-        if (dirReady) spawnPty(cols, rows);
+        if (dirReady && !stopped) spawnPty(cols, rows);
       } else {
         void invoke("pty_resize", { sessionId, cols, rows }).catch(() => {});
       }
@@ -402,20 +409,23 @@ export function TerminalView({
       window.setTimeout(() => scheduleFit(), 120);
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [visible, dirReady]);
+  }, [visible, dirReady, stopped]);
 
   // Eager restore-on-open: bring every session of the ACTIVE project live without waiting for
   // a click (VSCode-style — the whole project comes back where you left off). Companion shells
   // (shellOnly) stay lazy. Spawns with fallback dims; the reveal-refit corrects the size when
   // the tab is actually shown. Gated by the restoreSessionsOnOpen setting (default on).
+  // A session the user deliberately stopped is skipped here: without that, restoring the
+  // project on the next open would relaunch it and silently undo the decision — which is
+  // exactly why `stopped` is persisted rather than kept in component state.
   useEffect(() => {
-    if (spawnedRef.current || shellOnly) return;
+    if (spawnedRef.current || shellOnly || stopped) return;
     if (!restoreOnOpen || projectId !== selectedProjectId) return;
     const term = termRef.current;
     if (!term) return;
     spawnPty(term.cols || 80, term.rows || 24);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [restoreOnOpen, selectedProjectId]);
+  }, [restoreOnOpen, selectedProjectId, stopped]);
 
   // Shell-only: the resolved directory changed after spawn — a confirmed worktree was
   // deleted (fall back to the project root) or a deleted one came back. Kill + respawn
@@ -442,6 +452,56 @@ export function TerminalView({
       });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [workingDirectory]);
+
+  // Session hibernate: the user stopped or restarted this session.
+  //
+  // This is the ONLY path that may kill an AGENT PTY without deleting the session, and it
+  // fires exclusively on an explicit user gesture (tab close, sidebar Stop, bulk stop-idle).
+  // The keep-alive rule is otherwise untouched: tab switches, layout changes, group moves
+  // and directory changes must still never reach an agent terminal.
+  const prevStoppedRef = useRef(stopped);
+  useEffect(() => {
+    const was = prevStoppedRef.current;
+    prevStoppedRef.current = stopped;
+    if (was === stopped) return; // first run, or a re-render with no transition
+
+    if (stopped) {
+      if (!spawnedRef.current) return; // never spawned — nothing to kill
+      // Bump the generation FIRST so the doomed PTY's trailing frames (including its
+      // "[process exited]" notice) can't paint over the stop marker below.
+      spawnGenRef.current++;
+      spawnedRef.current = false;
+      spawnedDirRef.current = null;
+      // Deliberately NO reset(): keeping the scrollback is the whole difference between
+      // hibernating a session and deleting it.
+      termRef.current?.write(
+        "\r\n\x1b[2m── session stopped — click this tab to resume ──\x1b[0m\r\n",
+      );
+      void invoke("pty_kill", { sessionId }).catch(() => {});
+      void invoke("pty_kill", { sessionId: `${sessionId}::term` }).catch(() => {});
+      return;
+    }
+
+    // Restarting. Only spawn if this pane is actually on screen; a hidden one picks it up
+    // through the reveal path above (which now also gates on `stopped`).
+    const term = termRef.current;
+    if (!term || !visibleRef.current || !dirReady) return;
+    spawnPty(term.cols || 80, term.rows || 24);
+    const gen = spawnGenRef.current;
+    // Cold-spawn repaint. `claude --resume` replays into the alternate screen and nothing
+    // repaints it, so the pane can come back looking empty or half-drawn — the long-standing
+    // "resume is broken" symptom. pty_spawn's re-attach fast path nudges the winsize for
+    // exactly this reason; the cold path doesn't, so do it here, on the resume path only.
+    window.setTimeout(() => {
+      if (disposedRef.current || gen !== spawnGenRef.current || !spawnedRef.current) return;
+      const t = termRef.current;
+      if (!t) return;
+      void invoke("pty_resize", { sessionId, cols: t.cols, rows: t.rows + 1 })
+        .then(() => invoke("pty_resize", { sessionId, cols: t.cols, rows: t.rows }))
+        .catch(() => {});
+    }, 400);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [stopped]);
 
   // App-wide font zoom (View menu). Setting options.fontSize changes cell metrics
   // WITHOUT firing the ResizeObserver (the host box is unchanged), so cols/rows must
