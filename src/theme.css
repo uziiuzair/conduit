@@ -2419,6 +2419,22 @@ button {
   flex-shrink: 0;
 }
 
+/* A hibernated session: its processes are gone, but the session, its history and its
+   scrollback are all intact. Dimmed rather than hidden — clicking it relaunches and
+   resumes. Kept above the hover/selected rules' specificity so it reads as inactive
+   without fighting them. */
+.session-row.stopped .name {
+  opacity: 0.5;
+}
+
+.stopped-chip {
+  font-size: 10px;
+  line-height: 1;
+  color: var(--text-dim);
+  opacity: 0.7;
+  flex-shrink: 0;
+}
+
 /* Which account a session runs under (only shown when >1 account is configured). */
 .account-chip {
   font-size: 9px;

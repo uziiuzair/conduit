@@ -345,7 +345,7 @@ function SessionRow({
     <div
       className={`session-row ${selected ? "selected" : ""} ${hidden ? "collapsed-hidden" : ""} ${
         dragSelf ? "dragging" : ""
-      } ${drop ? `drop-${drop}` : ""}`}
+      } ${drop ? `drop-${drop}` : ""} ${session.stopped ? "stopped" : ""}`}
       draggable={!editing}
       onDragStart={(e) => {
         e.stopPropagation();
@@ -432,7 +432,15 @@ function SessionRow({
         </span>
       )}
       {!editing && <TrustChip session={session} />}
-      <StatusAccessory status={status} activity={activity} compacting={compacting} />
+      {!editing && session.stopped ? (
+        // A stopped session has no agent, so there is no live status to show — the chip
+        // replaces the accessory rather than sitting next to a misleading idle dot.
+        <span className="stopped-chip" title="Stopped — click to relaunch and resume">
+          ⏻
+        </span>
+      ) : (
+        <StatusAccessory status={status} activity={activity} compacting={compacting} />
+      )}
     </div>
     </div>
   );
@@ -590,6 +598,11 @@ function SessionContextMenu() {
   const privateMode = useStore((s) => s.privateMode);
   const accounts = useStore((s) => s.accounts);
   const setSessionAccount = useStore((s) => s.setSessionAccount);
+  const stopSession = useStore((s) => s.stopSession);
+  const startSession = useStore((s) => s.startSession);
+  const stopIdleSessions = useStore((s) => s.stopIdleSessions);
+  const pushToast = useStore((s) => s.pushToast);
+  const live = useStore((s) => s.live);
   const [accountOpen, setAccountOpen] = useState(false);
 
   // Reset the inline account expander whenever the menu target changes.
@@ -632,6 +645,21 @@ function SessionContextMenu() {
           }}
         >
           Open board
+        </button>
+        <button
+          onClick={() => {
+            void stopIdleSessions(menu.projectId).then((n) => {
+              pushToast(
+                n === 0
+                  ? "No idle sessions to stop."
+                  : `Stopped ${n} idle session${n === 1 ? "" : "s"}.`,
+              );
+            });
+            closeMenu();
+          }}
+          title="Free memory: shut down every session here that isn't mid-task. Their conversations are kept."
+        >
+          Stop idle sessions
         </button>
         <button
           className="danger"
@@ -733,6 +761,33 @@ function SessionContextMenu() {
         }}
       >
         Open to the Side
+      </button>
+      <button
+        onClick={() => {
+          if (!menuSession) return;
+          if (menuSession.stopped) {
+            void startSession(menu.projectId, sid);
+          } else {
+            if (
+              live[sid]?.status === "running" &&
+              !confirm(
+                `"${menuSession.name}" is still working. Stop it?\n\nIts conversation is kept — starting it again resumes where it left off.`,
+              )
+            ) {
+              closeMenu();
+              return;
+            }
+            void stopSession(menu.projectId, sid);
+          }
+          closeMenu();
+        }}
+        title={
+          menuSession?.stopped
+            ? "Relaunch this session and resume its conversation"
+            : "Shut down this session's agent and free its memory. Its conversation, history and scrollback are kept."
+        }
+      >
+        {menuSession?.stopped ? "Start session" : "Stop session"}
       </button>
       <button onClick={toggleSensitive} title="Silo this session: no other agent can read it">
         {siloed ? "Clear sensitive mark" : "Mark sensitive (silo)"}

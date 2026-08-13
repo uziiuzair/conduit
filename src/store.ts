@@ -2148,6 +2148,26 @@ export const useStore = create<AppState>((set, get) => {
         });
         if (!ok) return;
       }
+      // Closing a session tab now STOPS the session. Closing the tab was already the
+      // gesture people reached for to free memory, and it previously did nothing to the
+      // process — a session stayed resident until it was deleted. The session itself
+      // survives here: it stays in the sidebar and reopening it resumes the conversation.
+      // Confirm only when the agent is mid-task, since a stop is recoverable and a confirm
+      // on every close would be noise.
+      if (tab?.kind === "session") {
+        const session = findSession(s.projects, ref)?.session;
+        if (session && !session.stopped) {
+          if (s.live[ref]?.status === "running") {
+            const ok = await ask(
+              `"${session.name}" is still working. Stop it?\n\nIts conversation is kept — reopening the session resumes it.`,
+              { title: "Conduit", kind: "warning" },
+            );
+            if (!ok) return;
+          }
+          await s.stopSession(projectId, ref);
+          s.pushToast(`Stopped "${session.name}" — reopen it to resume.`);
+        }
+      }
       // Record explicit file closes for ⌘⇧T (rename/delete closes bypass this path —
       // their old ref is gone from disk and shouldn't be restorable).
       if (isFile && group) {
