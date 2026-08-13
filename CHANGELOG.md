@@ -3,6 +3,22 @@
 All notable changes to Conduit are documented here. This project uses
 [semantic versioning](https://semver.org/).
 
+## 0.21.0 — 2026-08-13
+
+- **Added — Stop a session without deleting it.** Closing a session's tab now shuts its agent
+  down and frees the memory, instead of only hiding the tab. The session stays in the sidebar,
+  dimmed; opening it again relaunches the agent and resumes the conversation where it left off,
+  with the scrollback from before the stop still above it. Previously the only way to reclaim a
+  finished session's memory was to delete it and lose its history. Right-click a session for
+  Stop/Start, or a project for "Stop idle sessions" to reclaim everything that isn't mid-task.
+  Stopping a session that's still working asks first, and stopped sessions stay stopped across
+  restarts.
+- **Added — Choose a session's MCP servers.** A new Claude session can launch with only the MCP
+  servers it needs. Servers are otherwise loaded by every session that could use them, so
+  trimming the list is a direct memory saving. Leave every box checked and nothing changes.
+- **Fixed — Blank pane after resuming a session.** A resumed session sometimes came back empty
+  or half-drawn until the window was resized. It now repaints itself on launch.
+
 ## 0.20.0 — 2026-08-10
 
 - **Added — Command palette (⌘K).** Reach any action by typing its name: switch to a session

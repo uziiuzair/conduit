@@ -173,6 +173,31 @@ kill+respawn on dir change lives in `Terminal.tsx` and is strictly `shellOnly` �
 terminals are keep-alive and must never be respawned. Design:
 `docs/superpowers/specs/2026-07-18-unified-session-directory-design.md`.
 
+## Where session hibernate + the per-session MCP allowlist live
+
+Stopping a session's processes without deleting it, and letting a session declare which MCP
+servers it loads. Both are driven by two `#[serde(default)]` fields on `Session`
+(`store.rs`): `stopped` and `mcp_servers`.
+
+- **Hibernate.** `stop_session` / `start_session` / `stop_idle_sessions` in `lib.rs` (bulk
+  selection is the pure, tested `idle_stop_targets`). The kill itself is the `stopped` effect
+  in `Terminal.tsx` — **the one sanctioned path that kills an agent PTY without deleting the
+  session.** The keep-alive rule is otherwise unchanged: tab switches, layout changes and
+  directory changes must still never touch an agent terminal. The effect fires on
+  *transitions* only (`prevStoppedRef`) and never calls `term.reset()`, which is why
+  scrollback survives a stop/start cycle. Opening a stopped session resumes it
+  (`selectSession` / `openToSide` clear the flag); the eager restore-on-open effect skips it,
+  which is why `stopped` is persisted rather than component state.
+- **MCP allowlist (Claude only).** `agent::session_mcp_config_json` builds a per-session
+  `--mcp-config` file (merging the fleet block when the session has one); `pty_spawn` writes
+  it and sets `strict_mcp`, which appends `--strict-mcp-config` in `build_script` /
+  `build_script_win`. The **store** owns which names apply; the frontend only sends the
+  registry definitions to resolve them against (the registry lives in localStorage). `None`
+  and `Some(<every server>)` are NOT equivalent — strict mode also suppresses a repo's own
+  `.mcp.json` — so "every box checked" must serialize to `None`. UI: `NewSessionDialog`.
+
+Design: `docs/superpowers/specs/2026-08-13-session-hibernate-and-mcp-allowlist-design.md`.
+
 ## Where multi-account assignment lives
 
 Accounts are per-agent profile pointers (`Account { agents, configDir }`, `store.rs`), assigned
