@@ -1024,6 +1024,82 @@ fn remove_session(
     store.remove_session(&project_id, &session_id);
 }
 
+// ---- Session hibernate (stop without delete) ---------------------------------
+//
+// A session's PTYs used to live exactly as long as the session record: nothing but
+// deletion, project removal, `fleet_stop` or app exit ever killed an agent. That made a
+// finished session cost ~600 MB (the agent plus its MCP servers) until the user threw its
+// history away. These three commands separate "stop the processes" from "delete the
+// session"; the conversation comes back through the adapters' existing resume path.
+
+/// Which of `session_ids` a bulk "stop idle sessions" should stop: those with a live PTY
+/// that the fleet does not report as running. A session with no live PTY is skipped -- it
+/// costs nothing, and marking it stopped would silently opt it out of restore-on-open.
+fn idle_stop_targets(
+    session_ids: &[String],
+    alive: &std::collections::HashSet<String>,
+    running: &std::collections::HashSet<String>,
+) -> Vec<String> {
+    session_ids
+        .iter()
+        .filter(|id| alive.contains(*id) && !running.contains(*id))
+        .cloned()
+        .collect()
+}
+
+/// Kill a session's agent PTY and its companion shell, and persist the intent so the
+/// restore-on-open path leaves it alone. The transcript, worktree and session record are
+/// untouched -- the next spawn resumes the conversation (`claude --resume <id>`, agy
+/// `--conversation=<id>`). Idempotent: stopping an already-stopped session is a no-op.
+#[tauri::command]
+fn stop_session(
+    session_id: String,
+    store: State<Arc<Store>>,
+    pty: State<Arc<PtyManager>>,
+    fleet: State<Arc<crate::fleet::FleetState>>,
+) {
+    pty.kill(&session_id);
+    pty.kill(&format!("{session_id}::term"));
+    // The status mirror is hook-driven; with the agent gone no hook will ever clear a
+    // stale "running", which would keep the quit guard warning about a dead process.
+    fleet.set_running(&session_id, false);
+    store.set_session_stopped(&session_id, true);
+}
+
+/// Clear the stopped flag. Spawning stays with the frontend -- `TerminalView` owns the
+/// cols/rows a spawn needs -- so this only records intent.
+#[tauri::command]
+fn start_session(session_id: String, store: State<Arc<Store>>) {
+    store.set_session_stopped(&session_id, false);
+}
+
+/// Stop every idle session in one project. Returns the ids actually stopped, so the UI can
+/// report a count instead of guessing.
+#[tauri::command]
+fn stop_idle_sessions(
+    project_id: String,
+    store: State<Arc<Store>>,
+    pty: State<Arc<PtyManager>>,
+    fleet: State<Arc<crate::fleet::FleetState>>,
+) -> Vec<String> {
+    let session_ids: Vec<String> = store
+        .list()
+        .into_iter()
+        .find(|p| p.id == project_id)
+        .map(|p| p.sessions.into_iter().map(|s| s.id).collect())
+        .unwrap_or_default();
+    let alive: std::collections::HashSet<String> = pty.session_ids().into_iter().collect();
+    let running: std::collections::HashSet<String> = fleet.running_sessions().into_iter().collect();
+    let targets = idle_stop_targets(&session_ids, &alive, &running);
+    for id in &targets {
+        pty.kill(id);
+        pty.kill(&format!("{id}::term"));
+        fleet.set_running(id, false);
+        store.set_session_stopped(id, true);
+    }
+    targets
+}
+
 /// Suggest a short session title from the first prompt. Tries a tiny `claude -p`
 /// (Haiku) call for a clean title, and falls back to a local heuristic on any
 /// error/empty output so the caller always gets something usable.
@@ -1742,6 +1818,9 @@ pub fn run() {
             pty_write,
             pty_resize,
             pty_kill,
+            stop_session,
+            start_session,
+            stop_idle_sessions,
             pty_is_running,
             tmux_available,
             session_context,
@@ -1871,5 +1950,31 @@ mod tests {
             !opts_into_mailbox(true, &["project".to_string()]),
             "a fleet mission already grants fleet MCP -- this predicate is mailbox-opt-in specifically"
         );
+    }
+
+    fn ids(v: &[&str]) -> Vec<String> {
+        v.iter().map(|s| s.to_string()).collect()
+    }
+    fn id_set(v: &[&str]) -> std::collections::HashSet<String> {
+        v.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn idle_targets_stops_alive_and_not_running() {
+        let got = idle_stop_targets(&ids(&["a", "b"]), &id_set(&["a", "b"]), &id_set(&["b"]));
+        assert_eq!(got, ids(&["a"]), "b is running, so only a is stopped");
+    }
+
+    #[test]
+    fn idle_targets_skips_sessions_with_no_pty() {
+        // `c` was never spawned: it costs nothing, and marking it stopped would silently
+        // opt it out of restore-on-open.
+        let got = idle_stop_targets(&ids(&["a", "c"]), &id_set(&["a"]), &id_set(&[]));
+        assert_eq!(got, ids(&["a"]));
+    }
+
+    #[test]
+    fn idle_targets_empty_project_stops_nothing() {
+        assert!(idle_stop_targets(&[], &id_set(&[]), &id_set(&[])).is_empty());
     }
 }
