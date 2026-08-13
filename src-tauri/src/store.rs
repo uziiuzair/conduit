@@ -93,6 +93,21 @@ pub struct Session {
     /// a secret.
     #[serde(default)]
     pub agent_conversation_id: Option<String>,
+    /// User stopped this session's processes without deleting it. The session, its
+    /// transcript and its worktree are untouched; only the PTYs are gone. Persisted so
+    /// hibernation survives a restart -- otherwise the eager restore-on-open path in
+    /// `Terminal.tsx` would relaunch it on the next project open, undoing the decision.
+    /// This records INTENT; whether a PTY exists is `PtyManager::has`.
+    #[serde(default)]
+    pub stopped: bool,
+    /// MCP servers this session may load, by registry name. None = inherit whatever the
+    /// agent would load on its own (user scope, project `.mcp.json`, plugins) -- today's
+    /// behavior exactly. Some(list) = load exactly these and nothing else, via a generated
+    /// `--mcp-config` plus `--strict-mcp-config`. Some(vec![]) is meaningful: no MCP at all.
+    /// None and Some(<every server>) are deliberately NOT the same: strict mode also
+    /// suppresses a repo's own `.mcp.json`.
+    #[serde(default)]
+    pub mcp_servers: Option<Vec<String>>,
 }
 
 /// Directed READ policy: may `caller` read `target`'s output? The single source of truth for
@@ -1074,6 +1089,47 @@ impl Store {
             }
         }
         self.save(&projects);
+    }
+
+    /// Persist the user's stop/start intent for a session. Cheap and idempotent; the caller
+    /// (`stop_session` / `start_session` in lib.rs) owns killing or spawning the processes.
+    pub fn set_session_stopped(&self, session_id: &str, stopped: bool) {
+        let mut projects = self.projects.lock().unwrap_or_else(|e| e.into_inner());
+        let mut changed = false;
+        for p in projects.iter_mut() {
+            if let Some(s) = p.sessions.iter_mut().find(|s| s.id == session_id) {
+                if s.stopped != stopped {
+                    s.stopped = stopped;
+                    changed = true;
+                }
+                break;
+            }
+        }
+        if changed {
+            self.save(&projects);
+        }
+    }
+
+    /// Replace a session's MCP allowlist. None restores inherit-everything.
+    pub fn set_session_mcp_servers(&self, session_id: &str, servers: Option<Vec<String>>) {
+        let mut projects = self.projects.lock().unwrap_or_else(|e| e.into_inner());
+        for p in projects.iter_mut() {
+            if let Some(s) = p.sessions.iter_mut().find(|s| s.id == session_id) {
+                s.mcp_servers = servers;
+                break;
+            }
+        }
+        self.save(&projects);
+    }
+
+    /// A session's MCP allowlist, if it has one. None = inherit (no MCP flags at spawn).
+    pub fn session_mcp_servers(&self, session_id: &str) -> Option<Vec<String>> {
+        let projects = self.projects.lock().unwrap_or_else(|e| e.into_inner());
+        projects
+            .iter()
+            .flat_map(|p| p.sessions.iter())
+            .find(|s| s.id == session_id)
+            .and_then(|s| s.mcp_servers.clone())
     }
 
     /// Persist the agent's captured conversation id (agy) so the next spawn can resume it.

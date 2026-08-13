@@ -802,15 +802,27 @@ fn add_session(
     use_worktree: bool,
     agent: crate::agent::AgentId,
     role: Option<SessionRole>,
+    // Feature C: MCP registry names this session may load. None = inherit everything
+    // (today's behavior). See `Session::mcp_servers` for why None != Some(<everything>).
+    mcp_servers: Option<Vec<String>>,
     store: State<Arc<Store>>,
 ) -> Option<Session> {
-    store.add_session(
+    let mut session = store.add_session(
         &project_id,
         name,
         use_worktree,
         agent,
         role.unwrap_or_default(),
-    )
+    )?;
+    // Applied as a follow-up write rather than an `add_session` parameter: that function has
+    // 40+ call sites (nearly all tests) and none of the others carries an allowlist. The
+    // returned session must carry it too -- the frontend merges THIS object into its project
+    // list, and a stale None there would make the very first spawn inherit everything.
+    if let Some(list) = mcp_servers {
+        store.set_session_mcp_servers(&session.id, Some(list.clone()));
+        session.mcp_servers = Some(list);
+    }
+    Some(session)
 }
 
 #[tauri::command]

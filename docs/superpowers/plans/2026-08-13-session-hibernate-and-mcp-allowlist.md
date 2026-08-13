@@ -38,7 +38,13 @@
   - `Store::set_session_stopped(&self, session_id: &str, stopped: bool)`
   - `Store::set_session_mcp_servers(&self, session_id: &str, servers: Option<Vec<String>>)`
   - `Store::session_mcp_servers(&self, session_id: &str) -> Option<Vec<String>>`
-  - `Store::add_session(..., mcp_servers: Option<Vec<String>>)` — one new trailing parameter
+  - The Tauri `add_session` command gains an `mcp_servers: Option<Vec<String>>` parameter
+
+**Revised during execution:** `Store::add_session` keeps its signature. It has 40+ call
+sites (nearly all tests), and threading a parameter through them is churn with no benefit —
+the Tauri command applies the allowlist with `set_session_mcp_servers` right after creating
+the session instead. Two writes to `state.json` at creation is not worth 40 edited call
+sites.
 
 - [ ] **Step 1: Add the two fields to `Session`**
 
@@ -62,25 +68,10 @@ Append inside `pub struct Session { … }`, after `agent_conversation_id`:
     pub mcp_servers: Option<Vec<String>>,
 ```
 
-- [ ] **Step 2: Thread the allowlist through `add_session`**
+- [ ] **Step 2: Confirm `add_session` needs no change**
 
-Add a trailing parameter to the signature:
-
-```rust
-    pub fn add_session(
-        &self,
-        project_id: &str,
-        name: String,
-        use_worktree: bool,
-        agent: crate::agent::AgentId,
-        role: SessionRole,
-        mcp_servers: Option<Vec<String>>,
-    ) -> Option<Session> {
-```
-
-In the `Session { … }` literal this function builds, set `stopped: false` and
-`mcp_servers`. If the literal uses `..Default::default()`, both fields are covered
-already and only `mcp_servers` needs setting explicitly.
+Its `Session { … }` literal ends in `..Default::default()`, so both new fields default
+correctly (`false` / `None`) with no edit.
 
 - [ ] **Step 3: Add the setters**
 
@@ -129,16 +120,10 @@ Place immediately after `set_session_account`:
     }
 ```
 
-- [ ] **Step 4: Fix the one `add_session` caller**
+- [ ] **Step 4: Accept the allowlist in the `add_session` command**
 
-`src-tauri/src/lib.rs`'s `add_session` command (~line 659) and any `fleet`/`fleet_mcp`
-caller must pass the new argument. Find them all:
-
-```bash
-grep -rn "add_session(" src-tauri/src/
-```
-
-The Tauri command gains a matching parameter:
+`src-tauri/src/lib.rs` (~line 659) — apply it after creation, leaving every other caller
+of `Store::add_session` untouched:
 
 ```rust
 fn add_session(
@@ -150,18 +135,26 @@ fn add_session(
     mcp_servers: Option<Vec<String>>,
     store: State<Arc<Store>>,
 ) -> Option<Session> {
-    store.add_session(
+    let mut session = store.add_session(
         &project_id,
         name,
         use_worktree,
         agent,
         role.unwrap_or_default(),
-        mcp_servers,
-    )
+    )?;
+    // Applied as a follow-up write rather than an `add_session` parameter: that function
+    // has 40+ call sites (nearly all tests) and none of the others has an allowlist.
+    if let Some(list) = mcp_servers {
+        store.set_session_mcp_servers(&session.id, Some(list.clone()));
+        session.mcp_servers = Some(list);
+    }
+    Some(session)
 }
 ```
 
-Backend fleet spawns pass `None`.
+Returning the mutated `session` matters: the frontend merges this exact object into its
+project list, and a stale `mcp_servers: None` there would make the next spawn inherit
+everything.
 
 - [ ] **Step 5: Verify it compiles**
 
