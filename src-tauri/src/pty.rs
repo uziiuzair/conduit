@@ -247,6 +247,10 @@ impl PtyManager {
         model: Option<String>,
         effort: Option<String>,
         resume_token: Option<String>,
+        // Add `--strict-mcp-config` alongside `mcp_config_path`, restricting the session to
+        // exactly that file's servers. Set only when the session has its own MCP allowlist
+        // (Feature C); false keeps the pre-allowlist inheritance behavior.
+        strict_mcp: bool,
         on_event: Channel<String>,
     ) -> Result<(), String> {
         // Already running → re-attach the live reader to the new channel and force
@@ -311,6 +315,7 @@ impl PtyManager {
                     model.as_deref(),
                     effort.as_deref(),
                     resume_token.as_deref(),
+                    strict_mcp,
                 );
                 cmd.args(["/K", inner.as_str()]);
             }
@@ -344,6 +349,7 @@ impl PtyManager {
                     model.as_deref(),
                     effort.as_deref(),
                     resume_token.as_deref(),
+                    strict_mcp,
                 )
             };
             // Persistence: run `inner` inside a tmux session named after this session id,
@@ -908,6 +914,7 @@ fn build_script(
     model: Option<&str>,
     effort: Option<&str>,
     resume_token: Option<&str>,
+    strict_mcp: bool,
 ) -> String {
     let mut flags = String::new();
     if let Some(name) = worktree {
@@ -918,6 +925,13 @@ fn build_script(
     }
     if let Some(cfg) = mcp_config {
         flags.push_str(&format!(" --mcp-config {}", shell_quote(cfg)));
+        // Only ever set alongside a config generated for a session's own MCP allowlist. It
+        // suppresses EVERY other MCP source -- user scope, the repo's own `.mcp.json` --
+        // so it must never appear for a session that didn't opt in. The Conductor's
+        // fleet-only config passes false and keeps inheriting.
+        if strict_mcp {
+            flags.push_str(" --strict-mcp-config");
+        }
     }
     // Continuity (Node-gated, board-enabled Claude sessions only): the bundled plugin
     // dir, resolved by `continuity::continuity_asset_dir`. None (continuity off) leaves
@@ -981,6 +995,7 @@ fn build_script_win(
     model: Option<&str>,
     effort: Option<&str>,
     resume_token: Option<&str>,
+    strict_mcp: bool,
 ) -> String {
     let mut flags = String::new();
     if let Some(name) = worktree {
@@ -991,6 +1006,11 @@ fn build_script_win(
     }
     if let Some(cfg) = mcp_config {
         flags.push_str(&format!(" --mcp-config {}", quote_arg(cfg)));
+        // See build_script's matching comment: strict mode is opt-in per session and
+        // suppresses every other MCP source. The flag itself needs no cmd-quoting.
+        if strict_mcp {
+            flags.push_str(" --strict-mcp-config");
+        }
     }
     // Continuity: same additive shape as the POSIX `build_script` above, cmd-quoted.
     if let Some(dir) = plugin_dir {
@@ -1122,10 +1142,63 @@ mod tests {
             None,
             None,
             None,
+            false, // strict_mcp
         );
         assert!(script.contains("export CONDUIT_SESSION_ID='sid-1' CONDUIT_HOOK_PORT=7777"));
         assert!(script.contains("claude --session-id 'sid-1' || claude"));
         assert!(script.contains("cd '/repo' &&"));
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn build_script_appends_strict_mcp_config_when_set() {
+        let script = build_script(
+            &crate::agent::ClaudeAdapter,
+            "sid-1",
+            7777,
+            "/repo",
+            "/bin/zsh",
+            None,
+            None,
+            Some("/cfg/mcp.json"),
+            None, // plugin_dir
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            true, // strict_mcp
+        );
+        assert!(script.contains("--mcp-config '/cfg/mcp.json'"));
+        assert!(script.contains("--strict-mcp-config"));
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn build_script_omits_strict_mcp_config_by_default() {
+        // The Conductor passes an mcp-config WITHOUT strict mode: it must keep inheriting
+        // the user's own MCP servers, exactly as it did before session allowlists existed.
+        let script = build_script(
+            &crate::agent::ClaudeAdapter,
+            "sid-1",
+            7777,
+            "/repo",
+            "/bin/zsh",
+            None,
+            None,
+            Some("/cfg/mcp.json"),
+            None, // plugin_dir
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            false, // strict_mcp
+        );
+        assert!(script.contains("--mcp-config '/cfg/mcp.json'"));
+        assert!(!script.contains("--strict-mcp-config"));
     }
 
     #[cfg(not(windows))]
@@ -1148,6 +1221,7 @@ mod tests {
             None,                     // model
             None,                     // effort
             None,
+            false, // strict_mcp
         );
         assert!(script.contains("--settings '/cfg/hooks.json'"), "{script}");
         assert!(script.contains("--mcp-config '/cfg/mcp.json'"), "{script}");
@@ -1183,6 +1257,7 @@ mod tests {
             None,
             None,
             None,
+            false, // strict_mcp
         );
         assert!(
             script.contains("'implement the parser'"),
@@ -1319,6 +1394,27 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
+    fn build_script_win_appends_strict_mcp_config_when_set() {
+        let script = build_script_win(
+            &*crate::agent::adapter_for(crate::agent::AgentId::Claude),
+            "sid-1",
+            None,
+            None,
+            Some(r"C:\cfg\mcp.json"),
+            None, // plugin_dir
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            true, // strict_mcp
+        );
+        assert!(script.contains("--strict-mcp-config"), "{script}");
+    }
+
+    #[cfg(windows)]
+    #[test]
     fn build_script_win_conductor_stays_under_cmd_line_limit() {
         // The actual regression guard for "The command line is too long." The persona
         // rides as a FILE path, so the doubled (`||` fallback) invocation stays far under
@@ -1364,6 +1460,7 @@ mod tests {
             Some("claude-opus-4-8"),
             Some("high"),
             None,
+            false, // strict_mcp
         );
         assert!(script.contains("--model 'claude-opus-4-8'"), "{script}");
         assert!(script.contains("--effort 'high'"), "{script}");
@@ -1410,6 +1507,7 @@ mod tests {
             None,
             None,
             None,
+            false, // strict_mcp
         );
         assert!(
             with_plugin.contains("--plugin-dir '/opt/continuity-plugin'"),
@@ -1419,7 +1517,7 @@ mod tests {
         // None (continuity off) must add nothing -- purely additive.
         let without_plugin = build_script(
             &*adapter, "sid-1", 8423, "/repo", "/bin/zsh", None, None, None, None, None, None,
-            None, None, None, None,
+            None, None, None, None, false,
         );
         assert!(!without_plugin.contains("--plugin-dir"), "{without_plugin}");
     }

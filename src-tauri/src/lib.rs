@@ -106,6 +106,11 @@ fn pty_spawn(
     worktree_name: Option<String>,
     role: Option<String>,
     initial_prompt: Option<String>,
+    // Feature C: resolved MCP server definitions for this session's allowlist. The registry
+    // lives in the frontend's localStorage, so Rust can't resolve names itself -- the caller
+    // sends the definitions it already holds, looked up fresh at every spawn. None =
+    // inherit (no MCP flags), which is the pre-allowlist behavior.
+    mcp_allowlist: Option<Vec<crate::agent::McpServer>>,
     on_event: Channel<String>,
     pty: State<Arc<PtyManager>>,
     hook_state: State<Arc<HookState>>,
@@ -262,20 +267,57 @@ fn pty_spawn(
     // limit on Windows once `build_invocation` doubled the flag string for its `||`
     // fallback -- the "command line is too long" Conductor-spawn failure. See
     // `fleet::write_persona_file`.
-    let (mcp_config_path, system_prompt_file) = if is_conductor {
-        let mcp_port = fleet.mcp_port.load(Ordering::SeqCst);
-        (
-            crate::fleet::write_mcp_config(mcp_port, &session_id),
-            crate::fleet::write_persona_file(&session_id, crate::fleet::CONDUCTOR_PERSONA),
-        )
-    } else if gets_fleet_mcp && agent == crate::agent::AgentId::Claude {
-        let mcp_port = fleet.mcp_port.load(Ordering::SeqCst);
-        (
-            crate::fleet::write_mcp_config(mcp_port, &session_id),
-            crate::fleet::write_persona_file(&session_id, crate::fleet::WORKER_BRIEF_SUFFIX),
-        )
+    let fleet_mcp_port = fleet.mcp_port.load(Ordering::SeqCst);
+    let wants_fleet_mcp =
+        (is_conductor || gets_fleet_mcp) && agent == crate::agent::AgentId::Claude;
+    let system_prompt_file = if is_conductor {
+        crate::fleet::write_persona_file(&session_id, crate::fleet::CONDUCTOR_PERSONA)
+    } else if wants_fleet_mcp {
+        crate::fleet::write_persona_file(&session_id, crate::fleet::WORKER_BRIEF_SUFFIX)
     } else {
-        (None, None)
+        None
+    };
+    // Feature C: a session with its own MCP allowlist gets a GENERATED config (the fleet
+    // block, when it has one, merged with exactly the servers it allows) plus
+    // `--strict-mcp-config`. Without an allowlist this resolves to precisely what it
+    // resolved to before the feature existed: the fleet-only config, unstrict.
+    //
+    // Claude-only, deliberately: `--strict-mcp-config` is verified in `claude --help`, and
+    // guessing the equivalent flag for another CLI would break its invocation outright.
+    //
+    // The STORE decides whether there's an allowlist and which names are in it; the caller's
+    // `mcp_allowlist` is only a dictionary of how to launch them (the registry lives in the
+    // frontend's localStorage, so Rust can't resolve a name to a command on its own). If the
+    // two disagree -- stale frontend state, a server deleted from the registry since -- the
+    // persisted names win and an unresolvable one is simply dropped.
+    let allowlist = (!shell_only && agent == crate::agent::AgentId::Claude)
+        .then(|| store.session_mcp_servers(&session_id))
+        .flatten()
+        .map(|names| {
+            let defs = mcp_allowlist.unwrap_or_default();
+            names
+                .iter()
+                .filter_map(|n| defs.iter().find(|d| &d.name == n).cloned())
+                .collect::<Vec<_>>()
+        });
+    let fleet_only_config =
+        || wants_fleet_mcp.then(|| crate::fleet::write_mcp_config(fleet_mcp_port, &session_id));
+    let (mcp_config_path, strict_mcp) = match allowlist {
+        Some(servers) => {
+            let fleet_block =
+                wants_fleet_mcp.then(|| crate::fleet::mcp_config_json(fleet_mcp_port, &session_id));
+            let json = crate::agent::session_mcp_config_json(&servers, fleet_block.as_deref());
+            let path = crate::store::data_dir().join(format!("session-mcp-{session_id}.json"));
+            match std::fs::write(&path, json) {
+                Ok(()) => (Some(path.to_string_lossy().to_string()), true),
+                Err(e) => {
+                    // Never fail a spawn over MCP: fall back to inherit-everything.
+                    eprintln!("conduit: session mcp-config write failed ({e}); inheriting MCP");
+                    (fleet_only_config().flatten(), false)
+                }
+            }
+        }
+        None => (fleet_only_config().flatten(), false),
     };
 
     // Feature 4 silo: a siloed session (under private mode) must not stream its output to any
@@ -408,6 +450,7 @@ fn pty_spawn(
         claude_model.map(str::to_string),
         claude_effort.map(str::to_string),
         resume_token,
+        strict_mcp,
         on_event,
     )
 }
