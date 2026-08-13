@@ -68,6 +68,11 @@ export interface Session {
   effort?: string | null;
   /** The agent's own captured conversation id (agy), for resume. Set by the backend. */
   agentConversationId?: string | null;
+  /** User stopped this session's processes without deleting it (persisted). Its terminal
+   *  stays mounted and keeps its scrollback; starting it resumes the conversation. */
+  stopped?: boolean;
+  /** MCP registry names this session may load; absent/null = inherit everything. */
+  mcpServers?: string[] | null;
 }
 
 /** A registered agent account (mirrors the Rust serde struct, camelCase). */
@@ -1016,7 +1021,7 @@ interface AppState {
 
   addProject: (path: string) => Promise<void>;
   removeProject: (id: string) => Promise<void>;
-  addSession: (projectId: string, opts?: { name?: string; useWorktree?: boolean; agent?: AgentId; role?: SessionRole; account?: string | null }) => Promise<void>;
+  addSession: (projectId: string, opts?: { name?: string; useWorktree?: boolean; agent?: AgentId; role?: SessionRole; account?: string | null; mcpServers?: string[] | null }) => Promise<void>;
   renameSession: (projectId: string, sessionId: string, name: string) => Promise<void>;
   /** Rename a project's display label only (not the directory on disk). */
   renameProject: (projectId: string, name: string) => Promise<void>;
@@ -1025,6 +1030,13 @@ interface AppState {
   reorderProject: (projectId: string, toIndex: number) => Promise<void>;
   reorderSession: (projectId: string, sessionId: string, toIndex: number) => Promise<void>;
   removeSession: (projectId: string, sessionId: string) => Promise<void>;
+  /** Kill a session's processes but keep the session, its history and its scrollback.
+   *  Frees the agent's memory (~400 MB) plus its MCP servers' (~200 MB). */
+  stopSession: (projectId: string, sessionId: string) => Promise<void>;
+  /** Clear the stopped flag; TerminalView respawns and the agent resumes from there. */
+  startSession: (projectId: string, sessionId: string) => Promise<void>;
+  /** Stop every idle session in a project; resolves with how many were stopped. */
+  stopIdleSessions: (projectId: string) => Promise<number>;
 
   /** A session created by the backend (Conductor fleet_spawn): merge it in + open it. */
   mergeSpawnedSession: (projectId: string, session: Session, task?: string) => void;
@@ -1665,7 +1677,11 @@ export const useStore = create<AppState>((set, get) => {
       const useWorktree = opts?.useWorktree ?? false;
       const agent = opts?.agent ?? DEFAULT_AGENT;
       const role = opts?.role ?? "worker";
-      const session = await invoke<Session | null>("add_session", { projectId, name, useWorktree, agent, role });
+      // null = inherit every MCP server the agent would load anyway. NOT the same as a
+      // list naming them all: that turns on strict mode, which also drops the repo's own
+      // .mcp.json. See Session.mcp_servers in store.rs.
+      const mcpServers = opts?.mcpServers ?? null;
+      const session = await invoke<Session | null>("add_session", { projectId, name, useWorktree, agent, role, mcpServers });
       if (!session) return;
       // Pin an explicitly-chosen account (blank = inherit the project/global default).
       if (opts?.account) {
@@ -1775,6 +1791,71 @@ export const useStore = create<AppState>((set, get) => {
         }),
       }));
       await invoke("reorder_session", { projectId, sessionId, toIndex }).catch(() => {});
+    },
+
+    // ---- Session hibernate (stop without delete) ----
+    // The stopped flag lives in the Rust store, but each of these mirrors it into local
+    // state immediately: TerminalView reacts to the prop, and waiting for a projects
+    // reload would leave the terminal running against a killed PTY in between.
+
+    stopSession: async (projectId, sessionId) => {
+      await invoke("stop_session", { sessionId }).catch(() => {});
+      feedSession("session.stop", { id: sessionId });
+      set((s) => ({
+        projects: s.projects.map((p) =>
+          p.id === projectId
+            ? {
+                ...p,
+                sessions: p.sessions.map((x) => (x.id === sessionId ? { ...x, stopped: true } : x)),
+              }
+            : p,
+        ),
+        // A stopped session has no agent, so no hook will ever clear a stale "running" —
+        // the sidebar would keep showing a working spinner for a process that's gone.
+        live: { ...s.live, [sessionId]: { ...EMPTY_LIVE } },
+      }));
+    },
+
+    startSession: async (projectId, sessionId) => {
+      await invoke("start_session", { sessionId }).catch(() => {});
+      feedSession("session.start", { id: sessionId });
+      set((s) => ({
+        projects: s.projects.map((p) =>
+          p.id === projectId
+            ? {
+                ...p,
+                sessions: p.sessions.map((x) =>
+                  x.id === sessionId ? { ...x, stopped: false } : x,
+                ),
+              }
+            : p,
+        ),
+      }));
+    },
+
+    stopIdleSessions: async (projectId) => {
+      const stopped = await invoke<string[]>("stop_idle_sessions", { projectId }).catch(
+        () => [] as string[],
+      );
+      if (!stopped.length) return 0;
+      const done = new Set(stopped);
+      stopped.forEach((id) => feedSession("session.stop", { id }));
+      set((s) => {
+        const live = { ...s.live };
+        for (const id of stopped) live[id] = { ...EMPTY_LIVE };
+        return {
+          projects: s.projects.map((p) =>
+            p.id === projectId
+              ? {
+                  ...p,
+                  sessions: p.sessions.map((x) => (done.has(x.id) ? { ...x, stopped: true } : x)),
+                }
+              : p,
+          ),
+          live,
+        };
+      });
+      return stopped.length;
     },
 
     removeSession: async (projectId, sessionId) => {
