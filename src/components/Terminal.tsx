@@ -108,6 +108,16 @@ export function TerminalView({
     // may run after newer renders, and must spawn into the LATEST resolved dir.
     const wd = wdRef.current;
     spawnedDirRef.current = wd;
+    // The MCP registry lives in localStorage, so Rust can't turn a session's allowlisted
+    // NAMES into launchable commands — send the definitions with the spawn. Looked up fresh
+    // every time, so editing a server in the matrix takes effect on the next start without
+    // rewriting any session record. Rust still decides WHICH names apply (the persisted
+    // allowlist wins); this is only the dictionary it resolves them against.
+    const st = useStore.getState();
+    const session = st.projects.flatMap((p) => p.sessions).find((s) => s.id === sessionId);
+    const allowed = session?.mcpServers;
+    const mcpAllowlist =
+      allowed == null ? null : st.mcpServers.filter((s) => allowed.includes(s.name));
     const gen = spawnGenRef.current;
     const channel = new Channel<string>();
     channel.onmessage = (msg) => {
@@ -124,6 +134,7 @@ export function TerminalView({
       role: role ?? "worker",
       // A backend-spawned worker carries a first prompt; consumed once here.
       initialPrompt: useStore.getState().takePendingPrompt(sessionId) ?? null,
+      mcpAllowlist,
       onEvent: channel,
     }).catch((e) => termRef.current?.write(`\r\n[spawn error: ${e}]\r\n`));
   };

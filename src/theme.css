@@ -2819,6 +2819,29 @@ button {
 .agent-tile .off { margin-left: auto; font-size: 8px; color: var(--text-dim); }
 .dialog-note { font-size: 11px; color: var(--text-dim); margin: 4px 0 8px; }
 
+/* Per-session MCP allowlist (new-session dialog). A fieldset for the grouping semantics,
+   restyled from the browser default so it reads as part of the dialog rather than a form
+   control from another era. Scrolls once the registry outgrows the dialog. */
+.mcp-picker {
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 8px 10px 2px;
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: 160px;
+  overflow-y: auto;
+}
+.mcp-picker legend {
+  font-size: 11px;
+  color: var(--text-dim);
+  padding: 0 4px;
+}
+.mcp-picker .dialog-note {
+  margin: 2px 0 6px;
+}
+
 /* ---- Settings modal ---- */
 .dialog.settings {
   min-width: 620px;
