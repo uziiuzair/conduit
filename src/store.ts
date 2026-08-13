@@ -1897,13 +1897,23 @@ export const useStore = create<AppState>((set, get) => {
       set({ selectedProjectId: projectId });
       applyLayout(projectId, (l) => rOpenTab(l, { kind: "session", ref: sessionId }));
       clearNeeds(sessionId);
+      // Opening a hibernated session is what un-hibernates it — that's the promise the
+      // stop toast and the dimmed sidebar row both make ("reopen it to resume"). Without
+      // this, the tab would reopen onto a terminal whose PTY was killed and never respawn.
+      const session = findSession(get().projects, sessionId)?.session;
+      if (session?.stopped) void get().startSession(projectId, sessionId);
     },
 
     openTab: (projectId, tab) => applyLayout(projectId, (l) => rOpenTab(l, tab)),
     openToSide: (projectId, tab) => {
       set({ selectedProjectId: projectId });
       applyLayout(projectId, (l) => rOpenToSide(l, tab));
-      if (tab.kind === "session") clearNeeds(tab.ref);
+      if (tab.kind === "session") {
+        clearNeeds(tab.ref);
+        // Same rule as selectSession: opening a stopped session resumes it.
+        const session = findSession(get().projects, tab.ref)?.session;
+        if (session?.stopped) void get().startSession(projectId, tab.ref);
+      }
     },
     openFile: (projectId, path, opts) => {
       const l = get().layouts[projectId];

@@ -136,7 +136,24 @@ export function TerminalView({
       initialPrompt: useStore.getState().takePendingPrompt(sessionId) ?? null,
       mcpAllowlist,
       onEvent: channel,
-    }).catch((e) => termRef.current?.write(`\r\n[spawn error: ${e}]\r\n`));
+    })
+      .then(() => {
+        // Cold-spawn repaint. When the agent resumes (`claude --resume <id>`, agy
+        // `--conversation=<id>`) it replays into the alternate screen and nothing repaints
+        // it, so the pane can come back blank or half-drawn — the long-standing "resume
+        // looks broken" symptom. pty_spawn's RE-ATTACH fast path already nudges the winsize
+        // for exactly this reason; the cold path never did. Harmless for a fresh session
+        // (a resize to rows+1 and straight back).
+        window.setTimeout(() => {
+          if (disposedRef.current || gen !== spawnGenRef.current || !spawnedRef.current) return;
+          const t = termRef.current;
+          if (!t || !visibleRef.current) return;
+          void invoke("pty_resize", { sessionId, cols: t.cols, rows: t.rows + 1 })
+            .then(() => invoke("pty_resize", { sessionId, cols: t.cols, rows: t.rows }))
+            .catch(() => {});
+        }, 400);
+      })
+      .catch((e) => termRef.current?.write(`\r\n[spawn error: ${e}]\r\n`));
   };
 
   // Create the xterm instance exactly once.
@@ -495,22 +512,12 @@ export function TerminalView({
 
     // Restarting. Only spawn if this pane is actually on screen; a hidden one picks it up
     // through the reveal path above (which now also gates on `stopped`).
+    // The repaint nudge lives in spawnPty, so it covers this path and the reveal path
+    // equally — a stopped session can resume through either, depending on whether its pane
+    // was already on screen when the flag cleared.
     const term = termRef.current;
     if (!term || !visibleRef.current || !dirReady) return;
     spawnPty(term.cols || 80, term.rows || 24);
-    const gen = spawnGenRef.current;
-    // Cold-spawn repaint. `claude --resume` replays into the alternate screen and nothing
-    // repaints it, so the pane can come back looking empty or half-drawn — the long-standing
-    // "resume is broken" symptom. pty_spawn's re-attach fast path nudges the winsize for
-    // exactly this reason; the cold path doesn't, so do it here, on the resume path only.
-    window.setTimeout(() => {
-      if (disposedRef.current || gen !== spawnGenRef.current || !spawnedRef.current) return;
-      const t = termRef.current;
-      if (!t) return;
-      void invoke("pty_resize", { sessionId, cols: t.cols, rows: t.rows + 1 })
-        .then(() => invoke("pty_resize", { sessionId, cols: t.cols, rows: t.rows }))
-        .catch(() => {});
-    }, 400);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [stopped]);
 
