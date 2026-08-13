@@ -175,6 +175,30 @@ pub struct PtyManager {
     warm_spawns: DashMap<String, ()>,
 }
 
+/// Why a session's processes are being ended. The two verbs kill the same things; they
+/// differ only in whether the scrollback snapshot survives, and that single bit is
+/// load-bearing enough to name.
+///
+/// A session that is destroyed is gone — its record, its worktree, or the whole project
+/// went with it, so keeping a snapshot would leak a file nothing will ever read. A session
+/// that is retired still exists and will be opened again; its snapshot is the only record
+/// of what was on screen once tmux is gone, and deleting it would hand the user back an
+/// empty terminal after the next launch.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Teardown {
+    /// The session is going away for good (delete, project removal, `fleet_stop`).
+    Destroy,
+    /// The session is being hibernated and will come back (Stop session, stop-idle).
+    Retire,
+}
+
+impl Teardown {
+    /// Whether the scrollback snapshot outlives this teardown.
+    pub fn keeps_snapshot(self) -> bool {
+        matches!(self, Teardown::Retire)
+    }
+}
+
 impl PtyManager {
     pub fn new() -> Self {
         Self {
@@ -720,6 +744,32 @@ impl PtyManager {
     }
 
     pub fn kill(&self, session_id: &str) {
+        self.tear_down(session_id, Teardown::Destroy);
+    }
+
+    /// Hibernate: end this session's processes and free their memory, while leaving
+    /// everything needed to bring it back — the session record, its transcript, and its
+    /// scrollback snapshot. The session comes back exactly the way one reaped by
+    /// `session_budget` does, or one whose tmux server was lost to a reboot: a cold spawn
+    /// that replays the snapshot and resumes the agent.
+    ///
+    /// The distinction from `kill` is the whole feature. `kill` means DESTROY and deletes
+    /// the snapshot; using it here would free the memory but throw away the scrollback the
+    /// user was promised on their next launch.
+    pub fn retire(&self, session_id: &str) {
+        self.tear_down(session_id, Teardown::Retire);
+    }
+
+    /// The one implementation behind `kill` and `retire`. They differ only in the two
+    /// dispositions `Teardown` names, which is exactly why that decision is a tested table
+    /// rather than a comment.
+    fn tear_down(&self, session_id: &str, how: Teardown) {
+        // Freshen the snapshot BEFORE dropping the PTY: after the entry is gone the live
+        // buffer is unreachable, and a retire that saved nothing would come back to
+        // whatever the slow flush timer last happened to write.
+        if how.keeps_snapshot() {
+            self.save_scrollback_for(session_id);
+        }
         if let Some((_, m)) = self.sessions.remove(session_id) {
             if let Ok(mut session) = m.lock() {
                 // Windows: child.kill() is TerminateProcess on cmd.exe only, which orphans
@@ -737,22 +787,36 @@ impl PtyManager {
                 let _ = session.child.wait(); // reap so we don't leave a zombie
             }
         }
-        // Every caller of `kill` means DESTROY -- session removed, project removed,
-        // worktree removed, fleet_stop, or the companion shell being respawned at a new
-        // directory. Killing the PTY alone would only detach the tmux client and strand
-        // the session (and its agent) running forever with nothing able to reattach.
-        //
-        // This is deliberately asymmetric with `kill_all` below. See its note.
+        // Both verbs kill the tmux session. For DESTROY it prevents stranding a session
+        // (and its agent) running forever with nothing able to reattach; for RETIRE it IS
+        // the point — killing the PTY alone would only detach the client, and the agent
+        // would keep every byte of its memory. Deliberately asymmetric with `kill_all`,
+        // which leaves tmux alone because persistence is its entire purpose.
         #[cfg(not(windows))]
         if let Some(tmux) = self.tmux_path() {
             crate::tmux::kill_session(tmux, session_id);
         }
-        // Destroy means destroy: the snapshot goes too. This is the ONLY place it is
-        // deleted for a session that still exists in the store -- the reaper explicitly
-        // must not, because a reaped session has to come back looking like it survived a
-        // reboot, and it cannot do that without its scrollback.
+        // The next spawn must be COLD either way, so it replays rather than assuming tmux
+        // will repaint a pane that no longer exists.
         self.warm_spawns.remove(session_id);
-        crate::scrollback::remove(session_id);
+        if !how.keeps_snapshot() {
+            crate::scrollback::remove(session_id);
+        }
+    }
+
+    /// Snapshot one session's scrollback now. `save_scrollback` does every session on a
+    /// timer; this is the single-session form a retire needs.
+    fn save_scrollback_for(&self, session_id: &str) {
+        let Some(entry) = self.sessions.get(session_id) else {
+            return;
+        };
+        let Ok(session) = entry.value().lock() else {
+            return;
+        };
+        let bytes = session.output.tail_bytes(crate::scrollback::MAX_BYTES);
+        if !bytes.is_empty() {
+            crate::scrollback::save(session_id, &bytes);
+        }
     }
 
     /// App quit. Drops every PTY and -- unlike `kill` -- deliberately leaves the tmux
@@ -1046,6 +1110,15 @@ mod tests {
     use std::sync::atomic::{AtomicU32, Ordering};
 
     const ID: &str = "11111111-2222-3333-4444-555555555555";
+
+    #[test]
+    fn destroying_a_session_drops_its_scrollback_but_retiring_keeps_it() {
+        // The whole difference between hibernating a session and deleting one. A retired
+        // session has to come back looking like it survived a reboot, and it cannot do that
+        // without its snapshot -- the same contract `session_budget`'s reaper depends on.
+        assert!(!Teardown::Destroy.keeps_snapshot());
+        assert!(Teardown::Retire.keeps_snapshot());
+    }
 
     #[test]
     fn conductor_spawn_sets_subagent_model_env() {

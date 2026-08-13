@@ -1101,8 +1101,10 @@ fn stop_session(
     pty: State<Arc<PtyManager>>,
     fleet: State<Arc<crate::fleet::FleetState>>,
 ) {
-    pty.kill(&session_id);
-    pty.kill(&format!("{session_id}::term"));
+    // `retire`, never `kill`: the session is coming back, so its scrollback snapshot has to
+    // outlive the teardown. `kill` means destroy and deletes it.
+    pty.retire(&session_id);
+    pty.retire(&format!("{session_id}::term"));
     // The status mirror is hook-driven; with the agent gone no hook will ever clear a
     // stale "running", which would keep the quit guard warning about a dead process.
     fleet.set_running(&session_id, false);
@@ -1135,8 +1137,9 @@ fn stop_idle_sessions(
     let running: std::collections::HashSet<String> = fleet.running_sessions().into_iter().collect();
     let targets = idle_stop_targets(&session_ids, &alive, &running);
     for id in &targets {
-        pty.kill(id);
-        pty.kill(&format!("{id}::term"));
+        // Same contract as stop_session: retire, don't destroy.
+        pty.retire(id);
+        pty.retire(&format!("{id}::term"));
         fleet.set_running(id, false);
         store.set_session_stopped(id, true);
     }
