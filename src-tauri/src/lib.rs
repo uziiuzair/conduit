@@ -295,10 +295,24 @@ fn pty_spawn(
         .flatten()
         .map(|names| {
             let defs = mcp_allowlist.unwrap_or_default();
-            names
+            let mut chosen: Vec<crate::agent::McpServer> = names
                 .iter()
                 .filter_map(|n| defs.iter().find(|d| &d.name == n).cloned())
-                .collect::<Vec<_>>()
+                .collect();
+            // `--strict-mcp-config` suppresses PLUGIN-provided MCP servers (verified against
+            // Claude Code v2.1.222 -- see `plugin_mcp_servers`). Continuity's coordination
+            // tools arrive that way, so without this a session that merely trimmed its MCP
+            // list would silently lose them while its prompt still claimed to have them.
+            // Carrying the plugin's own declarations into the generated config keeps the
+            // allowlist a statement about the USER's servers, not a hidden opt-out from a
+            // feature the project turned on.
+            if let Some(dir) = continuity_plugin_dir.as_deref() {
+                match std::fs::read_to_string(std::path::Path::new(dir).join(".mcp.json")) {
+                    Ok(manifest) => chosen.extend(crate::agent::plugin_mcp_servers(dir, &manifest)),
+                    Err(e) => eprintln!("conduit: continuity plugin .mcp.json unreadable ({e}); its tools will be missing under a session MCP allowlist"),
+                }
+            }
+            chosen
         });
     let fleet_only_config =
         || wants_fleet_mcp.then(|| crate::fleet::write_mcp_config(fleet_mcp_port, &session_id));

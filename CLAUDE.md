@@ -201,6 +201,12 @@ servers it loads. Both are driven by two `#[serde(default)]` fields on `Session`
   registry definitions to resolve them against (the registry lives in localStorage). `None`
   and `Some(<every server>)` are NOT equivalent — strict mode also suppresses a repo's own
   `.mcp.json` — so "every box checked" must serialize to `None`. UI: `NewSessionDialog`.
+  **`--strict-mcp-config` also suppresses PLUGIN-provided MCP servers** (measured against
+  Claude Code v2.1.222; `--mcp-config` alone does not, so the Conductor path is unaffected).
+  Continuity arrives that way, and the failure is silent — its skills and prompt still load,
+  so the session believes it has tools it cannot call. `agent::plugin_mcp_servers` therefore
+  folds the plugin's own `.mcp.json` into the generated config. If another plugin ever ships
+  MCP tools, it needs the same treatment.
 
 Design: `docs/superpowers/specs/2026-08-13-session-hibernate-and-mcp-allowlist-design.md`.
 

@@ -267,17 +267,41 @@ Editing the allowlist of an existing session is out of scope for this increment 
 choice is made where it matters, before the process exists. (Delete-and-recreate, or a
 later increment, covers changing one's mind.)
 
-### Open risk — continuity's plugin MCP
+### Settled — `--strict-mcp-config` suppresses plugin MCP
 
-Continuity's tools reach a board-enabled Claude session through `--plugin-dir`, not
-through `--mcp-config`. `--strict-mcp-config` is documented as ignoring "all other MCP
-configurations", and whether that includes plugin-provided servers is **not known**.
+Continuity's tools reach a board-enabled Claude session through `--plugin-dir`, not through
+`--mcp-config`, so the question was whether strict mode would take them out too. It does.
 
-This must be settled empirically before the feature ships: launch a board-enabled Claude
-session with an allowlist, run `/mcp`, and record whether continuity's tools are present.
-If they are suppressed, the dialog warns when the project has the board enabled, and the
-behavior is documented in `CLAUDE.md`. The feature is not gated on the answer — the answer
-is gated on being written down rather than assumed.
+Measured against Claude Code v2.1.222, using the continuity database as the oracle rather
+than the model's own account of its tools (asked directly, it answered inconsistently — it
+reports what its prompt claims, which is exactly what is wrong here). Each run asked the
+session to call `agent_report_focus` with a unique marker, then counted matching rows:
+
+| Flags | Marker written? |
+| --- | --- |
+| `--plugin-dir` | yes |
+| `--plugin-dir --mcp-config <file>` | yes (2 runs) |
+| `--plugin-dir --mcp-config <file> --strict-mcp-config` | **no** (2 runs) |
+
+Two consequences:
+
+1. **`--mcp-config` alone is harmless**, so the Conductor and fleet-worker paths — which
+   have always passed it without strict mode — were never affected.
+2. **The failure is silent and actively misleading.** The plugin's skills, hooks and prompt
+   text still load, so the session is *told* it has `agent_list_active`, `decision_write`
+   and the rest; only the calls are impossible. An agent that believes it is coordinating
+   and is not is worse than one that knows it is alone.
+
+**Resolution.** When a session has an allowlist, the servers declared in the plugin's own
+`.mcp.json` are read, resolved (`${CLAUDE_PLUGIN_ROOT}` → the real directory;
+`${user_config.*}` dropped, since Conduit sets no plugin user config and continuity treats
+every one as optional) and merged into the generated config — see
+`agent::plugin_mcp_servers`. Reading the plugin's manifest rather than hard-coding its
+launch command keeps one source of truth. Verified: with continuity carried in the config,
+the same strict-mode probe writes its marker.
+
+This keeps the allowlist a statement about the *user's* MCP servers rather than a hidden
+opt-out from a capability the project deliberately enabled.
 
 ## Testing
 

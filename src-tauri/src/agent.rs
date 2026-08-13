@@ -73,6 +73,75 @@ pub fn session_mcp_config_json(servers: &[McpServer], fleet_block: Option<&str>)
     serde_json::json!({ "mcpServers": serde_json::Value::Object(map) }).to_string()
 }
 
+/// The MCP servers a plugin declares in its own `.mcp.json`, resolved so they can be
+/// launched from a plain `--mcp-config` file instead of by the plugin loader.
+///
+/// This exists because `--strict-mcp-config` suppresses plugin-provided MCP servers.
+/// (Verified empirically against Claude Code v2.1.222: with `--plugin-dir` alone, or with
+/// `--plugin-dir --mcp-config`, a continuity tool call reaches its database; add
+/// `--strict-mcp-config` and it never runs. The plugin's skills and hooks keep working, so
+/// the failure is silent — the session still believes it has the tools.) A session that
+/// trims its MCP list must not thereby lose the coordination tools its project enabled, so
+/// the plugin's declarations are folded into the generated config.
+///
+/// Reading the plugin's own manifest keeps ONE source of truth: if continuity changes how
+/// its server launches, this follows automatically. Two substitutions are applied:
+/// `${CLAUDE_PLUGIN_ROOT}` becomes the real directory, and any `${user_config.*}` value is
+/// dropped — Conduit never sets plugin user config, and passing the literal placeholder
+/// through as an env value would be worse than omitting it (continuity treats every one of
+/// them as optional and falls back to local mode).
+pub fn plugin_mcp_servers(plugin_dir: &str, manifest_json: &str) -> Vec<McpServer> {
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(manifest_json) else {
+        return Vec::new();
+    };
+    let Some(map) = v.get("mcpServers").and_then(|m| m.as_object()) else {
+        return Vec::new();
+    };
+    let subst = |s: &str| s.replace("${CLAUDE_PLUGIN_ROOT}", plugin_dir);
+    map.iter()
+        .map(|(name, def)| {
+            let env = def
+                .get("env")
+                .and_then(|e| e.as_object())
+                .map(|e| {
+                    e.iter()
+                        .filter_map(|(k, val)| {
+                            let raw = val.as_str()?;
+                            let resolved = subst(raw);
+                            // An unresolved placeholder is a value we cannot supply.
+                            (!resolved.contains("${")).then(|| (k.clone(), resolved))
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            McpServer {
+                name: name.clone(),
+                transport: if def.get("url").is_some() {
+                    "http".to_string()
+                } else {
+                    "stdio".to_string()
+                },
+                command: def
+                    .get("command")
+                    .and_then(|c| c.as_str())
+                    .map(&subst)
+                    .unwrap_or_default(),
+                args: def
+                    .get("args")
+                    .and_then(|a| a.as_array())
+                    .map(|a| a.iter().filter_map(|x| x.as_str()).map(&subst).collect())
+                    .unwrap_or_default(),
+                url: def
+                    .get("url")
+                    .and_then(|u| u.as_str())
+                    .map(&subst)
+                    .unwrap_or_default(),
+                env,
+            }
+        })
+        .collect()
+}
+
 /// Shell-quote a single token: return it bare if it's safe, otherwise single-quote it.
 fn sh_quote(s: &str) -> String {
     if !s.is_empty()
@@ -1478,6 +1547,69 @@ mod tests {
         let json = session_mcp_config_json(&[], None);
         let v: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert!(v["mcpServers"].as_object().unwrap().is_empty());
+    }
+
+    /// The real shape of continuity's `.mcp.json`, trimmed to what matters here.
+    const PLUGIN_MANIFEST: &str = r#"{
+      "mcpServers": {
+        "continuity": {
+          "command": "node",
+          "args": ["${CLAUDE_PLUGIN_ROOT}/mcp/launch.mjs"],
+          "env": {
+            "NODE_NO_WARNINGS": "1",
+            "CONTINUITY_API_URL": "${user_config.apiUrl}"
+          }
+        }
+      }
+    }"#;
+
+    #[test]
+    fn plugin_mcp_servers_resolves_the_plugin_root() {
+        let got = plugin_mcp_servers("/opt/continuity-plugin", PLUGIN_MANIFEST);
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].name, "continuity");
+        assert_eq!(got[0].transport, "stdio");
+        assert_eq!(got[0].command, "node");
+        assert_eq!(got[0].args, vec!["/opt/continuity-plugin/mcp/launch.mjs"]);
+    }
+
+    #[test]
+    fn plugin_mcp_servers_drops_env_we_cannot_supply() {
+        // Conduit never sets plugin user config, so `${user_config.apiUrl}` would arrive as
+        // a literal placeholder. Continuity treats it as optional and falls back to local
+        // mode, so omitting it is right; passing the placeholder through is not.
+        let got = plugin_mcp_servers("/opt/continuity-plugin", PLUGIN_MANIFEST);
+        let env: std::collections::HashMap<_, _> = got[0].env.iter().cloned().collect();
+        assert_eq!(env.get("NODE_NO_WARNINGS").map(String::as_str), Some("1"));
+        assert!(
+            !env.contains_key("CONTINUITY_API_URL"),
+            "unresolved placeholder must be dropped, not passed through: {env:?}"
+        );
+    }
+
+    #[test]
+    fn plugin_mcp_servers_is_empty_for_a_plugin_that_declares_none() {
+        assert!(plugin_mcp_servers("/opt/p", "{}").is_empty());
+        assert!(plugin_mcp_servers("/opt/p", "not json").is_empty());
+    }
+
+    #[test]
+    fn an_allowlisted_session_still_gets_the_plugin_server() {
+        // The regression this guards: `--strict-mcp-config` suppresses plugin MCP, so
+        // continuity has to ride in the generated config or a session that merely trimmed
+        // its MCP list loses its coordination tools silently.
+        let mut servers = vec![stdio_server("ctx7")];
+        servers.extend(plugin_mcp_servers(
+            "/opt/continuity-plugin",
+            PLUGIN_MANIFEST,
+        ));
+        let json = session_mcp_config_json(&servers, None);
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert!(v["mcpServers"]["ctx7"].is_object());
+        assert_eq!(
+            v["mcpServers"]["continuity"]["args"][0],
+            "/opt/continuity-plugin/mcp/launch.mjs"
+        );
     }
 
     #[test]
