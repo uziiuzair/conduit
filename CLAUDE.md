@@ -173,6 +173,25 @@ kill+respawn on dir change lives in `Terminal.tsx` and is strictly `shellOnly` �
 terminals are keep-alive and must never be respawned. Design:
 `docs/superpowers/specs/2026-07-18-unified-session-directory-design.md`.
 
+## Where the continuity panels live
+
+Two READ-ONLY right-column tabs (Decisions, Messages) mirror continuity's running memory
+for the active project. Conduit never writes that database — continuity owns every write.
+
+- Rust: `continuity_read.rs` owns the path + read-only open (board presence/handoffs);
+  `continuity_feed.rs` reuses both for the panels (decisions + messages).
+  `feed_for_project` degrades to `available: false` on a missing DB, a drifted schema, or a
+  continuity install that has never run — the tabs then do not render at all.
+- Scoping is two allowlist arms, never a prefix or wildcard: `agent_label IN (this
+  project's Conduit session ids)` — exact, because `pty.rs` sets `CONTINUITY_AGENT_ID` to
+  the session id — plus `cwd_hash IN (sha256(git toplevel)[..16])` for sessions started
+  outside Conduit in the same checkout. Do NOT canonicalize the toplevel: continuity hashes
+  git's raw output, and `/tmp` vs `/private/tmp` would break the match.
+- UI: `ContinuityPanels.tsx` (rows + detail modal), tabs in `RightColumn.tsx`, state in
+  `store.ts` (`continuityFeed`), polled at 4 s by `hooks/useContinuityFeed.ts` —
+  deliberately separate from `useBoard`'s 1.5 s poll and its `board_enabled` gate.
+- Design: `docs/superpowers/specs/2026-08-14-continuity-panels-design.md`.
+
 ## Where multi-account assignment lives
 
 Accounts are per-agent profile pointers (`Account { agents, configDir }`, `store.rs`), assigned
