@@ -14,6 +14,7 @@ mod claude_usage;
 mod clipboard;
 mod context_window;
 mod continuity;
+mod continuity_feed;
 mod continuity_read;
 mod fleet;
 mod fleet_mcp;

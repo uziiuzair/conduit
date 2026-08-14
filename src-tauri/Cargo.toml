@@ -45,4 +45,8 @@ tungstenite = "0.23"
 dashmap = "6"
 uuid = { version = "1", features = ["v4"] }
 dirs = "5"
+# Reproduces continuity's cwd_hash (sha256 of the git toplevel, first 16 hex chars) so
+# sessions started outside Conduit in the same checkout can be matched. Already in the
+# lock file via tauri-plugin-updater — this only makes it a direct dependency.
+sha2 = "0.10"
 rusqlite = { version = "0.32", features = ["bundled"] }
