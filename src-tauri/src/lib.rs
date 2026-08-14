@@ -796,6 +796,44 @@ fn list_continuity(
     Ok(continuity_read::view_for_project(&project_id, &session_ids))
 }
 
+/// Read-only continuity feed for a project: the decisions and messages recorded by the
+/// sessions that belong to it. Scoped by Conduit session id (exact) plus the git toplevel
+/// of the project and each of its worktrees (for sessions started outside Conduit).
+/// Best-effort -- see `continuity_feed::feed_for_project`.
+#[tauri::command]
+fn continuity_feed(
+    store: State<Arc<Store>>,
+    project_id: String,
+) -> Result<continuity_feed::ContinuityFeed, String> {
+    let Some(project) = store.list().into_iter().find(|p| p.id == project_id) else {
+        return Ok(continuity_feed::ContinuityFeed::default());
+    };
+    let session_ids: Vec<String> = project.sessions.iter().map(|s| s.id.clone()).collect();
+
+    // The project root plus every worktree. Each is its own git toplevel and so its own
+    // cwd_hash; a path that isn't a checkout (a pending worktree) simply drops out.
+    let mut dirs: Vec<String> = vec![project.path.clone()];
+    dirs.extend(
+        project
+            .sessions
+            .iter()
+            .filter_map(|s| s.worktree_path.clone()),
+    );
+    let mut toplevels: Vec<String> = dirs.iter().filter_map(|d| git::toplevel(d)).collect();
+    toplevels.sort();
+    toplevels.dedup();
+
+    Ok(continuity_feed::feed_for_project(
+        &session_ids,
+        &toplevels,
+        CONTINUITY_FEED_LIMIT,
+    ))
+}
+
+/// Rows per table in one `continuity_feed` read. A memory panel, not an archive browser --
+/// deep history lives in continuity itself.
+const CONTINUITY_FEED_LIMIT: usize = 100;
+
 #[tauri::command]
 fn add_session(
     project_id: String,
@@ -1752,6 +1790,7 @@ pub fn run() {
             board_start_workflow,
             board_resolve_gate,
             list_continuity,
+            continuity_feed,
             add_session,
             detect_agents,
             rename_session,
