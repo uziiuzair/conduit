@@ -1,7 +1,8 @@
 import { useEffect, useRef } from "react";
 import { Terminal as Xterm, type ILink } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
-import { CanvasAddon } from "@xterm/addon-canvas";
+import { attachRenderer, type RendererHandle } from "../terminalRenderer";
+import { REAL_ADDONS } from "../terminalRendererAddons";
 import { invoke, Channel } from "@tauri-apps/api/core";
 import { currentTerminalTheme, registerTerminal } from "../themes";
 import { useStore, type SessionRole } from "../store";
@@ -89,6 +90,7 @@ export function TerminalView({
   const spawnGenRef = useRef(0);
 
   const restoreOnOpen = useStore((s) => s.restoreSessionsOnOpen);
+  const rendererPref = useStore((s) => s.terminalRenderer);
   const selectedProjectId = useStore((s) => s.selectedProjectId);
 
   // Spawn the PTY exactly once (guarded by spawnedRef). Shared by the reveal path and the
@@ -136,12 +138,9 @@ export function TerminalView({
     const fit = new FitAddon();
     term.loadAddon(fit);
     if (innerRef.current) term.open(innerRef.current);
-    // Canvas renderer: solid throughput without burning a WebGL context per tab.
-    try {
-      term.loadAddon(new CanvasAddon());
-    } catch {
-      /* fall back to the default DOM renderer */
-    }
+    // The renderer addon is attached by its own effect below, not here: it has to be able
+    // to swap when the preference changes, and this effect must stay one-shot because
+    // re-running it would recreate the xterm and kill the PTY under it.
     const writeSeq = (data: string) =>
       void invoke("pty_write", { sessionId, data }).catch(() => {});
 
@@ -369,6 +368,21 @@ export function TerminalView({
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // Renderer addon, swapped in place when Settings → Terminal changes. Swapping the addon
+  // is the whole point of keeping this separate from the effect above: the xterm instance
+  // and its PTY survive untouched, so a renderer change costs a repaint and nothing else.
+  // Declared after the create effect, so `termRef.current` is already populated on mount.
+  const rendererRef = useRef<RendererHandle | null>(null);
+  useEffect(() => {
+    const term = termRef.current;
+    if (!term) return;
+    rendererRef.current = attachRenderer(term, rendererPref, REAL_ADDONS);
+    return () => {
+      rendererRef.current?.dispose();
+      rendererRef.current = null;
+    };
+  }, [rendererPref]);
 
   // Track latest `visible` for the ResizeObserver closure.
   const visibleRef = useRef(visible);
