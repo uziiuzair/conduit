@@ -247,6 +247,10 @@ mod tests {
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
+    /// Continuity's real DDL for `agent_sessions` + `decisions` + `messages`, copied
+    /// verbatim from `continuity-mcp/packages/shared/src/schema.sqlite.ts` (SQLITE_DDL,
+    /// lines ~187-199, ~229-241 and ~296-311) so this fixture's column names match reality
+    /// exactly. The `CREATE INDEX` statements are omitted -- they change no read result.
     const FIXTURE_DDL: &str = "
 CREATE TABLE IF NOT EXISTS agent_sessions (
   id TEXT PRIMARY KEY,
@@ -418,6 +422,25 @@ CREATE TABLE IF NOT EXISTS messages (
             !ids.contains(&"sess-x".to_string()),
             "leaked another checkout: {ids:?}"
         );
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// Each arm has to hold on its own: git-toplevel resolution can fail (leaving no
+    /// hashes), and a project with no sessions yet supplies no labels. `placeholders(0)`
+    /// renders the empty arm as `IN (NULL)` -- a literal that consumes no parameter slot,
+    /// so the other arm's bindings still line up 1:1.
+    #[test]
+    fn one_empty_scope_arm_still_resolves_the_other() {
+        let path = temp_db_path("one-arm");
+        build_fixture(&path);
+        let conn = rusqlite::Connection::open(&path).expect("open");
+
+        let by_label = resolve_session_ids(&conn, &["conduit-session-1".to_string()], &[]);
+        assert_eq!(by_label, vec!["sess-a".to_string()]);
+
+        let by_hash = resolve_session_ids(&conn, &[], &["/repo/root".to_string()]);
+        assert_eq!(by_hash, vec!["sess-b".to_string()]);
 
         let _ = std::fs::remove_file(&path);
     }
