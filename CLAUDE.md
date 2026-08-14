@@ -187,6 +187,12 @@ for the active project. Conduit never writes that database — continuity owns e
   the session id — plus `cwd_hash IN (sha256(git toplevel)[..16])` for sessions started
   outside Conduit in the same checkout. Do NOT canonicalize the toplevel: continuity hashes
   git's raw output, and `/tmp` vs `/private/tmp` would break the match.
+- **Continuity's coordination surface is global; only authorship is project-bound.**
+  `message_send` fans out to EVERY live session and `decision_write` fans out as a message,
+  so another repo's traffic legitimately lands in this project's inbox (scoped by recipient)
+  while its decisions do not (scoped by author). That asymmetry is intended: `FeedMessage.foreign`
+  is set in `read_messages` when the SENDER is outside the scope set, and the panel dims and
+  badges those rows. The projection decides it — the UI never re-derives scope.
 - UI: `ContinuityPanels.tsx` (rows + detail modal), tabs in `RightColumn.tsx`, state in
   `store.ts` (`continuityFeed`), polled at 4 s by `hooks/useContinuityFeed.ts` —
   deliberately separate from `useBoard`'s 1.5 s poll and its `board_enabled` gate.

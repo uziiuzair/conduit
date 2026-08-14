@@ -10,7 +10,9 @@ All notable changes to Conduit are documented here. This project uses
   have committed to, and **Messages** lists what they have said to each other. Each row is
   one line; clicking it opens the full recorded prose. Both are read-only and scoped to the
   current project — including sessions you started in a plain terminal inside the same
-  checkout. Without continuity, the tabs do not appear.
+  checkout. Messages that reached this project as a broadcast from another one are dimmed
+  and badged `ext`, so another repo's traffic never reads as your own. Without continuity,
+  the tabs do not appear.
 
 ## 0.20.0 — 2026-08-10
 
