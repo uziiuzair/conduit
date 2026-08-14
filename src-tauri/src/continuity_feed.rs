@@ -121,6 +121,109 @@ pub fn read_decisions(
     rows.collect()
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct FeedMessage {
+    pub id: String,
+    pub kind: String,
+    pub body: String,
+    pub requires_response: bool,
+    pub related_key: Option<String>,
+    pub status: String,
+    pub response: Option<String>,
+    pub created_at: String,
+    pub expires_at: String,
+    pub from_label: Option<String>,
+    pub to_label: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct ContinuityFeed {
+    pub available: bool,
+    pub decisions: Vec<FeedDecision>,
+    pub messages: Vec<FeedMessage>,
+}
+
+pub fn read_messages(
+    conn: &rusqlite::Connection,
+    session_ids: &[String],
+    limit: usize,
+) -> rusqlite::Result<Vec<FeedMessage>> {
+    if session_ids.is_empty() {
+        return Ok(vec![]);
+    }
+    let ph = placeholders(session_ids.len());
+    let sql = format!(
+        "SELECT m.id, m.kind, m.body, m.requires_response, m.related_key, m.status, m.response, \
+         m.created_at, m.expires_at, f.agent_label, t.agent_label \
+         FROM messages m \
+         LEFT JOIN agent_sessions f ON f.id = m.from_agent_session_id \
+         LEFT JOIN agent_sessions t ON t.id = m.to_agent_session_id \
+         WHERE m.from_agent_session_id IN ({ph}) OR m.to_agent_session_id IN ({ph}) \
+         ORDER BY m.created_at DESC LIMIT {limit}"
+    );
+    // The id list is bound TWICE -- once per arm of the OR -- so the parameter vector is
+    // the ids repeated, in order.
+    let params: Vec<&String> = session_ids.iter().chain(session_ids.iter()).collect();
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map(rusqlite::params_from_iter(params), |r| {
+        Ok(FeedMessage {
+            id: r.get(0)?,
+            kind: r.get(1)?,
+            body: r.get(2)?,
+            requires_response: r.get::<_, i64>(3)? != 0,
+            related_key: r.get(4)?,
+            status: r.get(5)?,
+            response: r.get(6)?,
+            created_at: r.get(7)?,
+            expires_at: r.get(8)?,
+            from_label: r.get(9)?,
+            to_label: r.get(10)?,
+        })
+    })?;
+    rows.collect()
+}
+
+/// The whole read, in one call. Never errors: a missing database, a drifted schema, or a
+/// continuity install that has never run all produce `available: false` and empty lists,
+/// which the UI renders as "no tabs at all".
+pub fn feed_for_project(
+    session_ids: &[String],
+    toplevels: &[String],
+    limit: usize,
+) -> ContinuityFeed {
+    feed_from_db(
+        &crate::continuity_read::db_path(),
+        session_ids,
+        toplevels,
+        limit,
+    )
+}
+
+/// `feed_for_project` against an explicit database path. Split out so the tests can point
+/// at a fixture without mutating `CONTINUITY_DB_PATH`, which is process-global and shared
+/// with `continuity_read`'s tests.
+fn feed_from_db(
+    path: &std::path::Path,
+    session_ids: &[String],
+    toplevels: &[String],
+    limit: usize,
+) -> ContinuityFeed {
+    let Some(conn) = crate::continuity_read::open_ro(path) else {
+        return ContinuityFeed::default();
+    };
+    if !probe(&conn) {
+        return ContinuityFeed::default();
+    }
+    let ids = resolve_session_ids(&conn, session_ids, toplevels);
+    ContinuityFeed {
+        available: true,
+        decisions: read_decisions(&conn, &ids, limit).unwrap_or_default(),
+        messages: read_messages(&conn, &ids, limit).unwrap_or_default(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -258,6 +361,37 @@ CREATE TABLE IF NOT EXISTS messages (
             )
             .expect("insert decisions");
         }
+
+        for (id, from, to, kind, body, requires, status, created) in [
+            (
+                "m1",
+                "sess-a",
+                "sess-b",
+                "collision",
+                "I'm in store.rs too",
+                1,
+                "pending",
+                "2026-08-14T04:00:00Z",
+            ),
+            (
+                "m2",
+                "sess-x",
+                "sess-x",
+                "message",
+                "Unrelated chatter",
+                0,
+                "pending",
+                "2026-08-14T05:00:00Z",
+            ),
+        ] {
+            conn.execute(
+                "INSERT INTO messages (id, from_agent_session_id, to_agent_session_id, kind, body, \
+                 requires_response, status, created_at, expires_at) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, '2026-08-14T06:00:00Z')",
+                rusqlite::params![id, from, to, kind, body, requires, status, created],
+            )
+            .expect("insert messages");
+        }
     }
 
     #[test]
@@ -318,6 +452,102 @@ CREATE TABLE IF NOT EXISTS messages (
 
         assert!(rows.is_empty(), "unscoped read leaked rows: {rows:?}");
 
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn messages_are_scoped_to_either_endpoint() {
+        let path = temp_db_path("messages");
+        build_fixture(&path);
+        let conn = rusqlite::Connection::open(&path).expect("open");
+
+        let ids = resolve_session_ids(
+            &conn,
+            &["conduit-session-1".to_string()],
+            &["/repo/root".to_string()],
+        );
+        let rows = read_messages(&conn, &ids, 100).expect("read messages");
+
+        assert_eq!(
+            rows.len(),
+            1,
+            "expected only the in-project message: {rows:?}"
+        );
+        assert_eq!(rows[0].id, "m1");
+        assert_eq!(rows[0].from_label.as_deref(), Some("conduit-session-1"));
+        assert_eq!(rows[0].to_label.as_deref(), Some("root-9f2c1a"));
+        assert!(rows[0].requires_response);
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn feed_reports_available_with_scoped_rows() {
+        let path = temp_db_path("feed-ok");
+        build_fixture(&path);
+
+        let feed = feed_from_db(
+            &path,
+            &["conduit-session-1".to_string()],
+            &["/repo/root".to_string()],
+            100,
+        );
+
+        assert!(feed.available);
+        assert_eq!(feed.decisions.len(), 2);
+        assert_eq!(feed.messages.len(), 1);
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn missing_db_is_unavailable_and_does_not_panic() {
+        let path = temp_db_path("feed-missing");
+        let _ = std::fs::remove_file(&path); // guarantee it doesn't exist
+
+        let feed = feed_from_db(&path, &["whatever".to_string()], &[], 100);
+
+        assert!(!feed.available);
+        assert!(feed.decisions.is_empty());
+        assert!(feed.messages.is_empty());
+    }
+
+    #[test]
+    fn db_with_schema_but_no_sessions_is_unavailable() {
+        let path = temp_db_path("feed-empty");
+        let conn = rusqlite::Connection::open(&path).expect("open");
+        conn.execute_batch(FIXTURE_DDL)
+            .expect("schema only, no rows");
+        drop(conn);
+
+        let feed = feed_from_db(&path, &["whatever".to_string()], &[], 100);
+
+        assert!(!feed.available, "an unused continuity db must stay hidden");
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// The one place `feed_for_project` differs from `feed_from_db` is where it gets the
+    /// path, so that wiring is what this asserts: point CONTINUITY_DB_PATH at a database
+    /// with no sessions and the public entry point must report unavailable.
+    ///
+    /// It is the ONLY test here that touches the environment. `std::env::set_var` is
+    /// process-global and `continuity_read`'s tests mutate the same variable, so every
+    /// other test threads the path explicitly rather than racing over it.
+    #[test]
+    fn feed_for_project_reads_the_env_override() {
+        let path = temp_db_path("feed-env");
+        let conn = rusqlite::Connection::open(&path).expect("open");
+        conn.execute_batch(FIXTURE_DDL)
+            .expect("schema only, no rows");
+        drop(conn);
+        std::env::set_var("CONTINUITY_DB_PATH", &path);
+
+        let feed = feed_for_project(&["whatever".to_string()], &[], 100);
+
+        assert!(!feed.available);
+
+        std::env::remove_var("CONTINUITY_DB_PATH");
         let _ = std::fs::remove_file(&path);
     }
 }
