@@ -4442,3 +4442,41 @@ button {
 .toast.error {
   border-color: var(--red);
 }
+
+/* Continuity panels — one-line rows; the prose lives in the detail modal. */
+.continuity-list { display: flex; flex-direction: column; }
+.continuity-row {
+  display: flex; align-items: center; gap: 8px; width: 100%;
+  padding: 5px 10px; background: none; border: none; border-bottom: 1px solid var(--border);
+  font-family: var(--ui-font); font-size: 12px; color: var(--text-mid); text-align: left; cursor: pointer;
+}
+.continuity-row:hover { background: var(--selection-bg); }
+.continuity-row.muted { opacity: 0.55; }
+.continuity-dot { width: 6px; height: 6px; border-radius: 50%; flex: none; background: var(--accent); }
+.continuity-dot.superseded, .continuity-dot.rejected { background: var(--border); }
+.continuity-badge {
+  flex: none; padding: 1px 5px; border-radius: 4px; font-size: 10px; text-transform: uppercase;
+  background: var(--selection-bg); color: var(--text-dim);
+}
+.continuity-badge.collision { color: var(--accent); }
+/* Reached this project as a broadcast from elsewhere: in scope, but not our conversation. */
+.continuity-row.foreign .continuity-key { color: var(--text-dim); }
+.continuity-ext {
+  margin-right: 5px; padding: 0 4px; border: 1px solid var(--border); border-radius: 3px;
+  font-family: var(--ui-font); font-size: 9px; text-transform: uppercase; color: var(--text-dim);
+}
+.continuity-key {
+  flex: none; max-width: 30%; font-family: var(--mono-font); font-size: 11px;
+  color: var(--text-bright); white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.continuity-body { flex: 1; color: var(--text-dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.continuity-meta { flex: none; color: var(--text-dim); font-size: 11px; white-space: nowrap; }
+
+.modal.continuity-detail { width: min(640px, 90vw); }
+.continuity-prose {
+  margin: 0; padding: 10px 12px; border: 1px solid var(--border); border-radius: 8px;
+  background: var(--panel-bg); font-family: var(--mono-font); font-size: 12px;
+  color: var(--text-mid); white-space: pre-wrap; word-break: break-word; max-height: 42vh; overflow-y: auto;
+}
+.continuity-supersede { margin-top: 10px; color: var(--text-dim); font-size: 12px; }
+.continuity-response-head { margin-top: 14px !important; font-size: 13px !important; }

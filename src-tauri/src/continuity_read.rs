@@ -20,7 +20,7 @@ pub fn db_path() -> PathBuf {
 }
 
 /// Open the continuity DB read-only. None if it doesn't exist yet (no sessions have run).
-fn open_ro(path: &std::path::Path) -> Option<rusqlite::Connection> {
+pub(crate) fn open_ro(path: &std::path::Path) -> Option<rusqlite::Connection> {
     if !path.exists() {
         return None;
     }

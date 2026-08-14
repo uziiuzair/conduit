@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { ask } from "@tauri-apps/plugin-dialog";
 import {
@@ -16,6 +16,14 @@ import { GitGraph, type GraphCommit } from "./GitGraph";
 import { FileTree } from "./FileTree";
 import { SubagentsView } from "./SubagentsView";
 import { TerminalView } from "./Terminal";
+import {
+  ContinuityDetail,
+  DecisionsPanel,
+  MessagesPanel,
+  type ContinuityRow,
+} from "./ContinuityPanels";
+import { supersededMap } from "../continuityFeed";
+import { useContinuityFeed } from "../hooks/useContinuityFeed";
 import {
   RefreshIcon,
   CircleIcon,
@@ -57,6 +65,26 @@ export function RightColumn({
   useEffect(() => {
     prevBottomTab.current = bottomTab;
   }, [bottomTab]);
+
+  // Continuity's running memory. Availability is decided by the Rust probe: the tabs do not
+  // exist until continuity's database is reachable AND has at least one session in it. The
+  // poll runs whether or not a feed tab is open, because that first read is what decides
+  // whether the tabs can be opened at all.
+  useContinuityFeed(projectId, true);
+  const feedAvailable =
+    useStore((s) => (projectId ? s.continuityFeed[projectId]?.available : false)) ?? false;
+  const feedDecisions =
+    useStore((s) => (projectId ? s.continuityFeed[projectId]?.decisions : undefined)) ?? [];
+  const superseded = useMemo(() => supersededMap(feedDecisions), [feedDecisions]);
+  const [detail, setDetail] = useState<ContinuityRow | null>(null);
+
+  // A feed tab can vanish (continuity stops being reachable) while it is selected — fall
+  // back to Terminal rather than rendering a headless panel.
+  useEffect(() => {
+    if (!feedAvailable && (bottomTab === "decisions" || bottomTab === "messages")) {
+      setBottomTab("terminal");
+    }
+  }, [feedAvailable, bottomTab, setBottomTab]);
 
   const layout = useStore((s) => (projectId ? s.layouts[projectId] : undefined));
   const sessionDirs = useStore((s) => s.sessionDirs);
@@ -261,6 +289,20 @@ export function RightColumn({
         <div className="panel-tabs">
           <PanelTab label="Terminal" active={bottomTab === "terminal"} onClick={() => setBottomTab("terminal")} />
           <PanelTab label="Git" active={bottomTab === "git"} onClick={() => setBottomTab("git")} />
+          {feedAvailable && (
+            <>
+              <PanelTab
+                label="Decisions"
+                active={bottomTab === "decisions"}
+                onClick={() => setBottomTab("decisions")}
+              />
+              <PanelTab
+                label="Messages"
+                active={bottomTab === "messages"}
+                onClick={() => setBottomTab("messages")}
+              />
+            </>
+          )}
         </div>
         <div className="panel-content bottom-content">
           {allSessions.map(({ session, project }) => (
@@ -280,6 +322,18 @@ export function RightColumn({
               <GitGraph commits={graph} />
             </div>
           )}
+          {bottomTab === "decisions" && projectId && (
+            <DecisionsPanel
+              projectId={projectId}
+              onOpen={(d) => setDetail({ kind: "decision", value: d })}
+            />
+          )}
+          {bottomTab === "messages" && projectId && (
+            <MessagesPanel
+              projectId={projectId}
+              onOpen={(m) => setDetail({ kind: "message", value: m })}
+            />
+          )}
           {bottomTab === "terminal" && !selected && (
             <p className="placeholder" style={{ padding: 12 }}>
               No session selected.
@@ -287,6 +341,14 @@ export function RightColumn({
           )}
         </div>
       </div>
+
+      {detail && (
+        <ContinuityDetail
+          row={detail}
+          supersededBy={detail.kind === "decision" ? superseded[detail.value.id] : undefined}
+          onClose={() => setDetail(null)}
+        />
+      )}
     </div>
   );
 }

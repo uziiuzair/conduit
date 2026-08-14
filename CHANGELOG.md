@@ -3,6 +3,17 @@
 All notable changes to Conduit are documented here. This project uses
 [semantic versioning](https://semver.org/).
 
+## 0.21.0 — 2026-08-14
+
+- **Added — Continuity panels in the right column.** When continuity is installed and has
+  run, two new tabs sit beside Terminal and Git: **Decisions** lists the calls your sessions
+  have committed to, and **Messages** lists what they have said to each other. Each row is
+  one line; clicking it opens the full recorded prose. Both are read-only and scoped to the
+  current project — including sessions you started in a plain terminal inside the same
+  checkout. Messages that reached this project as a broadcast from another one are dimmed
+  and badged `ext`, so another repo's traffic never reads as your own. Without continuity,
+  the tabs do not appear.
+
 ## 0.20.0 — 2026-08-10
 
 - **Added — Command palette (⌘K).** Reach any action by typing its name: switch to a session

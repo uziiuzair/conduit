@@ -23,6 +23,7 @@ import {
 } from "./layout";
 import { cleanupEdits } from "./trim";
 import type { CanvasState } from "./canvas";
+import type { ContinuityFeed } from "./continuityFeed";
 import type * as Monaco from "monaco-editor";
 import type { SettingsTab } from "./components/Settings";
 import type { PluginDescriptor, PluginPermission } from "./plugins/types";
@@ -246,6 +247,11 @@ export interface CardHandoff {
 }
 export interface ContinuityView { presence: Presence[]; handoffs: CardHandoff[] }
 
+// The read-only running-memory feed (decisions + messages). Types live beside their pure
+// formatting helpers in continuityFeed.ts; re-exported here so consumers can keep pulling
+// every store type from one place.
+export type { ContinuityFeed, FeedDecision, FeedMessage } from "./continuityFeed";
+
 /** Center pane mode, per project: the terminal workspace, the task board, or the
  *  spatial canvas. Every mode is an OVERLAY over the still-mounted terminals — none of
  *  them may unmount or reparent a TerminalView. */
@@ -306,7 +312,7 @@ export interface ContextMenuState {
 }
 
 export type TopTab = "files" | "changes" | "todos" | "subagents";
-export type BottomTab = "terminal" | "git";
+export type BottomTab = "terminal" | "git" | "decisions" | "messages";
 
 // ---- Claude ambient (status + usage) — mirror Rust serde camelCase ----
 export interface StatusComponent { name: string; status: string; }
@@ -1183,6 +1189,11 @@ interface AppState {
   boards: Record<string, BoardSnapshot>;
   /** Latest continuity view (presence + handoffs) per project, refreshed by useBoard. */
   continuity: Record<string, ContinuityView>;
+  /** Latest continuity feed (decisions + messages) per project, refreshed by
+   *  useContinuityFeed. Separate from `continuity` above: that one rides the board's
+   *  1.5 s poll and its board_enabled gate; this one is gated only on continuity's
+   *  database being reachable. */
+  continuityFeed: Record<string, ContinuityFeed>;
   setCenterMode: (projectId: string, mode: CenterMode) => void;
   toggleCenterMode: (projectId: string) => void;
 
@@ -1195,6 +1206,7 @@ interface AppState {
   setCanvas: (projectId: string, next: CanvasState) => void;
   setBoard: (projectId: string, snapshot: BoardSnapshot) => void;
   setContinuity: (projectId: string, view: ContinuityView) => void;
+  setContinuityFeed: (projectId: string, feed: ContinuityFeed) => void;
 }
 
 export const useStore = create<AppState>((set, get) => {
@@ -2697,6 +2709,7 @@ export const useStore = create<AppState>((set, get) => {
     canvases: readCanvases(),
     boards: {},
     continuity: {},
+    continuityFeed: {},
     setCenterMode: (projectId, mode) =>
       set((s) => ({ centerMode: { ...s.centerMode, [projectId]: mode } })),
 
@@ -2715,6 +2728,8 @@ export const useStore = create<AppState>((set, get) => {
       set((s) => ({ boards: { ...s.boards, [projectId]: snapshot } })),
     setContinuity: (projectId, view) =>
       set((s) => ({ continuity: { ...s.continuity, [projectId]: view } })),
+    setContinuityFeed: (projectId, feed) =>
+      set((s) => ({ continuityFeed: { ...s.continuityFeed, [projectId]: feed } })),
   };
 });
 

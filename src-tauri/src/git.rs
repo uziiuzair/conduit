@@ -66,6 +66,18 @@ fn run_checked(args: &[&str], dir: &str) -> Result<String, String> {
     }
 }
 
+/// The git toplevel of `dir`, trimmed of whitespace and nothing else.
+///
+/// Deliberately NOT canonicalized: continuity hashes exactly this string to build its
+/// `cwd_hash`, and canonicalizing would break the match on macOS, where /tmp is a symlink
+/// to /private/tmp. See `continuity_feed::cwd_hash_of`.
+pub fn toplevel(dir: &str) -> Option<String> {
+    run_checked(&["rev-parse", "--show-toplevel"], dir)
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
 /// Absolute path -> repo-relative with forward slashes (what `git show HEAD:<p>`
 /// wants). Canonicalizes both sides so macOS /tmp-symlinks and Windows verbatim
 /// prefixes can't break the strip.
@@ -305,6 +317,14 @@ pub fn graph(dir: &str, limit: usize) -> Vec<GraphCommit> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn toplevel_of_a_non_repo_is_none() {
+        // A directory that is definitely not a git checkout. `toplevel` must degrade to
+        // None rather than propagating git's error -- the caller treats "no repo" as
+        // "nothing to scope by", not as a failure.
+        assert!(toplevel("/").is_none());
+    }
 
     fn h(kind: &str, start: u32, count: u32) -> Hunk {
         Hunk {
