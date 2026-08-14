@@ -135,6 +135,12 @@ pub struct FeedMessage {
     pub expires_at: String,
     pub from_label: Option<String>,
     pub to_label: Option<String>,
+    /// The sender is NOT one of this project's sessions -- i.e. this row reached us as a
+    /// broadcast from somewhere else. Continuity's `message_send` fans out to every live
+    /// session and `decision_write` fans out as a message, so another repo's traffic
+    /// legitimately lands in this project's inbox. It is in scope, but it is not local,
+    /// and the panel says so rather than letting it read as our own conversation.
+    pub foreign: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]
@@ -156,7 +162,7 @@ pub fn read_messages(
     let ph = placeholders(session_ids.len());
     let sql = format!(
         "SELECT m.id, m.kind, m.body, m.requires_response, m.related_key, m.status, m.response, \
-         m.created_at, m.expires_at, f.agent_label, t.agent_label \
+         m.created_at, m.expires_at, f.agent_label, t.agent_label, m.from_agent_session_id \
          FROM messages m \
          LEFT JOIN agent_sessions f ON f.id = m.from_agent_session_id \
          LEFT JOIN agent_sessions t ON t.id = m.to_agent_session_id \
@@ -180,6 +186,7 @@ pub fn read_messages(
             expires_at: r.get(8)?,
             from_label: r.get(9)?,
             to_label: r.get(10)?,
+            foreign: !session_ids.contains(&r.get::<_, String>(11)?),
         })
     })?;
     rows.collect()
@@ -387,6 +394,18 @@ CREATE TABLE IF NOT EXISTS messages (
                 "pending",
                 "2026-08-14T05:00:00Z",
             ),
+            // A broadcast from another checkout that landed in this project's inbox --
+            // in scope (the recipient is ours) but not local traffic.
+            (
+                "m3",
+                "sess-x",
+                "sess-a",
+                "decision",
+                "Decision [other.thing]: not ours",
+                0,
+                "pending",
+                "2026-08-14T03:30:00Z",
+            ),
         ] {
             conn.execute(
                 "INSERT INTO messages (id, from_agent_session_id, to_agent_session_id, kind, body, \
@@ -491,15 +510,40 @@ CREATE TABLE IF NOT EXISTS messages (
         );
         let rows = read_messages(&conn, &ids, 100).expect("read messages");
 
-        assert_eq!(
-            rows.len(),
-            1,
-            "expected only the in-project message: {rows:?}"
-        );
-        assert_eq!(rows[0].id, "m1");
+        // m1 (ours -> ours) and m3 (theirs -> ours) are in scope; m2 (theirs -> theirs)
+        // is not. Newest first puts m1 (04:00) ahead of m3 (03:30).
+        let seen: Vec<&str> = rows.iter().map(|m| m.id.as_str()).collect();
+        assert_eq!(seen, vec!["m1", "m3"]);
         assert_eq!(rows[0].from_label.as_deref(), Some("conduit-session-1"));
         assert_eq!(rows[0].to_label.as_deref(), Some("root-9f2c1a"));
         assert!(rows[0].requires_response);
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// A broadcast from outside the project is in scope but not local. The projection --
+    /// the only layer that knows the scope set -- is what decides that, not the UI.
+    #[test]
+    fn a_broadcast_from_another_checkout_is_marked_foreign() {
+        let path = temp_db_path("foreign");
+        build_fixture(&path);
+        let conn = rusqlite::Connection::open(&path).expect("open");
+
+        let ids = resolve_session_ids(
+            &conn,
+            &["conduit-session-1".to_string()],
+            &["/repo/root".to_string()],
+        );
+        let rows = read_messages(&conn, &ids, 100).expect("read messages");
+
+        let ours = rows.iter().find(|m| m.id == "m1").expect("m1 in scope");
+        let theirs = rows.iter().find(|m| m.id == "m3").expect("m3 in scope");
+
+        assert!(!ours.foreign, "a message we sent must not read as foreign");
+        assert!(
+            theirs.foreign,
+            "a broadcast from another checkout must be marked foreign"
+        );
 
         let _ = std::fs::remove_file(&path);
     }
@@ -518,7 +562,8 @@ CREATE TABLE IF NOT EXISTS messages (
 
         assert!(feed.available);
         assert_eq!(feed.decisions.len(), 2);
-        assert_eq!(feed.messages.len(), 1);
+        // m1 (ours -> ours) and m3 (a broadcast into our inbox); m2 is out of scope.
+        assert_eq!(feed.messages.len(), 2);
 
         let _ = std::fs::remove_file(&path);
     }

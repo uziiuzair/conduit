@@ -4459,6 +4459,12 @@ button {
   background: var(--selection-bg); color: var(--text-dim);
 }
 .continuity-badge.collision { color: var(--accent); }
+/* Reached this project as a broadcast from elsewhere: in scope, but not our conversation. */
+.continuity-row.foreign .continuity-key { color: var(--text-dim); }
+.continuity-ext {
+  margin-right: 5px; padding: 0 4px; border: 1px solid var(--border); border-radius: 3px;
+  font-family: var(--ui-font); font-size: 9px; text-transform: uppercase; color: var(--text-dim);
+}
 .continuity-key {
   flex: none; max-width: 30%; font-family: var(--mono-font); font-size: 11px;
   color: var(--text-bright); white-space: nowrap; overflow: hidden; text-overflow: ellipsis;

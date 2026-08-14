@@ -61,12 +61,19 @@ export function MessagesPanel({
         return (
           <button
             key={m.id}
-            className={`continuity-row ${m.status === "dismissed" ? "muted" : ""}`}
+            className={`continuity-row ${m.status === "dismissed" ? "muted" : ""} ${
+              m.foreign ? "foreign" : ""
+            }`}
             onClick={() => onOpen(m)}
-            title={`${m.fromLabel ?? "?"} → ${m.toLabel ?? "?"}`}
+            title={
+              m.foreign
+                ? `Broadcast from ${m.fromLabel ?? "another project"} — sent to this project, not from it`
+                : `${m.fromLabel ?? "?"} → ${m.toLabel ?? "?"}`
+            }
           >
             <span className={`continuity-badge ${m.kind}`}>{m.kind}</span>
             <span className="continuity-key">
+              {m.foreign && <span className="continuity-ext">ext</span>}
               {m.fromLabel ?? "?"} → {m.toLabel ?? "?"}
             </span>
             <span className="continuity-body">{truncateLine(m.body)}</span>
@@ -119,6 +126,7 @@ export function ContinuityDetail({
               {row.value.fromLabel ?? "?"} → {row.value.toLabel ?? "?"}
             </h2>
             <p className="settings-intro">
+              {row.value.foreign ? "broadcast from another project · " : ""}
               {row.value.kind} · {row.value.status}
               {row.value.requiresResponse ? " · response required" : ""} · {row.value.createdAt}
             </p>

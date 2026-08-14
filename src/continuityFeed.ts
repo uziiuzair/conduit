@@ -26,6 +26,10 @@ export interface FeedMessage {
   expiresAt: string;
   fromLabel: string | null;
   toLabel: string | null;
+  /** Sent by a session outside this project — continuity broadcasts reach every live
+   *  session, so another repo's traffic lands in this project's inbox. In scope, but not
+   *  ours; the row is dimmed and badged so it doesn't read as local conversation. */
+  foreign: boolean;
 }
 
 /** Mirrors Rust `continuity_feed::ContinuityFeed`. */
