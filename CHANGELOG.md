@@ -3,6 +3,19 @@
 All notable changes to Conduit are documented here. This project uses
 [semantic versioning](https://semver.org/).
 
+## 0.22.0 — 2026-08-15
+
+- **Changed — Terminals draw on the GPU by default.** Panes now render through WebGL, which
+  draws a whole screen in one pass instead of stamping glyphs one at a time on the CPU. Heavy
+  output and fast scrolling stay smoother, and typing echoes with less delay.
+- **Added — Settings → Terminal.** A new section with a **Renderer** choice: WebGL or Canvas.
+  WebGL needs one GPU context per open pane and the system limits how many exist at once, so
+  Canvas is there for anyone running a large fleet of sessions. Switching repaints every open
+  pane immediately — sessions, scrollback, and running agents are untouched.
+- **Fixed — A pane that loses its GPU context keeps drawing.** Past the system's context
+  limit, an affected pane falls back to Canvas on its own instead of going blank, and your
+  Renderer preference is left as you set it.
+
 ## 0.21.0 — 2026-08-14
 
 - **Added — Continuity panels in the right column.** When continuity is installed and has

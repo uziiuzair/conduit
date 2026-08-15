@@ -10,6 +10,7 @@ import {
   readStoredPref,
   writeStoredPref,
 } from "./themes";
+import type { TerminalRenderer } from "./terminalRenderer";
 import { AGENTS, type AgentId, type AgentInfo, DEFAULT_AGENT, type McpServer } from "./agents";
 import { check, type Update } from "@tauri-apps/plugin-updater";
 import { relaunch } from "@tauri-apps/plugin-process";
@@ -498,6 +499,28 @@ function writeRestoreSessionsOnOpen(v: boolean): void {
   }
 }
 
+// Terminal renderer: which xterm rasterizer new panes ask for, and which live panes swap to
+// when it changes. Default WebGL (VS Code's default) — one GPU draw per viewport instead of
+// per-glyph CPU blits. Canvas stays selectable because WebGL costs one live GPU context per
+// pane and WebKit caps how many exist at once; a fleet of panes past that cap starts losing
+// contexts. This records INTENT only: a pane that can't get WebGL falls back on its own and
+// the preference is left alone. Same persisted-pref pattern as the toggles above.
+const TERMINAL_RENDERER_KEY = "conduit.terminalRenderer";
+function readTerminalRenderer(): TerminalRenderer {
+  try {
+    return localStorage.getItem(TERMINAL_RENDERER_KEY) === "canvas" ? "canvas" : "webgl";
+  } catch {
+    return "webgl";
+  }
+}
+function writeTerminalRenderer(v: TerminalRenderer): void {
+  try {
+    localStorage.setItem(TERMINAL_RENDERER_KEY, v);
+  } catch {
+    /* quota — non-fatal */
+  }
+}
+
 // Canvas view: card positions / pan / zoom per project. Same persisted-pref pattern as the
 // toggles above. A corrupt or hand-edited value falls back to "no saved canvas", which
 // `reconcile` then repopulates by auto-placing every session — a canvas that lays itself
@@ -891,6 +914,10 @@ interface AppState {
    *  resumes all its sessions instead of waiting for a click. */
   restoreSessionsOnOpen: boolean;
   setRestoreSessionsOnOpen: (v: boolean) => void;
+  /** Persisted. Which xterm rasterizer panes ask for; live panes swap on change. Intent
+   *  only — a pane that can't hold a WebGL context degrades without rewriting this. */
+  terminalRenderer: TerminalRenderer;
+  setTerminalRenderer: (v: TerminalRenderer) => void;
   /** Persisted. When true (default), sessions run inside tmux and survive quitting the
    *  app — the next launch attaches to the live agent rather than resuming a transcript.
    *  Ignored on a machine without tmux; see `tmuxAvailable`. */
@@ -1268,6 +1295,7 @@ export const useStore = create<AppState>((set, get) => {
     usagePrefs: readUsagePrefs(),
     sessionDirs: {},
     restoreSessionsOnOpen: readRestoreSessionsOnOpen(),
+    terminalRenderer: readTerminalRenderer(),
     persistSessions: readPersistSessions(),
     tmuxAvailable: null,
     tmuxInstall: null,
@@ -2379,6 +2407,11 @@ export const useStore = create<AppState>((set, get) => {
     setRestoreSessionsOnOpen: (v) => {
       writeRestoreSessionsOnOpen(v);
       set({ restoreSessionsOnOpen: v });
+    },
+
+    setTerminalRenderer: (v) => {
+      writeTerminalRenderer(v);
+      set({ terminalRenderer: v });
     },
 
     setPersistSessions: (v) => {

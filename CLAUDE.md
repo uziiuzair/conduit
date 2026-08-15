@@ -159,6 +159,21 @@ Service status + subscription/local usage (distinct from per-session hook status
   Usage display). Polled by `src/hooks/useClaudeAmbient.ts`; state in `src/store.ts`
   (`claudeUsage` array + `agyUsageByAccount` map + `usagePrefs`).
 
+## Where the terminal renderer choice lives
+
+Panes draw through WebGL by default, canvas on request (Settings → Terminal). The tier ladder
+is `src/terminalRenderer.ts` (`attachRenderer`: WebGL → canvas → xterm's DOM renderer), with
+the concrete addons injected from `src/terminalRendererAddons.ts` — they are UMD bundles that
+touch `self` on import, so a static import would break the Node-env vitest. Two rules:
+
+- **The preference is intent; `handle.active` is reality.** WebGL costs one GPU context per
+  pane and WebKit caps how many are live; a pane that loses its context drops to canvas *in
+  place* and the stored preference is NOT rewritten. Same split as `workingDirOf` vs
+  `effectiveDirOf`.
+- **Switching must never recreate the xterm** — that would kill the PTY (keep-alive rule
+  above). `Terminal.tsx` keeps the renderer in its own effect keyed on the pref, so a change
+  disposes one addon and loads another on the live instance; the create effect stays `[]`.
+
 ## Where the unified session directory lives
 
 Every panel (Files/Changes/Git, tab-strip path, Open in VS Code) and the right-panel

@@ -7,6 +7,7 @@ import { AccountList } from "./AccountList";
 import { UsagePrefsPanel } from "./UsagePrefsPanel";
 import { FormatPrefsPanel } from "./FormatPrefsPanel";
 import { GeneralSettings } from "./GeneralSettings";
+import { TerminalSettings } from "./TerminalSettings";
 import { TrustPanel } from "./TrustPanel";
 import { OpenCodePanel } from "./OpenCodePanel";
 import { PluginsPanel } from "./PluginsPanel";
@@ -14,6 +15,7 @@ import { PluginsPanel } from "./PluginsPanel";
 // Exported for the native menu integration (menu → open Settings at a specific tab).
 export type SettingsTab =
   | "general"
+  | "terminal"
   | "agents"
   | "accounts"
   | "usage"
@@ -27,7 +29,13 @@ export type SettingsTab =
 
 /** Grouped sidebar navigation — scales past the point where flat tabs got unwieldy. */
 const NAV: Array<{ group: string; items: Array<{ id: SettingsTab; label: string }> }> = [
-  { group: "", items: [{ id: "general", label: "General" }] },
+  {
+    group: "",
+    items: [
+      { id: "general", label: "General" },
+      { id: "terminal", label: "Terminal" },
+    ],
+  },
   {
     group: "Coding agents",
     items: [
@@ -112,6 +120,12 @@ export function Settings({
                 <>
                   <p className="settings-intro">Startup and session behavior.</p>
                   <GeneralSettings />
+                </>
+              )}
+              {tab === "terminal" && (
+                <>
+                  <p className="settings-intro">How terminal panes are drawn.</p>
+                  <TerminalSettings />
                 </>
               )}
               {tab === "agents" && (
