@@ -101,14 +101,19 @@ export async function deleteSession(
   if (!confirm(prompt)) return;
 
   if (session.useWorktree && session.worktreePath) {
+    // Kill the live processes BEFORE asking anything about the worktree. The agent writes
+    // files right up until it dies, so a dirty check taken while it runs — or taken before
+    // a confirm the human sits on for a few seconds — is a reading of a directory that no
+    // longer exists by the time git looks at it. A stale "clean" means `git worktree
+    // remove` runs without --force, refuses ("contains modified or untracked files"), and
+    // the session disappears while its worktree stays on disk.
+    await invoke("pty_kill", { sessionId }).catch(() => {});
+    await invoke("pty_kill", { sessionId: `${sessionId}::term` }).catch(() => {});
     const dirty = await worktreeIsDirty(session.worktreePath);
     const msg = dirty
       ? `Also remove its git worktree (${session.branch})?\n\nIt has uncommitted changes that will be permanently lost.`
       : `Also remove its git worktree (${session.branch})?\n\nThe branch is kept; only the working copy is removed.`;
     if (confirm(msg)) {
-      // Kill the live process first so git can release the worktree lock.
-      await invoke("pty_kill", { sessionId }).catch(() => {});
-      await invoke("pty_kill", { sessionId: `${sessionId}::term` }).catch(() => {});
       try {
         await worktreeRemove(found.project.path, session.worktreePath, dirty);
       } catch (e) {
