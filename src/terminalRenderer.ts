@@ -96,11 +96,32 @@ export function attachRenderer(
     try {
       addon?.dispose();
     } catch {
-      // Terminal.dispose() disposes its addons first, so this can be a second dispose.
+      // Two ways this throws, both survivable: a second dispose on an addon xterm already
+      // tore down, and @xterm/addon-webgl 0.19's restore-the-DOM-renderer step, which reads
+      // `_core._store` — an internal that does not exist on @xterm/xterm 5.5. See disposePane.
     }
     addon = null;
     handle.active = "dom";
   };
 
   return handle;
+}
+
+/**
+ * Tear a pane down in the ONE order that is safe: renderer addon first, xterm second.
+ *
+ * `Terminal.dispose()` is NOT addon-safe. xterm's public Terminal registers its core before
+ * its addon manager and disposes registrations in that order, so the addons are disposed
+ * AFTER the core they reach back into — and whatever they throw comes out of the caller.
+ * @xterm/addon-webgl 0.19 throws there every time (its guard reads `_core._store`, which
+ * @xterm/xterm 5.5 does not have), which lands the exception in React's unmount commit and
+ * blanks the app behind the ErrorBoundary the moment a session's terminal unmounts.
+ *
+ * Disposing the addon through `handle` first keeps the throw inside `attachRenderer`'s catch
+ * and leaves xterm's addon manager with nothing to do: it marks the entry disposed before
+ * calling in, so the pass inside `Terminal.dispose()` becomes a no-op.
+ */
+export function disposePane(handle: RendererHandle | null, term: { dispose: () => void }): void {
+  handle?.dispose();
+  term.dispose();
 }

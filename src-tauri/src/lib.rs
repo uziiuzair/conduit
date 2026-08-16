@@ -428,7 +428,8 @@ fn pty_resize(
     pty.resize(&session_id, cols, rows)
 }
 
-#[tauri::command]
+// Thread pool, not the main thread: see the note on `remove_session`.
+#[tauri::command(async)]
 fn pty_kill(session_id: String, pty: State<Arc<PtyManager>>) {
     pty.kill(&session_id);
 }
@@ -1039,7 +1040,12 @@ fn opencode_key_set(store: State<Arc<Store>>) -> bool {
     store.opencode_key().is_some()
 }
 
-#[tauri::command]
+// `(async)` on a sync fn: run it on the thread pool instead of inline on the IPC (main)
+// thread. Destroying a session SIGKILLs a child, reaps it, tears down its tmux session and
+// rewrites state.json -- seconds of work in the worst case, and every one of them a frozen
+// window if it happens on the main thread. Same reasoning for `pty_kill` and the two
+// worktree commands below; the delete path calls all four in a row.
+#[tauri::command(async)]
 fn remove_session(
     project_id: String,
     session_id: String,
@@ -1269,12 +1275,14 @@ fn hotexit_load() -> Vec<hotexit::HotExitEntry> {
 
 // ---- Worktree lifecycle ------------------------------------------------------
 
-#[tauri::command]
+// Both shell out to git against a whole checkout -- `remove` deletes every file in it --
+// so both run on the thread pool. See the note on `remove_session`.
+#[tauri::command(async)]
 fn worktree_is_dirty(worktree_path: String) -> bool {
     worktree::is_dirty(&worktree_path)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn worktree_remove(repo_path: String, worktree_path: String, force: bool) -> Result<(), String> {
     worktree::remove(&repo_path, &worktree_path, force)
 }
