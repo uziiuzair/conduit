@@ -1,7 +1,7 @@
 import { useEffect, useRef } from "react";
 import { Terminal as Xterm, type ILink } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
-import { attachRenderer, type RendererHandle } from "../terminalRenderer";
+import { attachRenderer, disposePane, type RendererHandle } from "../terminalRenderer";
 import { REAL_ADDONS } from "../terminalRendererAddons";
 import { invoke, Channel } from "@tauri-apps/api/core";
 import { currentTerminalTheme, registerTerminal } from "../themes";
@@ -77,6 +77,9 @@ export function TerminalView({
   const spawnedRef = useRef(false);
   const resizeTimer = useRef<number | null>(null);
   const disposedRef = useRef(false);
+  /** The live renderer addon. Declared up here, not next to its effect, because the
+   *  create effect's cleanup has to dispose it BEFORE it disposes the xterm. */
+  const rendererRef = useRef<RendererHandle | null>(null);
   /** Dir the live PTY was spawned in — respawn trigger compares against the prop. */
   const spawnedDirRef = useRef<string | null>(null);
   /** Latest workingDirectory for closures created in the mount-once effect (openPath). */
@@ -364,7 +367,11 @@ export function TerminalView({
       window.removeEventListener("keyup", onMod, true);
       window.removeEventListener("blur", onBlur);
       innerRef.current?.removeEventListener("contextmenu", onContextMenu);
-      term.dispose();
+      // Renderer addon first, xterm second — see disposePane. React runs this cleanup
+      // before the renderer effect's own, so a bare term.dispose() here would be the one
+      // that disposes the addon, and its throw would take the whole UI down with it.
+      disposePane(rendererRef.current, term);
+      rendererRef.current = null;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -372,8 +379,7 @@ export function TerminalView({
   // Renderer addon, swapped in place when Settings → Terminal changes. Swapping the addon
   // is the whole point of keeping this separate from the effect above: the xterm instance
   // and its PTY survive untouched, so a renderer change costs a repaint and nothing else.
-  // Declared after the create effect, so `termRef.current` is already populated on mount.
-  const rendererRef = useRef<RendererHandle | null>(null);
+  // Placed after the create effect, so `termRef.current` is already populated on mount.
   useEffect(() => {
     const term = termRef.current;
     if (!term) return;
