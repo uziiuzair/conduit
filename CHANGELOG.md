@@ -3,6 +3,21 @@
 All notable changes to Conduit are documented here. This project uses
 [semantic versioning](https://semver.org/).
 
+## 0.22.1 — 2026-08-16
+
+- **Fixed — Deleting a session no longer takes the window down.** Closing a session tore its
+  pane down in an order the WebGL renderer could not survive, and the error blanked Conduit
+  behind the "Something went wrong" screen every time. Panes now shut their renderer down
+  first, so deleting a session just deletes the session.
+- **Fixed — Deleting a worktree session no longer leaves its worktree behind.** Conduit
+  checked the worktree for uncommitted work while the agent was still writing to it, then
+  handed git the stale answer; git refused to remove the directory and the session vanished
+  anyway. The agent is stopped first, so the question is asked about a tree that has stopped
+  moving.
+- **Fixed — The window stays responsive while a session is deleted.** Stopping the agent,
+  tearing down its tmux session, and deleting a worktree's files no longer run on the thread
+  that draws the UI, so a large checkout no longer beachballs the app on its way out.
+
 ## 0.22.0 — 2026-08-15
 
 - **Changed — Terminals draw on the GPU by default.** Panes now render through WebGL, which
