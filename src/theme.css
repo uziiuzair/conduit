@@ -381,6 +381,15 @@ button {
   min-height: 0;
 }
 
+/* `min-height: 0` only zeroes the CONTENT box — the row's 4px vertical padding still
+   counts toward the item's minimum contribution, so a `0fr` track floors at 8px and the
+   indent guide paints a stub under a collapsed project. Fold the padding away with the
+   track (transitioned on the rows below, so it stays one motion). */
+.session-row-slot.collapsed > * {
+  padding-top: 0;
+  padding-bottom: 0;
+}
+
 .session-row {
   display: flex;
   align-items: center;
@@ -390,7 +399,8 @@ button {
   font-size: 12px;
   color: var(--text-bright);
   overflow: hidden;
-  transition: opacity 0.16s ease, transform 0.2s ease, background 0.12s ease;
+  transition: opacity 0.16s ease, transform 0.2s ease, background 0.12s ease,
+    padding 0.2s ease;
 }
 
 .session-row:hover {
@@ -425,7 +435,7 @@ button {
   font-size: 12px;
   color: var(--accent);
   overflow: hidden;
-  transition: opacity 0.16s ease, transform 0.2s ease;
+  transition: opacity 0.16s ease, transform 0.2s ease, padding 0.2s ease;
 }
 
 /* Folded away while the project is collapsed. The height belongs to `.session-row-slot`;
