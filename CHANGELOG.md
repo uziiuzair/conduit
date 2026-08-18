@@ -3,6 +3,15 @@
 All notable changes to Conduit are documented here. This project uses
 [semantic versioning](https://semver.org/).
 
+## 0.22.2 — 2026-08-18
+
+- **Fixed — Collapsed projects no longer leave a stray line in the sidebar.** Folding a
+  project away collapsed its sessions but left a short vertical stub of the indent guide
+  hanging under the project name, along with a sliver of empty space. The guide now folds
+  away with the rows it belongs to.
+
+---
+
 ## 0.22.1 — 2026-08-16
 
 - **Fixed — Deleting a session no longer takes the window down.** Closing a session tore its
