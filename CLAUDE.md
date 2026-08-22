@@ -249,6 +249,44 @@ A sixth agent (`npm i -g command-code`), fronting ~58 models from one subscripti
   installer).
 - Design: `docs/superpowers/specs/2026-08-23-command-code-agent-design.md`.
 
+## Where agent routing lives
+
+Task-shaped preferences: a task kind (planning / implementation / review / research /
+bulk) maps to an ORDERED chain of targets (agent + optional model). The order IS the
+fallback, so one list covers preference, a missing CLI, and a spent quota.
+
+**The work is split across two languages and must not become a fork.** Rust
+(`routing.rs`) owns WHAT the preferences are -- built-in defaults, overlaid by global,
+overlaid by project, all sparse so an override of one kind keeps inheriting the rest.
+TypeScript (`src/routing.ts`, `pickTarget`) owns WHICH target is usable right now, because
+that needs the live usage snapshot already in the store. Neither re-implements the other.
+
+- **Defaults derive from `agent::capability_card`**, so an opinion about an agent lives in
+  one place. A default chain must reach a SECOND AGENT, not just a second model -- one
+  agent's windows all close together, so a Claude-only chain is not a fallback. A test
+  enforces it.
+- **Unknown quota is not exhausted quota.** Agents with no usage API carry
+  `remaining: null` and stay routable; treating null as 0 would silently make "no meter"
+  mean "never route here".
+- `usageRows.ts` holds the shared "how full is this account" arithmetic so the usage bar
+  and the router cannot disagree. `--model`/`--effort` are gated by
+  `ProviderAdapter::supports_model_flags`, not by naming Claude.
+- Design: `docs/superpowers/specs/2026-08-23-agent-routing-preferences-design.md`.
+
+## Where the rich session view lives
+
+An opt-in pane (`SessionChat.tsx`, Settings -> General) that renders a session's
+conversation instead of its terminal output, fed by `transcript::session_transcript` over
+the JSONL Claude already writes. No model generates it and none summarizes it -- it is a
+renderer over a file, and costs nothing.
+
+**It covers the terminal; it never replaces it.** The pane is an absolutely positioned
+sibling inside `.term-host`, so the xterm stays mounted and attached (the keep-alive rule
+above). Two consequences worth keeping: a session revealed with the pane open must not pull
+terminal focus, or the caret lands behind the pane -- and that check reads a REF, since
+adding it to the reveal effect's deps would re-run a fit and its spawn branch on every
+toggle. Claude-only, enforced in `session_transcript` rather than assumed in the view.
+
 ## Where multi-account assignment lives
 
 Accounts are per-agent profile pointers (`Account { agents, configDir }`, `store.rs`), assigned
