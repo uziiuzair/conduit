@@ -50,6 +50,12 @@ This writes to `…/ConduitTauri-dev/state.json`, so dev and the installed app c
   typecheck + `pnpm test` + `pnpm build` on one job, `cargo fmt --check` + `cargo clippy
   -D warnings` + `cargo test` on another. Clippy is strict; fix the lint rather than
   weakening the gate.
+- **The Rust job is a matrix: macOS AND Windows.** The two compile different programs
+  (`tmux`/`session_budget` are cfg-gated; spawn, PTY, path and process-kill each have a
+  Windows arm), so a green macOS leg proves nothing about Windows. It was macOS-only for
+  76 commits and the Windows build was broken that whole time. If you add a
+  `#[cfg(windows)]` block, the Windows leg is the only thing that will ever compile or
+  lint it.
 - **Component tests are deliberately absent.** Testing `Terminal.tsx` needs a mounted
   xterm, a PTY, and the Tauri bridge, and a shallow render would assert nothing worth
   maintaining. Verify UI changes with `pnpm exec tsc --noEmit` / `pnpm build` **and by

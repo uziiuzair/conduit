@@ -71,8 +71,10 @@ Releases are built + signed + notarized by CI on a version tag.
    git tag vX.Y.Z
    git push origin vX.Y.Z
    ```
-5. The **Release** workflow builds a universal macOS app, signs + notarizes it,
-   generates `latest.json`, and publishes the GitHub Release. Confirm the release
+5. The **Release** workflow runs one leg per platform: a universal macOS app that is
+   signed + notarized, and a Windows `.msi`. Both publish to the same tag and each
+   rewrites `latest.json`, so the matrix is `max-parallel: 1` on purpose -- running them
+   together drops a platform from the updater manifest. Confirm the release
    is **published** (not draft/prerelease) — the app's updater endpoint,
    `releases/latest/download/latest.json`, only resolves to a published release.
 
@@ -86,3 +88,21 @@ Tauri has no auto-rollback. To pull a bad version:
    "latest," every user moves forward on their next check.
 3. Consent-before-install already limits the blast radius to users who clicked
    Install before you rolled forward.
+
+### Building an installer locally
+
+`pnpm tauri build` ends in `A public key has been found, but no private key` -- the
+bundle is already written by then, but the command still exits non-zero, because
+`createUpdaterArtifacts` is on and the release signing key lives only in CI. For a local
+build use:
+
+```bash
+pnpm build:msi     # Windows: src-tauri/target/release/bundle/msi/Conduit_<version>_x64_en-US.msi
+```
+
+which merges `src-tauri/tauri.unsigned.conf.json` over the shared config to turn updater
+artifacts off. The result installs and runs; it simply cannot be served as an update.
+
+The published MSI is **not** Authenticode-signed, so Windows SmartScreen shows an
+"unrecognized app" warning until the download earns reputation. That is a missing
+hardware-backed certificate, not a build problem -- see the note in `release.yml`.

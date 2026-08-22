@@ -7,9 +7,28 @@ on:
 
 jobs:
   release:
-    runs-on: macos-latest
+    name: Release (${{ matrix.platform }})
     permissions:
       contents: write
+    strategy:
+      fail-fast: false
+      # Both legs publish to the SAME tag and each rewrites latest.json for the
+      # updater. Run them concurrently and the second overwrites the first's
+      # manifest, silently dropping a platform from the update feed -- so they are
+      # serialized rather than merely independent.
+      max-parallel: 1
+      matrix:
+        include:
+          - platform: macos-latest
+            args: --target universal-apple-darwin
+            rust-targets: aarch64-apple-darwin,x86_64-apple-darwin
+          - platform: windows-latest
+            # `bundle.targets` in tauri.conf.json is macOS-shaped, so the Windows
+            # target is selected here rather than by changing shared config -- the
+            # macOS output stays byte-for-byte what it was.
+            args: --bundles msi
+            rust-targets: ""
+    runs-on: ${{ matrix.platform }}
     steps:
       - uses: actions/checkout@v4
 
@@ -22,10 +41,15 @@ jobs:
           node-version: 20
           cache: pnpm
 
-      - name: Install Rust (stable) with both apple targets
+      - name: Install Rust (stable)
         uses: dtolnay/rust-toolchain@stable
         with:
-          targets: aarch64-apple-darwin,x86_64-apple-darwin
+          targets: ${{ matrix.rust-targets }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+          key: ${{ matrix.platform }}
 
       - name: Install frontend dependencies
         run: pnpm install --frozen-lockfile
@@ -35,12 +59,21 @@ jobs:
       # there from a base64-encoded secret (keeps newlines intact, nothing on disk
       # in the repo).
       - name: Provision App Store Connect API key
+        if: matrix.platform == 'macos-latest'
         env:
           APPLE_API_KEY_P8_BASE64: ${{ secrets.APPLE_API_KEY_P8_BASE64 }}
         run: |
           mkdir -p ~/private_keys
           echo "$APPLE_API_KEY_P8_BASE64" | base64 --decode > ~/private_keys/AuthKey_${{ secrets.APPLE_API_KEY }}.p8
 
+      # The Windows MSI is UNSIGNED: SmartScreen shows "unrecognized app" on first
+      # run until the download builds reputation. Authenticode now requires a
+      # hardware-backed key (an HSM or a cloud signing service), so it cannot be a
+      # secret in this repo. When one exists, wire it through
+      # `bundle.windows.signCommand` -- no change to this workflow's shape.
+      #
+      # Updater signing (TAURI_SIGNING_PRIVATE_KEY) is separate and DOES apply to
+      # both legs: it is what lets an installed Conduit trust an update payload.
       - name: Build, sign, notarize, and publish release
         uses: tauri-apps/tauri-action@v0
         env:
@@ -55,7 +88,7 @@ jobs:
           APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
           APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
         with:
-          args: --target universal-apple-darwin
+          args: ${{ matrix.args }}
           tagName: ${{ github.ref_name }}
           releaseName: "Conduit ${{ github.ref_name }}"
           releaseBody: "See the assets below. Release notes:"
