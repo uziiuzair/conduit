@@ -219,6 +219,36 @@ for the active project. Conduit never writes that database — continuity owns e
   deliberately separate from `useBoard`'s 1.5 s poll and its `board_enabled` gate.
 - Design: `docs/superpowers/specs/2026-08-14-continuity-panels-design.md`.
 
+## Where Command Code lives
+
+A sixth agent (`npm i -g command-code`), fronting ~58 models from one subscription.
+
+- **The binary is `cmd`, which is unusable on Windows.** Use `agent::COMMAND_CODE_BIN`,
+  never a literal: it is `cmdc` on Windows and `cmd` elsewhere, matching Command Code's own
+  `getBinaryCommand()`. A bare `cmd` on Windows resolves to System32's shell, and Conduit
+  spawns sessions as `cmd.exe /K "cd /d <dir> && <agent>"` -- so it would open a nested
+  command interpreter instead of the agent.
+- **Hooks:** `hooks::command_code_profile()` -> `.commandcode/settings.local.json`. Command
+  Code implements Claude's hook SCHEMA, so the generic installer carries over, but it fires
+  only FOUR events (`PreToolUse`/`PostToolUse`/`Stop`/`SessionStart`). Do not add Claude's
+  others -- they would be dead keys in a file Conduit does not own. Consequence: no `prompt`
+  verb, so a session reads `running` from its first tool call, not the keystroke.
+- **Resume:** there is no `--session-id` to pin Conduit's id, so Command Code's own
+  `session_id` is captured from the `SessionStart` hook body into
+  `Session.agent_conversation_id` and replayed as `--session <id>`. This looks like agy's
+  problem and is NOT: the payload and the hook URL carry both halves of the mapping in one
+  request, so no baseline or filesystem scan is involved. `source != "resume"` is what lets a
+  stale id be replaced instead of pinned forever.
+- **Usage:** `commandcode_usage.rs` reads `api.commandcode.ai/alpha/usage/summary` with the
+  key from `~/.commandcode/auth.json`. `/alpha/` is an internal surface and WILL move, so
+  every field is optional and an unknown shape degrades to `source: "unavailable"`.
+- **Config GUI:** `commandcode_config.rs` + `CommandCodePanel.tsx` patch
+  `~/.commandcode/config.json` behind a Rust-side allowlist, preserving unknown keys, backing
+  up once, merging `featureModels` key-by-key, and refusing a file that does not parse.
+  It never writes `settings.json` (team-committed, and its `hooks` key belongs to the hook
+  installer).
+- Design: `docs/superpowers/specs/2026-08-23-command-code-agent-design.md`.
+
 ## Where multi-account assignment lives
 
 Accounts are per-agent profile pointers (`Account { agents, configDir }`, `store.rs`), assigned
