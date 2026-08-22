@@ -11,6 +11,7 @@ import {
   writeStoredPref,
 } from "./themes";
 import type { TerminalRenderer } from "./terminalRenderer";
+import type { Chain, RoutesView, TaskKind, TaskKindInfo } from "./routing";
 import { AGENTS, type AgentId, type AgentInfo, DEFAULT_AGENT, type McpServer } from "./agents";
 import { check, type Update } from "@tauri-apps/plugin-updater";
 import { relaunch } from "@tauri-apps/plugin-process";
@@ -912,6 +913,20 @@ interface AppState {
   claudeStatus: ClaudeStatus | null;
   /** Claude usage per account (env default + every registered Claude account). */
   claudeUsage: ClaudeAccountUsage[];
+  /** Routing tables for the open project (defaults + global + project overlays), or null
+   *  before the first load. See routing.ts / routing.rs. */
+  routes: RoutesView | null;
+  /** Task kinds and their copy, supplied by Rust so the labels live in one language. */
+  taskKinds: TaskKindInfo[];
+  /** Load both, for a project (or global-only when projectId is omitted). */
+  loadRouting: (projectId?: string | null) => Promise<void>;
+  /** Pin or clear one task kind's chain. `chain: null` CLEARS the override so the scope
+   *  inherits again -- which is NOT the same as pinning an empty chain. */
+  setAgentRoute: (
+    projectId: string | null,
+    task: TaskKind,
+    chain: Chain | null,
+  ) => Promise<void>;
   /** Per-account Command Code usage. Empty when Command Code is not set up at all —
    *  the usage bar then simply has no Command Code rows, rather than showing zeros. */
   commandCodeUsage: CommandCodeAccountUsage[];
@@ -1078,7 +1093,7 @@ interface AppState {
 
   addProject: (path: string) => Promise<void>;
   removeProject: (id: string) => Promise<void>;
-  addSession: (projectId: string, opts?: { name?: string; useWorktree?: boolean; agent?: AgentId; role?: SessionRole; account?: string | null }) => Promise<void>;
+  addSession: (projectId: string, opts?: { name?: string; useWorktree?: boolean; agent?: AgentId; role?: SessionRole; account?: string | null; model?: string | null }) => Promise<void>;
   renameSession: (projectId: string, sessionId: string, name: string) => Promise<void>;
   /** Rename a project's display label only (not the directory on disk). */
   renameProject: (projectId: string, name: string) => Promise<void>;
@@ -1315,6 +1330,8 @@ export const useStore = create<AppState>((set, get) => {
     pendingReveal: null,
     claudeStatus: null,
     claudeUsage: [],
+    routes: null,
+    taskKinds: [],
     commandCodeUsage: [],
     planConnected: readPlanConnected(),
     updateInfo: null,
@@ -1737,7 +1754,10 @@ export const useStore = create<AppState>((set, get) => {
       const useWorktree = opts?.useWorktree ?? false;
       const agent = opts?.agent ?? DEFAULT_AGENT;
       const role = opts?.role ?? "worker";
-      const session = await invoke<Session | null>("add_session", { projectId, name, useWorktree, agent, role });
+      // `model` is the concrete id a route picked. It rides the CREATE call rather than a
+      // follow-up so the session is never persisted, however briefly, without it.
+      const model = opts?.model ?? null;
+      const session = await invoke<Session | null>("add_session", { projectId, name, useWorktree, agent, role, model });
       if (!session) return;
       // Pin an explicitly-chosen account (blank = inherit the project/global default).
       if (opts?.account) {
@@ -2585,6 +2605,27 @@ export const useStore = create<AppState>((set, get) => {
       try {
         const u = await invoke<ClaudeAccountUsage[]>("fetch_claude_usage");
         set({ claudeUsage: u });
+      } catch { /* fail-open: keep last-known */ }
+    },
+
+    loadRouting: async (projectId) => {
+      try {
+        const [routes, taskKinds] = await Promise.all([
+          invoke<RoutesView>("agent_routes", { projectId: projectId ?? null }),
+          invoke<TaskKindInfo[]>("task_kinds"),
+        ]);
+        set({ routes, taskKinds });
+      } catch { /* fail-open: the dialog falls back to picking an agent by hand */ }
+    },
+
+    setAgentRoute: async (projectId, task, chain) => {
+      try {
+        const routes = await invoke<RoutesView>("set_agent_route", {
+          projectId,
+          task,
+          chain,
+        });
+        set({ routes });
       } catch { /* fail-open: keep last-known */ }
     },
 
