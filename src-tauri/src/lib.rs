@@ -444,6 +444,14 @@ fn pty_is_running(session_id: String, pty: State<Arc<PtyManager>>) -> bool {
 /// with an install hint instead of silently doing nothing when switched on.
 #[derive(serde::Serialize)]
 struct TmuxInfo {
+    /// Can this platform persist sessions AT ALL. False on Windows, where tmux does not
+    /// exist and no install would change that.
+    ///
+    /// Separate from `available` because the two call for opposite UI: `available: false`
+    /// with `supported: true` is a fixable gap and earns an install hint, while
+    /// `supported: false` is a property of the OS and must NOT tell someone to go install
+    /// tmux with their package manager.
+    supported: bool,
     available: bool,
     path: Option<String>,
     /// How to install tmux on this host, when there is a sensible suggestion. Resolved here
@@ -460,6 +468,7 @@ fn tmux_available(pty: State<Arc<PtyManager>>) -> TmuxInfo {
         let path = pty.tmux_path().map(|p| p.to_string_lossy().into_owned());
         let available = path.is_some();
         TmuxInfo {
+            supported: true,
             available,
             path,
             install: if available {
@@ -474,6 +483,7 @@ fn tmux_available(pty: State<Arc<PtyManager>>) -> TmuxInfo {
     {
         let _ = pty;
         TmuxInfo {
+            supported: false,
             available: false,
             path: None,
             install: None,
@@ -1591,11 +1601,10 @@ fn reveal_path(path: String) -> Result<(), String> {
         // only launch failures are reported.
         let mut c = Command::new("explorer.exe");
         c.raw_arg(format!("/select,\"{path}\""));
-        return c
-            .no_window()
+        c.no_window()
             .status()
             .map(|_| ())
-            .map_err(|e| format!("failed to launch explorer: {e}"));
+            .map_err(|e| format!("failed to launch explorer: {e}"))
     }
     #[cfg(all(unix, not(target_os = "macos")))]
     {

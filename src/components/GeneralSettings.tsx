@@ -9,6 +9,7 @@ export function GeneralSettings() {
   const setPersistSessions = useStore((s) => s.setPersistSessions);
   const tmuxAvailable = useStore((s) => s.tmuxAvailable);
   const tmuxInstall = useStore((s) => s.tmuxInstall);
+  const tmuxSupported = useStore((s) => s.tmuxSupported);
   const probeTmux = useStore((s) => s.probeTmux);
 
   // Probe on first open rather than at app boot: it shells out, and nothing before
@@ -45,24 +46,38 @@ export function GeneralSettings() {
           working when Conduit is closed and the next launch attaches to the live session instead
           of replaying the conversation. Scrollback and anything mid-run survive too. Off = a
           session ends when Conduit does.
-          {tmuxAvailable === false && (
+          {/* Two different "off" states. `supported === false` is the OS (Windows has no
+              tmux and never will), so it gets a statement of fact; anything else is a
+              missing install, which gets a way to fix it. Telling a Windows user to reach
+              for their package manager is advice that cannot be taken. */}
+          {tmuxSupported === false ? (
             <em className="dialog-hint">
               {" "}
-              Needs tmux, which isn’t installed.
-              {/* The command comes from the backend: it depends on the platform and on what
-                  is already there, so a hardcoded `brew install tmux` is wrong on every
-                  Linux and on a Mac without Homebrew. */}
-              {tmuxInstall ? (
-                <>
-                  {" "}
-                  Install it with <code>{tmuxInstall.command}</code> and reopen Settings.
-                </>
-              ) : (
-                <> Install tmux with your system’s package manager and reopen Settings.</>
-              )}
+              Not available on Windows — session persistence runs on tmux. Sessions end when
+              Conduit does; Claude and agy still resume their conversation on the next launch.
             </em>
+          ) : (
+            tmuxAvailable === false && (
+              <em className="dialog-hint">
+                {" "}
+                Needs tmux, which isn’t installed.
+                {/* The command comes from the backend: it depends on the platform and on what
+                    is already there, so a hardcoded `brew install tmux` is wrong on every
+                    Linux and on a Mac without Homebrew. */}
+                {tmuxInstall ? (
+                  <>
+                    {" "}
+                    Install it with <code>{tmuxInstall.command}</code> and reopen Settings.
+                  </>
+                ) : (
+                  <> Install tmux with your system’s package manager and reopen Settings.</>
+                )}
+              </em>
+            )
           )}
-          {tmuxAvailable === null && <em className="dialog-hint"> Checking for tmux…</em>}
+          {tmuxAvailable === null && tmuxSupported !== false && (
+            <em className="dialog-hint"> Checking for tmux…</em>
+          )}
         </span>
       </label>
     </div>

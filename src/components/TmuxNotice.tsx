@@ -17,12 +17,16 @@ export function TmuxNotice() {
   const persistSessions = useStore((s) => s.persistSessions);
   const tmuxAvailable = useStore((s) => s.tmuxAvailable);
   const install = useStore((s) => s.tmuxInstall);
+  const tmuxSupported = useStore((s) => s.tmuxSupported);
   const dismissed = useStore((s) => s.tmuxNoticeDismissed);
   const dismiss = useStore((s) => s.dismissTmuxNotice);
   const [copied, setCopied] = useState(false);
 
-  // `null` = still probing. Only nag someone who asked for persistence in the first place.
-  if (dismissed || tmuxAvailable !== false || !persistSessions) return null;
+  // `null` = still probing. Only nag someone who asked for persistence in the first place,
+  // and never on a platform where persistence cannot exist: on Windows there is no tmux to
+  // install, so this banner would be a permanent complaint about the operating system.
+  if (dismissed || tmuxSupported === false || tmuxAvailable !== false || !persistSessions)
+    return null;
 
   const copy = () => {
     if (!install) return;

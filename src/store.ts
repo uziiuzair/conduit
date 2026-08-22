@@ -927,6 +927,11 @@ interface AppState {
    *  `null` = not yet probed, which the Settings toggle renders as neither on nor
    *  disabled rather than flashing a false "unavailable". */
   tmuxAvailable: boolean | null;
+  /** Whether this PLATFORM can persist sessions at all — false on Windows, where tmux does
+   *  not exist and no install would change that. Distinct from `tmuxAvailable`, which is a
+   *  fixable gap: only one of the two earns an install hint, and telling a Windows user to
+   *  install tmux with their package manager is advice that cannot be taken. */
+  tmuxSupported: boolean | null;
   /** How to install tmux on this host, when tmux is missing and there is a sensible
    *  suggestion. Resolved by the backend — the right command depends on the platform and
    *  on what is already installed. */
@@ -1298,6 +1303,7 @@ export const useStore = create<AppState>((set, get) => {
     terminalRenderer: readTerminalRenderer(),
     persistSessions: readPersistSessions(),
     tmuxAvailable: null,
+    tmuxSupported: null,
     tmuxInstall: null,
     tmuxNoticeDismissed: readTmuxNoticeDismissed(),
     sessionContext: {},
@@ -2454,17 +2460,26 @@ export const useStore = create<AppState>((set, get) => {
     probeTmux: async () => {
       try {
         const info = await invoke<{
+          supported: boolean;
           available: boolean;
           path: string | null;
           install: TmuxInstallHint | null;
         }>("tmux_available");
-        set({ tmuxAvailable: info.available, tmuxInstall: info.install ?? null });
+        set({
+          tmuxAvailable: info.available,
+          // `?? true` keeps an older backend (which has no `supported` field) reading as
+          // the Unix it must have been, rather than silently claiming Windows.
+          tmuxSupported: info.supported ?? true,
+          tmuxInstall: info.install ?? null,
+        });
         // Push the persisted preference down at boot. Without this the backend would
         // start on its own default and disagree with the toggle the user is looking at.
         void invoke("set_session_persistence", {
           enabled: info.available && get().persistSessions,
         }).catch(() => {});
       } catch {
+        // A failed probe says nothing about the platform, so `tmuxSupported` stays as it
+        // was rather than claiming an unsupported OS and hiding the install hint.
         set({ tmuxAvailable: false });
       }
     },

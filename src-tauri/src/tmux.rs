@@ -11,8 +11,11 @@
 //! wrapper.
 //!
 //! Design: docs/superpowers/specs/2026-08-10-tmux-session-persistence-design.md
-
-#![cfg(not(windows))]
+//!
+//! tmux is Unix-only, so on Windows every function here is dead -- the mod site carries
+//! `#[cfg_attr(windows, allow(dead_code))]` for exactly that. The module still COMPILES
+//! there on purpose: `InstallHint` is part of the `TmuxInfo` wire contract the frontend
+//! reads on every platform, and cfg-ing the module out would take that type with it.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -168,11 +171,15 @@ pub fn install_hint_here() -> Option<InstallHint> {
     })
 }
 
+/// The separator `PATH` uses on this host. `:` everywhere except Windows, which uses `;`
+/// precisely because a Windows path entry (`C:\Windows`) contains a colon of its own.
+const PATH_SEP: char = if cfg!(windows) { ';' } else { ':' };
+
 /// Scan a `PATH`-shaped string for an executable. Split out so it can be tested without
 /// depending on the machine's real environment.
 pub fn find_in_path(bin: &str, path: Option<&str>) -> Option<PathBuf> {
     path?
-        .split(':')
+        .split(PATH_SEP)
         .filter(|dir| !dir.is_empty())
         .map(|dir| Path::new(dir).join(bin))
         .find(|p| p.is_file())
@@ -472,14 +479,36 @@ mod tests {
     }
 
     #[test]
-    fn find_in_path_scans_and_tolerates_junk() {
+    fn find_in_path_tolerates_junk_everywhere() {
         assert!(find_in_path("tmux", None).is_none());
         assert!(find_in_path("tmux", Some("")).is_none());
         assert!(find_in_path("definitely-not-a-binary", Some("/usr/bin:/bin")).is_none());
-        // `sh` exists on every machine this code runs on.
+    }
+
+    /// The hit case needs a real binary at a known absolute path, so it is written once
+    /// per platform rather than skipped on the one where tmux never runs -- a test that
+    /// only ever runs on macOS is a test that breaks silently on the Windows CI leg.
+    #[test]
+    #[cfg(unix)]
+    fn find_in_path_finds_a_real_binary_and_skips_empty_entries() {
+        // `sh` exists on every Unix this code runs on.
         assert_eq!(
             find_in_path("sh", Some("::/nonexistent:/bin")),
             Some(PathBuf::from("/bin/sh"))
+        );
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn find_in_path_finds_a_real_binary_and_splits_on_semicolons() {
+        // Splitting on `:` here would shred `C:\Windows\System32` into `C` and a path
+        // that does not exist, so this is the assertion that pins PATH_SEP.
+        let root = std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".into());
+        let sys32 = PathBuf::from(root).join("System32");
+        let path = format!(";;C:\\nonexistent;{}", sys32.display());
+        assert_eq!(
+            find_in_path("cmd.exe", Some(&path)),
+            Some(sys32.join("cmd.exe"))
         );
     }
 

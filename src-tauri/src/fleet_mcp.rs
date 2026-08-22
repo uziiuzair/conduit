@@ -1281,7 +1281,7 @@ mod tests {
         let oversized = "x".repeat(513);
         assert!(oversized.len() > crate::board::NOTE_MAX_BYTES);
         let ok_sized = "x".repeat(512);
-        assert!(!(ok_sized.len() > crate::board::NOTE_MAX_BYTES));
+        assert!(ok_sized.len() <= crate::board::NOTE_MAX_BYTES);
     }
 
     #[test]
