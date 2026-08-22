@@ -12,6 +12,7 @@ mod broker;
 mod claude_status;
 mod claude_usage;
 mod clipboard;
+mod commandcode_config;
 mod commandcode_usage;
 mod context_window;
 mod continuity;
@@ -1875,6 +1876,9 @@ pub fn run() {
             reveal_path,
             claude_status::fetch_claude_status,
             claude_usage::fetch_claude_usage,
+            commandcode_config::command_code_config,
+            commandcode_config::set_command_code_config,
+            commandcode_config::command_code_models,
             commandcode_usage::fetch_command_code_usage,
             claude_usage::connect_claude_plan_usage,
             agy_usage::fetch_agy_usage,

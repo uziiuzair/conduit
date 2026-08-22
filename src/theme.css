@@ -3009,6 +3009,78 @@ button {
 }
 
 /* ---- OpenCode local-provider panel (Settings -> Local models) ---- */
+/* ---- Settings > Command Code ---- */
+.cc-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.cc-section {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  border-top: 1px solid var(--border);
+  padding-top: 12px;
+}
+.cc-field {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.cc-field > span {
+  font-size: 11px;
+  color: var(--text-mid);
+}
+.cc-select {
+  width: 100%;
+  font-size: 12px;
+  padding: 6px 8px;
+  border-radius: 5px;
+  border: 1px solid var(--border);
+  background: var(--panel-bg);
+  color: var(--text-bright);
+  font-family: var(--mono-font);
+  outline: none;
+}
+.cc-select:focus {
+  border-color: var(--accent);
+}
+.cc-select:disabled {
+  opacity: 0.55;
+}
+.cc-select option,
+.cc-select optgroup {
+  background: var(--panel-bg);
+  color: var(--text-bright);
+}
+.cc-toggle {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  font-size: 11px;
+  color: var(--text-mid);
+  line-height: 1.5;
+}
+.cc-toggle input {
+  margin-top: 2px;
+  flex: 0 0 auto;
+}
+.cc-note {
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--text-mid);
+}
+.cc-note code {
+  font-family: var(--mono-font);
+  font-size: 10px;
+}
+/* Errors and unreachable-CLI notices: same shape as a note, tinted so it reads as a
+   problem without becoming an alarm — none of these states break the panel. */
+.cc-warn {
+  color: var(--text-bright);
+  border-left: 2px solid var(--commandcode);
+  padding-left: 8px;
+}
 .oc-section {
   display: flex;
   flex-direction: column;
