@@ -383,7 +383,8 @@ fn pty_spawn(
     };
 
     // Resume token: the agent's own captured conversation id. agy resumes via
-    // `--conversation=<id>`; Claude ignores it (keys off session_id). None for shell-only
+    // `--conversation=<id>` and Command Code via `--session <id>`; Claude ignores it (it
+    // keys off session_id, which Conduit gets to pin itself). None for shell-only
     // companions and for a session we haven't captured an id for yet.
     let resume_token = (!shell_only)
         .then(|| store.session_agent_conversation_id(&session_id))

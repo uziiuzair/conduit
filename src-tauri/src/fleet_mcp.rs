@@ -1513,9 +1513,9 @@ mod tests {
     }
 
     #[test]
-    fn fleet_capabilities_returns_all_five_tier_labeled_cards() {
+    fn fleet_capabilities_returns_a_tier_labeled_card_per_agent() {
         let cards = crate::agent::capability_cards();
-        assert_eq!(cards.len(), 5);
+        assert_eq!(cards.len(), crate::agent::all_adapters().len());
         assert!(cards.iter().all(|c| c["tier"].is_number()));
     }
 
