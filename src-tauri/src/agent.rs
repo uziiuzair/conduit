@@ -77,6 +77,22 @@ pub fn claude_profile_env(config_dir: &str) -> Vec<(String, String)> {
     }
 }
 
+/// The home-relative directory whose presence means "this agent is set up for the ambient
+/// account", or None for an agent with no account concept.
+///
+/// Only used to decide whether to offer a "Default" usage row when nothing is registered.
+/// Antigravity answers `.claude` rather than `.gemini`: a Conduit agy ACCOUNT is a
+/// `.claude`-style profile root (see `claude_profile_env`), and agy's own state lives at
+/// `.gemini/antigravity-cli` under that same root -- so `.claude` is what marks the root,
+/// and changing it here would change which accounts agy offers, not just cosmetics.
+pub fn default_profile_dir(agent: AgentId) -> Option<&'static str> {
+    match agent {
+        AgentId::Claude | AgentId::Antigravity => Some(".claude"),
+        AgentId::CommandCode => Some(".commandcode"),
+        AgentId::Codex | AgentId::Gemini | AgentId::OpenCode => None,
+    }
+}
+
 /// Knows how to launch one agent CLI inside Conduit's `sh -c` cold-spawn script.
 pub trait ProviderAdapter {
     fn id(&self) -> AgentId;

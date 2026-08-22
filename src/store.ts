@@ -347,6 +347,27 @@ export interface ClaudeAccountUsage {
   usage: ClaudeUsage;
 }
 
+// ---- Command Code usage — mirrors Rust commandcode_usage.rs (camelCase) ----
+
+/** Command Code's two rolling windows, read from its own `/alpha/usage/summary`.
+ *  Reuses `PlanWindow` because the shape is identical, which is what lets the meter
+ *  component render Claude and Command Code without knowing which it is looking at. */
+export interface CommandCodeUsage {
+  windows: PlanWindow[] | null;
+  /** "disconnected" = not signed in (run `cmd login`); "unavailable" = signed in but the
+   *  call failed or answered a shape we do not know. Different states because different
+   *  things fix them. */
+  source: "live" | "unavailable" | "disconnected";
+  /** Whether this account is currently capped. `false` is the normal state — extra
+   *  pay-as-you-go credits bypass the windows entirely. */
+  limited: boolean;
+}
+export interface CommandCodeAccountUsage {
+  accountId: string | null;
+  label: string;
+  usage: CommandCodeUsage;
+}
+
 // ---- Antigravity (agy) usage — mirror Rust agy_usage.rs (camelCase) ----
 export interface AgyBucket {
   bucketId: string;
@@ -891,6 +912,9 @@ interface AppState {
   claudeStatus: ClaudeStatus | null;
   /** Claude usage per account (env default + every registered Claude account). */
   claudeUsage: ClaudeAccountUsage[];
+  /** Per-account Command Code usage. Empty when Command Code is not set up at all —
+   *  the usage bar then simply has no Command Code rows, rather than showing zeros. */
+  commandCodeUsage: CommandCodeAccountUsage[];
   /** Per-account "plan usage connected" flags, keyed by accountKey. */
   planConnected: Record<string, boolean>;
   /** agy usage per account, keyed by accountKey (accountId ?? "default"). */
@@ -1205,6 +1229,7 @@ interface AppState {
 
   refreshClaudeStatus: () => Promise<void>;
   refreshClaudeUsage: () => Promise<void>;
+  refreshCommandCodeUsage: () => Promise<void>;
   /** Connect plan usage for one account (null = env default). */
   connectPlanUsage: (accountId: string | null) => Promise<boolean>;
   /** One click: enable agy push-tracking + connect plan usage for every Claude account. */
@@ -1290,6 +1315,7 @@ export const useStore = create<AppState>((set, get) => {
     pendingReveal: null,
     claudeStatus: null,
     claudeUsage: [],
+    commandCodeUsage: [],
     planConnected: readPlanConnected(),
     updateInfo: null,
     updatePhase: "idle",
@@ -2559,6 +2585,13 @@ export const useStore = create<AppState>((set, get) => {
       try {
         const u = await invoke<ClaudeAccountUsage[]>("fetch_claude_usage");
         set({ claudeUsage: u });
+      } catch { /* fail-open: keep last-known */ }
+    },
+
+    refreshCommandCodeUsage: async () => {
+      try {
+        const u = await invoke<CommandCodeAccountUsage[]>("fetch_command_code_usage");
+        set({ commandCodeUsage: u });
       } catch { /* fail-open: keep last-known */ }
     },
 

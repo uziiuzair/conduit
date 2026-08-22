@@ -13,6 +13,7 @@ export function useClaudeAmbient(): void {
   const refreshStatus = useStore((s) => s.refreshClaudeStatus);
   const refreshUsage = useStore((s) => s.refreshClaudeUsage);
   const refreshAgy = useStore((s) => s.refreshAgyUsage);
+  const refreshCommandCode = useStore((s) => s.refreshCommandCodeUsage);
   const connectPlan = useStore((s) => s.connectPlanUsage);
   const planConnected = useStore((s) => s.planConnected);
 
@@ -25,6 +26,9 @@ export function useClaudeAmbient(): void {
       // agy usage is mostly pushed via the hook event, but re-pull the snapshot map too so a
       // refresh (e.g. after enabling tracking) shows without waiting for the next agy tick.
       void refreshAgy();
+      // Command Code reads its own API with a key already on disk, so unlike Claude there
+      // is no connect step to gate this on -- it either answers or reports why it cannot.
+      void refreshCommandCode();
     };
 
     const start = () => {

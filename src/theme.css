@@ -2535,6 +2535,9 @@ button {
 
 /* ---- Antigravity (agy) usage panel — violet, to distinguish it from Claude ---- */
 :root { --agy: #a78bfa; }
+/* Command Code's meter tint. Matches the amber monogram in `agents.ts` so the glyph and
+   the bar in the same row read as one agent. */
+:root { --commandcode: #e0b341; }
 .agy-usage-panel {
   padding: 8px 12px 10px;
   border-top: 1px solid color-mix(in srgb, var(--agy) 22%, transparent);
@@ -2657,6 +2660,9 @@ button {
 }
 .usage-row.antigravity .usage-meter-fill {
   --meter-base: var(--agy);
+}
+.usage-row.commandcode .usage-meter-fill {
+  --meter-base: var(--commandcode);
 }
 /* Scaled, not width-sized: the fill animates on the compositor instead of relaying out the
    row on every tick. `width: 100%` plus a left origin means scaleX(f) IS the fraction. */

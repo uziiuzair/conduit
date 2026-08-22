@@ -7,6 +7,7 @@ import {
   accountKey,
   type AgyUsage,
   type ClaudeAccountUsage,
+  type CommandCodeAccountUsage,
   type UsagePrefs,
 } from "../store";
 import { AgentGlyph } from "./AgentGlyph";
@@ -110,6 +111,39 @@ function claudeRow(entry: ClaudeAccountUsage): URow {
     planSource: entry.usage.planSource,
     localTotal: entry.usage.local.totalTokens,
     minRemaining: summaryRemaining(windows),
+  };
+}
+
+function commandCodeRow(entry: CommandCodeAccountUsage): URow {
+  const { windows: raw, source, limited } = entry.usage;
+  const windows: UWindow[] = (raw ?? []).map((w, i) => ({
+    key: `${w.label}-${i}`,
+    label: w.label,
+    // Command Code labels its windows "5-hour window" / "Weekly", so the Claude
+    // classifier reads them correctly and the prefs filter works without a third variant.
+    kind: claudeKind(w.label),
+    // One pool: both windows gate the same subscription, so the least-remaining of the
+    // two is the honest summary number.
+    group: "plan",
+    mode: "remaining",
+    value: Math.max(0, Math.min(1, 1 - w.pctUsed)),
+    resetsAt: w.resetsAt,
+    // `limited` means the account is capped RIGHT NOW. Marking the windows disabled
+    // would gray them out and drop them from the summary metric -- the opposite of what
+    // being capped should communicate -- so it is deliberately not mapped to `disabled`.
+    disabled: false,
+  }));
+  return {
+    agent: "commandcode",
+    key: accountKey(entry.accountId),
+    accountId: entry.accountId,
+    label: entry.label,
+    windows,
+    // No Connect button: unlike Claude there is no Keychain read to authorize, so a
+    // missing key means "not signed in", which a button here could not fix.
+    connectable: false,
+    planSource: source,
+    minRemaining: limited ? 0 : summaryRemaining(windows),
   };
 }
 
@@ -264,6 +298,7 @@ function summaryDotClass(row: URow, threshold: number): string {
 export function UsagePanel() {
   const claudeUsage = useStore((s) => s.claudeUsage);
   const agyMap = useStore((s) => s.agyUsageByAccount);
+  const commandCodeUsage = useStore((s) => s.commandCodeUsage);
   const prefs = useStore((s) => s.usagePrefs);
   const setShowSettings = useStore((s) => s.setShowSettings);
   const setSettingsTab = useStore((s) => s.setSettingsTab);
@@ -288,7 +323,13 @@ export function UsagePanel() {
   const threshold = Math.max(0, Math.min(1, prefs.lowThresholdPct / 100));
 
   // Build all rows, then sort.
-  let rows: URow[] = [...claudeUsage.map(claudeRow), ...Object.values(agyMap).map(agyRow)];
+  let rows: URow[] = [
+    ...claudeUsage.map(claudeRow),
+    ...Object.values(agyMap).map(agyRow),
+    // A signed-out account has no windows to draw and nothing actionable in this panel,
+    // so it is left out entirely rather than rendered as an empty row.
+    ...commandCodeUsage.filter((u) => u.usage.windows?.length).map(commandCodeRow),
+  ];
   rows.sort((a, b) =>
     prefs.sort === "label"
       ? a.label.localeCompare(b.label)

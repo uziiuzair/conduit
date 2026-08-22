@@ -879,8 +879,12 @@ impl Store {
             })
             .collect();
         if out.is_empty() {
-            let home_exists = dirs::home_dir()
-                .map(|h| h.join(".claude").is_dir())
+            // No account registered for this agent, so fall back to the ambient one -- but
+            // only if it actually exists, and the directory that proves it differs per
+            // agent. This probe used to be a hardcoded `.claude`, which quietly meant a
+            // Command Code user with no `~/.claude` got no default row at all.
+            let home_exists = crate::agent::default_profile_dir(agent)
+                .and_then(|name| dirs::home_dir().map(|h| h.join(name).is_dir()))
                 .unwrap_or(false);
             if home_exists {
                 out.push((None, "Default".to_string(), None));
