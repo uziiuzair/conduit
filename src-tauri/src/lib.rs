@@ -32,6 +32,7 @@ mod menu;
 mod notify;
 mod plugins;
 mod pty;
+mod routing;
 mod scrollback;
 mod search;
 #[cfg_attr(windows, allow(dead_code))]
@@ -204,20 +205,29 @@ fn pty_spawn(
     // `session_account_config_dir`'s session->project lookup.
     let project_board_on = !shell_only && store.board_enabled_for_session(&session_id);
     let gets_fleet_mcp = mission_record.is_some() || opted_into_mailbox || project_board_on;
-    // SPEC-B: model_tier -> concrete model id + effort, Claude only -- the only adapter
-    // with a verified per-invocation flag for either (`claude --help` lists both `--model
-    // <model>` and `--effort <low|medium|high|xhigh|max>`). Other adapters have no
-    // equivalent CLI knob today; model_tier/effort are still recorded on the Session (by
-    // fleet_spawn) so they're visible/queryable, just not acted on here.
-    let claude_model = (!shell_only && agent == crate::agent::AgentId::Claude)
+    // `--model` / `--effort`, for the adapters that verifiably take them (Claude and
+    // Command Code). This used to be spelled `agent == Claude`; asking the ADAPTER means
+    // adding a sixth agent with the same flags is a one-line capability rather than another
+    // condition to remember here. An adapter that does not take them still RECORDS
+    // model_tier/effort on the Session (fleet_spawn sets them), so they stay visible and
+    // queryable -- they are simply not acted on.
+    //
+    // Two sources, in precedence order. A concrete `model` is what a route pins ("sonnet",
+    // "google/gemini-3.7-flash"), and it wins because the user chose it for THIS session.
+    // `model_tier` is the fleet's coarse cheap/standard/hard, resolved per agent.
+    let takes_model_flags = !shell_only && crate::agent::adapter_for(agent).supports_model_flags();
+    let agent_model = takes_model_flags
         .then(|| {
-            this_session
-                .as_ref()
-                .and_then(|s| s.model_tier.as_deref())
-                .and_then(|tier| crate::agent::model_for_tier(agent, tier))
+            let s = this_session.as_ref()?;
+            s.model.clone().or_else(|| {
+                s.model_tier
+                    .as_deref()
+                    .and_then(|tier| crate::agent::model_for_tier(agent, tier))
+                    .map(str::to_string)
+            })
         })
         .flatten();
-    let claude_effort = (!shell_only && agent == crate::agent::AgentId::Claude)
+    let agent_effort = takes_model_flags
         .then(|| this_session.as_ref().and_then(|s| s.effort.as_deref()))
         .flatten();
     let is_conductor = !shell_only
@@ -409,8 +419,8 @@ fn pty_spawn(
         suppress_remote,
         opencode,
         is_conductor,
-        claude_model.map(str::to_string),
-        claude_effort.map(str::to_string),
+        agent_model,
+        agent_effort.map(str::to_string),
         resume_token,
         on_event,
     )
@@ -848,6 +858,9 @@ fn continuity_feed(
 /// deep history lives in continuity itself.
 const CONTINUITY_FEED_LIMIT: usize = 100;
 
+/// `model` is a concrete model id chosen by a route. It is applied HERE rather than in a
+/// second call from the frontend so the session is never briefly persisted without it --
+/// and so nothing can spawn in between reading a model that was not chosen.
 #[tauri::command]
 fn add_session(
     project_id: String,
@@ -855,15 +868,20 @@ fn add_session(
     use_worktree: bool,
     agent: crate::agent::AgentId,
     role: Option<SessionRole>,
+    model: Option<String>,
     store: State<Arc<Store>>,
 ) -> Option<Session> {
-    store.add_session(
+    let session = store.add_session(
         &project_id,
         name,
         use_worktree,
         agent,
         role.unwrap_or_default(),
-    )
+    )?;
+    if model.is_some() {
+        store.set_session_model(&session.id, model.clone());
+    }
+    Some(Session { model, ..session })
 }
 
 #[tauri::command]
@@ -1876,6 +1894,9 @@ pub fn run() {
             reveal_path,
             claude_status::fetch_claude_status,
             claude_usage::fetch_claude_usage,
+            routing::agent_routes,
+            routing::set_agent_route,
+            routing::task_kinds,
             commandcode_config::command_code_config,
             commandcode_config::set_command_code_config,
             commandcode_config::command_code_models,

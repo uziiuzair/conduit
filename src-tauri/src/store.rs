@@ -73,6 +73,12 @@ pub struct Session {
     /// editor; not yet consulted by `can_read` / `can_inject`.
     #[serde(default)]
     pub channels: Vec<String>,
+    /// A CONCRETE model id pinned for this session (`sonnet`, `google/gemini-3.7-flash`),
+    /// as chosen by a route. Takes precedence over `model_tier`, which is the fleet's
+    /// coarse cheap/standard/hard and needs a per-agent lookup to become a model. Only
+    /// acted on for adapters whose `supports_model_flags()` is true.
+    #[serde(default)]
+    pub model: Option<String>,
     /// Preferred model tier: "cheap" | "standard" | "hard" (SPEC-B, §7.5). Mapped to a
     /// concrete per-adapter model id by `agent::model_for_tier`.
     #[serde(default)]
@@ -273,6 +279,12 @@ pub struct Project {
     /// flips this on). `#[serde(default)]` so legacy state (no field) loads as `false`.
     #[serde(default)]
     pub board_enabled: bool,
+    /// This project's routing overrides (task kind -> fallback chain). SPARSE: only the
+    /// kinds actually overridden are stored, so everything else keeps inheriting the global
+    /// scope and the built-in defaults -- including later improvements to them. Empty =
+    /// inherit everything. See routing.rs.
+    #[serde(default)]
+    pub routes: crate::routing::AgentRoutes,
 }
 
 /// A registered agent account: a profile dir that holds its own credentials (a `.claude`
@@ -367,6 +379,9 @@ pub struct PersistState {
     pub opencode: OpenCodeSettings,
     #[serde(default)]
     pub plugins: Vec<crate::plugins::PluginRecord>,
+    /// Global routing overrides, layered over the built-in defaults and under any project's.
+    #[serde(default)]
+    pub routes: crate::routing::AgentRoutes,
 }
 
 pub struct Store {
@@ -378,6 +393,7 @@ pub struct Store {
     trust: Mutex<TrustSettings>,
     opencode: Mutex<OpenCodeSettings>,
     plugins: Mutex<Vec<crate::plugins::PluginRecord>>,
+    routes: Mutex<crate::routing::AgentRoutes>,
     /// The local-endpoint API key, held in memory for the app's lifetime only. Never part
     /// of `PersistState`/`save()`, never logged; injected into an `opencode` child's env.
     opencode_key: Mutex<Option<String>>,
@@ -504,6 +520,7 @@ impl Store {
             trust: Mutex::new(state.trust),
             opencode: Mutex::new(state.opencode),
             plugins: Mutex::new(state.plugins),
+            routes: Mutex::new(state.routes),
             opencode_key: Mutex::new(None),
             save_path,
         }
@@ -531,6 +548,11 @@ impl Store {
             default_account: default_accounts.get(&AgentId::Claude).cloned(),
             default_accounts,
             trust: self.trust.lock().unwrap_or_else(|e| e.into_inner()).clone(),
+            routes: self
+                .routes
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone(),
             opencode: self
                 .opencode
                 .lock()
@@ -600,6 +622,7 @@ impl Store {
             layout: None,
             default_accounts: HashMap::new(),
             board_enabled: false,
+            routes: Default::default(),
         };
         let mut projects = self.projects.lock().unwrap_or_else(|e| e.into_inner());
         projects.push(project.clone());
@@ -705,6 +728,30 @@ impl Store {
         project.sessions.push(session.clone());
         self.save(&projects);
         Some(session)
+    }
+
+    /// Pin a concrete model on a session. Set by the routing picker at creation, before the
+    /// session is ever spawned -- so unlike `model_tier` (which the fleet may set later),
+    /// this is always in place by the time `spawn` reads it.
+    ///
+    /// `None` clears the pin and the session falls back to its tier, then to the agent's own
+    /// configured model.
+    pub fn set_session_model(&self, session_id: &str, model: Option<String>) {
+        {
+            let mut projects = self.projects.lock().unwrap_or_else(|e| e.into_inner());
+            let Some(s) = projects
+                .iter_mut()
+                .flat_map(|p| &mut p.sessions)
+                .find(|s| s.id == session_id)
+            else {
+                return;
+            };
+            if s.model == model {
+                return;
+            }
+            s.model = model;
+        }
+        self.persist();
     }
 
     /// The agent for a session id, searching all projects. Defaults to Claude for an
@@ -1158,6 +1205,72 @@ impl Store {
 
     // ---- Trust boundaries (Feature 4: multi-agent silo / controlled sharing) -----
 
+    /// This scope's routing OVERRIDES, not the effective table -- the settings UI has to
+    /// distinguish "inherited" from "pinned here", and an effective table has already lost
+    /// that difference.
+    pub fn global_routes(&self) -> crate::routing::AgentRoutes {
+        self.routes
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+
+    pub fn project_routes(&self, project_id: &str) -> crate::routing::AgentRoutes {
+        self.projects
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .find(|p| p.id == project_id)
+            .map(|p| p.routes.clone())
+            .unwrap_or_default()
+    }
+
+    /// Pin or clear one task kind's chain in the global scope. `None` CLEARS the override,
+    /// which is how a scope goes back to inheriting -- distinct from pinning an empty chain,
+    /// which would mean "this kind routes nowhere".
+    pub fn set_global_route(
+        &self,
+        task: crate::routing::TaskKind,
+        chain: Option<Vec<crate::routing::RouteTarget>>,
+    ) {
+        {
+            let mut r = self.routes.lock().unwrap_or_else(|e| e.into_inner());
+            match chain {
+                Some(c) => {
+                    r.by_task.insert(task, c);
+                }
+                None => {
+                    r.by_task.remove(&task);
+                }
+            }
+        }
+        self.persist();
+    }
+
+    /// Pin or clear one task kind's chain for a project. `None` clears, as above.
+    pub fn set_project_route(
+        &self,
+        project_id: &str,
+        task: crate::routing::TaskKind,
+        chain: Option<Vec<crate::routing::RouteTarget>>,
+    ) {
+        {
+            let mut projects = self.projects.lock().unwrap_or_else(|e| e.into_inner());
+            let Some(p) = projects.iter_mut().find(|p| p.id == project_id) else {
+                return;
+            };
+            match chain {
+                Some(c) => {
+                    p.routes.by_task.insert(task, c);
+                }
+                None => {
+                    p.routes.by_task.remove(&task);
+                }
+            }
+        }
+        self.persist();
+    }
+
     pub fn trust_settings(&self) -> TrustSettings {
         self.trust.lock().unwrap_or_else(|e| e.into_inner()).clone()
     }
@@ -1381,6 +1494,7 @@ mod tests {
                 trust: Mutex::new(TrustSettings::default()),
                 opencode: Mutex::new(OpenCodeSettings::default()),
                 plugins: Mutex::new(Vec::new()),
+                routes: Mutex::new(Default::default()),
                 opencode_key: Mutex::new(None),
                 save_path: dir.join("state.json"),
             }

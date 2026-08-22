@@ -102,6 +102,17 @@ pub trait ProviderAdapter {
     fn supports_worktree(&self) -> bool {
         false
     }
+    /// Whether this CLI takes `--model <id>` and `--effort <level>` per invocation, so a
+    /// route (or a fleet tier) can pin them at spawn.
+    ///
+    /// Default false, and the bar for flipping it is a VERIFIED flag in that CLI's own
+    /// `--help`, not a plausible guess: a wrong flag here does not degrade, it makes every
+    /// session for that agent fail to launch. Claude and Command Code both list the pair;
+    /// Codex and Gemini have a `--model` but no verified `--effort`, so they stay false
+    /// until someone checks rather than shipping half a pair.
+    fn supports_model_flags(&self) -> bool {
+        false
+    }
     /// Extra env vars to set on the child process for this agent.
     fn env_overrides(&self) -> Vec<(&'static str, &'static str)> {
         Vec::new()
@@ -174,6 +185,9 @@ impl ProviderAdapter for ClaudeAdapter {
         Some("npm install -g @anthropic-ai/claude-code".into())
     }
     fn supports_worktree(&self) -> bool {
+        true
+    }
+    fn supports_model_flags(&self) -> bool {
         true
     }
     fn env_overrides(&self) -> Vec<(&'static str, &'static str)> {
@@ -656,6 +670,10 @@ impl ProviderAdapter for CommandCodeAdapter {
     // isolation stays off until it is.
     fn supports_worktree(&self) -> bool {
         false
+    }
+    // `cmdc --help` lists `-m, --model <model>` and `--effort <level>`.
+    fn supports_model_flags(&self) -> bool {
+        true
     }
     fn account_env(&self, config_dir: &str) -> Vec<(String, String)> {
         command_code_profile_env(config_dir)
