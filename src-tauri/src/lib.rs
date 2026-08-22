@@ -1894,6 +1894,7 @@ pub fn run() {
             reveal_path,
             claude_status::fetch_claude_status,
             claude_usage::fetch_claude_usage,
+            transcript::session_transcript,
             routing::agent_routes,
             routing::set_agent_route,
             routing::task_kinds,

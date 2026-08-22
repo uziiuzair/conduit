@@ -6,6 +6,7 @@ import { REAL_ADDONS } from "../terminalRendererAddons";
 import { invoke, Channel } from "@tauri-apps/api/core";
 import { currentTerminalTheme, registerTerminal } from "../themes";
 import { useStore, type SessionRole } from "../store";
+import { SessionChat } from "./SessionChat";
 
 function b64ToBytes(b64: string): Uint8Array {
   const bin = atob(b64);
@@ -71,6 +72,17 @@ export function TerminalView({
   onFocusGroup,
   style,
 }: Props) {
+  // Feature switch AND per-session state: the toggle only exists when the preference is
+  // on, and only covers the sessions the user actually opened it for.
+  const chatOpen = useStore((s) => s.richSessionView && !!s.richViewOpen[sessionId]);
+  const toggleRichView = useStore((s) => s.toggleRichView);
+  /** Read at reveal time by the fit/spawn effect. A REF, not a dep: adding chatOpen to
+   *  that effect's deps would re-run a fit (and its spawn branch) on every toggle, which
+   *  is a lot of machinery to move for a question it only needs to ask once. */
+  const chatOpenRef = useRef(chatOpen);
+  useEffect(() => {
+    chatOpenRef.current = chatOpen;
+  }, [chatOpen]);
   const innerRef = useRef<HTMLDivElement>(null);
   const termRef = useRef<Xterm | null>(null);
   const fitRef = useRef<FitAddon | null>(null);
@@ -417,7 +429,11 @@ export function TerminalView({
       // (focusOnReveal=false on a session switch) so it can't steal focus from Claude.
       // The effect re-subscribes on every `visible` change, so this captures the value
       // at the moment of reveal.
-      if (focusOnReveal) term.focus();
+      //
+      // A session revealed with the rich view open must NOT pull focus either: the
+      // terminal is behind the chat pane, so focusing it would put the caret somewhere
+      // invisible and swallow the next thing typed.
+      if (focusOnReveal && !chatOpenRef.current) term.focus();
       // Late fallback: catch layout/font settling after the first frame.
       window.setTimeout(() => scheduleFit(), 120);
     });
@@ -507,6 +523,16 @@ export function TerminalView({
       onMouseDown={onFocusGroup}
     >
       <div ref={innerRef} className="term-inner" />
+      {/* The rich view COVERS the terminal, it does not replace it. `.term-inner` above
+          stays mounted and attached the whole time this is on screen -- unmounting or
+          reparenting an xterm kills its PTY, which is the one rule this file exists to
+          protect. Closing the pane reveals the terminal exactly as it was, mid-run.
+
+          Companion shells are excluded: they have no transcript, so there would be
+          nothing to render but an empty pane over a working shell. */}
+      {chatOpen && !shellOnly && (
+        <SessionChat sessionId={sessionId} onClose={() => toggleRichView(sessionId)} />
+      )}
     </div>
   );
 }

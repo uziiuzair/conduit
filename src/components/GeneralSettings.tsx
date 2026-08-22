@@ -10,6 +10,8 @@ export function GeneralSettings() {
   const tmuxAvailable = useStore((s) => s.tmuxAvailable);
   const tmuxInstall = useStore((s) => s.tmuxInstall);
   const tmuxSupported = useStore((s) => s.tmuxSupported);
+  const richSessionView = useStore((s) => s.richSessionView);
+  const setRichSessionView = useStore((s) => s.setRichSessionView);
   const probeTmux = useStore((s) => s.probeTmux);
 
   // Probe on first open rather than at app boot: it shells out, and nothing before
@@ -31,6 +33,21 @@ export function GeneralSettings() {
           Restore sessions when opening a project — relaunch and resume every session of a
           project the moment you open it (Claude and agy reopen the conversation where you left
           off), instead of waiting for a click. Off = sessions spawn only when you click their tab.
+        </span>
+      </label>
+
+      <label className="dialog-toggle">
+        <input
+          type="checkbox"
+          checked={richSessionView}
+          onChange={(e) => setRichSessionView(e.target.checked)}
+        />
+        <span>
+          Rich session view — adds a Chat button to each session tab that renders the
+          conversation as messages and tool cards instead of terminal output, with a proper
+          input box. The terminal keeps running underneath the whole time and is one click
+          away; nothing is regenerated or summarized, so it costs no tokens. Claude sessions
+          only, since it reads Claude’s transcript.
         </span>
       </label>
 

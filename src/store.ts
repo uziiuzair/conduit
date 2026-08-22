@@ -334,6 +334,25 @@ export interface LocalUsage {
   sessions: number;
   messages: number;
 }
+/** One parsed transcript item (mirrors `transcript.rs`'s `parse_line` output).
+ *
+ *  A loose union on purpose: the Rust side emits `kind` plus whatever that kind needs, and
+ *  the renderer switches on `kind`. An unknown kind renders as nothing rather than breaking
+ *  the pane, so adding an item type on the Rust side stays additive. */
+export interface TranscriptItem {
+  kind: "bubble" | "event" | "usage" | string;
+  role?: "user" | "assistant";
+  text?: string;
+  event?: string;
+  label?: string;
+  mono?: string | null;
+  model?: string | null;
+  inputTokens?: number;
+  outputTokens?: number;
+  cacheReadTokens?: number;
+  cacheCreationTokens?: number;
+}
+
 /** resetsAt is an RFC3339 timestamp string (the endpoint's format). */
 export interface PlanWindow { label: string; pctUsed: number; resetsAt: string | null; }
 export interface ClaudeUsage {
@@ -576,6 +595,25 @@ function writeCanvases(v: Record<string, CanvasState>): void {
 //
 // Turning it off never kills anything already running; it only stops new spawns from
 // using tmux. Same persisted-pref pattern as everything else here.
+// Rich session view: render the agent's conversation as UI instead of reading it out of the
+// terminal. Off by default -- it is an alternative way to look at a session, not a
+// replacement for the terminal, and defaulting it on would hide the thing people came for.
+const RICH_VIEW_KEY = "conduit.richSessionView";
+function readRichView(): boolean {
+  try {
+    return localStorage.getItem(RICH_VIEW_KEY) === "1";
+  } catch {
+    return false;
+  }
+}
+function writeRichView(v: boolean): void {
+  try {
+    localStorage.setItem(RICH_VIEW_KEY, v ? "1" : "0");
+  } catch {
+    /* quota - non-fatal */
+  }
+}
+
 const PERSIST_SESSIONS_KEY = "conduit.persistSessions";
 function readPersistSessions(): boolean {
   try {
@@ -915,6 +953,18 @@ interface AppState {
   claudeUsage: ClaudeAccountUsage[];
   /** Routing tables for the open project (defaults + global + project overlays), or null
    *  before the first load. See routing.ts / routing.rs. */
+  /** Persisted. Whether the rich session view is offered at all. Per-session visibility is
+   *  `richViewOpen` -- this is the master switch that makes the toggle exist. */
+  richSessionView: boolean;
+  setRichSessionView: (v: boolean) => void;
+  /** Which sessions currently SHOW the rich view. Not persisted: it is a way of looking at
+   *  a session right now, and coming back to a terminal you cannot see would be a bad
+   *  surprise after a restart. */
+  richViewOpen: Record<string, boolean>;
+  toggleRichView: (sessionId: string) => void;
+  /** Parsed transcript items per session, newest last. Absent = never loaded. */
+  transcripts: Record<string, TranscriptItem[]>;
+  loadTranscript: (sessionId: string) => Promise<void>;
   routes: RoutesView | null;
   /** Task kinds and their copy, supplied by Rust so the labels live in one language. */
   taskKinds: TaskKindInfo[];
@@ -1330,6 +1380,9 @@ export const useStore = create<AppState>((set, get) => {
     pendingReveal: null,
     claudeStatus: null,
     claudeUsage: [],
+    richSessionView: readRichView(),
+    richViewOpen: {},
+    transcripts: {},
     routes: null,
     taskKinds: [],
     commandCodeUsage: [],
@@ -2605,6 +2658,25 @@ export const useStore = create<AppState>((set, get) => {
       try {
         const u = await invoke<ClaudeAccountUsage[]>("fetch_claude_usage");
         set({ claudeUsage: u });
+      } catch { /* fail-open: keep last-known */ }
+    },
+
+    setRichSessionView: (v) => {
+      writeRichView(v);
+      // Turning the feature off closes every open pane too, so the terminals are visible
+      // again immediately rather than after a click per session.
+      set(v ? { richSessionView: true } : { richSessionView: false, richViewOpen: {} });
+    },
+
+    toggleRichView: (sessionId) =>
+      set((s) => ({
+        richViewOpen: { ...s.richViewOpen, [sessionId]: !s.richViewOpen[sessionId] },
+      })),
+
+    loadTranscript: async (sessionId) => {
+      try {
+        const items = await invoke<TranscriptItem[]>("session_transcript", { sessionId });
+        set((s) => ({ transcripts: { ...s.transcripts, [sessionId]: items } }));
       } catch { /* fail-open: keep last-known */ }
     },
 
