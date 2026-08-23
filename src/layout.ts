@@ -225,3 +225,83 @@ export function repairLayout(
     : groups[0].id;
   return { groups, activeGroupId, weights: norm };
 }
+
+
+// ---- Dragging a session out of the sidebar and into a pane ----
+
+/**
+ * The drag payload that lets a SIDEBAR row be dropped into the panes.
+ *
+ * Carried as its own MIME type rather than through a module-level variable because the two
+ * ends live in different component trees, and because `dataTransfer.getData` is blocked
+ * during `dragover` — only `types` is readable. Advertising a custom type is therefore the
+ * only way a drop target can know a drag is droppable BEFORE it lands, which is what the
+ * pane overlay needs in order to appear at all.
+ */
+export const SESSION_DRAG_MIME = "application/x-conduit-session";
+
+export interface SessionDragPayload {
+  sessionId: string;
+  /** The session's OWN project, which may not be the project being dropped into. */
+  projectId: string;
+}
+
+/** Structural, so this is testable without a DOM `DataTransfer`. */
+export interface DragLike {
+  types: readonly string[];
+  getData(type: string): string;
+}
+
+/** Is this drag a sidebar session? Answerable during `dragover`, where data is not. */
+export function hasSessionDrag(dt: DragLike | null | undefined): boolean {
+  return !!dt && Array.from(dt.types).includes(SESSION_DRAG_MIME);
+}
+
+/** The payload, on drop. Null for any other drag, and for a malformed one — a drag from
+ *  outside the app can advertise any type it likes. */
+export function readSessionDrag(dt: DragLike | null | undefined): SessionDragPayload | null {
+  if (!hasSessionDrag(dt)) return null;
+  try {
+    const v = JSON.parse(dt!.getData(SESSION_DRAG_MIME));
+    return typeof v?.sessionId === "string" && typeof v?.projectId === "string"
+      ? { sessionId: v.sessionId, projectId: v.projectId }
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Put `tab` into `groupId` at `index`, removing any existing copy first.
+ *
+ * The dedupe is load-bearing, not tidiness: a session is ONE mounted terminal, placed by
+ * the first group whose tabs contain its ref. A ref present twice would draw in one pane
+ * and leave the other permanently blank.
+ */
+export function insertTabAt(
+  layout: ProjectLayout,
+  groupId: string,
+  index: number,
+  tab: WsTab,
+): ProjectLayout {
+  const l = clone(layout);
+  for (const g of l.groups) {
+    const i = g.tabs.findIndex((t) => t.ref === tab.ref);
+    if (i !== -1) {
+      g.tabs.splice(i, 1);
+      if (g.activeRef === tab.ref) g.activeRef = g.tabs[g.tabs.length - 1]?.ref ?? null;
+    }
+  }
+  const g = l.groups.find((x) => x.id === groupId) ?? l.groups[0];
+  if (!g) {
+    const ng: EditorGroup = { id: groupId, tabs: [tab], activeRef: tab.ref };
+    l.groups.push(ng);
+    l.weights.push(1);
+    l.activeGroupId = ng.id;
+    return l;
+  }
+  g.tabs.splice(Math.max(0, Math.min(index, g.tabs.length)), 0, tab);
+  g.activeRef = tab.ref;
+  l.activeGroupId = g.id;
+  return l;
+}

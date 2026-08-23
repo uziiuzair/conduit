@@ -194,6 +194,16 @@ layout's panes.
   EVERY tab is badged, not just the visitors, because badging only the foreign ones makes
   "no badge" mean "the host", which is the knowledge the badge exists to supply. When
   false, the strip renders exactly as it did before.
+- **The sidebar-to-pane drag crosses component trees, so it travels as a MIME type.**
+  `SESSION_DRAG_MIME` + `hasSessionDrag`/`readSessionDrag` (`layout.ts`). `dataTransfer.getData`
+  is blocked during `dragover` and only `types` is readable, so advertising a custom type is
+  the ONLY way a drop target can know a drag is droppable before it lands -- which is what
+  the pane overlay needs in order to render at all. A module-level variable could not do it:
+  the overlay is gated on React state in a different tree. `.group-chrome` sits above
+  `.term-stack`, so the tab strip must accept the drop itself; the pane overlay never sees a
+  pointer over a strip. `insertTabAt` dedupes by ref because a session is ONE mounted
+  terminal placed by the first group holding it -- a duplicate ref leaves the second pane
+  permanently blank.
 - **`projectAccent` is derived from the project id, never stored.** A colour the user did
   not choose must not become state to migrate, and it has to work for every project that
   already exists the moment they update. The sidebar's folder icon uses the same function,
@@ -220,6 +230,21 @@ place that decides how.
 - **`windowLabel(kind, pool?)` names the window, not the vendor.** Each CLI names its own
   windows differently; stacked in one panel those read as different KINDS of limit. Only agy
   keeps a pool prefix, because its pools are genuinely separate quotas.
+- **The PANEL and the ROUTER ask different questions of the same rows.** `summaryRemaining`
+  answers 1 for "nothing readable" so a router never treats an unmeasurable agent as spent;
+  the panel drew that same 1 as a healthy green dot, so a rate-limited poll read as good
+  news. `rowHealth` returns `remaining: null` for unknown, and the dot/sort/low-alert use it.
+  Keep `URow.minRemaining` unfiltered (routing truth) and derive anything the panel SHOWS
+  from `visibleWindows` -- the summary number reporting a window the user has filtered out
+  is the other half of "the views disagree".
+- **The collapsed summary must NAME its window** (`worstWindow`). A bare "79%" over meters
+  reading 18, 3 and 79 reads as a contradiction rather than a worst-case.
+- **`/api/oauth/usage` rate-limits, and Conduit was a big part of why.** It polled per
+  account every 60 s while the real `claude` CLI competed for the same budget; a 429 made
+  `parse_plan` return None and blanked the account. `ClaudeAuth.last_plan` now serves the
+  last good read as `planSource: "stale"` (max 1 h old), and `useClaudeAmbient` splits the
+  fast status tick (60 s) from the quota fetch (5 min, and not re-fired on every alt-tab).
+  Both windows it reports are measured in hours -- 60 s was never resolution, only load.
 - **`usageRows.ts` must stay importable without `store.ts`** -- that is why `accountKey`
   lives here and the store re-exports it. Importing the store under the node-env vitest
   touches `localStorage` at module scope and throws (same reason `startup.ts` exists), and

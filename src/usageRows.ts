@@ -102,6 +102,27 @@ export function meterView(w: UWindow, metric: UsageMetric): MeterView {
  *  -- so one unavailable pool can't paint an otherwise-healthy account red. A genuinely low
  *  window in a live pool still drives the number down. */
 export function summaryRemaining(windows: UWindow[]): number {
+  return healthOf(windows).remaining;
+}
+
+/**
+ * The window `summaryRemaining` is actually reporting.
+ *
+ * Returned so the collapsed summary can NAME the meter it agrees with. One bare number
+ * that silently meant "the worst of three" is most of why the panel looked like it
+ * contradicted itself: the summary said 79% while the meters below it read 18, 3 and 79.
+ * `null` when nothing drives it (no quota windows, or every pool unavailable).
+ */
+export function worstWindow(windows: UWindow[]): UWindow | null {
+  return healthOf(windows).worst;
+}
+
+interface Health {
+  remaining: number;
+  worst: UWindow | null;
+}
+
+function healthOf(windows: UWindow[]): Health {
   const byGroup = new Map<string, UWindow[]>();
   for (const w of windows) {
     if (!w.quota) continue;
@@ -109,16 +130,48 @@ export function summaryRemaining(windows: UWindow[]): number {
     arr.push(w);
     byGroup.set(w.group, arr);
   }
-  if (byGroup.size === 0) return 1;
+  if (byGroup.size === 0) return { remaining: 1, worst: null };
   const remaining = (w: UWindow) => 1 - clamp01(w.used);
-  const groupMins: number[] = [];
+  let best: Health | null = null;
   for (const ws of byGroup.values()) {
     const live = ws.filter((w) => !w.disabled);
     if (live.length === 0) continue; // whole pool disabled
     if (Math.max(...live.map(remaining)) <= 0) continue; // whole pool exhausted/unavailable
-    groupMins.push(Math.min(...live.map(remaining)));
+    let worst = live[0];
+    for (const w of live) if (remaining(w) < remaining(worst)) worst = w;
+    const r = remaining(worst);
+    if (!best || r < best.remaining) best = { remaining: r, worst };
   }
-  return groupMins.length ? Math.min(...groupMins) : 0;
+  return best ?? { remaining: 0, worst: null };
+}
+
+/** The windows a row actually draws, per the user's window filter. The ONE definition:
+ *  the meters, the summary number, the health dot, the sort and the low-alert all read it,
+ *  so hiding a window can no longer leave the summary reporting one the user cannot see. */
+export function visibleWindows(
+  windows: UWindow[],
+  show: Record<WinKind, boolean>,
+): UWindow[] {
+  return windows.filter((w) => show[w.kind]);
+}
+
+/**
+ * What the PANEL should say about a row, as opposed to what the router should think.
+ *
+ * `remaining: null` means UNKNOWN -- no readable quota window, usually because the poll was
+ * rate-limited. It is deliberately not 1: `summaryRemaining` returns 1 for "nothing known"
+ * because a router must not treat an unmeasurable agent as spent, but the panel drawing
+ * that as a healthy green dot told the user an account was fine when nothing had been read.
+ */
+export interface RowHealth {
+  remaining: number | null;
+  worst: UWindow | null;
+}
+
+export function rowHealth(visible: UWindow[]): RowHealth {
+  if (!visible.some((w) => w.quota)) return { remaining: null, worst: null };
+  const h = healthOf(visible);
+  return { remaining: h.remaining, worst: h.worst };
 }
 export interface URow {
   agent: AgentId;
@@ -132,8 +185,12 @@ export interface URow {
   tier?: string | null;
   /** Claude local token total (from stats-cache.json), shown even before plan-connect. */
   localTotal?: number;
-  /** Least remaining across non-context, non-disabled windows (1 = healthy / unknown). */
+  /** Least remaining across non-context, non-disabled windows (1 = healthy / unknown).
+   *  This is the ROUTER's number and is deliberately unfiltered by display preferences --
+   *  the panel uses `rowHealth` over the windows it actually draws. */
   minRemaining: number;
+  /** These numbers are the last good read, not this poll's: the fetch was throttled. */
+  stale?: boolean;
 }
 
 
@@ -188,6 +245,7 @@ export function claudeRow(entry: ClaudeAccountUsage): URow {
     windows,
     connectable: plan == null,
     planSource: entry.usage.planSource,
+    stale: entry.usage.planSource === "stale",
     localTotal: entry.usage.local.totalTokens,
     minRemaining: summaryRemaining(windows),
   };

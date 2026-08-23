@@ -13,7 +13,13 @@ import {
   type EditorGroup,
   type WsTab,
 } from "../store";
-import { isMixedLayout, projectAccent, tabProjectId } from "../layout";
+import {
+  hasSessionDrag,
+  isMixedLayout,
+  projectAccent,
+  readSessionDrag,
+  tabProjectId,
+} from "../layout";
 import { TerminalView } from "./Terminal";
 import { CodeEditorPane } from "./CodeEditorPane";
 import { BoardView } from "./BoardView";
@@ -75,11 +81,16 @@ export function WorkspaceCenter({
   const setGroupWeights = useStore((s) => s.setGroupWeights);
   const moveTab = useStore((s) => s.moveTab);
   const splitTab = useStore((s) => s.splitTab);
+  const dropSessionIntoPane = useStore((s) => s.dropSessionIntoPane);
   const wsRef = useRef<HTMLDivElement>(null);
 
   // drag-to-split / move-between-groups
   const dragData = useRef<TabDrag | null>(null);
   const [dragging, setDragging] = useState(false);
+  // A session dragged in from the SIDEBAR. Tracked separately from `dragging` because it
+  // starts in another component tree and carries no TabDrag — without this the pane
+  // overlay never appeared, so dragging a session out of the sidebar did nothing at all.
+  const [sidebarDragging, setSidebarDragging] = useState(false);
   // directional pane overlay: which group + region the cursor is currently over
   const [dropZone, setDropZone] = useState<{ groupId: string; zone: PaneZone } | null>(null);
 
@@ -90,8 +101,29 @@ export function WorkspaceCenter({
   const onTabDragEnd = () => {
     dragData.current = null;
     setDragging(false);
+    setSidebarDragging(false);
     setDropZone(null);
   };
+  // Any drop target that can take a session: a tab being rearranged, or a sidebar row
+  // arriving. The overlay renders for both.
+  const showDropZones = dragging || sidebarDragging;
+
+  // A drag cancelled with Esc while still over the workspace fires no `dragleave`, and the
+  // overlay sits at z-index 30 across the terminals — a stuck one would swallow every click
+  // and read as a frozen app. `dragend` always fires on the source, so listen globally.
+  useEffect(() => {
+    if (!sidebarDragging) return;
+    const clear = () => {
+      setSidebarDragging(false);
+      setDropZone(null);
+    };
+    window.addEventListener("dragend", clear);
+    window.addEventListener("drop", clear);
+    return () => {
+      window.removeEventListener("dragend", clear);
+      window.removeEventListener("drop", clear);
+    };
+  }, [sidebarDragging]);
 
   const activeProject = projectId ? projects.find((p) => p.id === projectId) ?? null : null;
   const ag = activeGroup(layout);
@@ -246,7 +278,32 @@ export function WorkspaceCenter({
 
   return (
     <div className="center">
-      <div className="workspace" ref={wsRef}>
+      <div
+        className="workspace"
+        ref={wsRef}
+        // Watch for a sidebar session ENTERING the workspace so the pane overlay can show.
+        // `dragenter` alone is not enough: it fires once, and a drag that starts over a
+        // child (a tab strip) would never re-fire it — so dragover keeps the flag set.
+        onDragEnter={(e) => {
+          if (hasSessionDrag(e.dataTransfer)) setSidebarDragging(true);
+        }}
+        onDragOver={(e) => {
+          if (hasSessionDrag(e.dataTransfer)) {
+            e.preventDefault();
+            setSidebarDragging(true);
+          }
+        }}
+        onDragLeave={(e) => {
+          if (!e.currentTarget.contains(e.relatedTarget as Node | null)) {
+            setSidebarDragging(false);
+            setDropZone(null);
+          }
+        }}
+        onDrop={() => {
+          setSidebarDragging(false);
+          setDropZone(null);
+        }}
+      >
         {layout && activeProject && canvasMode && (
           <div className="group-chrome" style={{ left: 0, width: "100%" }}>
             <GroupTabStrip
@@ -381,7 +438,7 @@ export function WorkspaceCenter({
           {/* Directional drop overlay — a separate absolutely-positioned sibling layer that
               only exists mid-drag. It NEVER wraps/reparents the panes above (keep-alive).
               left/right thirds split into a new column; the center moves into the group. */}
-          {dragging &&
+          {showDropZones &&
             layout &&
             projectId &&
             layout.groups.map((g, gi) =>
@@ -398,7 +455,7 @@ export function WorkspaceCenter({
                       dropZone?.groupId === g.id && dropZone.zone === zone ? "active" : ""
                     }`}
                     onDragOver={(e) => {
-                      if (!dragData.current) return;
+                      if (!dragData.current && !hasSessionDrag(e.dataTransfer)) return;
                       e.preventDefault();
                       setDropZone({ groupId: g.id, zone });
                     }}
@@ -409,8 +466,14 @@ export function WorkspaceCenter({
                     }
                     onDrop={(e) => {
                       e.preventDefault();
+                      e.stopPropagation();
+                      // A sidebar session wins: it is the only payload that can carry a
+                      // FOREIGN project, and a tab drag never sets that MIME type.
+                      const ext = readSessionDrag(e.dataTransfer);
                       const d = dragData.current;
-                      if (d) {
+                      if (ext) {
+                        dropSessionIntoPane(projectId, g.id, zone, ext.projectId, ext.sessionId);
+                      } else if (d) {
                         if (zone === "center") {
                           moveTab(projectId, d.fromGroupId, d.tab.ref, g.id, g.tabs.length);
                         } else {
@@ -488,6 +551,7 @@ function GroupTabStrip({
   const pinTab = useStore((s) => s.pinTab);
   const dirty = useStore((s) => s.dirty);
   const moveTab = useStore((s) => s.moveTab);
+  const dropSessionIntoPane = useStore((s) => s.dropSessionIntoPane);
   const sessionDirs = useStore((s) => s.sessionDirs);
   const sessionContext = useStore((s) => s.sessionContext);
   const richSessionView = useStore((s) => s.richSessionView);
@@ -496,10 +560,18 @@ function GroupTabStrip({
 
   // Insertion caret for tab reorder / move-into-strip: index in [0, tabs.length].
   const [caretIndex, setCaretIndex] = useState<number | null>(null);
-  // Drop of the dragged tab into THIS strip at the caret position.
-  const commitDrop = () => {
+  // Drop into THIS strip at the caret position — an existing tab being rearranged, or a
+  // session dragged in from the sidebar. The strip has to take the sidebar drop itself:
+  // `.group-chrome` sits ABOVE `.term-stack`, so the pane overlay never receives a pointer
+  // that is over a tab strip, and the strip is the most natural place to aim.
+  const commitDrop = (dt?: DataTransfer) => {
+    const ext = readSessionDrag(dt);
     const d = dragRef.current;
-    if (d) moveTab(projectId, d.fromGroupId, d.tab.ref, group.id, caretIndex ?? group.tabs.length);
+    if (ext) {
+      dropSessionIntoPane(projectId, group.id, "center", ext.projectId, ext.sessionId);
+    } else if (d) {
+      moveTab(projectId, d.fromGroupId, d.tab.ref, group.id, caretIndex ?? group.tabs.length);
+    }
     setCaretIndex(null);
     onTabDragEnd();
   };
@@ -548,7 +620,7 @@ function GroupTabStrip({
       onMouseDown={() => setActiveGroup(projectId, group.id)}
       onDragOver={(e) => {
         // Allow drops anywhere on the strip (incl. padding); tabs/fill set the caret index.
-        if (dragRef.current) e.preventDefault();
+        if (dragRef.current || hasSessionDrag(e.dataTransfer)) e.preventDefault();
       }}
       onDragLeave={(e) => {
         // Only clear when the pointer truly leaves the strip (not on child→child moves).
@@ -556,7 +628,8 @@ function GroupTabStrip({
       }}
       onDrop={(e) => {
         e.preventDefault();
-        commitDrop();
+        e.stopPropagation();
+        commitDrop(e.dataTransfer);
       }}
     >
       {group.tabs.map((t, i) => (
@@ -580,7 +653,7 @@ function GroupTabStrip({
             }}
             onDragEnd={onTabDragEnd}
             onDragOver={(e) => {
-              if (!dragRef.current) return;
+              if (!dragRef.current && !hasSessionDrag(e.dataTransfer)) return;
               e.preventDefault();
               // Insert before this tab if the cursor is left of its horizontal midpoint.
               const rect = e.currentTarget.getBoundingClientRect();
@@ -628,7 +701,7 @@ function GroupTabStrip({
         className="tab-strip-fill"
         data-tauri-drag-region
         onDragOver={(e) => {
-          if (!dragRef.current) return;
+          if (!dragRef.current && !hasSessionDrag(e.dataTransfer)) return;
           e.preventDefault();
           setCaretIndex(group.tabs.length);
         }}
