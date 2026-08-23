@@ -239,8 +239,13 @@ A sixth agent (`npm i -g command-code`), fronting ~58 models from one subscripti
   problem and is NOT: the payload and the hook URL carry both halves of the mapping in one
   request, so no baseline or filesystem scan is involved. `source != "resume"` is what lets a
   stale id be replaced instead of pinned forever.
-- **Usage:** `commandcode_usage.rs` reads `api.commandcode.ai/alpha/usage/summary` with the
-  key from `~/.commandcode/auth.json`. `/alpha/` is an internal surface and WILL move, so
+- **Usage:** `commandcode_usage.rs` reads `api.commandcode.ai/alpha/billing/credits` with
+  the key from `~/.commandcode/auth.json`. **Not `/alpha/usage/summary`** — that answers
+  200 with a billing-period COST report (`totalCost`/`totalTokens`, no caps), so reading the
+  quota from it misses on every poll and empties the meter. The caps are nested under
+  `windowLimits` (`fiveHour`/`weekly`, each `used`/`cap`/`resetAt`); the parser accepts a
+  bare top-level pair too, so the next move of this `/alpha/` surface degrades rather than
+  blanks. `/alpha/` is an internal surface and WILL move, so
   every field is optional and an unknown shape degrades to `source: "unavailable"`.
 - **Config GUI:** `commandcode_config.rs` + `CommandCodePanel.tsx` patch
   `~/.commandcode/config.json` behind a Rust-side allowlist, preserving unknown keys, backing

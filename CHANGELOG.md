@@ -3,6 +3,14 @@
 All notable changes to Conduit are documented here. This project uses
 [semantic versioning](https://semver.org/).
 
+## 0.26.2 — 2026-08-23
+
+- **Fixed — Command Code usage now actually appears in the usage bar.** The meter read
+  Command Code's quota from an endpoint that reports billing-period *spend* rather than
+  *limits* — it answered normally, just with no caps in it, so every poll parsed to nothing
+  and the account was left out of the panel entirely. It now reads the real limits endpoint
+  and draws the 5-hour and weekly windows like every other agent.
+
 ## 0.26.1 — 2026-08-23
 
 - **Fixed — launch no longer opens whichever project is at the top.** Conduit used to

@@ -94,7 +94,10 @@ fires no lifecycle hooks, which is the ONLY reason that heuristic exists.
 The bundle shows where the TUI actually gets its numbers -- `https://api.commandcode.ai`
 with a bearer token from `~/.commandcode/auth.json`:
 
-- `/alpha/usage/summary` -- the rolling-window meters
+- `/alpha/billing/credits` -- the rolling-window meters, nested under `windowLimits`
+  (CORRECTED after shipping: this was first implemented against `/alpha/usage/summary`,
+  which answers 200 but returns a billing-period cost report with no caps in it. The
+  meter was therefore empty for every account. See CHANGELOG 0.26.2.)
 - `/alpha/billing/credits` -- credit balance
 - `/alpha/billing/subscriptions` -- plan identity
 - `/alpha/whoami` -- account identity

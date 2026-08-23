@@ -4,9 +4,18 @@
 //! `{"authenticated":bool,"version":string}` -- so the numbers come from the same API its
 //! TUI reads:
 //!
-//!   GET https://api.commandcode.ai/alpha/usage/summary
+//!   GET https://api.commandcode.ai/alpha/billing/credits
 //!   Authorization: Bearer <apiKey>
-//!   -> { limited, fiveHour: { used, cap, resetAt }, weekly: { used, cap, resetAt } }
+//!   -> { credits:     { monthlyCredits, purchasedCredits, freeCredits, ... },
+//!        windowLimits: { limited, fiveHour: { used, cap, resetAt },
+//!                                 weekly:   { used, cap, resetAt } } }
+//!
+//! **Not `/alpha/usage/summary`.** That endpoint exists and answers 200, but it is a
+//! billing-PERIOD cost report -- `{ totalCount, totalCost, totalTokens, periodBasis }` --
+//! with no caps in it at all. Reading the quota from there yields a parse miss on every
+//! poll and therefore an empty meter, which is exactly the bug this module shipped with.
+//! The caps live under `windowLimits` at `billing/credits`; `usage/summary` is the right
+//! source for spend, not for headroom.
 //!
 //! The limit model is two ROLLING windows over monthly credits: a window opens on the
 //! first request and closes exactly 5 hours (or 7 days) later, with no calendar boundary.
@@ -33,7 +42,7 @@ use serde::Serialize;
 use crate::claude_usage::PlanWindow;
 
 /// Where the API lives. `alpha` is the vendor's own path segment, not a Conduit choice.
-const USAGE_ENDPOINT: &str = "https://api.commandcode.ai/alpha/usage/summary";
+const USAGE_ENDPOINT: &str = "https://api.commandcode.ai/alpha/billing/credits";
 
 /// One account's Command Code usage.
 #[derive(Serialize, Clone)]
@@ -114,7 +123,12 @@ pub fn parse_api_key(raw: &str) -> Option<String> {
         .map(str::to_string)
 }
 
-/// Parse `/alpha/usage/summary` into ordered windows plus the `limited` flag.
+/// Parse `/alpha/billing/credits` into ordered windows plus the `limited` flag.
+///
+/// The windows are nested under `windowLimits`, but a bare top-level `{ fiveHour, weekly }`
+/// is accepted too. That is not speculative generality: this is an `/alpha/` surface that
+/// has already moved once under Conduit's feet, and accepting both shapes costs one line
+/// while turning the NEXT move into a degraded meter rather than an empty one.
 ///
 /// Defensive on purpose. `used`/`cap` are accepted as any JSON number; a window missing
 /// either is SKIPPED rather than drawn at zero, and a `cap` of zero yields no window
@@ -122,7 +136,11 @@ pub fn parse_api_key(raw: &str) -> Option<String> {
 /// found, which the caller reports as "unavailable".
 pub fn parse_usage_summary(body: &str) -> Option<(Vec<PlanWindow>, bool)> {
     let v: serde_json::Value = serde_json::from_str(body).ok()?;
-    let obj = v.as_object()?;
+    // `windowLimits` when present, else the document itself.
+    let obj = v
+        .get("windowLimits")
+        .and_then(|w| w.as_object())
+        .or_else(|| v.as_object())?;
     let limited = obj
         .get("limited")
         .and_then(|l| l.as_bool())
@@ -234,6 +252,44 @@ mod tests {
         );
         assert_eq!(parse_api_key("not json"), None);
         assert_eq!(parse_api_key("[]"), None);
+    }
+
+    #[test]
+    fn the_real_billing_credits_shape_becomes_two_windows() {
+        // Captured verbatim from a live `GET /alpha/billing/credits` (numbers only --
+        // no key, no user id). This is the shape that actually ships; pinning it here is
+        // what stops the meter silently emptying again if the parser drifts.
+        let body = r#"{
+            "credits": {
+                "belowThreshold": false, "creditThreshold": 0,
+                "monthlyCredits": 79.9020260526, "purchasedCredits": 0, "freeCredits": 0
+            },
+            "windowLimits": {
+                "limited": true, "exceeded": null,
+                "fiveHour": { "used": 4, "cap": 16, "exceeded": false, "resetAt": 1787476441355 },
+                "weekly":   { "used": 10, "cap": 40, "exceeded": false, "resetAt": 1788063241355 }
+            }
+        }"#;
+        let (windows, limited) = parse_usage_summary(body).expect("parses");
+        assert!(limited);
+        assert_eq!(windows.len(), 2);
+        assert_eq!(windows[0].label, "5-hour window");
+        assert!((windows[0].pct_used - 0.25).abs() < f64::EPSILON);
+        assert_eq!(windows[1].label, "Weekly");
+        assert!((windows[1].pct_used - 0.25).abs() < f64::EPSILON);
+        assert_eq!(windows[0].resets_at.as_deref(), Some("1787476441355"));
+    }
+
+    #[test]
+    fn the_cost_report_endpoint_is_not_mistaken_for_a_quota() {
+        // `/alpha/usage/summary` answers 200 with this and no caps anywhere. Parsing it as
+        // a quota is the original bug: it must read as "unavailable", never as an account
+        // sitting at 0% with nothing used.
+        let body = r#"{"totalCount":0,"totalCost":0,"averageCost":0,"successRate":0,
+            "completedCount":0,"failedCount":0,"totalTokensIn":0,"totalTokensOut":0,
+            "totalTokens":0,"totalCredits":0,"totalFreeCredits":0,"totalMonthlyCredits":0,
+            "totalPurchasedCredits":0,"periodBasis":"billing-period"}"#;
+        assert!(parse_usage_summary(body).is_none());
     }
 
     #[test]
