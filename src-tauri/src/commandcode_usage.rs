@@ -83,14 +83,17 @@ impl CommandCodeUsage {
 
 /// The `.commandcode` directory for an account, or the ambient one.
 ///
-/// `config_dir` is what the account registry stores, which for Command Code is the
-/// `.commandcode` directory itself -- that is what `command_code_profile_env` redirects
-/// HOME to the parent of. None = the ambient `~/.commandcode`.
+/// Delegates to `agent::command_code_profile_dir` rather than trusting `config_dir`
+/// directly. That distinction is the whole bug this replaces: the account registry stores
+/// ONE `.claude`-rooted directory per account and tags it with several agents, so a
+/// Command Code-tagged account hands this a path like `<root>/.claude`. Treating that as a
+/// profile made the meter look for `auth.json` in a directory Command Code never writes,
+/// report "disconnected", and drop the account from the panel -- while its sessions were
+/// running perfectly well on the ambient login, because the spawn path declines to redirect
+/// for exactly the same input. A meter that describes a different account than the one the
+/// session uses is worse than no meter.
 fn auth_dir(config_dir: Option<&str>) -> Option<PathBuf> {
-    match config_dir {
-        Some(dir) if !dir.is_empty() => Some(PathBuf::from(dir)),
-        _ => dirs::home_dir().map(|h| h.join(".commandcode")),
-    }
+    crate::agent::command_code_profile_dir(config_dir)
 }
 
 /// Read this account's api key: the env override first, then `auth.json`.
@@ -342,11 +345,30 @@ mod tests {
 
     #[test]
     fn auth_dir_prefers_the_account_over_the_ambient_home() {
+        let base = std::env::temp_dir().join("conduit_cc_auth_dir");
+        let profile = base.join(".commandcode");
+        std::fs::create_dir_all(&profile).unwrap();
         assert_eq!(
-            auth_dir(Some("/profiles/work/.commandcode")),
-            Some(PathBuf::from("/profiles/work/.commandcode"))
+            auth_dir(Some(profile.to_str().unwrap())),
+            Some(profile.clone())
         );
+
         // An empty string is "no account", not a path to the filesystem root.
         assert_eq!(auth_dir(Some("")), auth_dir(None));
+
+        // THE REGRESSION. The account registry stores one `.claude`-rooted directory per
+        // account and tags it with several agents, so this is what a Command Code-tagged
+        // account actually hands in. Command Code has no config-dir override, so its
+        // sessions run on the AMBIENT login for this input -- and the meter must read the
+        // same place, or it reports an account nobody is using as signed out.
+        let claude_rooted = base.join(".claude");
+        std::fs::create_dir_all(&claude_rooted).unwrap();
+        assert_eq!(
+            auth_dir(Some(claude_rooted.to_str().unwrap())),
+            auth_dir(None),
+            "a .claude-rooted account must resolve to the ambient profile, not to itself"
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
     }
 }

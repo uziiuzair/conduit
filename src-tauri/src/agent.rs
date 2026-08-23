@@ -637,20 +637,44 @@ pub const COMMAND_CODE_BIN: &str = if cfg!(windows) { "cmdc" } else { "cmd" };
 /// cannot be honoured, and silently inheriting the ambient account would be worse than
 /// declining. An empty vec means "no redirect" and the session runs as the default account.
 pub fn command_code_profile_env(config_dir: &str) -> Vec<(String, String)> {
-    let p = Path::new(config_dir);
-    if !p.exists() {
-        return Vec::new();
-    }
-    let root = (p.file_name().and_then(|f| f.to_str()) == Some(".commandcode"))
-        .then(|| p.parent().and_then(|r| r.to_str()))
-        .flatten();
-    match root {
+    match command_code_account_dir(config_dir).and_then(|d| d.parent().map(Path::to_path_buf)) {
         Some(root) => vec![
-            ("USERPROFILE".to_string(), root.to_string()),
-            ("HOME".to_string(), root.to_string()),
+            ("USERPROFILE".to_string(), root.display().to_string()),
+            ("HOME".to_string(), root.display().to_string()),
         ],
+        // No redirect: the session runs as the ambient account. `command_code_profile_dir`
+        // says the same thing, which is the point -- see its doc comment.
         None => Vec::new(),
     }
+}
+
+/// The `.commandcode` profile an account NAMES, or None when it names something else.
+///
+/// The account registry stores one directory per account and tags it with several agents,
+/// and that directory is `.claude`-rooted (see `default_profile_dir`). Command Code has no
+/// config-dir override variable, so a `.claude` path cannot be honoured for it -- only a
+/// literal `.commandcode` profile can.
+fn command_code_account_dir(config_dir: &str) -> Option<std::path::PathBuf> {
+    let p = Path::new(config_dir);
+    (p.exists() && p.file_name().and_then(|f| f.to_str()) == Some(".commandcode"))
+        .then(|| p.to_path_buf())
+}
+
+/// The `.commandcode` directory a session using this account will ACTUALLY read.
+///
+/// **This exists so the spawn path and the usage meter cannot disagree**, which is the bug
+/// it replaces: an account tagged for Command Code but pointing at a `.claude` directory got
+/// no HOME redirect (so its sessions ran, correctly, as the ambient account) while the meter
+/// looked for `auth.json` INSIDE that `.claude` directory, found none, and reported the
+/// account as signed out forever. Both now derive from `command_code_account_dir`, so
+/// "which profile" has exactly one answer.
+///
+/// None only when the home directory itself cannot be resolved.
+pub fn command_code_profile_dir(config_dir: Option<&str>) -> Option<std::path::PathBuf> {
+    config_dir
+        .filter(|d| !d.is_empty())
+        .and_then(command_code_account_dir)
+        .or_else(|| dirs::home_dir().map(|h| h.join(".commandcode")))
 }
 
 pub struct CommandCodeAdapter;
@@ -1174,6 +1198,53 @@ mod tests {
         // Other adapters have no account concept -> no env.
         assert!(CodexAdapter.account_env(&dir).is_empty());
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn the_spawn_redirect_and_the_usage_meter_resolve_the_same_profile() {
+        let base = std::env::temp_dir().join("conduit_cc_profile_agreement");
+        let profile = base.join(".commandcode");
+        std::fs::create_dir_all(&profile).unwrap();
+
+        // An account naming its own `.commandcode`: the session's HOME is redirected to the
+        // parent, so the profile it reads is that directory -- and the meter agrees.
+        let env = command_code_profile_env(profile.to_str().unwrap());
+        assert_eq!(
+            env.len(),
+            2,
+            "a real profile redirects HOME and USERPROFILE"
+        );
+        assert!(env.iter().all(|(_, v)| v == &base.display().to_string()));
+        assert_eq!(
+            command_code_profile_dir(Some(profile.to_str().unwrap())),
+            Some(profile.clone())
+        );
+
+        // A `.claude`-rooted account -- what the registry ACTUALLY stores. No redirect is
+        // possible (Command Code has no config-dir override), so the session runs ambient
+        // and the meter must resolve ambient too. These two lines disagreeing is precisely
+        // the bug that left the usage panel empty.
+        let claude_rooted = base.join(".claude");
+        std::fs::create_dir_all(&claude_rooted).unwrap();
+        let cr = claude_rooted.to_str().unwrap();
+        assert!(
+            command_code_profile_env(cr).is_empty(),
+            "a .claude directory cannot be honoured as a Command Code profile"
+        );
+        assert_eq!(
+            command_code_profile_dir(Some(cr)),
+            command_code_profile_dir(None)
+        );
+
+        // A path that does not exist is not a profile either.
+        let ghost = base.join("nope").join(".commandcode");
+        assert!(command_code_profile_env(ghost.to_str().unwrap()).is_empty());
+        assert_eq!(
+            command_code_profile_dir(Some(ghost.to_str().unwrap())),
+            command_code_profile_dir(None)
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]

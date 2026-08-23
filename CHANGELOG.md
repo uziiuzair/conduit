@@ -3,6 +3,16 @@
 All notable changes to Conduit are documented here. This project uses
 [semantic versioning](https://semver.org/).
 
+## 0.26.3 — 2026-08-23
+
+- **Fixed — Command Code usage appears for accounts, not just the default profile.** An
+  account tagged for Command Code stores one Claude-shaped config directory, and the usage
+  meter was looking for Command Code's credentials inside it. It never found them, so the
+  account was reported as signed out and left out of the panel entirely — while its
+  sessions ran perfectly well on the signed-in profile. The meter and the session now
+  resolve the profile through one shared function, so they cannot describe different
+  accounts.
+
 ## 0.26.2 — 2026-08-23
 
 - **Fixed — Command Code usage now actually appears in the usage bar.** The meter read

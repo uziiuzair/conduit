@@ -247,6 +247,15 @@ A sixth agent (`npm i -g command-code`), fronting ~58 models from one subscripti
   bare top-level pair too, so the next move of this `/alpha/` surface degrades rather than
   blanks. `/alpha/` is an internal surface and WILL move, so
   every field is optional and an unknown shape degrades to `source: "unavailable"`.
+- **Accounts:** an account's `config_dir` is `.claude`-rooted (see `default_profile_dir`),
+  so a Command Code-tagged account hands the adapter a path Command Code cannot use — it
+  has no config-dir override variable. `agent::command_code_profile_dir` is the ONE place
+  that decides which profile such an account resolves to (its own `.commandcode`, else the
+  ambient one), and both `command_code_profile_env` (spawn) and `commandcode_usage::auth_dir`
+  (the meter) derive from it. They disagreed once: the session ran ambient while the meter
+  looked inside `.claude`, found no `auth.json`, and dropped the account from the usage bar.
+  Consequence worth knowing: tagging an account for Command Code does NOT yet give it a
+  separate login — it inherits the ambient one.
 - **Config GUI:** `commandcode_config.rs` + `CommandCodePanel.tsx` patch
   `~/.commandcode/config.json` behind a Rust-side allowlist, preserving unknown keys, backing
   up once, merging `featureModels` key-by-key, and refusing a file that does not parse.
