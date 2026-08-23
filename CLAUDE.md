@@ -50,6 +50,12 @@ This writes to `…/ConduitTauri-dev/state.json`, so dev and the installed app c
   typecheck + `pnpm test` + `pnpm build` on one job, `cargo fmt --check` + `cargo clippy
   -D warnings` + `cargo test` on another. Clippy is strict; fix the lint rather than
   weakening the gate.
+- **The Rust job is a matrix: macOS AND Windows.** The two compile different programs
+  (`tmux`/`session_budget` are cfg-gated; spawn, PTY, path and process-kill each have a
+  Windows arm), so a green macOS leg proves nothing about Windows. It was macOS-only for
+  76 commits and the Windows build was broken that whole time. If you add a
+  `#[cfg(windows)]` block, the Windows leg is the only thing that will ever compile or
+  lint it.
 - **Component tests are deliberately absent.** Testing `Terminal.tsx` needs a mounted
   xterm, a PTY, and the Tauri bridge, and a shallow render would assert nothing worth
   maintaining. Verify UI changes with `pnpm exec tsc --noEmit` / `pnpm build` **and by
@@ -213,6 +219,74 @@ for the active project. Conduit never writes that database — continuity owns e
   deliberately separate from `useBoard`'s 1.5 s poll and its `board_enabled` gate.
 - Design: `docs/superpowers/specs/2026-08-14-continuity-panels-design.md`.
 
+## Where Command Code lives
+
+A sixth agent (`npm i -g command-code`), fronting ~58 models from one subscription.
+
+- **The binary is `cmd`, which is unusable on Windows.** Use `agent::COMMAND_CODE_BIN`,
+  never a literal: it is `cmdc` on Windows and `cmd` elsewhere, matching Command Code's own
+  `getBinaryCommand()`. A bare `cmd` on Windows resolves to System32's shell, and Conduit
+  spawns sessions as `cmd.exe /K "cd /d <dir> && <agent>"` -- so it would open a nested
+  command interpreter instead of the agent.
+- **Hooks:** `hooks::command_code_profile()` -> `.commandcode/settings.local.json`. Command
+  Code implements Claude's hook SCHEMA, so the generic installer carries over, but it fires
+  only FOUR events (`PreToolUse`/`PostToolUse`/`Stop`/`SessionStart`). Do not add Claude's
+  others -- they would be dead keys in a file Conduit does not own. Consequence: no `prompt`
+  verb, so a session reads `running` from its first tool call, not the keystroke.
+- **Resume:** there is no `--session-id` to pin Conduit's id, so Command Code's own
+  `session_id` is captured from the `SessionStart` hook body into
+  `Session.agent_conversation_id` and replayed as `--session <id>`. This looks like agy's
+  problem and is NOT: the payload and the hook URL carry both halves of the mapping in one
+  request, so no baseline or filesystem scan is involved. `source != "resume"` is what lets a
+  stale id be replaced instead of pinned forever.
+- **Usage:** `commandcode_usage.rs` reads `api.commandcode.ai/alpha/usage/summary` with the
+  key from `~/.commandcode/auth.json`. `/alpha/` is an internal surface and WILL move, so
+  every field is optional and an unknown shape degrades to `source: "unavailable"`.
+- **Config GUI:** `commandcode_config.rs` + `CommandCodePanel.tsx` patch
+  `~/.commandcode/config.json` behind a Rust-side allowlist, preserving unknown keys, backing
+  up once, merging `featureModels` key-by-key, and refusing a file that does not parse.
+  It never writes `settings.json` (team-committed, and its `hooks` key belongs to the hook
+  installer).
+- Design: `docs/superpowers/specs/2026-08-23-command-code-agent-design.md`.
+
+## Where agent routing lives
+
+Task-shaped preferences: a task kind (planning / implementation / review / research /
+bulk) maps to an ORDERED chain of targets (agent + optional model). The order IS the
+fallback, so one list covers preference, a missing CLI, and a spent quota.
+
+**The work is split across two languages and must not become a fork.** Rust
+(`routing.rs`) owns WHAT the preferences are -- built-in defaults, overlaid by global,
+overlaid by project, all sparse so an override of one kind keeps inheriting the rest.
+TypeScript (`src/routing.ts`, `pickTarget`) owns WHICH target is usable right now, because
+that needs the live usage snapshot already in the store. Neither re-implements the other.
+
+- **Defaults derive from `agent::capability_card`**, so an opinion about an agent lives in
+  one place. A default chain must reach a SECOND AGENT, not just a second model -- one
+  agent's windows all close together, so a Claude-only chain is not a fallback. A test
+  enforces it.
+- **Unknown quota is not exhausted quota.** Agents with no usage API carry
+  `remaining: null` and stay routable; treating null as 0 would silently make "no meter"
+  mean "never route here".
+- `usageRows.ts` holds the shared "how full is this account" arithmetic so the usage bar
+  and the router cannot disagree. `--model`/`--effort` are gated by
+  `ProviderAdapter::supports_model_flags`, not by naming Claude.
+- Design: `docs/superpowers/specs/2026-08-23-agent-routing-preferences-design.md`.
+
+## Where the rich session view lives
+
+An opt-in pane (`SessionChat.tsx`, Settings -> General) that renders a session's
+conversation instead of its terminal output, fed by `transcript::session_transcript` over
+the JSONL Claude already writes. No model generates it and none summarizes it -- it is a
+renderer over a file, and costs nothing.
+
+**It covers the terminal; it never replaces it.** The pane is an absolutely positioned
+sibling inside `.term-host`, so the xterm stays mounted and attached (the keep-alive rule
+above). Two consequences worth keeping: a session revealed with the pane open must not pull
+terminal focus, or the caret lands behind the pane -- and that check reads a REF, since
+adding it to the reveal effect's deps would re-run a fit and its spawn branch on every
+toggle. Claude-only, enforced in `session_transcript` rather than assumed in the view.
+
 ## Where multi-account assignment lives
 
 Accounts are per-agent profile pointers (`Account { agents, configDir }`, `store.rs`), assigned
@@ -223,6 +297,27 @@ agy override it; a future agent implements only that method. UI: `AccountList.ts
 agent tags, per-agent + per-project defaults), the new-session dialog picker, and the
 right-click "Account" submenu in `Sidebar.tsx`. Design:
 `docs/superpowers/specs/2026-07-12-multi-account-orchestration-design.md`.
+
+## Where the launch selection lives
+
+Which project a cold start lands on. `store.load()` used to take `projects[0]`, so the
+TOPMOST project opened (and, under `restoreSessionsOnOpen`, every one of its sessions
+spawned) no matter what the user was last in — and a sidebar drag-reorder silently changed
+which project launched.
+
+- The decision is `initialProjectSelection` in `src/startup.ts`, kept pure because
+  `store.ts` cannot be imported under the node-env vitest (it touches `localStorage` and
+  the Tauri bridge at module scope). `src/startup.test.ts` covers it.
+- **A stale or absent memory resolves to `null`, never to `projects[0]`.** Falling back to
+  the first project is the exact bug; a fallback would reproduce it once on every machine's
+  first launch after the change and then hide it. `null` is also free — no selected project
+  means `Terminal.tsx`'s eager-spawn effect (`projectId !== selectedProjectId`) starts
+  nothing, and `WorkspaceCenter` already renders an empty state for it.
+- **The memory is written by a `useStore.subscribe` at the bottom of `store.ts`, not by
+  each action.** Seven code paths move `selectedProjectId` (select project/session, open to
+  side, add project, add session, reopen closed tab, remove project); a memory six of them
+  forget to update is worse than none.
+- User-facing switch: `openBehavior` (`"last"` default | `"none"`), Settings → General.
 
 ## Where session restore + safe shutdown lives
 

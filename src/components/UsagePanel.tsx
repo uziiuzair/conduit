@@ -4,69 +4,20 @@ import {
   globalSelectedSessionId,
   findSession,
   resolvedAccountKey,
-  accountKey,
-  type AgyUsage,
-  type ClaudeAccountUsage,
   type UsagePrefs,
 } from "../store";
+// The row shapes and the "how full is this account" arithmetic live outside this file so
+// the ROUTER can share them -- see usageRows.ts.
+import {
+  agyRow,
+  claudeRow,
+  commandCodeRow,
+  type URow,
+  type UWindow,
+} from "../usageRows";
 import { AgentGlyph } from "./AgentGlyph";
 import { fmtTokens } from "./ClaudeStatusPill";
 import type { AgentId } from "../agents";
-
-/** A window's kind, used both for the prefs filter and for labeling. */
-type WinKind = "fiveHour" | "weekly" | "weeklyOpus" | "context";
-/** A normalized meter across agents: "remaining" (Claude plan / agy quota) or "used" (context). */
-interface UWindow {
-  key: string;
-  label: string;
-  kind: WinKind;
-  /** Pool this window belongs to (agy has redundant pools: "Gemini Models", "Claude & GPT
-   *  Models"). Used to ignore a whole unavailable pool in the summary metric. */
-  group: string;
-  mode: "remaining" | "used";
-  value: number; // 0..1 (remaining fraction, or used fraction for context)
-  resetsAt: string | null;
-  disabled: boolean;
-}
-
-/** The single "how healthy is this account" number for the summary/sort/low-alert. It's the
- *  minimum remaining across windows, BUT a pool whose windows are all disabled or at 0 is
- *  treated as structurally unavailable (e.g. agy's Claude/GPT pool on a Pro tier) and ignored
- *  -- so one unavailable pool can't paint an otherwise-healthy account red. A genuinely low
- *  window in a live pool still drives the number down. */
-function summaryRemaining(windows: UWindow[]): number {
-  const byGroup = new Map<string, UWindow[]>();
-  for (const w of windows) {
-    if (w.mode !== "remaining") continue;
-    const arr = byGroup.get(w.group) ?? [];
-    arr.push(w);
-    byGroup.set(w.group, arr);
-  }
-  if (byGroup.size === 0) return 1;
-  const groupMins: number[] = [];
-  for (const ws of byGroup.values()) {
-    const live = ws.filter((w) => !w.disabled);
-    if (live.length === 0) continue; // whole pool disabled
-    if (Math.max(...live.map((w) => w.value)) <= 0) continue; // whole pool exhausted/unavailable
-    groupMins.push(Math.min(...live.map((w) => w.value)));
-  }
-  return groupMins.length ? Math.min(...groupMins) : 0;
-}
-interface URow {
-  agent: AgentId;
-  key: string; // account key
-  accountId: string | null;
-  label: string;
-  windows: UWindow[];
-  /** Claude only: present when plan limits couldn't be fetched (offer a Connect button). */
-  connectable: boolean;
-  planSource?: string;
-  tier?: string | null;
-  /** Claude local token total (from stats-cache.json), shown even before plan-connect. */
-  localTotal?: number;
-  /** Least remaining across non-context, non-disabled windows (1 = healthy / unknown). */
-  minRemaining: number;
-}
 
 /** RFC3339 → "3:41pm" (today) / "Mon" (later). Never throws. */
 function shortReset(iso: string | null): string {
@@ -77,85 +28,6 @@ function shortReset(iso: string | null): string {
   return sameDay
     ? d.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })
     : d.toLocaleDateString([], { weekday: "short" });
-}
-
-function claudeKind(label: string): WinKind {
-  if (label.includes("Opus")) return "weeklyOpus";
-  if (label.toLowerCase().includes("week")) return "weekly";
-  return "fiveHour";
-}
-function agyKind(label: string): WinKind {
-  return label.toLowerCase().includes("week") ? "weekly" : "fiveHour";
-}
-
-function claudeRow(entry: ClaudeAccountUsage): URow {
-  const plan = entry.usage.plan;
-  const windows: UWindow[] = (plan ?? []).map((w, i) => ({
-    key: `${w.label}-${i}`,
-    label: w.label,
-    kind: claudeKind(w.label),
-    group: "plan", // Claude's windows are distinct limits, treated as one pool.
-    mode: "remaining",
-    value: Math.max(0, Math.min(1, 1 - w.pctUsed)),
-    resetsAt: w.resetsAt,
-    disabled: false,
-  }));
-  return {
-    agent: "claude",
-    key: accountKey(entry.accountId),
-    accountId: entry.accountId,
-    label: entry.label,
-    windows,
-    connectable: plan == null,
-    planSource: entry.usage.planSource,
-    localTotal: entry.usage.local.totalTokens,
-    minRemaining: summaryRemaining(windows),
-  };
-}
-
-function agyRow(u: AgyUsage): URow {
-  const windows: UWindow[] = [];
-  for (const g of u.groups) {
-    const short = g.displayName.startsWith("Gemini")
-      ? "Gemini"
-      : g.displayName.startsWith("Claude")
-        ? "Claude/GPT"
-        : g.displayName;
-    for (const b of g.buckets) {
-      windows.push({
-        key: b.bucketId,
-        label: `${short} ${b.label}`,
-        kind: agyKind(b.label),
-        group: g.displayName,
-        mode: "remaining",
-        value: Math.max(0, Math.min(1, b.remainingFraction)),
-        resetsAt: b.resetsAt,
-        disabled: b.disabled,
-      });
-    }
-  }
-  if (u.context && u.context.contextWindowSize > 0) {
-    windows.push({
-      key: "context",
-      label: "Context",
-      kind: "context",
-      group: "context",
-      mode: "used",
-      value: Math.max(0, Math.min(1, u.context.usedPercentage / 100)),
-      resetsAt: null,
-      disabled: false,
-    });
-  }
-  return {
-    agent: "antigravity",
-    key: accountKey(u.accountId),
-    accountId: u.accountId,
-    label: u.email ? u.email.split("@")[0] : "Antigravity",
-    windows,
-    connectable: false,
-    tier: u.planTier,
-    minRemaining: summaryRemaining(windows),
-  };
 }
 
 function Meter({ w, threshold }: { w: UWindow; threshold: number }) {
@@ -264,6 +136,7 @@ function summaryDotClass(row: URow, threshold: number): string {
 export function UsagePanel() {
   const claudeUsage = useStore((s) => s.claudeUsage);
   const agyMap = useStore((s) => s.agyUsageByAccount);
+  const commandCodeUsage = useStore((s) => s.commandCodeUsage);
   const prefs = useStore((s) => s.usagePrefs);
   const setShowSettings = useStore((s) => s.setShowSettings);
   const setSettingsTab = useStore((s) => s.setSettingsTab);
@@ -288,7 +161,13 @@ export function UsagePanel() {
   const threshold = Math.max(0, Math.min(1, prefs.lowThresholdPct / 100));
 
   // Build all rows, then sort.
-  let rows: URow[] = [...claudeUsage.map(claudeRow), ...Object.values(agyMap).map(agyRow)];
+  let rows: URow[] = [
+    ...claudeUsage.map(claudeRow),
+    ...Object.values(agyMap).map(agyRow),
+    // A signed-out account has no windows to draw and nothing actionable in this panel,
+    // so it is left out entirely rather than rendered as an empty row.
+    ...commandCodeUsage.filter((u) => u.usage.windows?.length).map(commandCodeRow),
+  ];
   rows.sort((a, b) =>
     prefs.sort === "label"
       ? a.label.localeCompare(b.label)

@@ -3,6 +3,73 @@
 All notable changes to Conduit are documented here. This project uses
 [semantic versioning](https://semver.org/).
 
+## 0.26.1 — 2026-08-23
+
+- **Fixed — launch no longer opens whichever project is at the top.** Conduit used to
+  select the first project in the sidebar every time it started, open its tabs and (with
+  restore-on-open) spawn all of its sessions — so reordering the sidebar changed which
+  project launched, and coming back to a specific session meant clicking away from one you
+  never asked for. It now reopens the project you were actually last in.
+- **Added — a launch preference.** Settings → General — *Reopen the last project on
+  launch*, on by default. Turn it off to start with nothing selected and nothing spawned.
+  A stale memory (the project was deleted) also starts empty rather than falling back to
+  someone else's project.
+
+## 0.26.0 — 2026-08-23
+
+- **Added — Read a session as a conversation.** A new Chat button on each session tab
+  swaps the terminal for a rendered view of what the agent is doing: your prompts and its
+  replies as messages, tool calls as one-line rows, and a proper input box instead of a
+  terminal prompt. The terminal keeps running underneath the whole time and is one click
+  away — nothing is paused, restarted, or lost. Turn it on in Settings → General.
+  Claude sessions only for now.
+
+---
+
+## 0.25.0 — 2026-08-23
+
+- **Added — Tell Conduit which agent should do which kind of work.** Settings →
+  Routing lets you say that planning goes to Opus, implementation to Sonnet, checks to
+  Haiku, research to Antigravity, and bulk edits to a local model — globally or for one
+  project. The new-session dialog then asks what the session is for and picks the agent and
+  model for you.
+- **Added — Fall back automatically when an agent runs out.** Each kind of work has an
+  ordered list, so if your first choice isn't installed or its quota is spent, the next one
+  takes the job and the dialog tells you why it switched. The defaults come from what each
+  agent is actually good at, and always fall back to a *different* agent — a second
+  model on the same subscription runs out at the same moment as the first.
+
+---
+
+## 0.24.0 — 2026-08-23
+
+- **Added — Command Code is now a Conduit agent.** Install it in one click from Settings
+  → Agents and run it in sessions like any other agent, with live session status, resume
+  across restarts, MCP server management, and multi-account support.
+- **Added — Command Code usage in the usage bar.** Its five-hour and weekly rolling
+  windows sit alongside your Claude and Antigravity meters, so you can see which
+  subscription has room before you start.
+- **Added — A settings page for Command Code.** Settings → Command Code sets the
+  model, reasoning effort, taste learning, and which cheap model handles its internal
+  housekeeping — without having to open a session to reach `/config`. Your existing
+  config file is preserved and backed up before the first change.
+
+---
+
+## 0.23.0 — 2026-08-23
+
+- **Added — A Windows installer.** Releases now publish a Windows `.msi` alongside the
+  macOS build, and the updater knows about it. The installer is not yet code-signed, so
+  Windows will warn about an unrecognized app on first run.
+- **Fixed — Conduit builds and runs on Windows again.** The Windows build had been
+  broken for 76 commits behind a macOS-only CI gate. Windows is now compiled, linted, and
+  tested on every change, so it cannot break silently again.
+- **Fixed — Honest advice about session persistence on Windows.** Settings used to say
+  sessions would survive a quit once you installed tmux, which cannot be done on Windows.
+  It now says persistence isn't available there, and the nagging banner about it is gone.
+
+---
+
 ## 0.22.2 — 2026-08-18
 
 - **Fixed — Collapsed projects no longer leave a stray line in the sidebar.** Folding a

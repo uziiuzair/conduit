@@ -1,14 +1,18 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { isGitRepo, useStore, type SessionRole } from "../store";
 import { AGENTS, agentMeta, type AgentId } from "../agents";
 import { AgentGlyph } from "./AgentGlyph";
+import { pickTarget, type TaskKind } from "../routing";
+import { agyRow, availabilityFrom, claudeRow, commandCodeRow } from "../usageRows";
 
 export function NewSessionDialog({
+  projectId,
   projectPath,
   hasConductor,
   onCancel,
   onCreate,
 }: {
+  projectId: string;
   projectPath: string;
   hasConductor: boolean;
   onCancel: () => void;
@@ -18,10 +22,24 @@ export function NewSessionDialog({
     agent: AgentId;
     role: SessionRole;
     account?: string | null;
+    model?: string | null;
   }) => void;
 }) {
   const defaultAgent = useStore((s) => s.defaultAgent);
   const accounts = useStore((s) => s.accounts);
+  const routes = useStore((s) => s.routes);
+  const taskKinds = useStore((s) => s.taskKinds);
+  const loadRouting = useStore((s) => s.loadRouting);
+  const claudeUsage = useStore((s) => s.claudeUsage);
+  const agyMap = useStore((s) => s.agyUsageByAccount);
+  const commandCodeUsage = useStore((s) => s.commandCodeUsage);
+  const lowThresholdPct = useStore((s) => s.usagePrefs.lowThresholdPct);
+  /** "" = pick the agent by hand, which is what this dialog did before routing existed. */
+  const [task, setTask] = useState<TaskKind | "">("");
+  /** The model a route pinned, carried separately from `agent` so that overriding the
+   *  agent by hand drops the model too rather than sending it to a CLI that never
+   *  offered it. */
+  const [routedModel, setRoutedModel] = useState<string | null>(null);
   const [name, setName] = useState("");
   const [useWorktree, setUseWorktree] = useState(false);
   const [gitOk, setGitOk] = useState(false);
@@ -52,6 +70,38 @@ export function NewSessionDialog({
   }, [detected, defaultAgent]);
 
   useEffect(() => {
+    void loadRouting(projectId);
+  }, [projectId, loadRouting]);
+
+  // The same account-health numbers the usage bar draws, collapsed per agent — so a route
+  // can never decide an agent is too low while its meter still reads green.
+  const availability = useMemo(
+    () =>
+      availabilityFrom(detected, [
+        ...claudeUsage.map(claudeRow),
+        ...Object.values(agyMap).map(agyRow),
+        ...commandCodeUsage.filter((u) => u.usage.windows?.length).map(commandCodeRow),
+      ]),
+    [detected, claudeUsage, agyMap, commandCodeUsage],
+  );
+
+  const decision = useMemo(
+    () =>
+      task && routes
+        ? pickTarget(routes.effective[task], availability, Math.max(0, Math.min(1, lowThresholdPct / 100)))
+        : null,
+    [task, routes, availability, lowThresholdPct],
+  );
+
+  // Applying the decision is an effect, not render-time state, because the user must stay
+  // able to override the agent afterwards — a render-time override would fight them.
+  useEffect(() => {
+    if (!decision?.target) return;
+    setAgent(decision.target.agent);
+    setRoutedModel(decision.target.model ?? null);
+  }, [decision]);
+
+  useEffect(() => {
     const onKey = (e: KeyboardEvent) => e.key === "Escape" && onCancel();
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
@@ -77,7 +127,16 @@ export function NewSessionDialog({
       return;
     }
     if (!isReady(agent)) return;
-    onCreate({ name: name.trim() || undefined, useWorktree: useWorktree && worktreeAllowed, agent, role: "worker", account: acct });
+    onCreate({
+      name: name.trim() || undefined,
+      useWorktree: useWorktree && worktreeAllowed,
+      agent,
+      role: "worker",
+      account: acct,
+      // Only send a model the route actually picked FOR this agent. Picking a different
+      // agent by hand clears it (below), so a Claude model can never reach Codex.
+      model: routedModel,
+    });
   };
 
   return (
@@ -106,6 +165,38 @@ export function NewSessionDialog({
           <span>Conductor (orchestrates this project)</span>
         </label>
 
+        {taskKinds.length > 0 && !conductor && (
+          <>
+            <div className="dialog-label">What is this session for?</div>
+            <select
+              className="dialog-input"
+              value={task}
+              onChange={(e) => {
+                const next = e.target.value as TaskKind | "";
+                setTask(next);
+                if (!next) setRoutedModel(null);
+              }}
+            >
+              <option value="">Let me choose the agent</option>
+              {taskKinds.map((t) => (
+                <option key={t.id} value={t.id} title={t.hint}>
+                  {t.label}
+                </option>
+              ))}
+            </select>
+            {decision && (
+              // Always shown, never only on a fallback: a router that explains itself only
+              // when it deviates teaches you to distrust it the rest of the time.
+              <div
+                className={`route-note${decision.exhausted ? " warn" : ""}`}
+                role="status"
+              >
+                {decision.reason}
+              </div>
+            )}
+          </>
+        )}
+
         <div className="dialog-label">Agent</div>
         <div className="agent-tiles" role="radiogroup" aria-label="Agent">
           {AGENTS.map((a) => {
@@ -118,7 +209,14 @@ export function NewSessionDialog({
                 aria-label={`${a.label}${ready ? "" : " (not installed)"}`}
                 className={`agent-tile ${agent === a.id ? "sel" : ""} ${ready && !conductor ? "" : "disabled"}`}
                 disabled={!ready || conductor}
-                onClick={() => ready && !conductor && setAgent(a.id)}
+                onClick={() => {
+                  if (!ready || conductor) return;
+                  setAgent(a.id);
+                  // A hand-picked agent overrides the route. Drop the routed model with
+                  // it: it named a model for a DIFFERENT CLI, and passing it on would
+                  // either be rejected or, worse, silently mean something else.
+                  if (a.id !== decision?.target?.agent) setRoutedModel(null);
+                }}
               >
                 <AgentGlyph id={a.id} size={20} />
                 <span className="nm">{a.label}</span>

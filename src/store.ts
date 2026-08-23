@@ -11,6 +11,8 @@ import {
   writeStoredPref,
 } from "./themes";
 import type { TerminalRenderer } from "./terminalRenderer";
+import { initialProjectSelection, type OpenBehavior } from "./startup";
+import type { Chain, RoutesView, TaskKind, TaskKindInfo } from "./routing";
 import { AGENTS, type AgentId, type AgentInfo, DEFAULT_AGENT, type McpServer } from "./agents";
 import { check, type Update } from "@tauri-apps/plugin-updater";
 import { relaunch } from "@tauri-apps/plugin-process";
@@ -333,6 +335,25 @@ export interface LocalUsage {
   sessions: number;
   messages: number;
 }
+/** One parsed transcript item (mirrors `transcript.rs`'s `parse_line` output).
+ *
+ *  A loose union on purpose: the Rust side emits `kind` plus whatever that kind needs, and
+ *  the renderer switches on `kind`. An unknown kind renders as nothing rather than breaking
+ *  the pane, so adding an item type on the Rust side stays additive. */
+export interface TranscriptItem {
+  kind: "bubble" | "event" | "usage" | string;
+  role?: "user" | "assistant";
+  text?: string;
+  event?: string;
+  label?: string;
+  mono?: string | null;
+  model?: string | null;
+  inputTokens?: number;
+  outputTokens?: number;
+  cacheReadTokens?: number;
+  cacheCreationTokens?: number;
+}
+
 /** resetsAt is an RFC3339 timestamp string (the endpoint's format). */
 export interface PlanWindow { label: string; pctUsed: number; resetsAt: string | null; }
 export interface ClaudeUsage {
@@ -345,6 +366,27 @@ export interface ClaudeAccountUsage {
   accountId: string | null;
   label: string;
   usage: ClaudeUsage;
+}
+
+// ---- Command Code usage — mirrors Rust commandcode_usage.rs (camelCase) ----
+
+/** Command Code's two rolling windows, read from its own `/alpha/usage/summary`.
+ *  Reuses `PlanWindow` because the shape is identical, which is what lets the meter
+ *  component render Claude and Command Code without knowing which it is looking at. */
+export interface CommandCodeUsage {
+  windows: PlanWindow[] | null;
+  /** "disconnected" = not signed in (run `cmd login`); "unavailable" = signed in but the
+   *  call failed or answered a shape we do not know. Different states because different
+   *  things fix them. */
+  source: "live" | "unavailable" | "disconnected";
+  /** Whether this account is currently capped. `false` is the normal state — extra
+   *  pay-as-you-go credits bypass the windows entirely. */
+  limited: boolean;
+}
+export interface CommandCodeAccountUsage {
+  accountId: string | null;
+  label: string;
+  usage: CommandCodeUsage;
 }
 
 // ---- Antigravity (agy) usage — mirror Rust agy_usage.rs (camelCase) ----
@@ -499,6 +541,44 @@ function writeRestoreSessionsOnOpen(v: boolean): void {
   }
 }
 
+// Which project (if any) a launch lands on, and the memory that feeds it. The decision
+// itself lives in `./startup` so it can be tested; these only persist its inputs. The
+// last-project memory is written by a subscription at the bottom of this file rather than
+// by each caller, so a new place that changes the selection cannot forget to record it.
+const OPEN_BEHAVIOR_KEY = "conduit.openBehavior";
+const LAST_PROJECT_KEY = "conduit.lastProject";
+function readOpenBehavior(): OpenBehavior {
+  try {
+    return localStorage.getItem(OPEN_BEHAVIOR_KEY) === "none" ? "none" : "last";
+  } catch {
+    return "last";
+  }
+}
+function writeOpenBehavior(v: OpenBehavior): void {
+  try {
+    localStorage.setItem(OPEN_BEHAVIOR_KEY, v);
+  } catch {
+    /* quota — non-fatal */
+  }
+}
+function readLastProject(): string | null {
+  try {
+    return localStorage.getItem(LAST_PROJECT_KEY);
+  } catch {
+    return null;
+  }
+}
+function writeLastProject(id: string | null): void {
+  try {
+    // Closing the last project forgets it, rather than leaving the next launch pointed at
+    // a project the user deliberately closed.
+    if (id) localStorage.setItem(LAST_PROJECT_KEY, id);
+    else localStorage.removeItem(LAST_PROJECT_KEY);
+  } catch {
+    /* quota — non-fatal */
+  }
+}
+
 // Terminal renderer: which xterm rasterizer new panes ask for, and which live panes swap to
 // when it changes. Default WebGL (VS Code's default) — one GPU draw per viewport instead of
 // per-glyph CPU blits. Canvas stays selectable because WebGL costs one live GPU context per
@@ -554,6 +634,25 @@ function writeCanvases(v: Record<string, CanvasState>): void {
 //
 // Turning it off never kills anything already running; it only stops new spawns from
 // using tmux. Same persisted-pref pattern as everything else here.
+// Rich session view: render the agent's conversation as UI instead of reading it out of the
+// terminal. Off by default -- it is an alternative way to look at a session, not a
+// replacement for the terminal, and defaulting it on would hide the thing people came for.
+const RICH_VIEW_KEY = "conduit.richSessionView";
+function readRichView(): boolean {
+  try {
+    return localStorage.getItem(RICH_VIEW_KEY) === "1";
+  } catch {
+    return false;
+  }
+}
+function writeRichView(v: boolean): void {
+  try {
+    localStorage.setItem(RICH_VIEW_KEY, v ? "1" : "0");
+  } catch {
+    /* quota - non-fatal */
+  }
+}
+
 const PERSIST_SESSIONS_KEY = "conduit.persistSessions";
 function readPersistSessions(): boolean {
   try {
@@ -891,6 +990,35 @@ interface AppState {
   claudeStatus: ClaudeStatus | null;
   /** Claude usage per account (env default + every registered Claude account). */
   claudeUsage: ClaudeAccountUsage[];
+  /** Routing tables for the open project (defaults + global + project overlays), or null
+   *  before the first load. See routing.ts / routing.rs. */
+  /** Persisted. Whether the rich session view is offered at all. Per-session visibility is
+   *  `richViewOpen` -- this is the master switch that makes the toggle exist. */
+  richSessionView: boolean;
+  setRichSessionView: (v: boolean) => void;
+  /** Which sessions currently SHOW the rich view. Not persisted: it is a way of looking at
+   *  a session right now, and coming back to a terminal you cannot see would be a bad
+   *  surprise after a restart. */
+  richViewOpen: Record<string, boolean>;
+  toggleRichView: (sessionId: string) => void;
+  /** Parsed transcript items per session, newest last. Absent = never loaded. */
+  transcripts: Record<string, TranscriptItem[]>;
+  loadTranscript: (sessionId: string) => Promise<void>;
+  routes: RoutesView | null;
+  /** Task kinds and their copy, supplied by Rust so the labels live in one language. */
+  taskKinds: TaskKindInfo[];
+  /** Load both, for a project (or global-only when projectId is omitted). */
+  loadRouting: (projectId?: string | null) => Promise<void>;
+  /** Pin or clear one task kind's chain. `chain: null` CLEARS the override so the scope
+   *  inherits again -- which is NOT the same as pinning an empty chain. */
+  setAgentRoute: (
+    projectId: string | null,
+    task: TaskKind,
+    chain: Chain | null,
+  ) => Promise<void>;
+  /** Per-account Command Code usage. Empty when Command Code is not set up at all —
+   *  the usage bar then simply has no Command Code rows, rather than showing zeros. */
+  commandCodeUsage: CommandCodeAccountUsage[];
   /** Per-account "plan usage connected" flags, keyed by accountKey. */
   planConnected: Record<string, boolean>;
   /** agy usage per account, keyed by accountKey (accountId ?? "default"). */
@@ -914,6 +1042,11 @@ interface AppState {
    *  resumes all its sessions instead of waiting for a click. */
   restoreSessionsOnOpen: boolean;
   setRestoreSessionsOnOpen: (v: boolean) => void;
+  /** Persisted. Whether a launch reopens the project you were last on ("last", the
+   *  default) or opens nothing ("none"). Neither one reopens the topmost project as
+   *  such — see `initialProjectSelection`. */
+  openBehavior: OpenBehavior;
+  setOpenBehavior: (v: OpenBehavior) => void;
   /** Persisted. Which xterm rasterizer panes ask for; live panes swap on change. Intent
    *  only — a pane that can't hold a WebGL context degrades without rewriting this. */
   terminalRenderer: TerminalRenderer;
@@ -927,6 +1060,11 @@ interface AppState {
    *  `null` = not yet probed, which the Settings toggle renders as neither on nor
    *  disabled rather than flashing a false "unavailable". */
   tmuxAvailable: boolean | null;
+  /** Whether this PLATFORM can persist sessions at all — false on Windows, where tmux does
+   *  not exist and no install would change that. Distinct from `tmuxAvailable`, which is a
+   *  fixable gap: only one of the two earns an install hint, and telling a Windows user to
+   *  install tmux with their package manager is advice that cannot be taken. */
+  tmuxSupported: boolean | null;
   /** How to install tmux on this host, when tmux is missing and there is a sensible
    *  suggestion. Resolved by the backend — the right command depends on the platform and
    *  on what is already installed. */
@@ -1049,7 +1187,7 @@ interface AppState {
 
   addProject: (path: string) => Promise<void>;
   removeProject: (id: string) => Promise<void>;
-  addSession: (projectId: string, opts?: { name?: string; useWorktree?: boolean; agent?: AgentId; role?: SessionRole; account?: string | null }) => Promise<void>;
+  addSession: (projectId: string, opts?: { name?: string; useWorktree?: boolean; agent?: AgentId; role?: SessionRole; account?: string | null; model?: string | null }) => Promise<void>;
   renameSession: (projectId: string, sessionId: string, name: string) => Promise<void>;
   /** Rename a project's display label only (not the directory on disk). */
   renameProject: (projectId: string, name: string) => Promise<void>;
@@ -1200,6 +1338,7 @@ interface AppState {
 
   refreshClaudeStatus: () => Promise<void>;
   refreshClaudeUsage: () => Promise<void>;
+  refreshCommandCodeUsage: () => Promise<void>;
   /** Connect plan usage for one account (null = env default). */
   connectPlanUsage: (accountId: string | null) => Promise<boolean>;
   /** One click: enable agy push-tracking + connect plan usage for every Claude account. */
@@ -1285,6 +1424,12 @@ export const useStore = create<AppState>((set, get) => {
     pendingReveal: null,
     claudeStatus: null,
     claudeUsage: [],
+    richSessionView: readRichView(),
+    richViewOpen: {},
+    transcripts: {},
+    routes: null,
+    taskKinds: [],
+    commandCodeUsage: [],
     planConnected: readPlanConnected(),
     updateInfo: null,
     updatePhase: "idle",
@@ -1295,9 +1440,11 @@ export const useStore = create<AppState>((set, get) => {
     usagePrefs: readUsagePrefs(),
     sessionDirs: {},
     restoreSessionsOnOpen: readRestoreSessionsOnOpen(),
+    openBehavior: readOpenBehavior(),
     terminalRenderer: readTerminalRenderer(),
     persistSessions: readPersistSessions(),
     tmuxAvailable: null,
+    tmuxSupported: null,
     tmuxInstall: null,
     tmuxNoticeDismissed: readTmuxNoticeDismissed(),
     sessionContext: {},
@@ -1383,7 +1530,11 @@ export const useStore = create<AppState>((set, get) => {
         projects,
         homeDir: home,
         layouts,
-        selectedProjectId: projects[0]?.id ?? null,
+        selectedProjectId: initialProjectSelection(
+          projects.map((p) => p.id),
+          get().openBehavior,
+          readLastProject(),
+        ),
         accounts,
         defaultAccounts,
         privateMode: trust.privateMode,
@@ -1705,7 +1856,10 @@ export const useStore = create<AppState>((set, get) => {
       const useWorktree = opts?.useWorktree ?? false;
       const agent = opts?.agent ?? DEFAULT_AGENT;
       const role = opts?.role ?? "worker";
-      const session = await invoke<Session | null>("add_session", { projectId, name, useWorktree, agent, role });
+      // `model` is the concrete id a route picked. It rides the CREATE call rather than a
+      // follow-up so the session is never persisted, however briefly, without it.
+      const model = opts?.model ?? null;
+      const session = await invoke<Session | null>("add_session", { projectId, name, useWorktree, agent, role, model });
       if (!session) return;
       // Pin an explicitly-chosen account (blank = inherit the project/global default).
       if (opts?.account) {
@@ -2409,6 +2563,11 @@ export const useStore = create<AppState>((set, get) => {
       set({ restoreSessionsOnOpen: v });
     },
 
+    setOpenBehavior: (v) => {
+      writeOpenBehavior(v);
+      set({ openBehavior: v });
+    },
+
     setTerminalRenderer: (v) => {
       writeTerminalRenderer(v);
       set({ terminalRenderer: v });
@@ -2454,17 +2613,26 @@ export const useStore = create<AppState>((set, get) => {
     probeTmux: async () => {
       try {
         const info = await invoke<{
+          supported: boolean;
           available: boolean;
           path: string | null;
           install: TmuxInstallHint | null;
         }>("tmux_available");
-        set({ tmuxAvailable: info.available, tmuxInstall: info.install ?? null });
+        set({
+          tmuxAvailable: info.available,
+          // `?? true` keeps an older backend (which has no `supported` field) reading as
+          // the Unix it must have been, rather than silently claiming Windows.
+          tmuxSupported: info.supported ?? true,
+          tmuxInstall: info.install ?? null,
+        });
         // Push the persisted preference down at boot. Without this the backend would
         // start on its own default and disagree with the toggle the user is looking at.
         void invoke("set_session_persistence", {
           enabled: info.available && get().persistSessions,
         }).catch(() => {});
       } catch {
+        // A failed probe says nothing about the platform, so `tmuxSupported` stays as it
+        // was rather than claiming an unsupported OS and hiding the install hint.
         set({ tmuxAvailable: false });
       }
     },
@@ -2544,6 +2712,53 @@ export const useStore = create<AppState>((set, get) => {
       try {
         const u = await invoke<ClaudeAccountUsage[]>("fetch_claude_usage");
         set({ claudeUsage: u });
+      } catch { /* fail-open: keep last-known */ }
+    },
+
+    setRichSessionView: (v) => {
+      writeRichView(v);
+      // Turning the feature off closes every open pane too, so the terminals are visible
+      // again immediately rather than after a click per session.
+      set(v ? { richSessionView: true } : { richSessionView: false, richViewOpen: {} });
+    },
+
+    toggleRichView: (sessionId) =>
+      set((s) => ({
+        richViewOpen: { ...s.richViewOpen, [sessionId]: !s.richViewOpen[sessionId] },
+      })),
+
+    loadTranscript: async (sessionId) => {
+      try {
+        const items = await invoke<TranscriptItem[]>("session_transcript", { sessionId });
+        set((s) => ({ transcripts: { ...s.transcripts, [sessionId]: items } }));
+      } catch { /* fail-open: keep last-known */ }
+    },
+
+    loadRouting: async (projectId) => {
+      try {
+        const [routes, taskKinds] = await Promise.all([
+          invoke<RoutesView>("agent_routes", { projectId: projectId ?? null }),
+          invoke<TaskKindInfo[]>("task_kinds"),
+        ]);
+        set({ routes, taskKinds });
+      } catch { /* fail-open: the dialog falls back to picking an agent by hand */ }
+    },
+
+    setAgentRoute: async (projectId, task, chain) => {
+      try {
+        const routes = await invoke<RoutesView>("set_agent_route", {
+          projectId,
+          task,
+          chain,
+        });
+        set({ routes });
+      } catch { /* fail-open: keep last-known */ }
+    },
+
+    refreshCommandCodeUsage: async () => {
+      try {
+        const u = await invoke<CommandCodeAccountUsage[]>("fetch_command_code_usage");
+        set({ commandCodeUsage: u });
       } catch { /* fail-open: keep last-known */ }
     },
 
@@ -2764,6 +2979,16 @@ export const useStore = create<AppState>((set, get) => {
     setContinuityFeed: (projectId, feed) =>
       set((s) => ({ continuityFeed: { ...s.continuityFeed, [projectId]: feed } })),
   };
+});
+
+// Record which project is open so the next launch can come back to it. A subscription
+// rather than a line in each action: `selectProject` is only one of seven places that move
+// the selection (opening a session, opening to the side, adding a project or a session,
+// reopening a closed tab, removing a project), and a memory that six of them forget to
+// update is worse than none. Cheap — one localStorage write per project switch, and only when
+// the id actually changes.
+useStore.subscribe((s, prev) => {
+  if (s.selectedProjectId !== prev.selectedProjectId) writeLastProject(s.selectedProjectId);
 });
 
 // ---- selectors / helpers ----

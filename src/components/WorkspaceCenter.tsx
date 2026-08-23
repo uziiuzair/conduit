@@ -470,6 +470,9 @@ function GroupTabStrip({
   const moveTab = useStore((s) => s.moveTab);
   const sessionDirs = useStore((s) => s.sessionDirs);
   const sessionContext = useStore((s) => s.sessionContext);
+  const richSessionView = useStore((s) => s.richSessionView);
+  const richViewOpen = useStore((s) => s.richViewOpen);
+  const toggleRichView = useStore((s) => s.toggleRichView);
 
   // Insertion caret for tab reorder / move-into-strip: index in [0, tabs.length].
   const [caretIndex, setCaretIndex] = useState<number | null>(null);
@@ -579,6 +582,24 @@ function GroupTabStrip({
         }}
       />
       {wd && soloGroup && <span className="cwd">{prettyPath(wd, home)}</span>}
+      {/* Per-session view switch. Only exists when the preference is on, and only for a
+          session tab -- an editor or a diff has no conversation to render. The terminal is
+          never unmounted by this; the pane simply covers it (see SessionChat). */}
+      {richSessionView && activeTab?.kind === "session" && (
+        <button
+          type="button"
+          className={`header-btn board-tab ${richViewOpen[activeTab.ref] ? "active" : ""}`}
+          title={
+            richViewOpen[activeTab.ref]
+              ? "Back to the terminal (it never stopped running)"
+              : "Read this session as a conversation"
+          }
+          onClick={() => toggleRichView(activeTab.ref)}
+        >
+          <span className="board-tab-dot" />
+          <span>{richViewOpen[activeTab.ref] ? "Terminal" : "Chat"}</span>
+        </button>
+      )}
       {isActiveGroup && (
         <button
           type="button"

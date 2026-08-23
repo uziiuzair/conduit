@@ -291,6 +291,7 @@ function ProjectBlock({ project }: { project: Project }) {
       </div>
       {showNew && (
         <NewSessionDialog
+          projectId={project.id}
           projectPath={project.path}
           hasConductor={project.sessions.some((s) => s.role === "conductor")}
           onCancel={() => setShowNew(false)}

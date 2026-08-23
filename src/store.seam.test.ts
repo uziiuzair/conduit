@@ -37,12 +37,24 @@ const ALLOWED = new Map<string, string>([
 
 const SOURCE_EXT = /\.(ts|tsx)$/;
 
+/**
+ * Repo-relative path with forward slashes, on every platform.
+ *
+ * `join` uses the host separator, so on Windows this walk yields `src\store.ts` while
+ * ALLOWED is keyed on `src/store.ts` — every allowlisted file would read as an offender
+ * and the suite would fail for no reason but the OS. The allowlist is written the way the
+ * repo writes paths, so normalize toward that rather than the other way around.
+ */
+function normalize(path: string): string {
+  return path.replace(/\\/g, "/");
+}
+
 function sourceFiles(dir: string, acc: string[] = []): string[] {
   for (const entry of readdirSync(dir)) {
     if (entry === "node_modules" || entry.startsWith(".")) continue;
     const path = join(dir, entry);
     if (statSync(path).isDirectory()) sourceFiles(path, acc);
-    else if (SOURCE_EXT.test(entry)) acc.push(path);
+    else if (SOURCE_EXT.test(entry)) acc.push(normalize(path));
   }
   return acc;
 }
