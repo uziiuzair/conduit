@@ -298,6 +298,27 @@ agent tags, per-agent + per-project defaults), the new-session dialog picker, an
 right-click "Account" submenu in `Sidebar.tsx`. Design:
 `docs/superpowers/specs/2026-07-12-multi-account-orchestration-design.md`.
 
+## Where the launch selection lives
+
+Which project a cold start lands on. `store.load()` used to take `projects[0]`, so the
+TOPMOST project opened (and, under `restoreSessionsOnOpen`, every one of its sessions
+spawned) no matter what the user was last in — and a sidebar drag-reorder silently changed
+which project launched.
+
+- The decision is `initialProjectSelection` in `src/startup.ts`, kept pure because
+  `store.ts` cannot be imported under the node-env vitest (it touches `localStorage` and
+  the Tauri bridge at module scope). `src/startup.test.ts` covers it.
+- **A stale or absent memory resolves to `null`, never to `projects[0]`.** Falling back to
+  the first project is the exact bug; a fallback would reproduce it once on every machine's
+  first launch after the change and then hide it. `null` is also free — no selected project
+  means `Terminal.tsx`'s eager-spawn effect (`projectId !== selectedProjectId`) starts
+  nothing, and `WorkspaceCenter` already renders an empty state for it.
+- **The memory is written by a `useStore.subscribe` at the bottom of `store.ts`, not by
+  each action.** Seven code paths move `selectedProjectId` (select project/session, open to
+  side, add project, add session, reopen closed tab, remove project); a memory six of them
+  forget to update is worse than none.
+- User-facing switch: `openBehavior` (`"last"` default | `"none"`), Settings → General.
+
 ## Where session restore + safe shutdown lives
 
 VSCode-style "reopen where I left off" + a running-agent quit guard (Claude + agy; others

@@ -3,6 +3,18 @@
 All notable changes to Conduit are documented here. This project uses
 [semantic versioning](https://semver.org/).
 
+## 0.26.1 — 2026-08-23
+
+- **Fixed — launch no longer opens whichever project is at the top.** Conduit used to
+  select the first project in the sidebar every time it started, open its tabs and (with
+  restore-on-open) spawn all of its sessions — so reordering the sidebar changed which
+  project launched, and coming back to a specific session meant clicking away from one you
+  never asked for. It now reopens the project you were actually last in.
+- **Added — a launch preference.** Settings → General — *Reopen the last project on
+  launch*, on by default. Turn it off to start with nothing selected and nothing spawned.
+  A stale memory (the project was deleted) also starts empty rather than falling back to
+  someone else's project.
+
 ## 0.26.0 — 2026-08-23
 
 - **Added — Read a session as a conversation.** A new Chat button on each session tab

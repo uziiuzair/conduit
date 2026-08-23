@@ -11,6 +11,7 @@ import {
   writeStoredPref,
 } from "./themes";
 import type { TerminalRenderer } from "./terminalRenderer";
+import { initialProjectSelection, type OpenBehavior } from "./startup";
 import type { Chain, RoutesView, TaskKind, TaskKindInfo } from "./routing";
 import { AGENTS, type AgentId, type AgentInfo, DEFAULT_AGENT, type McpServer } from "./agents";
 import { check, type Update } from "@tauri-apps/plugin-updater";
@@ -540,6 +541,44 @@ function writeRestoreSessionsOnOpen(v: boolean): void {
   }
 }
 
+// Which project (if any) a launch lands on, and the memory that feeds it. The decision
+// itself lives in `./startup` so it can be tested; these only persist its inputs. The
+// last-project memory is written by a subscription at the bottom of this file rather than
+// by each caller, so a new place that changes the selection cannot forget to record it.
+const OPEN_BEHAVIOR_KEY = "conduit.openBehavior";
+const LAST_PROJECT_KEY = "conduit.lastProject";
+function readOpenBehavior(): OpenBehavior {
+  try {
+    return localStorage.getItem(OPEN_BEHAVIOR_KEY) === "none" ? "none" : "last";
+  } catch {
+    return "last";
+  }
+}
+function writeOpenBehavior(v: OpenBehavior): void {
+  try {
+    localStorage.setItem(OPEN_BEHAVIOR_KEY, v);
+  } catch {
+    /* quota — non-fatal */
+  }
+}
+function readLastProject(): string | null {
+  try {
+    return localStorage.getItem(LAST_PROJECT_KEY);
+  } catch {
+    return null;
+  }
+}
+function writeLastProject(id: string | null): void {
+  try {
+    // Closing the last project forgets it, rather than leaving the next launch pointed at
+    // a project the user deliberately closed.
+    if (id) localStorage.setItem(LAST_PROJECT_KEY, id);
+    else localStorage.removeItem(LAST_PROJECT_KEY);
+  } catch {
+    /* quota — non-fatal */
+  }
+}
+
 // Terminal renderer: which xterm rasterizer new panes ask for, and which live panes swap to
 // when it changes. Default WebGL (VS Code's default) — one GPU draw per viewport instead of
 // per-glyph CPU blits. Canvas stays selectable because WebGL costs one live GPU context per
@@ -1003,6 +1042,11 @@ interface AppState {
    *  resumes all its sessions instead of waiting for a click. */
   restoreSessionsOnOpen: boolean;
   setRestoreSessionsOnOpen: (v: boolean) => void;
+  /** Persisted. Whether a launch reopens the project you were last on ("last", the
+   *  default) or opens nothing ("none"). Neither one reopens the topmost project as
+   *  such — see `initialProjectSelection`. */
+  openBehavior: OpenBehavior;
+  setOpenBehavior: (v: OpenBehavior) => void;
   /** Persisted. Which xterm rasterizer panes ask for; live panes swap on change. Intent
    *  only — a pane that can't hold a WebGL context degrades without rewriting this. */
   terminalRenderer: TerminalRenderer;
@@ -1396,6 +1440,7 @@ export const useStore = create<AppState>((set, get) => {
     usagePrefs: readUsagePrefs(),
     sessionDirs: {},
     restoreSessionsOnOpen: readRestoreSessionsOnOpen(),
+    openBehavior: readOpenBehavior(),
     terminalRenderer: readTerminalRenderer(),
     persistSessions: readPersistSessions(),
     tmuxAvailable: null,
@@ -1485,7 +1530,11 @@ export const useStore = create<AppState>((set, get) => {
         projects,
         homeDir: home,
         layouts,
-        selectedProjectId: projects[0]?.id ?? null,
+        selectedProjectId: initialProjectSelection(
+          projects.map((p) => p.id),
+          get().openBehavior,
+          readLastProject(),
+        ),
         accounts,
         defaultAccounts,
         privateMode: trust.privateMode,
@@ -2514,6 +2563,11 @@ export const useStore = create<AppState>((set, get) => {
       set({ restoreSessionsOnOpen: v });
     },
 
+    setOpenBehavior: (v) => {
+      writeOpenBehavior(v);
+      set({ openBehavior: v });
+    },
+
     setTerminalRenderer: (v) => {
       writeTerminalRenderer(v);
       set({ terminalRenderer: v });
@@ -2925,6 +2979,16 @@ export const useStore = create<AppState>((set, get) => {
     setContinuityFeed: (projectId, feed) =>
       set((s) => ({ continuityFeed: { ...s.continuityFeed, [projectId]: feed } })),
   };
+});
+
+// Record which project is open so the next launch can come back to it. A subscription
+// rather than a line in each action: `selectProject` is only one of seven places that move
+// the selection (opening a session, opening to the side, adding a project or a session,
+// reopening a closed tab, removing a project), and a memory that six of them forget to
+// update is worse than none. Cheap — one localStorage write per project switch, and only when
+// the id actually changes.
+useStore.subscribe((s, prev) => {
+  if (s.selectedProjectId !== prev.selectedProjectId) writeLastProject(s.selectedProjectId);
 });
 
 // ---- selectors / helpers ----

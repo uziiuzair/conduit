@@ -3,6 +3,8 @@ import { useStore } from "../store";
 
 /** Settings → General: startup / session behavior toggles. */
 export function GeneralSettings() {
+  const openBehavior = useStore((s) => s.openBehavior);
+  const setOpenBehavior = useStore((s) => s.setOpenBehavior);
   const restoreSessionsOnOpen = useStore((s) => s.restoreSessionsOnOpen);
   const setRestoreSessionsOnOpen = useStore((s) => s.setRestoreSessionsOnOpen);
   const persistSessions = useStore((s) => s.persistSessions);
@@ -23,6 +25,20 @@ export function GeneralSettings() {
 
   return (
     <div className="general-settings">
+      <label className="dialog-toggle">
+        <input
+          type="checkbox"
+          checked={openBehavior === "last"}
+          onChange={(e) => setOpenBehavior(e.target.checked ? "last" : "none")}
+        />
+        <span>
+          Reopen the last project on launch — come back to whichever project you were in
+          when you quit. Off = Conduit opens with nothing selected and waits for you to pick.
+          Either way it never opens the topmost project just for being topmost, and the first
+          launch after an update has nothing to remember yet, so it starts empty once.
+        </span>
+      </label>
+
       <label className="dialog-toggle">
         <input
           type="checkbox"
