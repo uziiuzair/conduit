@@ -25,7 +25,7 @@ import {
   GitBranchIcon,
 } from "./Icons";
 import { AgentGlyph, glyphStateFor } from "./AgentGlyph";
-import { projectAccent } from "../layout";
+import { projectAccent, SESSION_DRAG_MIME } from "../layout";
 import { ThemeSwitcher } from "./ThemeSwitcher";
 import { ClaudeStatusPill } from "./ClaudeStatusPill";
 import { UsagePanel } from "./UsagePanel";
@@ -366,6 +366,14 @@ function SessionRow({
         e.stopPropagation();
         sidebarDrag = { kind: "session", projectId: project.id, sessionId: session.id };
         e.dataTransfer.setData("text/plain", session.id);
+        // A second, custom type so the WORKSPACE can recognise this drag. Only
+        // `dataTransfer.types` is readable during dragover, so advertising the type is the
+        // only way the pane overlay can know to appear before the drop happens. Carries the
+        // owning project too: dropping into another project's panes borrows the session.
+        e.dataTransfer.setData(
+          SESSION_DRAG_MIME,
+          JSON.stringify({ sessionId: session.id, projectId: project.id }),
+        );
         e.dataTransfer.effectAllowed = "move";
         setDragSelf(true);
       }}

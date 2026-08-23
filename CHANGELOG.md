@@ -3,6 +3,34 @@
 All notable changes to Conduit are documented here. This project uses
 [semantic versioning](https://semver.org/).
 
+## 0.29.0 — 2026-08-23
+
+- **Added — Drag a session straight into a pane.** Drag any session from the sidebar onto the
+  workspace: drop it on the left or right third of a pane to split beside it, or in the
+  middle (or on a tab strip) to add it to that pane. Sessions from other projects work the
+  same way, which is what the previous release's cross-project panes were missing — until
+  now the only way in was the right-click menu.
+
+## 0.28.1 — 2026-08-23
+
+- **Fixed — Usage meters no longer disagree with each other.** The collapsed summary reported
+  an account's worst window while the expanded view showed every window, so one view said
+  "79%" and the other showed 18%, 3% and 79% with no hint of the connection. The summary now
+  names the window it is reporting, and the low-alert list, the sort order and the health dot
+  all read the same windows the meters draw — so hiding a window no longer leaves the
+  headline number describing one you cannot see.
+- **Fixed — A rate-limited check no longer blanks your usage.** Claude's usage endpoint
+  throttles, and Conduit was polling it once a minute for every account (plus your real
+  `claude` sessions doing the same). A throttled check wiped that account's meters and, worse,
+  drew it as a healthy green dot — so the panel changed its mind minute to minute. Conduit
+  now keeps the last good reading, marks it "last known", and checks every five minutes
+  instead of every minute. An account whose quota genuinely could not be read shows a hollow
+  dot and "not read" rather than a clean bill of health.
+- **Fixed — The single-account view no longer shows another account's numbers.** With two
+  Claude accounts signed in, a session that didn't name one would display whichever account
+  happened to sort first — different figures from the stacked view for the same session. It
+  now asks you to pick one instead of guessing.
+
 ## 0.28.0 — 2026-08-23
 
 - **Added — Split panes across projects.** Sessions from different projects can now sit

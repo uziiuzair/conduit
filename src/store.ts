@@ -12,7 +12,7 @@ import {
 } from "./themes";
 import type { TerminalRenderer } from "./terminalRenderer";
 import { initialProjectSelection, type OpenBehavior } from "./startup";
-import { repairLayout } from "./layout";
+import { insertTabAt, repairLayout } from "./layout";
 import { accountKey, type UsageMetric } from "./usageRows";
 import type { Chain, RoutesView, TaskKind, TaskKindInfo } from "./routing";
 import { AGENTS, type AgentId, type AgentInfo, DEFAULT_AGENT, type McpServer } from "./agents";
@@ -367,7 +367,9 @@ export interface PlanWindow { label: string; pctUsed: number; resetsAt: string |
 export interface ClaudeUsage {
   local: LocalUsage;
   plan: PlanWindow[] | null;
-  planSource: "live" | "unavailable" | "disconnected";
+  /** "stale" = this poll failed (the endpoint rate-limits) and a recent good read stood in
+   *  for it. The numbers are real, just not from this minute -- see claude_usage.rs. */
+  planSource: "live" | "stale" | "unavailable" | "disconnected";
 }
 /** One account's Claude usage (mirrors Rust ClaudeAccountUsage). accountId null = env default. */
 export interface ClaudeAccountUsage {
@@ -1262,6 +1264,15 @@ interface AppState {
     toIndex: number,
   ) => void;
   splitTab: (projectId: string, ref: string, targetGroupId: string, side: "left" | "right") => void;
+  /** Drop a session (possibly from ANOTHER project) onto a pane: into the group, or split
+   *  beside it. The one entry point for the sidebar-to-pane drag. */
+  dropSessionIntoPane: (
+    hostProjectId: string,
+    groupId: string,
+    zone: "left" | "center" | "right",
+    ownerProjectId: string,
+    sessionId: string,
+  ) => void;
   setGroupWeights: (projectId: string, weights: number[]) => void;
   /** Open a file tab. `preview: true` opens transiently: it replaces the active
    *  group's current preview tab; a later explicit open (or an edit) pins it.
@@ -2592,6 +2603,26 @@ export const useStore = create<AppState>((set, get) => {
         }
         return next;
       }),
+
+    dropSessionIntoPane: (hostProjectId, groupId, zone, ownerProjectId, sessionId) => {
+      // `projectId` set only for a genuinely foreign session, so a same-project drop still
+      // writes the plain, absent-is-local tab shape every existing layout uses.
+      const tab: WsTab = {
+        kind: "session",
+        ref: sessionId,
+        ...(ownerProjectId === hostProjectId ? {} : { projectId: ownerProjectId }),
+      };
+      set({ selectedProjectId: hostProjectId });
+      applyLayout(hostProjectId, (l) => {
+        const group = l.groups.find((g) => g.id === groupId);
+        // Land it in the target group first either way: splitting reads the tab out of a
+        // group, so an external drop has to exist somewhere before it can be split off.
+        const placed = insertTabAt(l, groupId, group?.tabs.length ?? 0, tab);
+        if (zone === "center") return placed;
+        return reduceSplitTab(placed, sessionId, groupId, zone, uid());
+      });
+      clearNeeds(sessionId);
+    },
 
     setGroupWeights: (projectId, weights) =>
       applyLayout(projectId, (l) => {

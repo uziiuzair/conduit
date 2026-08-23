@@ -7,7 +7,11 @@ import {
   projectAccent,
   projectHue,
   reopenTabAt,
+  hasSessionDrag,
+  insertTabAt,
+  readSessionDrag,
   repairLayout,
+  SESSION_DRAG_MIME,
   splitTab,
   tabProjectId,
   type LayoutProject,
@@ -231,5 +235,67 @@ describe("repairLayout", () => {
     };
     const r = repairLayout(l, "A", PROJECTS, "new");
     expect(r.groups[0].activeRef).toBe("s1");
+  });
+});
+
+
+// ---- dragging a sidebar session into a pane ----
+
+const dt = (entries: Record<string, string>) => ({
+  types: Object.keys(entries),
+  getData: (t: string) => entries[t] ?? "",
+});
+
+describe("session drag payload", () => {
+  it("is recognisable from `types` alone, which is all dragover can see", () => {
+    // The whole reason for a custom MIME type: `getData` is blocked during dragover, so
+    // without this the pane overlay could never know to appear before the drop.
+    const d = dt({ "text/plain": "s2", [SESSION_DRAG_MIME]: "{}" });
+    expect(hasSessionDrag(d)).toBe(true);
+    expect(hasSessionDrag(dt({ "text/plain": "s2" }))).toBe(false);
+    expect(hasSessionDrag(null)).toBe(false);
+  });
+
+  it("round-trips the session and its owning project", () => {
+    const d = dt({
+      [SESSION_DRAG_MIME]: JSON.stringify({ sessionId: "s2", projectId: "B" }),
+    });
+    expect(readSessionDrag(d)).toEqual({ sessionId: "s2", projectId: "B" });
+  });
+
+  it("refuses a malformed or foreign payload instead of trusting it", () => {
+    // Anything on the desktop can advertise a MIME type; a bad payload must not become a
+    // tab pointing at nothing.
+    expect(readSessionDrag(dt({ [SESSION_DRAG_MIME]: "not json" }))).toBeNull();
+    expect(readSessionDrag(dt({ [SESSION_DRAG_MIME]: '{"sessionId":"s2"}' }))).toBeNull();
+    expect(readSessionDrag(dt({ "text/plain": "s2" }))).toBeNull();
+  });
+});
+
+describe("insertTabAt", () => {
+  it("places a foreign session in the target group and activates it", () => {
+    const r = insertTabAt(L(), "g2", 0, { kind: "session", ref: "s9", projectId: "B" });
+    expect(r.groups[1].tabs.map((t) => t.ref)).toEqual(["s9", "s1"]);
+    expect(r.groups[1].activeRef).toBe("s9");
+    expect(r.activeGroupId).toBe("g2");
+  });
+
+  it("moves rather than duplicates a session already open elsewhere", () => {
+    // A ref twice in one layout is not cosmetic: the terminal is placed by the FIRST group
+    // holding it, so the second pane would sit permanently blank.
+    const r = insertTabAt(L(), "g1", 0, { kind: "session", ref: "s1" });
+    expect(r.groups[0].tabs.map((t) => t.ref)).toEqual(["s1", "/a", "/b"]);
+    expect(r.groups[1].tabs).toEqual([]);
+    expect(r.groups[1].activeRef).toBeNull();
+  });
+
+  it("clamps an out-of-range index instead of leaving a hole", () => {
+    const r = insertTabAt(L(), "g1", 99, { kind: "session", ref: "s9" });
+    expect(r.groups[0].tabs.map((t) => t.ref)).toEqual(["/a", "/b", "s9"]);
+  });
+
+  it("falls back to the first group when the target is gone", () => {
+    const r = insertTabAt(L(), "nope", 0, { kind: "session", ref: "s9" });
+    expect(r.groups[0].tabs[0].ref).toBe("s9");
   });
 });

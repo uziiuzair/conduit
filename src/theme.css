@@ -2787,6 +2787,19 @@ button {
 .usage-dot.hot {
   background: var(--red);
 }
+/* Not read: hollow, so it cannot be mistaken for the green of an account we checked and
+   found healthy. That conflation is what made a rate-limited poll look like good news. */
+.usage-dot.unknown {
+  background: transparent;
+  box-shadow: inset 0 0 0 1.5px var(--text-dim);
+}
+.usage-stale-chip {
+  font-size: 9px;
+  padding: 1px 5px;
+  border-radius: 999px;
+  color: var(--text-dim);
+  background: color-mix(in srgb, var(--text-mid) 14%, transparent);
+}
 /* Settings → Usage display */
 .usage-prefs {
   display: flex;

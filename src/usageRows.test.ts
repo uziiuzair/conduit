@@ -4,8 +4,12 @@ import {
   claudeRow,
   commandCodeRow,
   meterView,
+  rowHealth,
   summaryRemaining,
+  visibleWindows,
+  worstWindow,
   type UWindow,
+  type WinKind,
 } from "./usageRows";
 import type { AgyUsage, ClaudeAccountUsage, CommandCodeAccountUsage } from "./store";
 
@@ -201,5 +205,90 @@ describe("summaryRemaining", () => {
     // No meter is not an empty meter — the router would otherwise stop using every agent
     // that exposes no usage API.
     expect(summaryRemaining([])).toBe(1);
+  });
+});
+
+
+const ALL: Record<WinKind, boolean> = {
+  fiveHour: true,
+  weekly: true,
+  weeklyOpus: true,
+  context: true,
+};
+
+describe("what the panel reports vs what the router believes", () => {
+  it("names the window its number came from", () => {
+    // A bare "79%" sitting above meters reading 18, 3 and 79 looks like a contradiction.
+    // Naming the window is what makes it read as a worst-case instead of a disagreement.
+    const wins = [
+      win({ key: "a", label: "5-hour", used: 0.18 }),
+      win({ key: "b", label: "Weekly", kind: "weekly", used: 0.03 }),
+      win({ key: "c", label: "Weekly · Opus", kind: "weeklyOpus", used: 0.79 }),
+    ];
+    const h = rowHealth(wins);
+    expect(h.remaining).toBeCloseTo(0.21);
+    expect(h.worst?.label).toBe("Weekly · Opus");
+    // ...and it is genuinely one of the meters on screen, not a fourth number.
+    expect(meterView(h.worst!, "used").pct).toBe(79);
+  });
+
+  it("reports only the windows the user can actually see", () => {
+    // Hiding the Opus window used to leave the summary and the dot still driven by it, so
+    // the headline number belonged to a meter that was not on screen.
+    const wins = [
+      win({ key: "a", used: 0.18 }),
+      win({ key: "c", kind: "weeklyOpus", used: 0.79 }),
+    ];
+    const shown = visibleWindows(wins, { ...ALL, weeklyOpus: false });
+    expect(shown.map((w) => w.key)).toEqual(["a"]);
+    expect(rowHealth(shown).remaining).toBeCloseTo(0.82);
+  });
+
+  it("calls an unreadable account unknown, not healthy", () => {
+    // The rate-limit case. `summaryRemaining` answers 1 so the ROUTER keeps using an agent
+    // it cannot measure; the panel must not turn that same 1 into a green "all good" dot.
+    expect(summaryRemaining([])).toBe(1);
+    expect(rowHealth([]).remaining).toBeNull();
+    // A context-only row is equally unmeasured as far as quota goes.
+    expect(rowHealth([win({ key: "ctx", group: "context", quota: false, used: 0.9 })]).remaining).toBeNull();
+  });
+
+  it("keeps ignoring a structurally unavailable pool when picking the worst", () => {
+    const gemini = win({ key: "g", group: "Gemini Models", used: 0.2 });
+    const spent = win({ key: "c", group: "Claude & GPT Models", used: 1 });
+    expect(worstWindow([gemini, spent])?.key).toBe("g");
+  });
+});
+
+describe("stale reads", () => {
+  it("keeps the numbers and flags them rather than blanking the row", () => {
+    // A throttled poll now serves the last good read. It must still draw meters -- an empty
+    // row is what made the panel disagree with itself minute to minute.
+    const row = claudeRow({
+      accountId: null,
+      label: "Personal",
+      usage: {
+        local: { totalTokens: 0 } as ClaudeAccountUsage["usage"]["local"],
+        plan: [{ label: "5-hour window", pctUsed: 0.4, resetsAt: null }],
+        planSource: "stale",
+      },
+    });
+    expect(row.stale).toBe(true);
+    expect(row.connectable).toBe(false);
+    expect(row.windows).toHaveLength(1);
+    expect(rowHealth(row.windows).remaining).toBeCloseTo(0.6);
+  });
+
+  it("does not flag a live read", () => {
+    const row = claudeRow({
+      accountId: null,
+      label: "Personal",
+      usage: {
+        local: { totalTokens: 0 } as ClaudeAccountUsage["usage"]["local"],
+        plan: [{ label: "5-hour window", pctUsed: 0.4, resetsAt: null }],
+        planSource: "live",
+      },
+    });
+    expect(row.stale).toBe(false);
   });
 });
