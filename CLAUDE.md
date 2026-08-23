@@ -208,6 +208,9 @@ layout's panes.
   not choose must not become state to migrate, and it has to work for every project that
   already exists the moment they update. The sidebar's folder icon uses the same function,
   so a colour on a tab always has a referent.
+- Design: `docs/superpowers/specs/2026-08-23-cross-project-panes-design.md`, which also
+  records why this ships BORROWED TABS rather than the single global `workspaceLayout` the
+  July spike proposed, and which of that spike's risks do and do not apply.
 
 ## Where the usage meter's semantics live
 
@@ -249,6 +252,7 @@ place that decides how.
   lives here and the store re-exports it. Importing the store under the node-env vitest
   touches `localStorage` at module scope and throws (same reason `startup.ts` exists), and
   `usageRows.test.ts` is what holds the label/bar agreement in place.
+- Design: `docs/superpowers/specs/2026-08-23-usage-meter-semantics-design.md`.
 
 ## Where the agent glyph lives
 
