@@ -12,6 +12,7 @@ import {
 } from "./themes";
 import type { TerminalRenderer } from "./terminalRenderer";
 import { initialProjectSelection, type OpenBehavior } from "./startup";
+import { repairLayout } from "./layout";
 import { accountKey, type UsageMetric } from "./usageRows";
 import type { Chain, RoutesView, TaskKind, TaskKindInfo } from "./routing";
 import { AGENTS, type AgentId, type AgentInfo, DEFAULT_AGENT, type McpServer } from "./agents";
@@ -164,6 +165,12 @@ export interface WsTab {
    *  Pinned by editing, double-click, or an explicit (non-preview) open. Mirrored in
    *  the Rust WsTab struct so it survives layout persistence. */
   preview?: boolean;
+  /** Set ONLY on a foreign session tab -- one borrowed from another project into this
+   *  layout's panes, so two projects can sit side by side. Absent means "this layout's own
+   *  project", which is what every tab written before this feature is. Read it through
+   *  `tabProjectId` (layout.ts), never directly, so the absent case stays handled in one
+   *  place. Mirrored in the Rust WsTab struct or persistence would drop it. */
+  projectId?: string;
 }
 
 /** A recently closed file tab, restorable via ⌘⇧T (explicit closes only). */
@@ -785,31 +792,62 @@ function defaultLayout(project: Project): ProjectLayout {
   };
 }
 
-/** Repair a layout against the current project: drop dead session tabs, prune empty
- *  groups (and their weights, index-aligned), fix dangling active ids, normalize weights. */
-function validateLayout(layout: ProjectLayout, project: Project | undefined): ProjectLayout {
-  const valid = new Set(project?.sessions.map((s) => s.id) ?? []);
-  const groups: EditorGroup[] = [];
-  const weights: number[] = [];
-  layout.groups.forEach((g, i) => {
-    const tabs = g.tabs.filter((t) => t.kind === "file" || valid.has(t.ref));
-    if (tabs.length === 0) return; // prune empty group + its weight
-    const activeRef = tabs.some((t) => t.ref === g.activeRef)
-      ? g.activeRef
-      : tabs[tabs.length - 1].ref;
-    groups.push({ id: g.id, tabs, activeRef });
-    weights.push(layout.weights?.[i] ?? 1);
-  });
-  if (groups.length === 0) {
-    const gid = uid();
-    return { groups: [{ id: gid, tabs: [], activeRef: null }], activeGroupId: gid, weights: [1] };
+/** `repairLayout` (layout.ts) with a fresh group id supplied. Kept as a wrapper so the
+ *  repair itself stays pure and testable -- it is the function that decides whether a
+ *  borrowed cross-project tab survives, and it runs on EVERY layout write. */
+function validateLayout(
+  layout: ProjectLayout,
+  project: Project | undefined,
+  all: Project[],
+): ProjectLayout {
+  return repairLayout(layout, project?.id ?? null, all, uid());
+}
+
+/**
+ * Repair EVERY layout after a session or project disappears.
+ *
+ * Before cross-project panes, a session could only be referenced by its own project's
+ * layout, so removing it needed one repair. A borrowed session lives in someone else's
+ * panes, so a targeted repair would leave a tab pointing at a session that no longer
+ * exists. Only changed layouts are persisted -- this runs on every removal.
+ */
+function revalidateAllLayouts(
+  layouts: Record<string, ProjectLayout>,
+  maximized: Record<string, string>,
+  projects: Project[],
+): { layouts: Record<string, ProjectLayout>; maximized: Record<string, string> } {
+  const nextLayouts = { ...layouts };
+  const nextMax = { ...maximized };
+  for (const p of projects) {
+    const cur = layouts[p.id];
+    if (!cur) continue;
+    const next = validateLayout(cur, p, projects);
+    if (sameLayout(cur, next)) continue;
+    persistLayout(p.id, next);
+    nextLayouts[p.id] = next;
+    // Same maximize hygiene as applyLayout: a pruned or deactivated maximized group must
+    // drop the flag, or the next ⇧⌘M is a silent no-op on a stale id.
+    const maxId = maximized[p.id];
+    if (maxId && (next.activeGroupId !== maxId || !next.groups.some((g) => g.id === maxId))) {
+      delete nextMax[p.id];
+    }
   }
-  const sum = weights.reduce((a, b) => a + b, 0) || 1;
-  const norm = weights.map((w) => w / sum);
-  const activeGroupId = groups.some((g) => g.id === layout.activeGroupId)
-    ? layout.activeGroupId
-    : groups[0].id;
-  return { groups, activeGroupId, weights: norm };
+  return { layouts: nextLayouts, maximized: nextMax };
+}
+
+/** Cheap structural equality, only enough to skip a no-op persist. */
+function sameLayout(a: ProjectLayout, b: ProjectLayout): boolean {
+  return (
+    a.activeGroupId === b.activeGroupId &&
+    a.groups.length === b.groups.length &&
+    a.groups.every(
+      (g, i) =>
+        g.id === b.groups[i].id &&
+        g.activeRef === b.groups[i].activeRef &&
+        g.tabs.length === b.groups[i].tabs.length &&
+        g.tabs.every((t, j) => t.ref === b.groups[i].tabs[j].ref),
+    )
+  );
 }
 
 // ---- layout reducers (mutate a cloned layout in place) ----
@@ -1388,7 +1426,7 @@ export const useStore = create<AppState>((set, get) => {
       const cur = s.layouts[projectId];
       if (!cur) return {};
       const project = s.projects.find((p) => p.id === projectId);
-      const next = validateLayout(fn(clone(cur)), project);
+      const next = validateLayout(fn(clone(cur)), project, s.projects);
       persistLayout(projectId, next);
       const patch: Partial<AppState> = { layouts: { ...s.layouts, [projectId]: next } };
       // Maximize follows the active group: any layout action that activates a
@@ -1516,7 +1554,7 @@ export const useStore = create<AppState>((set, get) => {
         ]);
       const layouts: Record<string, ProjectLayout> = {};
       for (const p of projects) {
-        layouts[p.id] = validateLayout(p.layout ?? defaultLayout(p), p);
+        layouts[p.id] = validateLayout(p.layout ?? defaultLayout(p), p, projects);
       }
       // Balance close/removeProject release: acquire a model ref for every restored file tab.
       for (const p of projects) {
@@ -1843,11 +1881,13 @@ export const useStore = create<AppState>((set, get) => {
         registry.disposeIfUnreferenced(ref);
       }
       set((st) => {
-        const layouts = { ...st.layouts };
-        delete layouts[id];
-        const maximized = { ...st.maximized };
-        delete maximized[id];
+        const remaining = { ...st.layouts };
+        delete remaining[id];
+        const maxima = { ...st.maximized };
+        delete maxima[id];
         const projects = st.projects.filter((p) => p.id !== id);
+        // Other projects may have borrowed this one's sessions into their panes.
+        const { layouts, maximized } = revalidateAllLayouts(remaining, maxima, projects);
         const selectedProjectId =
           st.selectedProjectId === id ? projects[0]?.id ?? null : st.selectedProjectId;
         return { projects, layouts, selectedProjectId, maximized };
@@ -1988,22 +2028,9 @@ export const useStore = create<AppState>((set, get) => {
             ? { ...p, sessions: p.sessions.filter((x) => x.id !== sessionId) }
             : p,
         );
-        let layouts = s.layouts;
-        let maximized = s.maximized;
-        const cur = s.layouts[projectId];
-        if (cur) {
-          const next = validateLayout(cur, projects.find((p) => p.id === projectId));
-          persistLayout(projectId, next);
-          layouts = { ...s.layouts, [projectId]: next };
-          // Same maximize hygiene as applyLayout (this path commits a layout
-          // directly): a pruned/deactivated maximized group must drop the flag or
-          // the next ⇧⌘M is a silent no-op on a stale id.
-          const maxId = s.maximized[projectId];
-          if (maxId && (next.activeGroupId !== maxId || !next.groups.some((g) => g.id === maxId))) {
-            maximized = { ...s.maximized };
-            delete maximized[projectId];
-          }
-        }
+        // Every layout, not just this project's: a removed session may have been borrowed
+        // into ANOTHER project's panes, and that tab would otherwise point at nothing.
+        const { layouts, maximized } = revalidateAllLayouts(s.layouts, s.maximized, projects);
         return { projects, live, sessionContext, layouts, maximized };
       });
     },
@@ -2011,6 +2038,19 @@ export const useStore = create<AppState>((set, get) => {
     selectProject: (projectId) => set({ selectedProjectId: projectId }),
 
     selectSession: (projectId, sessionId) => {
+      // If this session is already borrowed into the layout on screen, focus it THERE
+      // rather than jumping to its own project. Switching would tear down the side-by-side
+      // view the user built, to show them the session they can already see.
+      const host = get().selectedProjectId;
+      if (host && host !== projectId) {
+        const hosted = get().layouts[host];
+        const g = hosted?.groups.find((x) => x.tabs.some((t) => t.ref === sessionId));
+        if (g) {
+          get().setActiveTab(host, g.id, sessionId);
+          clearNeeds(sessionId);
+          return;
+        }
+      }
       set({ selectedProjectId: projectId });
       applyLayout(projectId, (l) => rOpenTab(l, { kind: "session", ref: sessionId }));
       clearNeeds(sessionId);

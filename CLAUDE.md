@@ -165,6 +165,40 @@ Service status + subscription/local usage (distinct from per-session hook status
   Usage display). Polled by `src/hooks/useClaudeAmbient.ts`; state in `src/store.ts`
   (`claudeUsage` array + `agyUsageByAccount` map + `usagePrefs`).
 
+## Where cross-project panes live
+
+A layout is keyed by project, so for years "which project is this tab's session in" was
+answered by "the layout it is in" and nothing stored it. `WsTab.projectId` is the whole
+feature: set ONLY on a BORROWED tab -- a session lent from another project into this
+layout's panes.
+
+- **Absent means the host project**, and every tab written before this feature is absent.
+  That is what makes existing `state.json` files and the Rust struct forward-compatible;
+  two Rust tests pin it (an old tab must not deserialize as an orphan, a borrowed one must
+  survive a round trip, a local one must not grow a `projectId` key). Read it through
+  `tabProjectId` (`src/layout.ts`), never off the object, so the absent case is handled once.
+- **`repairLayout` must validate a foreign tab against its OWN project.** It moved out of
+  `store.ts` into `layout.ts` precisely so this is testable: a repair runs on EVERY layout
+  write, so checking a borrowed tab against the host would prune it the instant it was
+  created and the feature would look broken rather than absent. `store.ts` keeps a thin
+  `validateLayout` wrapper that supplies `uid()`.
+- **Removal repairs EVERY layout, not the owner's.** `revalidateAllLayouts` runs on
+  `removeSession`/`removeProject` because a dead session may be sitting in someone else's
+  panes. It skips persisting layouts that did not change.
+- **The terminals were already all mounted.** `WorkspaceCenter`'s `allSessions` flat-maps
+  every project's sessions into one permanent keep-alive stack and moves them with CSS
+  alone, so this needed no remounting -- only dropping `placeSession`'s ownership gate in
+  pane mode. CANVAS mode keeps the gate: a canvas is reconciled from its own project's
+  sessions, so a borrowed one has no node.
+- **Differentiation is all-or-nothing per layout.** `isMixedLayout` decides; when true
+  EVERY tab is badged, not just the visitors, because badging only the foreign ones makes
+  "no badge" mean "the host", which is the knowledge the badge exists to supply. When
+  false, the strip renders exactly as it did before.
+- **`projectAccent` is derived from the project id, never stored.** A colour the user did
+  not choose must not become state to migrate, and it has to work for every project that
+  already exists the moment they update. The sidebar's folder icon uses the same function,
+  so a colour on a tab always has a referent.
+
 ## Where the usage meter's semantics live
 
 Every quota meter in the app answers the same question, and `src/usageRows.ts` is the ONE

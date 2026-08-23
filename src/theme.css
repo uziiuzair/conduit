@@ -304,7 +304,9 @@ button {
 }
 
 .project-head .folder-icon {
-  color: var(--accent);
+  /* Falls back to the theme accent so the rule still works anywhere --proj-accent is
+     not set (and so a stylesheet-only read of this file is not a puzzle). */
+  color: var(--proj-accent, var(--accent));
   flex: none;
 }
 
@@ -1532,6 +1534,37 @@ button {
   .tab-ctx-fill {
     transition: none;
   }
+}
+
+/* ---- Cross-project panes ----
+   A layout can borrow sessions from other projects (WsTab.projectId). Once it does, EVERY
+   tab is badged with its project, so no tab's origin is implied by the absence of a badge.
+   The colour comes from `projectAccent` (layout.ts), derived from the project id -- one
+   function, so the tab bar and the pane edge can never disagree about a project's colour. */
+.tab.badged {
+  /* Widened only when badged: the badge needs the room and an unbadged strip must look
+     exactly as it did before this feature existed. */
+  max-width: 260px;
+  box-shadow: inset 3px 0 0 var(--proj-accent, transparent);
+  padding-left: 12px;
+}
+.tab-project {
+  flex-shrink: 0;
+  max-width: 88px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 10px;
+  letter-spacing: 0.02em;
+  padding: 1px 5px;
+  border-radius: 4px;
+  color: var(--proj-accent, var(--text-mid));
+  background: color-mix(in srgb, var(--proj-accent, var(--text-mid)) 16%, transparent);
+}
+/* A pane whose tabs are all one project wears that colour along its top edge, so panes are
+   told apart before a single tab is read. */
+.tab-strip.has-project-accent {
+  border-top: 2px solid var(--proj-accent);
 }
 
 .tab:hover {

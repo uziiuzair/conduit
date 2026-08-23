@@ -3,6 +3,23 @@
 All notable changes to Conduit are documented here. This project uses
 [semantic versioning](https://semver.org/).
 
+## 0.28.0 — 2026-08-23
+
+- **Added — Split panes across projects.** Sessions from different projects can now sit
+  side by side. Right-click any session in the sidebar and choose **Open beside <project>**
+  to borrow it into the panes you are already looking at. The session stays where it lives:
+  it keeps its own project, its own sidebar row and its own working directory, and closing
+  the borrowed tab leaves it running.
+- **Added — Tabs say which project they belong to.** As soon as a set of panes holds more
+  than one project, every tab gains its project's name and colour, and a pane whose tabs are
+  all one project wears that colour along its top edge. Panes holding a single project look
+  exactly as they did. Each project's colour is derived from the project itself, so it is
+  the same in every window and on every machine — and the sidebar's folder icon now carries
+  it too, so the colour on a tab always has something to point back to.
+- **Changed — Clicking a borrowed session focuses it where it is.** Selecting a session in
+  the sidebar that is already visible in the panes on screen now focuses that tab instead of
+  switching projects and tearing down the split.
+
 ## 0.27.0 — 2026-08-23
 
 - **Changed — Usage meters read one way, everywhere.** The number and the bar used to point

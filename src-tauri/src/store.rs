@@ -234,6 +234,13 @@ pub struct WsTab {
     /// group. Must exist here or serde strips it from persisted layouts.
     #[serde(default)]
     pub preview: bool,
+    /// Owning project, set ONLY when this tab borrows a session from ANOTHER project so
+    /// two projects can sit side by side in one set of panes. `None` means "the project
+    /// whose layout this is", which is what every tab written before the feature is — so
+    /// old state files load unchanged. Skipped when absent so new state files do not grow
+    /// a null on every tab.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_id: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -2254,5 +2261,43 @@ mod tests {
         assert_eq!(recs[0].consented_version, "1.0.0");
         // Persisted to disk and reloads.
         assert!(dir.join("state.json").exists());
+    }
+
+    #[test]
+    fn a_layout_written_before_cross_project_panes_still_loads() {
+        // Every tab in every existing state.json lacks `projectId`. If that stopped
+        // deserializing, the update would open to an empty workspace on every machine.
+        let tab: WsTab = serde_json::from_str(r#"{"kind":"session","ref":"s1"}"#).unwrap();
+        assert_eq!(tab.r#ref, "s1");
+        assert!(!tab.preview);
+        assert_eq!(
+            tab.project_id, None,
+            "an old tab is a LOCAL tab, not an orphan"
+        );
+    }
+
+    #[test]
+    fn a_borrowed_tab_survives_a_round_trip_and_a_local_one_stays_lean() {
+        // The whole cross-project feature is one optional field; if serde drops it on
+        // write, the split silently collapses to same-project on the next launch.
+        let borrowed = WsTab {
+            kind: "session".into(),
+            r#ref: "s2".into(),
+            preview: false,
+            project_id: Some("proj-b".into()),
+        };
+        let json = serde_json::to_string(&borrowed).unwrap();
+        assert!(json.contains(r#""projectId":"proj-b""#), "{json}");
+        let back: WsTab = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.project_id.as_deref(), Some("proj-b"));
+
+        // skip_serializing_if keeps the common case exactly as small as it was.
+        let local = WsTab {
+            kind: "session".into(),
+            r#ref: "s1".into(),
+            preview: false,
+            project_id: None,
+        };
+        assert!(!serde_json::to_string(&local).unwrap().contains("projectId"));
     }
 }
