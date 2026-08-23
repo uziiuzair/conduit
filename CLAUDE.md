@@ -165,6 +165,54 @@ Service status + subscription/local usage (distinct from per-session hook status
   Usage display). Polled by `src/hooks/useClaudeAmbient.ts`; state in `src/store.ts`
   (`claudeUsage` array + `agyUsageByAccount` map + `usagePrefs`).
 
+## Where the usage meter's semantics live
+
+Every quota meter in the app answers the same question, and `src/usageRows.ts` is the ONE
+place that decides how.
+
+- **`UWindow.used` is the only quantity stored** -- the fraction CONSUMED, 0..1, whatever
+  the agent reported. Claude and Command Code give `pctUsed`; agy gives `remainingFraction`
+  and is flipped at its row builder. It used to be a `mode` + a `value` that meant remaining
+  for some windows and used for others, the panel branched on the mode in three places, and
+  one of them was backwards: the label read "62% left" over a bar filled to 38%.
+- **`meterView(w, metric)` returns the label number and the bar fraction together**, which is
+  what makes that class of bug unrepresentable. It also returns `severity`, which is ALWAYS
+  consumption: the colour ramp, the low-alert and the sort key off danger, not off the
+  direction the user happens to read. A meter showing "8% left" must be red.
+- **`metric` defaults to `"used"`** (`UsagePrefs.metric`, Settings -> Usage display) because
+  that is what the agents' own views show -- `claude /usage` prints
+  `Current session ████░░░░░░ 18% · resets 3:50pm`. `"remaining"` is a supported preference,
+  not a fallback.
+- **`windowLabel(kind, pool?)` names the window, not the vendor.** Each CLI names its own
+  windows differently; stacked in one panel those read as different KINDS of limit. Only agy
+  keeps a pool prefix, because its pools are genuinely separate quotas.
+- **`usageRows.ts` must stay importable without `store.ts`** -- that is why `accountKey`
+  lives here and the store re-exports it. Importing the store under the node-env vitest
+  touches `localStorage` at module scope and throws (same reason `startup.ts` exists), and
+  `usageRows.test.ts` is what holds the label/bar agreement in place.
+
+## Where the agent glyph lives
+
+`src/components/AgentGlyph.tsx` owns both the agent's identity and the session's liveness.
+
+- **`AGENT_MARKS` holds each agent's real brand mark**, one path per agent in its SOURCE
+  viewBox (they disagree -- 24 vs 144 -- and rescaling path data by hand is a silent
+  transcription error nobody catches in review). An agent with no mark falls back to
+  `AgentMeta.letter` rather than shipping a guessed logo, which is why that field still
+  exists.
+- **The tint is bent toward `--text-bright`** (`--glyph-ink`). The tints are fixed constants
+  in `agents.ts` but Conduit ships a light theme, and `#e0b341` on cream is ~1.5:1. One
+  `color-mix` brightens on dark and darkens on light, clearing the 3:1 WCAG 1.4.11 asks of a
+  graphic.
+- **`glyphStateFor(status, loaded, compacting)` is the only place status becomes a ring.**
+  `loaded` is "a `live` entry exists", i.e. the session has emitted a hook -- there is no PTY
+  registry in the store. A never-started session gets NO ring on purpose: if every row had
+  one, an idle ring would be wallpaper.
+- The running/needs-you pulse animates `opacity` + `transform` only (compositor-only, so a
+  dozen live sessions cost nothing), runs at 2.4s/1.6s -- far under WCAG 2.3.1's 3Hz -- and
+  is dropped under `prefers-reduced-motion`. The ring still distinguishes the states without
+  it, and the meaning is in the tooltip so it never rests on hue alone.
+
 ## Where the terminal renderer choice lives
 
 Panes draw through WebGL by default, canvas on request (Settings → Terminal). The tier ladder

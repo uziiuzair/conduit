@@ -3,6 +3,32 @@
 All notable changes to Conduit are documented here. This project uses
 [semantic versioning](https://semver.org/).
 
+## 0.27.0 — 2026-08-23
+
+- **Changed — Usage meters read one way, everywhere.** The number and the bar used to point
+  in opposite directions: a meter that said "62% left" drew a bar filled to 38%. Every meter
+  now shows how much you have **used** — the number, the bar and the collapsed summary all
+  agreeing — which is what `claude /usage` and the agents' own usage views show. Reset times
+  read "resets 3:50pm" instead of a bare timestamp.
+- **Added — "Meters show" preference (Settings → Usage display).** Prefer a fuel gauge? Switch
+  the whole panel to "Amount left" and the number, the bar and the summary all flip together.
+  Colour still warns on consumption either way, so a meter reading "8% left" is red whichever
+  direction you read.
+- **Changed — The same window is named the same thing across agents.** Claude reported
+  "Current session" / "Current week (all)", Command Code "5-hour window" / "Weekly", and
+  Antigravity its own variants, so a stacked panel read as unrelated kinds of limit. They are
+  now all "5-hour", "Weekly" and "Weekly · Opus"; Antigravity keeps its pool prefix
+  ("Gemini · Weekly") because those genuinely are separate quotas.
+- **Changed — Sessions show their agent's real logo.** The coloured monogram tiles (C, x, G,
+  o, A, c) are gone, replaced by each agent's actual brand mark — Claude, Codex, Gemini,
+  opencode, Antigravity and Command Code — tinted to stay legible in both the dark and the
+  light themes.
+- **Added — A ring around the agent logo shows what the session is doing.** No ring means it
+  has not started; a faint ring means it is loaded and waiting; a slow pulse means it is
+  working; a faster amber pulse means it needs you; a green ring means it just finished. The
+  animation respects your system's reduce-motion setting, and every state is spelled out in
+  the tooltip rather than left to colour.
+
 ## 0.26.3 — 2026-08-23
 
 - **Fixed — Command Code usage appears for accounts, not just the default profile.** An

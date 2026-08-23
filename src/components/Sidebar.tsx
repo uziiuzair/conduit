@@ -24,7 +24,7 @@ import {
   ChevronRightIcon,
   GitBranchIcon,
 } from "./Icons";
-import { AgentGlyph } from "./AgentGlyph";
+import { AgentGlyph, glyphStateFor } from "./AgentGlyph";
 import { ThemeSwitcher } from "./ThemeSwitcher";
 import { ClaudeStatusPill } from "./ClaudeStatusPill";
 import { UsagePanel } from "./UsagePanel";
@@ -318,6 +318,9 @@ function SessionRow({
   const status = useStore((s) => liveState(s.live, session.id).status);
   const activity = useStore((s) => liveState(s.live, session.id).activity);
   const compacting = useStore((s) => liveState(s.live, session.id).compacting);
+  // A `live` entry exists only once the session has emitted a hook, so its presence IS
+  // "this session has started this run" — see glyphStateFor.
+  const loaded = useStore((s) => s.live[session.id] !== undefined);
   const editing = useStore((s) => s.editingSessionId === session.id);
   const selectSession = useStore((s) => s.selectSession);
   const openMenu = useStore((s) => s.openMenu);
@@ -412,7 +415,11 @@ function SessionRow({
         });
       }}
     >
-      <AgentGlyph id={session.agent} size={14} />
+      <AgentGlyph
+        id={session.agent}
+        size={14}
+        state={glyphStateFor(status, loaded, compacting)}
+      />
       {session.role === "conductor" && (
         <span className="conductor-chip" title="Conductor — orchestrates this project">
           ◆

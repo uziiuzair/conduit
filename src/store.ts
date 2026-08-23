@@ -12,6 +12,7 @@ import {
 } from "./themes";
 import type { TerminalRenderer } from "./terminalRenderer";
 import { initialProjectSelection, type OpenBehavior } from "./startup";
+import { accountKey, type UsageMetric } from "./usageRows";
 import type { Chain, RoutesView, TaskKind, TaskKindInfo } from "./routing";
 import { AGENTS, type AgentId, type AgentInfo, DEFAULT_AGENT, type McpServer } from "./agents";
 import { check, type Update } from "@tauri-apps/plugin-updater";
@@ -370,7 +371,7 @@ export interface ClaudeAccountUsage {
 
 // ---- Command Code usage — mirrors Rust commandcode_usage.rs (camelCase) ----
 
-/** Command Code's two rolling windows, read from its own `/alpha/usage/summary`.
+/** Command Code's two rolling windows, read from its own `/alpha/billing/credits`.
  *  Reuses `PlanWindow` because the shape is identical, which is what lets the meter
  *  component render Claude and Command Code without knowing which it is looking at. */
 export interface CommandCodeUsage {
@@ -417,10 +418,9 @@ export interface AgyUsage {
   agentState: string | null;
   updatedAt: number; // epoch ms
 }
-/** The map key for an account snapshot (env default has no id). */
-export function accountKey(accountId: string | null | undefined): string {
-  return accountId ?? "default";
-}
+// The map key for an account snapshot lives in `usageRows.ts` (which must stay importable
+// without this file) and is re-exported here so its many callers did not have to move.
+export { accountKey };
 
 // ---- Usage bar view preferences (user-configurable; persisted in localStorage) ----
 export interface UsagePrefs {
@@ -430,6 +430,9 @@ export interface UsagePrefs {
   windows: { fiveHour: boolean; weekly: boolean; weeklyOpus: boolean; context: boolean };
   /** Row order: most-critical (least remaining) first, or alphabetical by label. */
   sort: "critical" | "label";
+  /** Which direction every meter reads. Defaults to "used" -- what each agent's own usage
+   *  view shows -- and applies to the number AND the bar together; see `meterView`. */
+  metric: UsageMetric;
   /** A window at or below this % remaining is "low" (drives the hot color + lowAlertOnly). */
   lowThresholdPct: number;
 }
@@ -437,6 +440,7 @@ export const DEFAULT_USAGE_PREFS: UsagePrefs = {
   layout: "selected",
   windows: { fiveHour: true, weekly: true, weeklyOpus: true, context: true },
   sort: "critical",
+  metric: "used",
   lowThresholdPct: 20,
 };
 const USAGE_PREFS_KEY = "conduit.usagePrefs";
