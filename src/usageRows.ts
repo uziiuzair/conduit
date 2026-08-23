@@ -1,4 +1,3 @@
-import { accountKey } from "./store";
 import type {
   AgyUsage,
   ClaudeAccountUsage,
@@ -15,12 +14,32 @@ import type { AgentAvailability, AvailabilityMap } from "./routing";
  * and two implementations of it would eventually disagree about whether an agent is too low
  * to route to while its meter still shows green.
  *
- * Pure and React-free, so `routing.ts` can stay that way too.
+ * Pure and React-free, so `routing.ts` can stay that way too -- and with NO value import
+ * from `store.ts`, which is what lets `usageRows.test.ts` run: importing the store under the
+ * node-env vitest touches `localStorage` at module scope and throws. Same reason
+ * `startup.ts` exists. Keep the imports from `store` type-only.
  */
+
+/** The map key for an account snapshot (the env default has no id).
+ *  Defined here rather than in `store.ts`, which re-exports it, so this module stays
+ *  importable without the store -- see the note above. */
+export function accountKey(accountId: string | null | undefined): string {
+  return accountId ?? "default";
+}
 
 /** A window's kind, used both for the prefs filter and for labeling. */
 export type WinKind = "fiveHour" | "weekly" | "weeklyOpus" | "context";
-/** A normalized meter across agents: "remaining" (Claude plan / agy quota) or "used" (context). */
+
+/**
+ * One meter, normalized across agents.
+ *
+ * `used` is the ONLY quantity stored, and every agent is converted into it at the row
+ * builder. It used to be a `mode` + a `value` that meant remaining for some windows and
+ * used for others, and the panel had to branch on the mode in three places to decide what
+ * the label said and what the bar drew. It got one of them backwards: the label read
+ * "62% left" while the bar filled to 38%. Storing one direction removes the branch, and
+ * with it the chance of the two disagreeing again.
+ */
 export interface UWindow {
   key: string;
   label: string;
@@ -28,10 +47,53 @@ export interface UWindow {
   /** Pool this window belongs to (agy has redundant pools: "Gemini Models", "Claude & GPT
    *  Models"). Used to ignore a whole unavailable pool in the summary metric. */
   group: string;
-  mode: "remaining" | "used";
-  value: number; // 0..1 (remaining fraction, or used fraction for context)
+  /** Fraction of this window CONSUMED, 0..1. */
+  used: number;
+  /** Does this window gate work? Context does not — it is informational, and letting it
+   *  drag an account's health number down would route traffic away from an agent whose
+   *  quota is untouched. */
+  quota: boolean;
   resetsAt: string | null;
   disabled: boolean;
+}
+
+const clamp01 = (n: number) => Math.max(0, Math.min(1, Number.isFinite(n) ? n : 0));
+
+/**
+ * Which direction the user reads a meter.
+ *
+ * "used" is the default because it is what every agent's own usage view shows — `claude
+ * /usage` prints `Current session ████░░░░░░ 18% · resets 3:50pm`, and quota dashboards
+ * generally (GitHub Actions minutes, OpenAI usage, cloud budgets) count up toward a cap
+ * rather than down from one. "remaining" is offered because a fuel-gauge reading is a real
+ * preference, not a wrong one.
+ */
+export type UsageMetric = "used" | "remaining";
+
+/** Everything the panel needs to draw one meter, derived once. */
+export interface MeterView {
+  /** The number in the label AND the fraction the bar fills. Returning them as one value
+   *  is the point: it is no longer possible for the text and the bar to disagree. */
+  fraction: number;
+  /** `fraction` as a rounded percent, for the label. */
+  pct: number;
+  /** The word after the number: "used" or "left". */
+  word: string;
+  /** Always the CONSUMED fraction, whichever metric is displayed. Danger is a property of
+   *  the account, not of how the user likes to read it — so the colour ramp, the low-alert
+   *  and the sort all key off this and never off `fraction`. */
+  severity: number;
+}
+
+export function meterView(w: UWindow, metric: UsageMetric): MeterView {
+  const used = clamp01(w.used);
+  const fraction = metric === "used" ? used : 1 - used;
+  return {
+    fraction,
+    pct: Math.round(fraction * 100),
+    word: metric === "used" ? "used" : "left",
+    severity: used,
+  };
 }
 
 /** The single "how healthy is this account" number for the summary/sort/low-alert. It's the
@@ -42,18 +104,19 @@ export interface UWindow {
 export function summaryRemaining(windows: UWindow[]): number {
   const byGroup = new Map<string, UWindow[]>();
   for (const w of windows) {
-    if (w.mode !== "remaining") continue;
+    if (!w.quota) continue;
     const arr = byGroup.get(w.group) ?? [];
     arr.push(w);
     byGroup.set(w.group, arr);
   }
   if (byGroup.size === 0) return 1;
+  const remaining = (w: UWindow) => 1 - clamp01(w.used);
   const groupMins: number[] = [];
   for (const ws of byGroup.values()) {
     const live = ws.filter((w) => !w.disabled);
     if (live.length === 0) continue; // whole pool disabled
-    if (Math.max(...live.map((w) => w.value)) <= 0) continue; // whole pool exhausted/unavailable
-    groupMins.push(Math.min(...live.map((w) => w.value)));
+    if (Math.max(...live.map(remaining)) <= 0) continue; // whole pool exhausted/unavailable
+    groupMins.push(Math.min(...live.map(remaining)));
   }
   return groupMins.length ? Math.min(...groupMins) : 0;
 }
@@ -74,6 +137,28 @@ export interface URow {
 }
 
 
+/**
+ * One vocabulary for the same window across every agent.
+ *
+ * Each CLI names its own windows: Claude says "Current session" / "Current week (all)",
+ * Command Code says "5-hour window" / "Weekly", agy says "5-hour" / "Weekly" per pool. In
+ * a stacked panel those sat next to each other and read as different KINDS of limit rather
+ * than the same limit measured by three vendors. `kind` was already the classification the
+ * prefs filter uses, so the label is now derived from it instead of passed through.
+ */
+const KIND_LABEL: Record<WinKind, string> = {
+  fiveHour: "5-hour",
+  weekly: "Weekly",
+  weeklyOpus: "Weekly · Opus",
+  context: "Context",
+};
+
+/** `pool` survives only for agy, whose windows genuinely belong to separate quotas and
+ *  would otherwise collapse into four rows named "5-hour" and "Weekly". */
+export function windowLabel(kind: WinKind, pool?: string): string {
+  return pool ? `${pool} · ${KIND_LABEL[kind]}` : KIND_LABEL[kind];
+}
+
 export function claudeKind(label: string): WinKind {
   if (label.includes("Opus")) return "weeklyOpus";
   if (label.toLowerCase().includes("week")) return "weekly";
@@ -87,11 +172,11 @@ export function claudeRow(entry: ClaudeAccountUsage): URow {
   const plan = entry.usage.plan;
   const windows: UWindow[] = (plan ?? []).map((w, i) => ({
     key: `${w.label}-${i}`,
-    label: w.label,
+    label: windowLabel(claudeKind(w.label)),
     kind: claudeKind(w.label),
     group: "plan", // Claude's windows are distinct limits, treated as one pool.
-    mode: "remaining",
-    value: Math.max(0, Math.min(1, 1 - w.pctUsed)),
+    used: clamp01(w.pctUsed),
+    quota: true,
     resetsAt: w.resetsAt,
     disabled: false,
   }));
@@ -112,15 +197,15 @@ export function commandCodeRow(entry: CommandCodeAccountUsage): URow {
   const { windows: raw, source, limited } = entry.usage;
   const windows: UWindow[] = (raw ?? []).map((w, i) => ({
     key: `${w.label}-${i}`,
-    label: w.label,
+    label: windowLabel(claudeKind(w.label)),
     // Command Code labels its windows "5-hour window" / "Weekly", so the Claude
     // classifier reads them correctly and the prefs filter works without a third variant.
     kind: claudeKind(w.label),
     // One pool: both windows gate the same subscription, so the least-remaining of the
     // two is the honest summary number.
     group: "plan",
-    mode: "remaining",
-    value: Math.max(0, Math.min(1, 1 - w.pctUsed)),
+    used: clamp01(w.pctUsed),
+    quota: true,
     resetsAt: w.resetsAt,
     // `limited` means the account is capped RIGHT NOW. Marking the windows disabled
     // would gray them out and drop them from the summary metric -- the opposite of what
@@ -152,11 +237,13 @@ export function agyRow(u: AgyUsage): URow {
     for (const b of g.buckets) {
       windows.push({
         key: b.bucketId,
-        label: `${short} ${b.label}`,
+        label: windowLabel(agyKind(b.label), short),
         kind: agyKind(b.label),
         group: g.displayName,
-        mode: "remaining",
-        value: Math.max(0, Math.min(1, b.remainingFraction)),
+        // agy reports headroom; every other agent reports consumption. Flipping it here,
+        // once, is why nothing downstream has to know which is which.
+        used: 1 - clamp01(b.remainingFraction),
+        quota: true,
         resetsAt: b.resetsAt,
         disabled: b.disabled,
       });
@@ -165,11 +252,12 @@ export function agyRow(u: AgyUsage): URow {
   if (u.context && u.context.contextWindowSize > 0) {
     windows.push({
       key: "context",
-      label: "Context",
+      label: windowLabel("context"),
       kind: "context",
       group: "context",
-      mode: "used",
-      value: Math.max(0, Math.min(1, u.context.usedPercentage / 100)),
+      used: clamp01(u.context.usedPercentage / 100),
+      // Not a quota: a full context window costs nothing and resets on the next turn.
+      quota: false,
       resetsAt: null,
       disabled: false,
     });

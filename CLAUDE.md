@@ -165,6 +165,88 @@ Service status + subscription/local usage (distinct from per-session hook status
   Usage display). Polled by `src/hooks/useClaudeAmbient.ts`; state in `src/store.ts`
   (`claudeUsage` array + `agyUsageByAccount` map + `usagePrefs`).
 
+## Where cross-project panes live
+
+A layout is keyed by project, so for years "which project is this tab's session in" was
+answered by "the layout it is in" and nothing stored it. `WsTab.projectId` is the whole
+feature: set ONLY on a BORROWED tab -- a session lent from another project into this
+layout's panes.
+
+- **Absent means the host project**, and every tab written before this feature is absent.
+  That is what makes existing `state.json` files and the Rust struct forward-compatible;
+  two Rust tests pin it (an old tab must not deserialize as an orphan, a borrowed one must
+  survive a round trip, a local one must not grow a `projectId` key). Read it through
+  `tabProjectId` (`src/layout.ts`), never off the object, so the absent case is handled once.
+- **`repairLayout` must validate a foreign tab against its OWN project.** It moved out of
+  `store.ts` into `layout.ts` precisely so this is testable: a repair runs on EVERY layout
+  write, so checking a borrowed tab against the host would prune it the instant it was
+  created and the feature would look broken rather than absent. `store.ts` keeps a thin
+  `validateLayout` wrapper that supplies `uid()`.
+- **Removal repairs EVERY layout, not the owner's.** `revalidateAllLayouts` runs on
+  `removeSession`/`removeProject` because a dead session may be sitting in someone else's
+  panes. It skips persisting layouts that did not change.
+- **The terminals were already all mounted.** `WorkspaceCenter`'s `allSessions` flat-maps
+  every project's sessions into one permanent keep-alive stack and moves them with CSS
+  alone, so this needed no remounting -- only dropping `placeSession`'s ownership gate in
+  pane mode. CANVAS mode keeps the gate: a canvas is reconciled from its own project's
+  sessions, so a borrowed one has no node.
+- **Differentiation is all-or-nothing per layout.** `isMixedLayout` decides; when true
+  EVERY tab is badged, not just the visitors, because badging only the foreign ones makes
+  "no badge" mean "the host", which is the knowledge the badge exists to supply. When
+  false, the strip renders exactly as it did before.
+- **`projectAccent` is derived from the project id, never stored.** A colour the user did
+  not choose must not become state to migrate, and it has to work for every project that
+  already exists the moment they update. The sidebar's folder icon uses the same function,
+  so a colour on a tab always has a referent.
+
+## Where the usage meter's semantics live
+
+Every quota meter in the app answers the same question, and `src/usageRows.ts` is the ONE
+place that decides how.
+
+- **`UWindow.used` is the only quantity stored** -- the fraction CONSUMED, 0..1, whatever
+  the agent reported. Claude and Command Code give `pctUsed`; agy gives `remainingFraction`
+  and is flipped at its row builder. It used to be a `mode` + a `value` that meant remaining
+  for some windows and used for others, the panel branched on the mode in three places, and
+  one of them was backwards: the label read "62% left" over a bar filled to 38%.
+- **`meterView(w, metric)` returns the label number and the bar fraction together**, which is
+  what makes that class of bug unrepresentable. It also returns `severity`, which is ALWAYS
+  consumption: the colour ramp, the low-alert and the sort key off danger, not off the
+  direction the user happens to read. A meter showing "8% left" must be red.
+- **`metric` defaults to `"used"`** (`UsagePrefs.metric`, Settings -> Usage display) because
+  that is what the agents' own views show -- `claude /usage` prints
+  `Current session ████░░░░░░ 18% · resets 3:50pm`. `"remaining"` is a supported preference,
+  not a fallback.
+- **`windowLabel(kind, pool?)` names the window, not the vendor.** Each CLI names its own
+  windows differently; stacked in one panel those read as different KINDS of limit. Only agy
+  keeps a pool prefix, because its pools are genuinely separate quotas.
+- **`usageRows.ts` must stay importable without `store.ts`** -- that is why `accountKey`
+  lives here and the store re-exports it. Importing the store under the node-env vitest
+  touches `localStorage` at module scope and throws (same reason `startup.ts` exists), and
+  `usageRows.test.ts` is what holds the label/bar agreement in place.
+
+## Where the agent glyph lives
+
+`src/components/AgentGlyph.tsx` owns both the agent's identity and the session's liveness.
+
+- **`AGENT_MARKS` holds each agent's real brand mark**, one path per agent in its SOURCE
+  viewBox (they disagree -- 24 vs 144 -- and rescaling path data by hand is a silent
+  transcription error nobody catches in review). An agent with no mark falls back to
+  `AgentMeta.letter` rather than shipping a guessed logo, which is why that field still
+  exists.
+- **The tint is bent toward `--text-bright`** (`--glyph-ink`). The tints are fixed constants
+  in `agents.ts` but Conduit ships a light theme, and `#e0b341` on cream is ~1.5:1. One
+  `color-mix` brightens on dark and darkens on light, clearing the 3:1 WCAG 1.4.11 asks of a
+  graphic.
+- **`glyphStateFor(status, loaded, compacting)` is the only place status becomes a ring.**
+  `loaded` is "a `live` entry exists", i.e. the session has emitted a hook -- there is no PTY
+  registry in the store. A never-started session gets NO ring on purpose: if every row had
+  one, an idle ring would be wallpaper.
+- The running/needs-you pulse animates `opacity` + `transform` only (compositor-only, so a
+  dozen live sessions cost nothing), runs at 2.4s/1.6s -- far under WCAG 2.3.1's 3Hz -- and
+  is dropped under `prefers-reduced-motion`. The ring still distinguishes the states without
+  it, and the meaning is in the tooltip so it never rests on hue alone.
+
 ## Where the terminal renderer choice lives
 
 Panes draw through WebGL by default, canvas on request (Settings → Terminal). The tier ladder

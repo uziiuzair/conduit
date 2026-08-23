@@ -304,7 +304,9 @@ button {
 }
 
 .project-head .folder-icon {
-  color: var(--accent);
+  /* Falls back to the theme accent so the rule still works anywhere --proj-accent is
+     not set (and so a stylesheet-only read of this file is not a puzzle). */
+  color: var(--proj-accent, var(--accent));
   flex: none;
 }
 
@@ -1534,6 +1536,37 @@ button {
   }
 }
 
+/* ---- Cross-project panes ----
+   A layout can borrow sessions from other projects (WsTab.projectId). Once it does, EVERY
+   tab is badged with its project, so no tab's origin is implied by the absence of a badge.
+   The colour comes from `projectAccent` (layout.ts), derived from the project id -- one
+   function, so the tab bar and the pane edge can never disagree about a project's colour. */
+.tab.badged {
+  /* Widened only when badged: the badge needs the room and an unbadged strip must look
+     exactly as it did before this feature existed. */
+  max-width: 260px;
+  box-shadow: inset 3px 0 0 var(--proj-accent, transparent);
+  padding-left: 12px;
+}
+.tab-project {
+  flex-shrink: 0;
+  max-width: 88px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 10px;
+  letter-spacing: 0.02em;
+  padding: 1px 5px;
+  border-radius: 4px;
+  color: var(--proj-accent, var(--text-mid));
+  background: color-mix(in srgb, var(--proj-accent, var(--text-mid)) 16%, transparent);
+}
+/* A pane whose tabs are all one project wears that colour along its top edge, so panes are
+   told apart before a single tab is read. */
+.tab-strip.has-project-accent {
+  border-top: 2px solid var(--proj-accent);
+}
+
 .tab:hover {
   color: var(--text-bright);
 }
@@ -2725,10 +2758,6 @@ button {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-/* Tint the agent glyph in summary rows so Claude vs agy reads at a glance. */
-.usage-summary-item.antigravity {
-  color: var(--agy);
-}
 .usage-summary {
   display: flex;
   flex-direction: column;
@@ -2798,15 +2827,91 @@ button {
 .claude-warning-icon { flex-shrink: 0; }
 .claude-warning-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
+/* ---- Agent glyph: brand mark + session-state ring ----
+   The mark is drawn in the agent's tint on a faint plate of the same tint, so one colour
+   (--glyph-tint, set inline from AgentMeta.tint) drives the whole glyph. The ring around
+   it carries SESSION STATE, which is why the plate stays constant: if both the fill and
+   the ring moved, neither would read. */
 .agent-glyph {
+  position: relative;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  border-radius: 4px;
-  color: #161310;
+  /* Proportional so the squircle looks the same at 12px (usage bar) and 20px (pickers). */
+  border-radius: 30%;
+  /* The brand tints are fixed constants (agents.ts), but Conduit ships a LIGHT theme too,
+     and #e0b341 on cream is about 1.5:1 -- unreadable. Bending each tint toward the
+     theme's own text colour brightens it on the dark themes and darkens it on the light
+     one from a single expression, clearing the 3:1 that WCAG 1.4.11 asks of a graphic.
+     The tint stays recognisable because it is still 72% of the mix. */
+  --glyph-ink: color-mix(in srgb, var(--glyph-tint, var(--accent)) 72%, var(--text-bright));
+  color: var(--glyph-ink);
+  background: color-mix(in srgb, var(--glyph-tint, var(--accent)) 15%, transparent);
   font-weight: 700;
   flex-shrink: 0;
   line-height: 1;
+}
+.agent-glyph svg {
+  width: 66%;
+  height: 66%;
+  display: block;
+}
+/* Idle = spawned and quiet: present, not shouting. */
+.agent-glyph.st-idle {
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--glyph-ink) 45%, transparent);
+}
+.agent-glyph.st-running {
+  box-shadow: 0 0 0 1px var(--glyph-ink);
+}
+/* needsInput and done leave the agent's tint deliberately: they are about YOU, not about
+   which agent it is, so they use the same amber/green the rest of the app reserves for
+   "blocked" and "finished". */
+.agent-glyph.st-needs {
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--amber) 85%, transparent);
+}
+.agent-glyph.st-done {
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--green) 70%, transparent);
+}
+/* The "working" halo: a ring that breathes outward and fades. Only `opacity` and
+   `transform` animate, so it stays on the compositor and costs nothing per frame even
+   with a dozen sessions running. 2.4s is slow enough to read as ambient rather than as an
+   alert, and far below the 3Hz flash threshold in WCAG 2.3.1. */
+.agent-glyph.st-running::after,
+.agent-glyph.st-needs::after {
+  content: "";
+  position: absolute;
+  inset: -2px;
+  border-radius: 30%;
+  border: 1px solid currentColor;
+  animation: glyph-pulse 2.4s ease-in-out infinite;
+  pointer-events: none;
+}
+.agent-glyph.st-needs::after {
+  color: var(--amber);
+  /* Faster and tighter: this one IS an alert, and should catch the eye the working ring
+     deliberately does not. */
+  animation-duration: 1.6s;
+}
+@keyframes glyph-pulse {
+  0%,
+  100% {
+    opacity: 0.6;
+    transform: scale(0.92);
+  }
+  60% {
+    opacity: 0;
+    transform: scale(1.28);
+  }
+}
+/* Motion is the ONLY thing removed — the ring itself still distinguishes the states, so a
+   reduced-motion user loses nothing but the animation. */
+@media (prefers-reduced-motion: reduce) {
+  .agent-glyph.st-running::after,
+  .agent-glyph.st-needs::after {
+    animation: none;
+    opacity: 0.55;
+    transform: none;
+  }
 }
 
 .dialog-label { font-size: 10px; letter-spacing: 0.06em; text-transform: uppercase; color: var(--text-dim); margin: 2px 0 6px; }

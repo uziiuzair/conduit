@@ -12,12 +12,14 @@ import {
   agyRow,
   claudeRow,
   commandCodeRow,
+  meterView,
   type URow,
+  type UsageMetric,
   type UWindow,
 } from "../usageRows";
 import { AgentGlyph } from "./AgentGlyph";
 import { fmtTokens } from "./ClaudeStatusPill";
-import type { AgentId } from "../agents";
+import { agentMeta, type AgentId } from "../agents";
 
 /** RFC3339 → "3:41pm" (today) / "Mon" (later). Never throws. */
 function shortReset(iso: string | null): string {
@@ -30,29 +32,40 @@ function shortReset(iso: string | null): string {
     : d.toLocaleDateString([], { weekday: "short" });
 }
 
-function Meter({ w, threshold }: { w: UWindow; threshold: number }) {
-  const pct = Math.round(w.value * 100);
+/**
+ * One meter, laid out like the agents lay out their own: `label ······ 18% used · resets 3:50pm`,
+ * bar underneath filling in the same direction the number counts.
+ *
+ * The number and the bar both come from a single `meterView` call, which is the whole point
+ * of that function — they used to be computed separately here and pointed opposite ways.
+ */
+function Meter({ w, metric, threshold }: { w: UWindow; metric: UsageMetric; threshold: number }) {
+  const v = meterView(w, metric);
   const reset = shortReset(w.resetsAt);
-  const text = w.disabled ? "disabled" : w.mode === "used" ? `${pct}% used` : `${pct}% left`;
-  // Bar fills with consumption: "remaining" windows show the used amount (100 - remaining),
-  // "used"/context windows already track consumption. Label still reads "% left".
-  const fillPct = w.disabled ? 0 : w.mode === "remaining" ? 100 - pct : pct;
+  const text = w.disabled ? "disabled" : `${v.pct}% ${v.word}`;
+  const fillPct = w.disabled ? 0 : v.fraction * 100;
   // Smooth ramp: tint the fill from the agent's base color (var(--meter-base)) toward muted
-  // red as it approaches full. Ramp begins where the amber warn tier used to (100 - 2*threshold)
-  // and hits full red at 100%, so the Settings low-threshold slider still steers the onset.
+  // red as CONSUMPTION approaches full. Keyed on severity, not on the drawn fraction, so a
+  // meter reading "left" still reddens when it runs low instead of when it runs full. Ramp
+  // begins where the amber warn tier used to (100 - 2*threshold) and hits full red at 100%,
+  // so the Settings low-threshold slider still steers the onset.
+  const severityPct = v.severity * 100;
   const rampStart = Math.max(0, 100 - Math.min(50, threshold * 200));
   const redWeight = w.disabled
     ? 0
-    : Math.round(Math.max(0, Math.min(1, (fillPct - rampStart) / (100 - rampStart || 1))) * 100);
-  // disabled keeps its gray (via the class); ctx keeps its dimmed opacity.
-  const fillClass = w.disabled ? "disabled" : w.mode === "used" ? "ctx" : "";
+    : Math.round(
+        Math.max(0, Math.min(1, (severityPct - rampStart) / (100 - rampStart || 1))) * 100,
+      );
+  // disabled keeps its gray (via the class); context keeps its dimmed opacity, because it
+  // is not a quota and should not compete with the windows that are.
+  const fillClass = w.disabled ? "disabled" : w.quota ? "" : "ctx";
   return (
     <div className="usage-meter">
       <div className="usage-meter-head">
         <span>{w.label}</span>
         <span>
           {text}
-          {reset ? ` · ${reset}` : ""}
+          {reset ? ` · resets ${reset}` : ""}
         </span>
       </div>
       <div className="usage-meter-bar">
@@ -114,10 +127,23 @@ function RowBlock({
       ) : wins.length === 0 ? (
         <div className="usage-hint">No windows match your filter.</div>
       ) : (
-        wins.map((w) => <Meter key={w.key} w={w} threshold={threshold} />)
+        wins.map((w) => (
+          <Meter key={w.key} w={w} metric={prefs.metric} threshold={threshold} />
+        ))
       )}
     </div>
   );
+}
+
+/**
+ * The one number the collapsed summary shows, in the SAME direction as the expanded
+ * meters. `minRemaining` is the row's worst window, so under "used" that is its most-used
+ * one -- the collapsed and expanded views must not disagree about which way is worse.
+ */
+function summaryText(row: URow, metric: UsageMetric): string {
+  return metric === "used"
+    ? `${Math.round((1 - row.minRemaining) * 100)}% used`
+    : `${Math.round(row.minRemaining * 100)}% left`;
 }
 
 /** Dot color for the summary layout, from a row's least-remaining window. */
@@ -230,12 +256,12 @@ export function UsagePanel() {
               <span
                 key={`${r.agent}:${r.key}`}
                 className={`usage-summary-item ${r.agent}`}
-                title={`${r.agent === "antigravity" ? "agy" : "Claude"} · ${r.label}`}
+                title={`${agentMeta(r.agent).label} · ${r.label}`}
               >
                 <AgentGlyph id={r.agent} size={12} />
                 <span className={`usage-dot ${summaryDotClass(r, threshold)}`} />
                 <span className="usage-summary-label">{r.label}</span>
-                {r.connectable ? "—" : `${Math.round(r.minRemaining * 100)}%`}
+                {r.connectable ? "—" : summaryText(r, prefs.metric)}
               </span>
             ))}
           </div>

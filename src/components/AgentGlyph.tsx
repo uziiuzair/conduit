@@ -1,17 +1,147 @@
 import { agentMeta, type AgentId } from "../agents";
 
-/** Rounded-square monogram identifying an agent. Accessible: shape + letter + color,
- *  with the agent name as the title (not color alone). */
-export function AgentGlyph({ id, size = 14 }: { id: AgentId; size?: number }) {
+/**
+ * Each agent's real brand mark, as a single path so it tints with `currentColor`.
+ *
+ * These replaced coloured monogram letters: at 13-20px a letter is legible but not
+ * IDENTIFIABLE -- "C" was Claude and "c" was Command Code, a distinction only the person
+ * who wrote it can make. A logo is recognised pre-attentively, which is the whole job of
+ * this glyph in a dense sidebar.
+ *
+ * Sources (published brand marks, taken verbatim -- geometry unmodified):
+ *   claude, gemini                   simple-icons (CC0)
+ *   codex, opencode, antigravity     lobehub/lobe-icons (MIT)
+ *   commandcode                      the command-code npm package's own extension icon
+ *
+ * `viewBox` is per-mark because the sources disagree (24 vs 144). Rescaling path data by
+ * hand is exactly the kind of silent transcription error nobody can spot in review.
+ */
+interface AgentMark {
+  viewBox: string;
+  path: string;
+  /** Marks with knockout holes (Command Code's loops) need evenodd, not nonzero. */
+  evenOdd?: boolean;
+}
+
+export const AGENT_MARKS: Partial<Record<AgentId, AgentMark>> = {
+  claude: {
+    viewBox: "0 0 24 24",
+    path: "m4.7144 15.9555 4.7174-2.6471.079-.2307-.079-.1275h-.2307l-.7893-.0486-2.6956-.0729-2.3375-.0971-2.2646-.1214-.5707-.1215-.5343-.7042.0546-.3522.4797-.3218.686.0608 1.5179.1032 2.2767.1578 1.6514.0972 2.4468.255h.3886l.0546-.1579-.1336-.0971-.1032-.0972L6.973 9.8356l-2.55-1.6879-1.3356-.9714-.7225-.4918-.3643-.4614-.1578-1.0078.6557-.7225.8803.0607.2246.0607.8925.686 1.9064 1.4754 2.4893 1.8336.3643.3035.1457-.1032.0182-.0728-.164-.2733-1.3539-2.4467-1.445-2.4893-.6435-1.032-.17-.6194c-.0607-.255-.1032-.4674-.1032-.7285L6.287.1335 6.6997 0l.9957.1336.419.3642.6192 1.4147 1.0018 2.2282 1.5543 3.0296.4553.8985.2429.8318.091.255h.1579v-.1457l.1275-1.706.2368-2.0947.2307-2.6957.0789-.7589.3764-.9107.7468-.4918.5828.2793.4797.686-.0668.4433-.2853 1.8517-.5586 2.9021-.3643 1.9429h.2125l.2429-.2429.9835-1.3053 1.6514-2.0643.7286-.8196.85-.9046.5464-.4311h1.0321l.759 1.1293-.34 1.1657-1.0625 1.3478-.8804 1.1414-1.2628 1.7-.7893 1.36.0729.1093.1882-.0183 2.8535-.607 1.5421-.2794 1.8396-.3157.8318.3886.091.3946-.3278.8075-1.967.4857-2.3072.4614-3.4364.8136-.0425.0304.0486.0607 1.5482.1457.6618.0364h1.621l3.0175.2247.7892.522.4736.6376-.079.4857-1.2142.6193-1.6393-.3886-3.825-.9107-1.3113-.3279h-.1822v.1093l1.0929 1.0686 2.0035 1.8092 2.5075 2.3314.1275.5768-.3218.4554-.34-.0486-2.2039-1.6575-.85-.7468-1.9246-1.621h-.1275v.17l.4432.6496 2.3436 3.5214.1214 1.0807-.17.3521-.6071.2125-.6679-.1214-1.3721-1.9246L14.38 17.959l-1.1414-1.9428-.1397.079-.674 7.2552-.3156.3703-.7286.2793-.6071-.4614-.3218-.7468.3218-1.4753.3886-1.9246.3157-1.53.2853-1.9004.17-.6314-.0121-.0425-.1397.0182-1.4328 1.9672-2.1796 2.9446-1.7243 1.8456-.4128.164-.7164-.3704.0667-.6618.4008-.5889 2.386-3.0357 1.4389-1.882.929-1.0868-.0062-.1579h-.0546l-6.3385 4.1164-1.1293.1457-.4857-.4554.0608-.7467.2307-.2429 1.9064-1.3114Z",
+  },
+  codex: {
+    viewBox: "0 0 24 24",
+    evenOdd: true,
+    path: "M8.086.457a6.105 6.105 0 013.046-.415c1.333.153 2.521.72 3.564 1.7a.117.117 0 00.107.029c1.408-.346 2.762-.224 4.061.366l.063.03.154.076c1.357.703 2.33 1.77 2.918 3.198.278.679.418 1.388.421 2.126a5.655 5.655 0 01-.18 1.631.167.167 0 00.04.155 5.982 5.982 0 011.578 2.891c.385 1.901-.01 3.615-1.183 5.14l-.182.22a6.063 6.063 0 01-2.934 1.851.162.162 0 00-.108.102c-.255.736-.511 1.364-.987 1.992-1.199 1.582-2.962 2.462-4.948 2.451-1.583-.008-2.986-.587-4.21-1.736a.145.145 0 00-.14-.032c-.518.167-1.04.191-1.604.185a5.924 5.924 0 01-2.595-.622 6.058 6.058 0 01-2.146-1.781c-.203-.269-.404-.522-.551-.821a7.74 7.74 0 01-.495-1.283 6.11 6.11 0 01-.017-3.064.166.166 0 00.008-.074.115.115 0 00-.037-.064 5.958 5.958 0 01-1.38-2.202 5.196 5.196 0 01-.333-1.589 6.915 6.915 0 01.188-2.132c.45-1.484 1.309-2.648 2.577-3.493.282-.188.55-.334.802-.438.286-.12.573-.22.861-.304a.129.129 0 00.087-.087A6.016 6.016 0 015.635 2.31C6.315 1.464 7.132.846 8.086.457zm-.804 7.85a.848.848 0 00-1.473.842l1.694 2.965-1.688 2.848a.849.849 0 001.46.864l1.94-3.272a.849.849 0 00.007-.854l-1.94-3.393zm5.446 6.24a.849.849 0 000 1.695h4.848a.849.849 0 000-1.696h-4.848z",
+  },
+  gemini: {
+    viewBox: "0 0 24 24",
+    path: "M11.04 19.32Q12 21.51 12 24q0-2.49.93-4.68.96-2.19 2.58-3.81t3.81-2.55Q21.51 12 24 12q-2.49 0-4.68-.93a12.3 12.3 0 0 1-3.81-2.58 12.3 12.3 0 0 1-2.58-3.81Q12 2.49 12 0q0 2.49-.96 4.68-.93 2.19-2.55 3.81a12.3 12.3 0 0 1-3.81 2.58Q2.49 12 0 12q2.49 0 4.68.96 2.19.93 3.81 2.55t2.55 3.81",
+  },
+  opencode: {
+    viewBox: "0 0 24 24",
+    evenOdd: true,
+    path: "M16 6H8v12h8V6zm4 16H4V2h16v20z",
+  },
+  antigravity: {
+    viewBox: "0 0 24 24",
+    path: "M21.751 22.607c1.34 1.005 3.35.335 1.508-1.508C17.73 15.74 18.904 1 12.037 1 5.17 1 6.342 15.74.815 21.1c-2.01 2.009.167 2.511 1.507 1.506 5.192-3.517 4.857-9.714 9.715-9.714 4.857 0 4.522 6.197 9.714 9.715z",
+  },
+  commandcode: {
+    // No evenOdd: the source path relies on opposite winding for the four loop holes, and
+    // the source renders it with the default nonzero rule.
+    viewBox: "0 0 144 144",
+    path: "M98.8049 27.6163C89.3295 27.6163 81.6214 35.3243 81.6214 44.7997V52.1641H61.9832V44.7997C61.9832 35.3243 54.2752 27.6163 44.7997 27.6163C35.3243 27.6163 27.6163 35.3243 27.6163 44.7997C27.6163 54.2752 35.3243 61.9832 44.7997 61.9832H52.1641V81.6214H44.7997C35.3243 81.6214 27.6163 89.3295 27.6163 98.8049C27.6163 108.28 35.3243 115.988 44.7997 115.988C54.2752 115.988 61.9832 108.28 61.9832 98.8049V91.4406H81.6214V98.8049C81.6214 108.28 89.3295 115.988 98.8049 115.988C108.28 115.988 115.988 108.28 115.988 98.8049C115.988 89.3295 108.28 81.6214 98.8049 81.6214H91.4406V61.9832H98.8049C108.28 61.9832 115.988 54.2752 115.988 44.7997C115.988 35.3243 108.28 27.6163 98.8049 27.6163ZM91.4406 52.1641V44.7997C91.4406 40.7248 94.73 37.4354 98.8049 37.4354C102.88 37.4354 106.169 40.7248 106.169 44.7997C106.169 48.8747 102.88 52.1641 98.8049 52.1641H91.4406ZM44.7997 52.1641C40.7248 52.1641 37.4354 48.8747 37.4354 44.7997C37.4354 40.7248 40.7248 37.4354 44.7997 37.4354C48.8747 37.4354 52.1641 40.7248 52.1641 44.7997V52.1641H44.7997ZM61.9832 81.6214V61.9832H81.6214V81.6214H61.9832ZM98.8049 106.169C94.73 106.169 91.4406 102.88 91.4406 98.8049V91.4406H98.8049C102.88 91.4406 106.169 94.73 106.169 98.8049C106.169 102.88 102.88 106.169 98.8049 106.169ZM44.7997 106.169C40.7248 106.169 37.4354 102.88 37.4354 98.8049C37.4354 94.73 40.7248 91.4406 44.7997 91.4406H52.1641V98.8049C52.1641 102.88 48.8747 106.169 44.7997 106.169Z",
+  },
+};
+
+/**
+ * A session's liveness, expressed as a ring around the glyph rather than as another chip.
+ *
+ * Deliberately NOT the same vocabulary as `SessionStatus`: the ring answers "is this alive
+ * and does it want me", which collapses several statuses. `undefined` means "this is a
+ * picker, not a session" and draws no ring at all -- a ring on the new-session dialog's
+ * agent tiles would read as state that does not exist yet.
+ */
+export type GlyphState = "idle" | "running" | "needsInput" | "done";
+
+const STATE_CLASS: Record<GlyphState, string> = {
+  idle: "st-idle",
+  running: "st-running",
+  needsInput: "st-needs",
+  done: "st-done",
+};
+
+/** Spelled out in the tooltip so the ring's meaning never rests on hue alone. */
+const STATE_TITLE: Record<GlyphState, string> = {
+  idle: "loaded, waiting",
+  running: "working",
+  needsInput: "needs you",
+  done: "finished",
+};
+
+/**
+ * Session status -> ring, the one place that mapping is made.
+ *
+ * `loaded` is "has this session ever spoken to us this run" (a `live` entry exists), NOT
+ * "does a PTY exist" — the store has no PTY registry, and a session that has emitted a
+ * hook has definitionally started. A never-started session gets NO ring, which is what
+ * makes the ring mean something: if every row had one, an idle ring would be wallpaper.
+ *
+ * `compacting` folds into `running` deliberately. It is a distinct sidebar chip because
+ * the word is useful, but as a ring it is the same fact: the agent is busy, don't type.
+ */
+export function glyphStateFor(
+  status: string | undefined,
+  loaded: boolean,
+  compacting?: boolean,
+): GlyphState | undefined {
+  if (status === "needsInput") return "needsInput";
+  if (compacting || status === "running") return "running";
+  if (status === "done") return "done";
+  return loaded ? "idle" : undefined;
+}
+
+/**
+ * The agent's brand mark, tinted, optionally ringed with its session state.
+ *
+ * Accessible by shape + label, never by colour alone: the mark distinguishes the agent,
+ * `title`/`aria-label` names it, and the ring's meaning is in the title too.
+ */
+export function AgentGlyph({
+  id,
+  size = 14,
+  state,
+}: {
+  id: AgentId;
+  size?: number;
+  state?: GlyphState;
+}) {
   const m = agentMeta(id);
+  const mark = AGENT_MARKS[id];
+  const label = state ? `${m.label} — ${STATE_TITLE[state]}` : m.label;
   return (
     <span
-      className="agent-glyph"
-      title={m.label}
-      aria-label={m.label}
-      style={{ width: size, height: size, background: m.tint, fontSize: Math.round(size * 0.6) }}
+      className={`agent-glyph ${state ? STATE_CLASS[state] : ""}`}
+      title={label}
+      aria-label={label}
+      style={{
+        width: size,
+        height: size,
+        // The tint drives the mark, the plate and the idle/running ring, so adding an
+        // agent still means picking exactly one colour.
+        ["--glyph-tint" as string]: m.tint,
+        fontSize: Math.round(size * 0.6),
+      }}
     >
-      {m.letter}
+      {mark ? (
+        <svg viewBox={mark.viewBox} aria-hidden="true" focusable="false">
+          <path d={mark.path} fill="currentColor" fillRule={mark.evenOdd ? "evenodd" : undefined} />
+        </svg>
+      ) : (
+        // No published mark for this agent yet — fall back to the monogram rather than
+        // ship a guessed logo.
+        m.letter
+      )}
     </span>
   );
 }

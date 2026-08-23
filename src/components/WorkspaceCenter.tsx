@@ -3,6 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import {
   useStore,
   activeGroup,
+  findSession,
   workingDirOf,
   effectiveDirOf,
   prettyPath,
@@ -12,6 +13,7 @@ import {
   type EditorGroup,
   type WsTab,
 } from "../store";
+import { isMixedLayout, projectAccent, tabProjectId } from "../layout";
 import { TerminalView } from "./Terminal";
 import { CodeEditorPane } from "./CodeEditorPane";
 import { BoardView } from "./BoardView";
@@ -134,7 +136,14 @@ export function WorkspaceCenter({
   // stack (keep-alive); only CSS position/visibility changes. display:none when its
   // project isn't active or the session isn't open as a tab.
   const placeSession = (ownerProjectId: string, sessionId: string) => {
-    if (ownerProjectId !== projectId || !layout) {
+    if (!layout) {
+      return { visible: false, inActiveGroup: false, style: { display: "none" } as React.CSSProperties };
+    }
+    // Pane mode deliberately does NOT check ownership: a layout may borrow another
+    // project's session (WsTab.projectId), and `groupIndexOfRef` below already hides
+    // anything the active layout does not hold. Canvas mode still does, because a canvas
+    // is reconciled from its own project's sessions and a borrowed one has no node.
+    if (canvasMode && ownerProjectId !== projectId) {
       return { visible: false, inActiveGroup: false, style: { display: "none" } as React.CSSProperties };
     }
     // Canvas mode positions the SAME mounted terminals by absolute canvas coordinates
@@ -186,6 +195,9 @@ export function WorkspaceCenter({
   const nothingVisible =
     !canvasMode && (!layout || layout.groups.every((g) => g.tabs.length === 0));
   const soloGroup = (layout?.groups.length ?? 0) <= 1;
+  // Computed for the LAYOUT, not per group: with project A in one pane and project B in
+  // another, each group is internally uniform yet the panes still need telling apart.
+  const mixed = !!layout && !!projectId && isMixedLayout(layout, projectId);
 
   const startDrag = (e: React.MouseEvent, boundary: number) => {
     if (!layout || !wsRef.current || !projectId) return;
@@ -239,7 +251,8 @@ export function WorkspaceCenter({
           <div className="group-chrome" style={{ left: 0, width: "100%" }}>
             <GroupTabStrip
               projectId={projectId!}
-              project={activeProject}
+              projects={projects}
+              mixed={mixed}
               group={activeGroup(layout) ?? layout.groups[0]}
               home={home}
               isActiveGroup
@@ -266,7 +279,8 @@ export function WorkspaceCenter({
               >
                 <GroupTabStrip
                   projectId={projectId!}
-                  project={activeProject}
+                  projects={projects}
+                  mixed={mixed}
                   group={g}
                   home={home}
                   isActiveGroup={ag?.id === g.id}
@@ -312,7 +326,9 @@ export function WorkspaceCenter({
         >
           {allSessions.map(({ project, session }) => {
             const pl = placeSession(project.id, session.id);
-            const gi = project.id === projectId ? groupIndexOfRef(session.id) : -1;
+            // By ref alone, not by ownership: a borrowed session sits in the active
+            // layout's groups too, and clicking into its terminal must activate that group.
+            const gi = groupIndexOfRef(session.id);
             const gid = gi !== -1 ? layout?.groups[gi]?.id : undefined;
             return (
               <TerminalView
@@ -434,7 +450,8 @@ export function WorkspaceCenter({
 
 function GroupTabStrip({
   projectId,
-  project,
+  projects,
+  mixed,
   group,
   home,
   isActiveGroup,
@@ -447,7 +464,10 @@ function GroupTabStrip({
   canvasViewportRef,
 }: {
   projectId: string;
-  project: Project;
+  /** Every project: a session tab may belong to any of them, not just the host. */
+  projects: Project[];
+  /** This layout holds sessions from more than one project, so tabs carry a project badge. */
+  mixed: boolean;
   group: EditorGroup;
   home: string | null;
   isActiveGroup: boolean;
@@ -489,20 +509,42 @@ function GroupTabStrip({
   }, [dragging]);
 
   const activeTab = group.tabs.find((t) => t.ref === group.activeRef) ?? null;
-  const activeSession =
-    activeTab?.kind === "session"
-      ? project.sessions.find((s) => s.id === activeTab.ref) ?? null
-      : null;
-  const wd = activeSession ? effectiveDirOf(project, activeSession, sessionDirs) : null;
+  // Resolved across ALL projects, not this one: the cwd readout and the VS Code button must
+  // follow a borrowed session to ITS repo, or they would quietly point at the host project.
+  const activeFound = activeTab?.kind === "session" ? findSession(projects, activeTab.ref) : null;
+  const wd = activeFound
+    ? effectiveDirOf(activeFound.project, activeFound.session, sessionDirs)
+    : null;
 
   const label = (t: WsTab): string =>
     t.kind === "session"
-      ? project.sessions.find((s) => s.id === t.ref)?.name ?? "Session"
+      ? findSession(projects, t.ref)?.session.name ?? "Session"
       : baseName(t.ref);
+
+  /** The project a tab belongs to, and its stable accent. Files are always the host's. */
+  const ownerOf = (t: WsTab): { id: string; name: string; accent: string } => {
+    const id = t.kind === "session" ? tabProjectId(t, projectId) : projectId;
+    return {
+      id,
+      name: projects.find((p) => p.id === id)?.name ?? "",
+      accent: projectAccent(id),
+    };
+  };
+
+  // A pane whose tabs all belong to one project wears that project's colour along its top
+  // edge, so panes are distinguishable before you read a single tab. A group holding two
+  // projects gets none -- the per-tab bars already say it, and a strip colour would have to
+  // pick a winner.
+  const groupProjects = new Set(
+    group.tabs.filter((t) => t.kind === "session").map((t) => tabProjectId(t, projectId)),
+  );
+  const stripAccent =
+    mixed && groupProjects.size === 1 ? projectAccent([...groupProjects][0]) : undefined;
 
   return (
     <div
-      className={`tab-strip ${isActiveGroup ? "active-group" : ""}`}
+      className={`tab-strip ${isActiveGroup ? "active-group" : ""} ${stripAccent ? "has-project-accent" : ""}`}
+      style={stripAccent ? ({ ["--proj-accent" as string]: stripAccent } as React.CSSProperties) : undefined}
       onMouseDown={() => setActiveGroup(projectId, group.id)}
       onDragOver={(e) => {
         // Allow drops anywhere on the strip (incl. padding); tabs/fill set the caret index.
@@ -523,7 +565,13 @@ function GroupTabStrip({
           <div
             className={`tab ${group.activeRef === t.ref ? "active" : ""} ${
               t.preview ? "preview" : ""
-            }`}
+            } ${mixed ? "badged" : ""}`}
+            style={
+              mixed
+                ? ({ ["--proj-accent" as string]: ownerOf(t).accent } as React.CSSProperties)
+                : undefined
+            }
+            title={mixed ? `${ownerOf(t).name} · ${label(t)}` : undefined}
             draggable
             onDragStart={(e) => {
               e.dataTransfer.effectAllowed = "move";
@@ -553,6 +601,10 @@ function GroupTabStrip({
             ) : (
               <FileIcon size={11} />
             )}
+            {/* Shown on EVERY tab once the layout is mixed, never on only the foreign ones:
+                badging just the visitors would make a bare tab mean "the host project",
+                which is knowledge the badge exists to remove. */}
+            {mixed && <span className="tab-project">{ownerOf(t).name}</span>}
             <span className="tab-label">{label(t)}</span>
             {t.kind === "file" && dirty[t.ref] && (
               <span className="tab-dirty" title="Unsaved changes" />

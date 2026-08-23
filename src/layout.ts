@@ -1,7 +1,68 @@
 // src/layout.ts — pure ProjectLayout transforms. NO Tauri / Zustand imports, so vitest can
 // exercise these in a node env (types are erased `import type`). validateLayout (in store.ts)
 // prunes any empty source group + renormalizes weights after these run.
-import type { ProjectLayout, WsTab } from "./store";
+import type { EditorGroup, ProjectLayout, WsTab } from "./store";
+
+/**
+ * Which project a tab's session belongs to.
+ *
+ * A layout is keyed by project, so for years the answer was "the project whose layout this
+ * is" and nothing stored it. `WsTab.projectId` is set ONLY on a foreign tab -- a session
+ * borrowed from another project into this layout's panes. Leaving it absent for the common
+ * case is what makes every persisted layout (and the Rust struct) forward-compatible: an
+ * old layout read by new code is all-local, which is exactly what it was.
+ */
+export function tabProjectId(tab: WsTab, hostProjectId: string): string {
+  return tab.projectId ?? hostProjectId;
+}
+
+/** Every project represented in this layout, host first, in first-appearance order. */
+export function layoutProjectIds(layout: ProjectLayout, hostProjectId: string): string[] {
+  const seen = [hostProjectId];
+  for (const g of layout.groups) {
+    for (const t of g.tabs) {
+      const pid = tabProjectId(t, hostProjectId);
+      if (!seen.includes(pid)) seen.push(pid);
+    }
+  }
+  return seen;
+}
+
+/**
+ * Does this layout hold sessions from more than one project?
+ *
+ * Drives whether tabs are badged with their project. Badging only the foreign tabs would
+ * make "no badge" mean "the host project", which the user has to already know -- so when a
+ * layout is mixed EVERY tab is badged, and when it is not (the overwhelmingly common case)
+ * none are and the strip is exactly as it was.
+ */
+export function isMixedLayout(layout: ProjectLayout, hostProjectId: string): boolean {
+  return layoutProjectIds(layout, hostProjectId).length > 1;
+}
+
+/**
+ * A stable colour for a project, derived from its id.
+ *
+ * Deterministic rather than stored: a colour the user never chose must not become a thing
+ * they have to migrate, and this has to work for every existing project the moment they
+ * update. FNV-1a over the id, mapped onto the hue circle at a fixed saturation/lightness so
+ * no project can land on an unreadable colour. Hues are spread by a large odd step so ids
+ * that differ in one character do not land next to each other.
+ */
+export function projectHue(projectId: string): number {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < projectId.length; i++) {
+    h ^= projectId.charCodeAt(i);
+    h = Math.imul(h, 0x01000193) >>> 0;
+  }
+  return (h % 360) * 137 % 360;
+}
+
+/** The project's accent as a CSS colour. One place, so the tab chip, the pane edge and the
+ *  sidebar cannot disagree about what colour a project is. */
+export function projectAccent(projectId: string): string {
+  return `hsl(${projectHue(projectId)} 58% 62%)`;
+}
 
 function clone(l: ProjectLayout): ProjectLayout {
   return {
@@ -106,4 +167,61 @@ export function splitTab(
   l.groups.splice(insertAt, 0, { id: newGroupId, tabs: [tab], activeRef: ref });
   l.activeGroupId = newGroupId;
   return l;
+}
+
+/** Just enough of a Project for the repair: its id and which sessions it holds. */
+export interface LayoutProject {
+  id: string;
+  sessions: { id: string }[];
+}
+
+/**
+ * Repair a layout against the projects that actually exist: drop dead session tabs, prune
+ * empty groups (and their weights, index-aligned), fix dangling active ids, normalize
+ * weights.
+ *
+ * `all` is EVERY project, not just the host, because a session tab may be foreign (see
+ * `WsTab.projectId`) and has to be validated against its OWN project. Checking a foreign
+ * tab against the host would prune every cross-project pane on the next repair -- and a
+ * repair runs on every layout write, so the split would collapse the instant it was made.
+ *
+ * `emptyGroupId` is used only when nothing survives; passed in rather than generated so
+ * this stays pure (`store.ts` supplies `uid()`).
+ */
+export function repairLayout(
+  layout: ProjectLayout,
+  hostProjectId: string | null,
+  all: LayoutProject[],
+  emptyGroupId: string,
+): ProjectLayout {
+  const byProject = new Map<string, Set<string>>();
+  for (const p of all) byProject.set(p.id, new Set(p.sessions.map((s) => s.id)));
+  const liveSession = (t: WsTab): boolean => {
+    const owner = t.projectId ?? hostProjectId;
+    return !!owner && (byProject.get(owner)?.has(t.ref) ?? false);
+  };
+  const groups: EditorGroup[] = [];
+  const weights: number[] = [];
+  layout.groups.forEach((g, i) => {
+    const tabs = g.tabs.filter((t) => (t.kind === "file" ? true : liveSession(t)));
+    if (tabs.length === 0) return; // prune empty group + its weight
+    const activeRef = tabs.some((t) => t.ref === g.activeRef)
+      ? g.activeRef
+      : tabs[tabs.length - 1].ref;
+    groups.push({ id: g.id, tabs, activeRef });
+    weights.push(layout.weights?.[i] ?? 1);
+  });
+  if (groups.length === 0) {
+    return {
+      groups: [{ id: emptyGroupId, tabs: [], activeRef: null }],
+      activeGroupId: emptyGroupId,
+      weights: [1],
+    };
+  }
+  const sum = weights.reduce((a, b) => a + b, 0) || 1;
+  const norm = weights.map((w) => w / sum);
+  const activeGroupId = groups.some((g) => g.id === layout.activeGroupId)
+    ? layout.activeGroupId
+    : groups[0].id;
+  return { groups, activeGroupId, weights: norm };
 }
