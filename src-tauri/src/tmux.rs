@@ -247,6 +247,14 @@ pub fn ensure_conf(tmux: &Path, scrollback: u32) -> Option<PathBuf> {
 /// (whose smallest-client-wins rule would shrink the pane) never applies.
 ///
 /// `exec` replaces the login shell, leaving no extra process between the PTY and tmux.
+///
+/// `cd /` first, because whichever client happens to START the server donates its cwd to
+/// it, and the server keeps that directory for its entire life. Conduit spawns from the
+/// session directory, so the donor cwd is routinely a worktree -- and once that worktree is
+/// deleted the server holds a dead inode, which every pane it later forks inherits IN
+/// PREFERENCE to `-c` (measured on tmux 3.7b: `-c` silently loses to a dead server cwd).
+/// `/bin/sh` then opens each new terminal with `shell-init: error retrieving current
+/// directory`. `/` is the one cwd nobody can delete.
 pub fn wrap_command(
     tmux: &Path,
     conf: Option<&Path>,
@@ -259,7 +267,7 @@ pub fn wrap_command(
         None => String::new(),
     };
     format!(
-        "exec {tmux}{conf} -L {socket} new-session -A -D -s {name} -c {dir} sh -c {inner}",
+        "cd / && exec {tmux}{conf} -L {socket} new-session -A -D -s {name} -c {dir} sh -c {inner}",
         tmux = crate::pty::shell_quote(&tmux.to_string_lossy()),
         conf = conf_flag,
         socket = socket(),
@@ -404,13 +412,24 @@ mod tests {
             "/work/proj",
             "echo hi",
         );
-        assert!(cmd.starts_with("exec '/opt/homebrew/bin/tmux'"));
+        assert!(cmd.starts_with("cd / && exec '/opt/homebrew/bin/tmux'"));
         assert!(cmd.contains("-L conduit"));
         assert!(cmd.contains("new-session -A -D"));
         assert!(cmd.contains("-s 'cdt-s1'"));
         assert!(cmd.contains("-c '/work/proj'"));
         assert!(cmd.contains("-f '/data/conduit.tmux.conf'"));
         assert!(cmd.ends_with("sh -c 'echo hi'"));
+    }
+
+    #[test]
+    fn wrap_command_starts_the_server_from_a_stable_directory() {
+        // A tmux client donates its cwd to a server it starts, and the server holds that
+        // directory for its whole life. A worktree there is deleted eventually, and from
+        // then on EVERY pane the server spawns lands in the dead inode -- `-c` included --
+        // so /bin/sh greets each new terminal with a getcwd shell-init error. Starting from
+        // `/` is the only cwd that cannot be deleted out from under the server.
+        let cmd = wrap_command(Path::new("/usr/bin/tmux"), None, "cdt-s1", "/w", "sh");
+        assert!(cmd.starts_with("cd / && exec "));
     }
 
     #[test]
