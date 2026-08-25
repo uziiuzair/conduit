@@ -152,6 +152,26 @@ pub trait ProviderAdapter {
         initial_prompt: Option<&str>,
         resume_token: Option<&str>,
     ) -> String;
+    /// A config file, RELATIVE TO THE SESSION'S WORKING DIRECTORY, that this CLI reads
+    /// MCP servers from at startup -- the file-based equivalent of Claude's
+    /// `--mcp-config <path>` flag, for an adapter that has no such flag.
+    ///
+    /// This is the seam that lets a non-Claude worker join the fleet's structured
+    /// channels (`fleet_result`, `fleet_note`/`fleet_inbox`) instead of being limited to
+    /// a lossy `fleet_peek` scrape. It is deliberately a WORKING-DIRECTORY-relative path,
+    /// which is what makes it per-session: a fleet worker always runs in its own
+    /// worktree, so a file written there is scoped to that one worker. Command Code's
+    /// other MCP scopes are not usable for this -- `~/.commandcode/mcp.json` is global
+    /// and its "local" scope keys off the project path, so both would hand every session
+    /// in a project the same session-scoped callback URL.
+    ///
+    /// `None` (the default) means this adapter has no file-based MCP config, and a worker
+    /// on it stays Tier 2/3. Only consulted for a session that has already qualified for
+    /// fleet MCP, and only on the Conduit-driven worktree path -- see the call site in
+    /// `lib.rs`, which explains why the shared project root is deliberately left alone.
+    fn project_mcp_config_rel_path(&self) -> Option<&'static str> {
+        None
+    }
     /// Build the CLI command string to register an MCP server at user scope.
     /// Returns `None` if this adapter doesn't support the given transport yet.
     fn mcp_add_command(&self, _s: &McpServer) -> Option<String> {
@@ -705,6 +725,14 @@ impl ProviderAdapter for CommandCodeAdapter {
     fn hooks_profile(&self) -> Option<crate::hooks::HooksProfile> {
         Some(crate::hooks::command_code_profile())
     }
+    /// Command Code loads `<cwd>/.mcp.json` at startup (its "project" MCP scope), in the
+    /// same `{"mcpServers": {...}}` shape Claude's `--mcp-config` file uses -- its
+    /// `inferTransport` reads either `transport` or `type`, so `fleet::mcp_config_json`
+    /// serves both verbatim. That is what gives a Command Code worker `fleet_result` and
+    /// the mailbox rather than leaving it on a terminal scrape.
+    fn project_mcp_config_rel_path(&self) -> Option<&'static str> {
+        Some(".mcp.json")
+    }
     /// Resume by the id Command Code chose for itself.
     ///
     /// There is no `--session-id` to PIN one the way Claude has, so Conduit cannot decide
@@ -935,6 +963,17 @@ pub fn model_for_tier(agent: AgentId, tier: &str) -> Option<&'static str> {
             Some("gemini-3.5-flash")
         }
         (AgentId::Gemini, "hard") | (AgentId::Antigravity, "hard") => Some("gemini-3.1-pro"),
+        // Command Code fronts ~58 models from one subscription, so its tiers are the one
+        // place a tier can mean "a different VENDOR", not just a smaller model. The ids
+        // are taken verbatim from `routing::default_routes`, which already states an
+        // opinion about which Command Code model suits which kind of work -- an opinion
+        // about an agent lives in one place, so a tier here must not invent a second one.
+        // `cheap` is Command Code's own default model rather than a Claude one: routing a
+        // fleet's mechanical work through a Claude model on Command Code would spend a
+        // frontier budget on exactly the work its capability card says not to.
+        (AgentId::CommandCode, "cheap") => Some("deepseek/deepseek-v4-flash"),
+        (AgentId::CommandCode, "standard") => Some("claude-sonnet-5"),
+        (AgentId::CommandCode, "hard") => Some("claude-opus-5"),
         _ => None,
     }
 }
@@ -1008,17 +1047,19 @@ pub fn capability_card(agent: AgentId) -> serde_json::Value {
         }),
         AgentId::CommandCode => serde_json::json!({
             "agent": "commandcode",
-            "tier": 2,
-            // Tier 2 for the reason Gemini is: the hook CHANNEL exists (Command Code
-            // implements Claude's hook schema, so status is live and accurate), but no
-            // `result` row is wired, so there is no code path by which a Command Code
-            // worker could hand back a structured result. Stated rather than implied,
-            // per design-doc invariant 9. Flip `structuredResult` only when that row and
-            // its payload path actually ship.
-            "structuredResult": false,
-            "mailbox": false,
-            "whenToUse": "Spreading load across ~58 models from one subscription -- Anthropic, OpenAI, Google, xAI and a large open-source set -- when the point is to NOT spend a Claude or Codex quota. Per-session model and reasoning effort are selectable (`--model`, `--effort`), so a cheap open model can take mechanical work while the expensive quotas stay for work that needs them.",
-            "whenNotToUse": "Anything needing a structured hand-back (fleet_result) or mailbox participation (fleet_note/fleet_inbox) -- neither channel exists here, same limitation as Gemini. Status IS monitored, so fleet_list still reports idle/running/done honestly."
+            "tier": 1,
+            // Tier 1 as of the `.mcp.json` wiring: Command Code reads MCP servers from its
+            // working directory, and a fleet worker's working directory is its own
+            // worktree -- so it gets the SAME session-scoped fleet MCP server a Claude
+            // worker does, and with it a real `fleet_result` and mailbox rather than a
+            // `fleet_peek` scrape. It was Tier 2 while no such channel existed. The claim
+            // is load-bearing (design-doc invariant 9), so it is tied to the seam that
+            // implements it: `project_mcp_config_rel_path`. Both flags must go back to
+            // false if that seam or the worktree path ever stops being wired.
+            "structuredResult": true,
+            "mailbox": true,
+            "whenToUse": "Spreading load across ~58 models from one subscription -- Anthropic, OpenAI, Google, xAI and a large open-source set -- when the point is to NOT spend a Claude or Codex quota. Per-session model and reasoning effort are selectable (`--model`, `--effort`): pass `model` to fleet_spawn to pin any one of them exactly (`claude-opus-5`, `google/gemini-3.7-flash`, `deepseek/deepseek-v4-flash`), or `modelTier` for the coarse cheap/standard/hard mapping. A cheap open model can take mechanical work while the expensive quotas stay for work that needs them.",
+            "whenNotToUse": "Conducting: the Conductor persona and its orchestration tools are Claude-only. Work that must run on one specific vendor's own subscription rather than through Command Code's."
         }),
     }
 }
@@ -1921,7 +1962,7 @@ mod tests {
             (AgentId::OpenCode, 1),
             (AgentId::Codex, 2),
             (AgentId::Gemini, 2),
-            (AgentId::CommandCode, 2),
+            (AgentId::CommandCode, 1),
             (AgentId::Antigravity, 3),
         ];
         assert_eq!(
@@ -1945,12 +1986,6 @@ mod tests {
         // STATED, never silently implied to work like Tier 1.
         assert_eq!(capability_card(AgentId::Codex)["mailbox"], false);
         assert_eq!(capability_card(AgentId::Gemini)["mailbox"], false);
-        assert_eq!(capability_card(AgentId::CommandCode)["mailbox"], false);
-        assert_eq!(
-            capability_card(AgentId::CommandCode)["structuredResult"],
-            false,
-            "no result HookRow is wired, so claiming one would mislead a routing decision"
-        );
         assert_eq!(capability_card(AgentId::Antigravity)["mailbox"], false);
         assert_eq!(
             capability_card(AgentId::Antigravity)["structuredResult"],
@@ -1963,6 +1998,66 @@ mod tests {
         // Tier 1 adapters get both.
         assert_eq!(capability_card(AgentId::Claude)["mailbox"], true);
         assert_eq!(capability_card(AgentId::OpenCode)["mailbox"], true);
+    }
+
+    /// The other half of invariant 9: a card claiming Tier 1 must be backed by a real
+    /// channel. Command Code has no `--mcp-config` flag, so the ONLY thing that earns it
+    /// `structuredResult`/`mailbox` is the working-directory MCP file -- tie the claim to
+    /// the seam, so removing the seam fails here rather than shipping a lie to the router.
+    #[test]
+    fn command_code_tier_1_claim_is_backed_by_a_real_mcp_channel() {
+        let card = capability_card(AgentId::CommandCode);
+        assert_eq!(card["structuredResult"], true);
+        assert_eq!(card["mailbox"], true);
+        assert_eq!(
+            CommandCodeAdapter.project_mcp_config_rel_path(),
+            Some(".mcp.json"),
+            "the file Command Code reads MCP servers from, relative to its cwd"
+        );
+        // Every OTHER adapter must stay None: Claude has a real flag, and inventing a
+        // path for an agent that does not read one would write a dead file into a worktree.
+        for a in all_adapters() {
+            if a.id() != AgentId::CommandCode {
+                assert_eq!(a.project_mcp_config_rel_path(), None, "agent={:?}", a.id());
+            }
+        }
+    }
+
+    /// Command Code is the one agent whose tiers cross VENDORS, so a wrong id here is not
+    /// a smaller model, it is a failed launch. Every id is checked against the real
+    /// `cmdc --list-models` catalogue.
+    #[test]
+    fn model_tier_command_code_spans_vendors_and_defaults_cheap_to_open_source() {
+        assert_eq!(
+            model_for_tier(AgentId::CommandCode, "cheap"),
+            Some("deepseek/deepseek-v4-flash"),
+            "mechanical work must not spend a frontier budget"
+        );
+        assert_eq!(
+            model_for_tier(AgentId::CommandCode, "standard"),
+            Some("claude-sonnet-5")
+        );
+        assert_eq!(
+            model_for_tier(AgentId::CommandCode, "hard"),
+            Some("claude-opus-5")
+        );
+        // The tiers must agree with the routing table -- one opinion per agent, not two.
+        let routes = crate::routing::default_routes();
+        for (task, tier) in [
+            (crate::routing::TaskKind::Planning, "hard"),
+            (crate::routing::TaskKind::Implementation, "standard"),
+            (crate::routing::TaskKind::Bulk, "cheap"),
+        ] {
+            let pinned = routes.by_task[&task]
+                .iter()
+                .find(|t| t.agent == AgentId::CommandCode)
+                .and_then(|t| t.model.as_deref());
+            assert_eq!(
+                pinned,
+                model_for_tier(AgentId::CommandCode, tier),
+                "routing and model_for_tier disagree for {task:?}"
+            );
+        }
     }
 
     #[test]

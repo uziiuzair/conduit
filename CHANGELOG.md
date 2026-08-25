@@ -3,6 +3,37 @@
 All notable changes to Conduit are documented here. This project uses
 [semantic versioning](https://semver.org/).
 
+## 0.30.0 — 2026-08-25
+
+- **Fixed — Starting a session with a task no longer fails on Windows.** Any agent handed an
+  opening instruction — every worker the Conductor spawns, and any session launched from a
+  worktree whose path contains a space — died at launch with "too many arguments. Expected 1
+  argument but got 16." Windows was splitting the instruction into one argument per word
+  before the agent ever saw it. The command now travels in a generated script file instead of
+  on the command line, so the whole instruction arrives intact no matter how long it is or
+  what it contains.
+- **Fixed — Continuity's presence and coordination work again on Windows.** In the installed
+  Windows app, none of continuity's hooks or its MCP tools ever ran: every session ended with
+  a "Stop hook error … EISDIR … lstat 'C:'" and the rest failed silently, so no session
+  reported its presence, file activity or handoffs. The plugin was being located through a
+  path shape Node refuses to load from. Sessions started from a development build were never
+  affected.
+- **Added — Command Code can be orchestrated.** The Conductor could not spawn a Command Code
+  worker at all: it was missing from the list of agents `fleet_spawn` accepts. It is now a
+  first-class choice, which matters because Command Code reaches its ~58 models through a
+  separate subscription — so it keeps working when your Claude window closes.
+- **Added — Pick the model a spawned worker runs on.** Workers used to be limited to a coarse
+  cheap/standard/hard tier, which for Command Code could not name most of its catalogue. A
+  spawn can now pin one exact model (`claude-opus-5`, `google/gemini-3.7-flash`,
+  `deepseek/deepseek-v4-flash`, `gpt-5.5`, `xai/grok-4.5`, …), and the three tiers now map to
+  real Command Code models instead of being ignored — cheap deliberately lands on an
+  open-source model so mechanical work stops spending a frontier budget.
+- **Added — Command Code workers hand their results back.** A Command Code session could only
+  be watched through its terminal output; it had no way to report what it did or to exchange
+  notes with its peers. It now gets the same structured hand-back and project mailbox a Claude
+  worker has, so the Conductor learns whether a worker succeeded instead of guessing from
+  scraped text.
+
 ## 0.29.0 — 2026-08-23
 
 - **Added — Drag a session straight into a pane.** Drag any session from the sidebar onto the

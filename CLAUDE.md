@@ -276,6 +276,28 @@ place that decides how.
   is dropped under `prefers-reduced-motion`. The ring still distinguishes the states without
   it, and the meaning is in the tooltip so it never rests on hue alone.
 
+## Where the Windows spawn command lives
+
+`pty.rs` spawns Windows sessions as `cmd.exe /K <one argument>`, and that argument **must
+never contain a double quote**. `portable_pty` builds the child command line with MSVCRT
+`ArgvQuote` rules, which escape an embedded `"` as `\"`; cmd.exe has no such escape, so it
+strips the outer quote pair and hands the child literal backslash-quotes, whose CRT then
+splits the contents on spaces. A 16-word initial prompt reached the agent as 16 arguments --
+`error: too many arguments. Expected 1 argument but got 16.` It hit EVERY adapter that puts
+a prompt (or a spaced path) on the command line, not one of them.
+
+- **The invocation travels in a generated script**, `data_dir()/spawn-<session_id>.cmd`
+  (`write_spawn_script`), and the only token left on the command line is that file's path,
+  caret-escaped (`cmd_caret_escape`). `^` is the one escape that survives `ArgvQuote`
+  untouched, which is why the path is caret-escaped rather than quoted.
+- **The body is one line prefixed with `@`, never `@echo off`** -- `/K` leaves the user in an
+  interactive shell afterwards, and `echo off` would hide its prompt.
+- Inside the script ordinary cmd quoting applies, so `win_quote` and every adapter's
+  `build_invocation` are correct as written and needed no change.
+- `hooks::write_codex_result_script` predates this and works around the same re-parse
+  locally; it is still needed for its own reasons, but new code should not hand-roll another
+  one -- put it in the spawn script.
+
 ## Where the terminal renderer choice lives
 
 Panes draw through WebGL by default, canvas on request (Settings → Terminal). The tier ladder
@@ -328,6 +350,15 @@ for the active project. Conduit never writes that database — continuity owns e
 - UI: `ContinuityPanels.tsx` (rows + detail modal), tabs in `RightColumn.tsx`, state in
   `store.ts` (`continuityFeed`), polled at 4 s by `hooks/useContinuityFeed.ts` —
   deliberately separate from `useBoard`'s 1.5 s poll and its `board_enabled` gate.
+- **The bundled plugin dir must lose its `\\?\` prefix before it reaches `--plugin-dir`.**
+  Tauri's resource resolver canonicalizes, and on Windows that yields a verbatim path; it
+  becomes `CLAUDE_PLUGIN_ROOT`, and the plugin's own `hooks.json`/`.mcp.json` join it as
+  `${CLAUDE_PLUGIN_ROOT}/scripts/<x>.mjs`. Node cannot resolve a main module under a verbatim
+  root — `realpathSync` splits the root as `C:` and lstats it — so every hook and the MCP
+  server died with `EISDIR … lstat 'C:'` before running a line, and only the `Stop` hook was
+  visible. `continuity::strip_verbatim_prefix` is the fix; it is deliberately not
+  `#[cfg(windows)]` so both CI legs test it. Dev builds never reproduce this: the
+  `CARGO_MANIFEST_DIR` fallback is not canonicalized.
 - Design: `docs/superpowers/specs/2026-08-14-continuity-panels-design.md`.
 
 ## Where Command Code lives
@@ -367,6 +398,25 @@ A sixth agent (`npm i -g command-code`), fronting ~58 models from one subscripti
   looked inside `.claude`, found no `auth.json`, and dropped the account from the usage bar.
   Consequence worth knowing: tagging an account for Command Code does NOT yet give it a
   separate login — it inherits the ambient one.
+- **Orchestration:** Command Code is a Tier-1 fleet agent, and the thing that makes it one is
+  `ProviderAdapter::project_mcp_config_rel_path` -> `.mcp.json`. It has no `--mcp-config`
+  flag, but it loads MCP servers from its CWD, and a fleet worker's CWD is its own worktree
+  -- so `fleet::write_project_mcp_config` drops the same session-scoped fleet MCP server a
+  Claude worker gets as a FILE instead of a flag, and that is what buys `fleet_result` +
+  the mailbox. Two constraints hold it together: it is written ONLY on the Conduit-driven
+  worktree path (the shared project root would hand every session in the project the same
+  session-scoped URL, and drop an untracked file into the user's checkout), and the worker
+  must be TOLD it has the tools -- `hooks::write_worker_brief_context` appends the brief to
+  `AGENTS.md`, because there is no `--append-system-prompt-file` here. The capability card's
+  `structuredResult`/`mailbox` claim is pinned to that seam by a test; if the seam goes, the
+  card must go back to Tier 2 rather than lie to the router.
+- **Models:** `model_for_tier` covers Command Code, and its ids are copied from
+  `routing::default_routes` -- one opinion per agent, and a test fails if the two drift.
+  `cheap` is `deepseek/deepseek-v4-flash` (its own default), NOT a Claude model: routing a
+  fleet's mechanical work through Claude-on-Command-Code spends a frontier budget on exactly
+  the work the capability card says not to. `fleet_spawn` also takes an exact `model`, which
+  wins over the tier -- three tiers cannot name a 58-model catalogue. It is applied via
+  `store.set_session_model`, not `set_session_trust`, which carries no `model` field.
 - **Config GUI:** `commandcode_config.rs` + `CommandCodePanel.tsx` patch
   `~/.commandcode/config.json` behind a Rust-side allowlist, preserving unknown keys, backing
   up once, merging `featureModels` key-by-key, and refusing a file that does not parse.

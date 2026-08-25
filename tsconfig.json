@@ -14,6 +14,14 @@
     "noEmit": true,
     "jsx": "react-jsx",
 
+    /* Ambient @types are NOT auto-included. The project deliberately depends on no
+       @types/node (see src/store.seam.test.ts), but pnpm hoists one in transitively via
+       vite/vitest, and TypeScript picks up every node_modules/@types/* by default -- which
+       silently makes `process`, `Buffer` and friends type-check inside frontend code that
+       has no Node runtime under it. Empty list = only types referenced explicitly, e.g.
+       src/vite-env.d.ts's `/// <reference types="vite/client" />`. */
+    "types": [],
+
     /* Linting */
     "strict": true,
     "noUnusedLocals": true,

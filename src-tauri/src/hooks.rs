@@ -588,7 +588,6 @@ pub fn write_codex_result_script(worktree_path: &str, port: u16) -> std::io::Res
 /// otherwise. Only ever called for a session with a real Mission record -- a manual
 /// session's context file is never touched.
 pub fn write_mission_context(worktree_path: &str, mission: &Value) {
-    let path = Path::new(worktree_path).join("AGENTS.md");
     let objective = mission
         .get("objective")
         .and_then(|v| v.as_str())
@@ -601,11 +600,36 @@ pub fn write_mission_context(worktree_path: &str, mission: &Value) {
         block.push_str(&format!("\n**Boundaries:** {b}\n"));
     }
 
+    append_agents_md(worktree_path, &block);
+}
+
+/// Tell a worker on a non-Claude adapter which fleet tools it has and what it owes back.
+///
+/// Claude gets this through `--append-system-prompt-file`; an adapter with no such flag
+/// has to be told in the file it already reads. Without it a Command Code worker would be
+/// handed `fleet_result`/`fleet_note` by `.mcp.json` and never know it was expected to
+/// call them -- the channel would exist and stay silent, which looks exactly like the
+/// missing channel it replaces. `authorize()` still enforces the restriction server-side,
+/// so this text informs, it does not grant.
+pub fn write_worker_brief_context(worktree_path: &str) {
+    append_agents_md(
+        worktree_path,
+        &format!(
+            "\n## Fleet tools\n\n{}\n",
+            crate::fleet::WORKER_BRIEF_SUFFIX
+        ),
+    );
+}
+
+/// Append a block to the worktree's `AGENTS.md`, creating it if absent. The context file
+/// every non-Claude adapter reads (Claude uses `CLAUDE.md` and ignores this one).
+fn append_agents_md(worktree_path: &str, block: &str) {
+    let path = Path::new(worktree_path).join("AGENTS.md");
     let mut content = fs::read_to_string(&path).unwrap_or_default();
     if !content.is_empty() && !content.ends_with('\n') {
         content.push('\n');
     }
-    content.push_str(&block);
+    content.push_str(block);
     let _ = fs::write(&path, content);
 }
 

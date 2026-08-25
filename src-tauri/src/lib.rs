@@ -366,6 +366,27 @@ fn pty_spawn(
         if let Some(mission) = &mission_record {
             hooks::write_mission_context(&wt_path, &mission.payload);
         }
+        // SPEC-A Tier 1 for a non-Claude adapter: Command Code has no `--mcp-config`
+        // flag, but it does read `<cwd>/.mcp.json`, and a Conduit-driven worktree IS this
+        // worker's cwd -- so the same session-scoped fleet MCP server a Claude worker gets
+        // is delivered as a file instead of a flag. That is what turns a Command Code
+        // worker from "status only, hand back nothing" into a real fleet participant with
+        // `fleet_result` and the mailbox.
+        //
+        // Deliberately only on the WORKTREE path. The non-worktree branch below runs in
+        // the shared project root, where writing `.mcp.json` would both drop an untracked
+        // file into the user's checkout and give every session in that project the same
+        // session-scoped callback URL -- so a manual Command Code session stays on the
+        // status channel alone.
+        if gets_fleet_mcp {
+            if let Some(rel) = adapter.project_mcp_config_rel_path() {
+                let mcp_port = fleet.mcp_port.load(Ordering::SeqCst);
+                crate::fleet::write_project_mcp_config(&wt_path, rel, mcp_port, &session_id);
+                // The tools are useless if the worker does not know it has them, and
+                // this adapter has no system-prompt flag to be told through.
+                hooks::write_worker_brief_context(&wt_path);
+            }
+        }
         // SPEC-A Tier 2: Codex has no MCP, so its structured result rides the hook
         // channel instead -- provision the schema (and, on Windows, the curl helper
         // script) its build_invocation references, for every Codex worktree spawn, not
