@@ -187,6 +187,14 @@ All notable changes to Conduit are documented here. This project uses
 - **Fixed — Honest advice about session persistence on Windows.** Settings used to say
   sessions would survive a quit once you installed tmux, which cannot be done on Windows.
   It now says persistence isn't available there, and the nagging banner about it is gone.
+## 0.22.3 — 2026-08-24
+
+- **Fixed — New terminals no longer open with a `getcwd` error.** Every freshly launched
+  session greeted you with `shell-init: error retrieving current directory: getcwd: cannot
+  access parent directories` before the agent appeared. The background tmux server had
+  adopted the directory of the very first session it ever ran, and once that worktree was
+  deleted every later terminal started in the missing directory. The server now runs from a
+  directory that cannot be deleted, so new terminals start clean.
 
 ---
 
