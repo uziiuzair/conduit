@@ -21,7 +21,7 @@ pub fn continuity_asset_dir(app: &tauri::AppHandle) -> Option<PathBuf> {
             .resolve(candidate, tauri::path::BaseDirectory::Resource)
         {
             if p.join("mcp").join("launch.mjs").exists() {
-                return Some(p);
+                return Some(strip_verbatim_prefix(p));
             }
         }
     }
@@ -33,6 +33,34 @@ pub fn continuity_asset_dir(app: &tauri::AppHandle) -> Option<PathBuf> {
         return Some(dev);
     }
     None
+}
+
+/// Strip Windows' extended-length (`\\?\`) prefix from a resolved path.
+///
+/// Tauri's resource resolver canonicalizes, and on Windows canonicalization yields a VERBATIM
+/// path -- `\\?\C:\Program Files\Conduit\resources\continuity-plugin`. That string is what
+/// `--plugin-dir` receives, so it becomes `CLAUDE_PLUGIN_ROOT`, and every entry in the plugin's
+/// own `hooks/hooks.json` and `.mcp.json` joins it as `${CLAUDE_PLUGIN_ROOT}/scripts/<x>.mjs`.
+/// Node cannot resolve a main module under a verbatim root: `realpathSync` splits the root as
+/// `C:` and lstats it, so the process dies with `EISDIR: illegal operation on a directory,
+/// lstat 'C:'` before running a line. That killed EVERY continuity hook and the MCP server on
+/// the installed Windows build -- only the `Stop` hook was loud, because it is the one Claude
+/// Code surfaces inline; the rest failed silently. Dev builds never showed it: the
+/// `CARGO_MANIFEST_DIR` fallback below is not canonicalized.
+///
+/// Deliberately NOT `#[cfg(windows)]`: the point of this seam is that both CI legs compile and
+/// test it, and a `\\?\` prefix cannot occur in a unix path anyway.
+fn strip_verbatim_prefix(p: PathBuf) -> PathBuf {
+    let stripped = {
+        let s = p.to_string_lossy();
+        // `\\?\UNC\server\share` maps back to `\\server\share`; `\\?\C:\x` to `C:\x`.
+        if let Some(rest) = s.strip_prefix(r"\\?\UNC\") {
+            Some(PathBuf::from(format!(r"\\{rest}")))
+        } else {
+            s.strip_prefix(r"\\?\").map(PathBuf::from)
+        }
+    };
+    stripped.unwrap_or(p)
 }
 
 /// Parse `node --version` ("v22.5.0", "v24.1.0", "v20.11.1") into (major, minor).
@@ -102,6 +130,30 @@ mod probe_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn verbatim_prefix_is_stripped() {
+        // The exact shape Tauri handed `--plugin-dir` on the installed Windows build.
+        assert_eq!(
+            strip_verbatim_prefix(PathBuf::from(
+                r"\\?\C:\Program Files\Conduit\resources\continuity-plugin"
+            )),
+            PathBuf::from(r"C:\Program Files\Conduit\resources\continuity-plugin")
+        );
+        // A verbatim UNC path keeps its share, it does not become a local path.
+        assert_eq!(
+            strip_verbatim_prefix(PathBuf::from(r"\\?\UNC\server\share\continuity-plugin")),
+            PathBuf::from(r"\\server\share\continuity-plugin")
+        );
+        // Anything already plain is returned untouched -- including the dev fallback shape.
+        for plain in [
+            r"C:\Program Files\Conduit\resources\continuity-plugin",
+            "/Users/x/conduit/src-tauri/resources/continuity-plugin",
+        ] {
+            let p = PathBuf::from(plain);
+            assert_eq!(strip_verbatim_prefix(p.clone()), p);
+        }
+    }
+
     #[test]
     fn vendored_plugin_is_present_in_source_tree() {
         // The dev fallback path must exist in the repo (the bundled asset).
