@@ -109,3 +109,12 @@ export const CircleFilledIcon = ({ size = 13, className }: P) =>
       <circle cx="12" cy="12" r="3.5" fill="currentColor" stroke="none" />
     </>
   ));
+
+// Root chat (HQ)
+export const ArrowUpIcon = ({ size = 14, className }: P) =>
+  svg(size, className, <path d="M12 19V5M6 11l6-6 6 6" />);
+
+export const ChatBubbleIcon = ({ size = 13, className }: P) =>
+  svg(size, className, (
+    <path d="M21 12a8 8 0 0 1-8 8H5.6c-.9 0-1.4-1-.9-1.7l1-1.4A8 8 0 1 1 21 12z" />
+  ));
