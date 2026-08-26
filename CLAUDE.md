@@ -275,6 +275,14 @@ session and **nothing else** — never the snapshot, never the session record �
 session is indistinguishable from one that lost its tmux server to a reboot. `pty::kill` (a
 destroy) is the only place a snapshot is deleted.
 
+One tmux rule outranks the rest: **`wrap_command` must `cd /` before `exec`ing tmux.** The
+client that happens to start the server donates its cwd for the server's whole life, and
+Conduit spawns from session directories — so the donor is routinely a worktree. Once that
+worktree is deleted the server holds a dead inode and every pane it later forks inherits it
+*in preference to `-c`* (tmux 3.7b), which is why new terminals greeted users with
+`shell-init: error retrieving current directory: getcwd`. An already-poisoned server keeps
+the bad cwd until it is killed — the fix only prevents new ones.
+
 ## Where the fleet/Conductor orchestration lives
 
 A per-project **Conductor** (a Claude session flagged `role: Conductor`) observes and
