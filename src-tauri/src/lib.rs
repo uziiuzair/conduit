@@ -578,7 +578,8 @@ fn search_transcripts(
 pub(crate) fn live_running_agent<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> bool {
     let fleet = app.state::<Arc<crate::fleet::FleetState>>();
     let pty = app.state::<Arc<PtyManager>>();
-    fleet.running_sessions().iter().any(|sid| pty.has(sid))
+    let root = app.state::<Arc<crate::root_chat::RootChatState>>();
+    fleet.running_sessions().iter().any(|sid| pty.has(sid)) || root.any_running()
 }
 
 /// Whether any agent is actively working (live-PTY-checked). The frontend `live` map can lag
@@ -588,8 +589,9 @@ pub(crate) fn live_running_agent<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -
 fn any_agent_running(
     fleet: State<Arc<crate::fleet::FleetState>>,
     pty: State<Arc<PtyManager>>,
+    root: State<Arc<crate::root_chat::RootChatState>>,
 ) -> bool {
-    fleet.running_sessions().iter().any(|sid| pty.has(sid))
+    fleet.running_sessions().iter().any(|sid| pty.has(sid)) || root.any_running()
 }
 
 // ---- Project / session store commands ---------------------------------------
@@ -613,6 +615,28 @@ fn remove_project(id: String, store: State<Arc<Store>>, pty: State<Arc<PtyManage
         }
     }
     store.remove_project(&id);
+}
+
+// ---- Root chat commands -------------------------------------------------------
+
+#[tauri::command]
+fn list_root_chats(store: State<Arc<Store>>) -> Vec<store::RootChat> {
+    store.list_root_chats()
+}
+
+#[tauri::command]
+fn add_root_chat(store: State<Arc<Store>>) -> store::RootChat {
+    store.add_root_chat()
+}
+
+#[tauri::command]
+fn rename_root_chat(id: String, name: String, store: State<Arc<Store>>) {
+    store.rename_root_chat(&id, &name);
+}
+
+#[tauri::command]
+fn remove_root_chat(id: String, store: State<Arc<Store>>) {
+    store.remove_root_chat(&id);
 }
 
 // ---- Project task board commands ---------------------------------------------
@@ -1631,6 +1655,7 @@ pub fn run() {
         .manage(Arc::new(claude_usage::ClaudeAuth::default()))
         .manage(Arc::new(agy_usage::AgyUsageState::default()))
         .manage(Arc::new(agy_usage::AgyResumeState::default()))
+        .manage(Arc::new(root_chat::RootChatState::default()))
         .manage(Arc::new(hookbus::HookBus::default()))
         .manage(Arc::new(broker::Broker::default()))
         .manage(Arc::new(broker::Presence::default()))
@@ -1788,6 +1813,13 @@ pub fn run() {
             load_projects,
             add_project,
             remove_project,
+            list_root_chats,
+            add_root_chat,
+            rename_root_chat,
+            remove_root_chat,
+            root_chat::root_chat_send,
+            root_chat::root_chat_stop,
+            root_chat::root_chat_history,
             list_board,
             set_board_enabled,
             board_add_card,

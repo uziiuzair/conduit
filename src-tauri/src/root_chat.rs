@@ -3,6 +3,218 @@
 //! Design: docs/superpowers/specs/2026-08-26-root-chat-design.md
 
 use serde_json::{json, Value};
+use std::collections::HashMap;
+use std::io::{BufRead, BufReader, Read, Write};
+use std::path::PathBuf;
+use std::process::{Child, Command, Stdio};
+use std::sync::{Arc, Mutex};
+use tauri::{Emitter, State};
+
+/// Live children, one per chat at most. A child exists only while a turn is streaming;
+/// idle chats hold no process (spawn-per-message).
+#[derive(Default)]
+pub struct RootChatState {
+    children: Mutex<HashMap<String, Child>>,
+}
+
+impl RootChatState {
+    /// True if any turn is mid-stream. Reaps exited children first so a finished child
+    /// can't hold the quit guard open.
+    pub fn any_running(&self) -> bool {
+        let mut map = self.children.lock().unwrap_or_else(|e| e.into_inner());
+        map.retain(|_, c| matches!(c.try_wait(), Ok(None)));
+        !map.is_empty()
+    }
+}
+
+#[tauri::command(async)]
+pub fn root_chat_send(
+    app: tauri::AppHandle,
+    chat_id: String,
+    text: String,
+    workspace_root: Option<String>,
+    state: State<Arc<RootChatState>>,
+    store: State<Arc<crate::store::Store>>,
+) -> Result<(), String> {
+    use crate::NoWindow;
+
+    store
+        .root_chat(&chat_id)
+        .ok_or_else(|| format!("unknown root chat {chat_id}"))?;
+    {
+        // One live child per chat: reject, never queue (the composer is disabled anyway).
+        let mut map = state.children.lock().unwrap_or_else(|e| e.into_inner());
+        map.retain(|_, c| matches!(c.try_wait(), Ok(None)));
+        if map.contains_key(&chat_id) {
+            return Err("a turn is already running for this chat".into());
+        }
+    }
+
+    let cwd = workspace_root
+        .filter(|s| !s.is_empty())
+        .map(PathBuf::from)
+        .or_else(dirs::home_dir)
+        .ok_or("no workspace root and no resolvable home directory")?;
+    if !cwd.is_dir() {
+        return Err(format!(
+            "workspace root {} is not a directory",
+            cwd.display()
+        ));
+    }
+
+    // Transcript home follows the chat's pinned account (same rule as every other
+    // transcript consumer); it also decides fresh (--session-id) vs resume.
+    let config_dir = store.root_chat_config_dir(&chat_id);
+    let projects_dir = match &config_dir {
+        Some(cfg) if !cfg.is_empty() => Some(PathBuf::from(cfg).join("projects")),
+        _ => crate::pty::claude_projects_dir(),
+    };
+    let resume = projects_dir
+        .as_deref()
+        .is_some_and(|d| crate::pty::transcript_exists(&chat_id, d));
+
+    let roster: Vec<(String, String)> = store
+        .list()
+        .iter()
+        .map(|p| (p.name.clone(), p.path.clone()))
+        .collect();
+    let charter = build_charter(&cwd.to_string_lossy(), &roster);
+    let cmd = build_command(&chat_id, resume, &charter);
+
+    // Interactive login shell for PATH parity with the titler / pty.rs (GUI-launched
+    // apps get the bare Finder PATH; nvm/Homebrew claude would be missing otherwise).
+    #[cfg(windows)]
+    let mut builder = {
+        let shell = std::env::var("ComSpec").unwrap_or_else(|_| "cmd.exe".to_string());
+        let mut c = Command::new(shell);
+        c.args(["/C", &cmd]);
+        c
+    };
+    #[cfg(not(windows))]
+    let mut builder = {
+        let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
+        let mut c = Command::new(shell);
+        c.args(["-i", "-l", "-c", &cmd]);
+        c
+    };
+    builder
+        .current_dir(&cwd)
+        .env_remove("npm_config_prefix")
+        .no_window()
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    if let Some(cfg) = config_dir.as_deref().filter(|s| !s.is_empty()) {
+        for (k, v) in crate::agent::adapter_for(crate::agent::AgentId::Claude).account_env(cfg) {
+            builder.env(k, v);
+        }
+    }
+
+    let mut child = builder.spawn().map_err(|e| format!("spawn claude: {e}"))?;
+    if let Some(mut stdin) = child.stdin.take() {
+        let _ = stdin.write_all(text.as_bytes());
+        // Dropped here -> EOF, so `claude -p` reads the full prompt (titler pattern).
+    }
+    let stdout = child.stdout.take().ok_or("child stdout unavailable")?;
+    let stderr = child.stderr.take();
+
+    let state_arc = Arc::clone(state.inner());
+    state_arc
+        .children
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(chat_id.clone(), child);
+
+    std::thread::spawn(move || {
+        let mut saw_done = false;
+        for line in BufReader::new(stdout).lines().map_while(Result::ok) {
+            match classify_line(&line) {
+                LineOut::Items(items) => {
+                    for item in items {
+                        let _ =
+                            app.emit("root-chat-item", json!({ "chatId": chat_id, "item": item }));
+                    }
+                }
+                LineOut::Done(mut done) => {
+                    saw_done = true;
+                    done["chatId"] = json!(chat_id);
+                    let _ = app.emit("root-chat-done", done);
+                }
+                LineOut::Nothing => {}
+            }
+        }
+        // Stream over: reap the child and surface silent failures (spawn errors land in
+        // stderr with no `result` line — e.g. claude not on PATH, bad --resume).
+        let status = state_arc
+            .children
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&chat_id)
+            .and_then(|mut c| c.wait().ok());
+        if !saw_done {
+            let mut tail = String::new();
+            if let Some(mut err) = stderr {
+                let mut buf = String::new();
+                let _ = err.read_to_string(&mut buf);
+                let trimmed = buf.trim();
+                let cut = trimmed
+                    .char_indices()
+                    .rev()
+                    .nth(499)
+                    .map(|(i, _)| i)
+                    .unwrap_or(0);
+                tail = trimmed[cut..].to_string();
+            }
+            let message = match status {
+                Some(s) if s.success() => "claude exited without a result".to_string(),
+                Some(s) => format!("claude exited with {s}: {tail}"),
+                None => format!("claude terminated: {tail}"),
+            };
+            let _ = app.emit(
+                "root-chat-error",
+                json!({ "chatId": chat_id, "message": message }),
+            );
+        }
+    });
+    Ok(())
+}
+
+#[tauri::command]
+pub fn root_chat_stop(chat_id: String, state: State<Arc<RootChatState>>) {
+    if let Some(c) = state
+        .children
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get_mut(&chat_id)
+    {
+        let _ = c.kill();
+    }
+}
+
+/// Replay a chat's history from its transcript on disk — the same parser the live
+/// stream uses, so reopen renders exactly what streaming rendered. Missing transcript
+/// (fresh chat, deleted store) degrades to empty, per the transcript-consumer rule.
+#[tauri::command]
+pub fn root_chat_history(chat_id: String, store: State<Arc<crate::store::Store>>) -> Vec<Value> {
+    let projects = match store.root_chat_config_dir(&chat_id) {
+        Some(cfg) if !cfg.is_empty() => PathBuf::from(cfg).join("projects"),
+        _ => match crate::pty::claude_projects_dir() {
+            Some(d) => d,
+            None => return Vec::new(),
+        },
+    };
+    let Some(path) = crate::pty::transcript_path(&chat_id, &projects) else {
+        return Vec::new();
+    };
+    let Ok(f) = std::fs::File::open(&path) else {
+        return Vec::new();
+    };
+    BufReader::new(f)
+        .lines()
+        .map_while(Result::ok)
+        .flat_map(|l| crate::transcript::parse_line(&l))
+        .collect()
+}
 
 /// What one stream-json stdout line means to the chat.
 pub enum LineOut {

@@ -2309,7 +2309,10 @@ mod tests {
     #[test]
     fn persist_state_root_chats_roundtrip_and_legacy_default() {
         let back: PersistState = serde_json::from_str(r#"{"projects":[]}"#).unwrap();
-        assert!(back.root_chats.is_empty(), "legacy state loads without the field");
+        assert!(
+            back.root_chats.is_empty(),
+            "legacy state loads without the field"
+        );
         let st = PersistState {
             root_chats: vec![RootChat {
                 id: "c1".into(),
@@ -2320,7 +2323,10 @@ mod tests {
             ..Default::default()
         };
         let json = serde_json::to_string(&st).unwrap();
-        assert!(json.contains("\"accountId\":\"a1\""), "camelCase wire shape: {json}");
+        assert!(
+            json.contains("\"accountId\":\"a1\""),
+            "camelCase wire shape: {json}"
+        );
         let back: PersistState = serde_json::from_str(&json).unwrap();
         assert_eq!(back.root_chats.len(), 1);
         assert_eq!(back.root_chats[0].title, "Roadmap");
