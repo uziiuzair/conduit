@@ -4541,3 +4541,16 @@ button {
 .root-chat-composer textarea:focus { outline: none; border-color: color-mix(in srgb, var(--accent) 55%, transparent); }
 .root-chat-send, .root-chat-stop { padding: 8px 16px; border-radius: 8px; }
 .root-chat-send:disabled { opacity: 0.4; }
+
+/* HQ sidebar section + workspace-root setting */
+.section-label.hq-label { display: flex; align-items: center; justify-content: space-between; }
+.hq-add { display: inline-flex; align-items: center; }
+.root-chat-row .name { flex: 1; }
+.root-chat-running { color: var(--accent); flex: none; }
+.workspace-root-field { flex-direction: column; align-items: stretch; gap: 8px; }
+.workspace-root-input { display: flex; gap: 8px; }
+.workspace-root-input input {
+  flex: 1; background: color-mix(in srgb, var(--border) 40%, transparent);
+  color: var(--text-bright); border: 1px solid var(--border); border-radius: 6px;
+  padding: 6px 10px; font-size: 12px; font-family: var(--mono-font);
+}

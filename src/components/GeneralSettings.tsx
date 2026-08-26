@@ -1,4 +1,5 @@
 import { useEffect } from "react";
+import { open } from "@tauri-apps/plugin-dialog";
 import { useStore } from "../store";
 
 /** Settings → General: startup / session behavior toggles. */
@@ -10,6 +11,8 @@ export function GeneralSettings() {
   const tmuxAvailable = useStore((s) => s.tmuxAvailable);
   const tmuxInstall = useStore((s) => s.tmuxInstall);
   const probeTmux = useStore((s) => s.probeTmux);
+  const workspaceRoot = useStore((s) => s.workspaceRoot);
+  const setWorkspaceRoot = useStore((s) => s.setWorkspaceRoot);
 
   // Probe on first open rather than at app boot: it shells out, and nothing before
   // this panel needs the answer. `null` until it lands, which the copy below renders
@@ -64,6 +67,35 @@ export function GeneralSettings() {
           )}
           {tmuxAvailable === null && <em className="dialog-hint"> Checking for tmux…</em>}
         </span>
+      </label>
+
+      <label className="dialog-toggle workspace-root-field">
+        <span>
+          Workspace root — the folder HQ root chats read from (where your projects live).
+          Leave empty for your home directory. Root chats can read anything under it but
+          never modify files.
+        </span>
+        <div className="workspace-root-input">
+          <input
+            type="text"
+            value={workspaceRoot}
+            placeholder="~ (home directory)"
+            spellCheck={false}
+            onChange={(e) => setWorkspaceRoot(e.target.value)}
+          />
+          <button
+            onClick={async () => {
+              const dir = await open({
+                directory: true,
+                multiple: false,
+                title: "Choose workspace root",
+              });
+              if (typeof dir === "string") setWorkspaceRoot(dir);
+            }}
+          >
+            Choose…
+          </button>
+        </div>
       </label>
     </div>
   );

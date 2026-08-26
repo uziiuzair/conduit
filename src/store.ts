@@ -308,9 +308,11 @@ const EMPTY_LIVE: LiveState = { status: "idle", todos: [] };
 export interface ContextMenuState {
   x: number;
   y: number;
-  kind: "session" | "project";
+  kind: "session" | "project" | "rootchat";
+  /** Empty string for kind "rootchat" — root chats live above all projects. */
   projectId: string;
   sessionId?: string;
+  rootChatId?: string;
 }
 
 export type TopTab = "files" | "changes" | "todos" | "subagents";
@@ -940,6 +942,10 @@ interface AppState {
   sendRootChat: (id: string, text: string) => Promise<void>;
   stopRootChat: (id: string) => Promise<void>;
   setWorkspaceRoot: (v: string) => void;
+  /** Inline sidebar rename, mirroring editingSessionId / editingProjectId. */
+  editingRootChatId: string | null;
+  startRootChatRename: (id: string) => void;
+  cancelRootChatRename: () => void;
   rootChatItemArrived: (chatId: string, item: ChatItem) => void;
   rootChatDone: (chatId: string) => void;
   rootChatFailed: (chatId: string, message: string) => void;
@@ -1334,6 +1340,7 @@ export const useStore = create<AppState>((set, get) => {
     rootChatItems: {},
     rootChatRunning: {},
     workspaceRoot: readWorkspaceRoot(),
+    editingRootChatId: null,
     restoreSessionsOnOpen: readRestoreSessionsOnOpen(),
     terminalRenderer: readTerminalRenderer(),
     persistSessions: readPersistSessions(),
@@ -1913,12 +1920,16 @@ export const useStore = create<AppState>((set, get) => {
 
     renameRootChat: async (id, name) => {
       const clean = name.trim();
+      set({ editingRootChatId: null });
       if (!clean) return;
       set((st) => ({
         rootChats: st.rootChats.map((c) => (c.id === id ? { ...c, title: clean } : c)),
       }));
       await invoke("rename_root_chat", { id, name: clean }).catch(() => {});
     },
+
+    startRootChatRename: (id) => set({ editingRootChatId: id }),
+    cancelRootChatRename: () => set({ editingRootChatId: null }),
 
     removeRootChat: async (id) => {
       set((st) => {
