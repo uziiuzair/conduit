@@ -24,6 +24,7 @@ import {
 } from "./layout";
 import { cleanupEdits } from "./trim";
 import { appendItem, type ChatItem, type RootChat } from "./rootChat";
+import { inProfile, type Profile } from "./profiles";
 import type { CanvasState } from "./canvas";
 import type { ContinuityFeed } from "./continuityFeed";
 import type * as Monaco from "monaco-editor";
@@ -218,6 +219,8 @@ export interface Project {
   layout?: ProjectLayout | null;
   /** Per-agent default account for this project's sessions (beats the global default). */
   defaultAccounts?: DefaultAccounts;
+  /** Profile this project is visible under (sidebar filter); absent/null = Default. */
+  profileId?: string | null;
 }
 
 // ---- Task board (Conductor board) ----
@@ -923,6 +926,16 @@ interface AppState {
   setSessionDir: (sessionId: string, dir: string) => void;
   pruneSessionDirs: (liveIds: Set<string>) => void;
 
+  // ---- profiles: named sidebar workspaces (visibility filter, never isolation) ----
+  profiles: Profile[];
+  /** Active profile id; null = the implicit Default profile. Persisted in state.json. */
+  activeProfileId: string | null;
+  /** Create a profile and switch to it. */
+  addProfile: (name: string) => Promise<void>;
+  /** Switch profiles (null = Default), repairing selection so the workspace never
+   *  shows a project the sidebar hides. */
+  setActiveProfile: (id: string | null) => Promise<void>;
+
   // ---- root chat (HQ): read-only claude -p conversations above all projects ----
   rootChats: RootChat[];
   /** Non-null while the chat view overlays the (still-mounted) terminal workspace. */
@@ -1335,6 +1348,8 @@ export const useStore = create<AppState>((set, get) => {
     agyUsageTracking: false,
     usagePrefs: readUsagePrefs(),
     sessionDirs: {},
+    profiles: [],
+    activeProfileId: null,
     rootChats: [],
     selectedRootChatId: null,
     rootChatItems: {},
@@ -1398,18 +1413,29 @@ export const useStore = create<AppState>((set, get) => {
     toasts: [],
 
     load: async () => {
-      const [projects, home, accounts, defaultAccounts, trust, opencode, hotExitEntries] =
-        await Promise.all([
-          invoke<Project[]>("load_projects"),
-          getHomeDir().catch(() => null),
-          invoke<Account[]>("list_accounts").catch(() => [] as Account[]),
-          invoke<DefaultAccounts>("get_default_accounts").catch(() => ({}) as DefaultAccounts),
-          invoke<TrustSettings>("get_trust_settings").catch(
-            () => ({ privateMode: false }) as TrustSettings,
-          ),
-          invoke<OpenCodeSettings>("get_opencode_settings").catch(() => get().opencode),
-          invoke<HotExitEntry[]>("hotexit_load").catch(() => [] as HotExitEntry[]),
-        ]);
+      const [
+        projects,
+        home,
+        accounts,
+        defaultAccounts,
+        trust,
+        opencode,
+        hotExitEntries,
+        profiles,
+        activeProfileId,
+      ] = await Promise.all([
+        invoke<Project[]>("load_projects"),
+        getHomeDir().catch(() => null),
+        invoke<Account[]>("list_accounts").catch(() => [] as Account[]),
+        invoke<DefaultAccounts>("get_default_accounts").catch(() => ({}) as DefaultAccounts),
+        invoke<TrustSettings>("get_trust_settings").catch(
+          () => ({ privateMode: false }) as TrustSettings,
+        ),
+        invoke<OpenCodeSettings>("get_opencode_settings").catch(() => get().opencode),
+        invoke<HotExitEntry[]>("hotexit_load").catch(() => [] as HotExitEntry[]),
+        invoke<Profile[]>("list_profiles").catch(() => [] as Profile[]),
+        invoke<string | null>("get_active_profile").catch(() => null),
+      ]);
       const layouts: Record<string, ProjectLayout> = {};
       for (const p of projects) {
         layouts[p.id] = validateLayout(p.layout ?? defaultLayout(p), p);
@@ -1426,18 +1452,61 @@ export const useStore = create<AppState>((set, get) => {
       // one-shot as panes create models. Never blocks load.
       const hotExit: Record<string, string> = {};
       for (const e of hotExitEntries) hotExit[e.path] = e.content;
+      // Reopen in the profile you left: the initial selection is the first project the
+      // sidebar will actually show under the persisted active profile.
+      const knownProfiles = new Set(profiles.map((p) => p.id));
+      const firstVisible = projects.find((p) =>
+        inProfile(p.profileId, activeProfileId, knownProfiles),
+      );
       set({
         projects,
         homeDir: home,
         layouts,
-        selectedProjectId: projects[0]?.id ?? null,
+        selectedProjectId: firstVisible?.id ?? null,
         accounts,
         defaultAccounts,
         privateMode: trust.privateMode,
         opencode,
         hotExit,
+        profiles,
+        activeProfileId,
       });
       void get().loadRootChats();
+    },
+
+    // ---- profiles ----
+
+    addProfile: async (name) => {
+      const clean = name.trim();
+      if (!clean) return;
+      const profile = await invoke<Profile>("add_profile", { name: clean }).catch(() => null);
+      if (!profile) return;
+      set((s) => ({ profiles: [...s.profiles, profile] }));
+      await get().setActiveProfile(profile.id);
+    },
+
+    setActiveProfile: async (id) => {
+      const ok = await invoke<boolean>("set_active_profile", { id }).catch(() => false);
+      if (!ok) return;
+      set((s) => {
+        const known = new Set(s.profiles.map((p) => p.id));
+        const patch: Partial<AppState> = { activeProfileId: id };
+        // Selection repair: never leave the workspace on a project (or the chat layer on
+        // a chat) the sidebar just hid. Terminals stay mounted either way — this only
+        // moves focus.
+        const selected = s.projects.find((p) => p.id === s.selectedProjectId);
+        if (!selected || !inProfile(selected.profileId, id, known)) {
+          patch.selectedProjectId =
+            s.projects.find((p) => inProfile(p.profileId, id, known))?.id ?? null;
+        }
+        const chat = s.selectedRootChatId
+          ? s.rootChats.find((c) => c.id === s.selectedRootChatId)
+          : undefined;
+        if (chat && !inProfile(chat.profileId, id, known)) {
+          patch.selectedRootChatId = null;
+        }
+        return patch;
+      });
     },
 
     setDefaultAgent: (id) => {

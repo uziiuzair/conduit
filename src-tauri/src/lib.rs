@@ -639,6 +639,33 @@ fn remove_root_chat(id: String, store: State<Arc<Store>>) {
     store.remove_root_chat(&id);
 }
 
+// ---- Profile commands ---------------------------------------------------------
+
+#[tauri::command]
+fn list_profiles(store: State<Arc<Store>>) -> Vec<store::Profile> {
+    store.list_profiles()
+}
+
+#[tauri::command]
+fn add_profile(name: String, store: State<Arc<Store>>) -> store::Profile {
+    store.add_profile(&name)
+}
+
+#[tauri::command]
+fn remove_profile(id: String, store: State<Arc<Store>>) -> bool {
+    store.remove_profile(&id)
+}
+
+#[tauri::command]
+fn get_active_profile(store: State<Arc<Store>>) -> Option<String> {
+    store.active_profile()
+}
+
+#[tauri::command]
+fn set_active_profile(id: Option<String>, store: State<Arc<Store>>) -> bool {
+    store.set_active_profile(id)
+}
+
 // ---- Project task board commands ---------------------------------------------
 
 /// Resolve a project id to its on-disk repo root, using the same `Store` accessor
@@ -1817,6 +1844,11 @@ pub fn run() {
             add_root_chat,
             rename_root_chat,
             remove_root_chat,
+            list_profiles,
+            add_profile,
+            remove_profile,
+            get_active_profile,
+            set_active_profile,
             root_chat::root_chat_send,
             root_chat::root_chat_stop,
             root_chat::root_chat_history,

@@ -12,6 +12,8 @@ export interface RootChat {
   title: string;
   accountId?: string | null;
   createdAt: number;
+  /** Profile this chat is visible under (sidebar filter); absent/null = Default. */
+  profileId?: string | null;
 }
 
 export function appendItem(items: ChatItem[] | undefined, item: ChatItem): ChatItem[] {
