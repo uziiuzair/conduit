@@ -3,6 +3,193 @@
 All notable changes to Conduit are documented here. This project uses
 [semantic versioning](https://semver.org/).
 
+## 0.30.0 — 2026-08-25
+
+- **Fixed — Starting a session with a task no longer fails on Windows.** Any agent handed an
+  opening instruction — every worker the Conductor spawns, and any session launched from a
+  worktree whose path contains a space — died at launch with "too many arguments. Expected 1
+  argument but got 16." Windows was splitting the instruction into one argument per word
+  before the agent ever saw it. The command now travels in a generated script file instead of
+  on the command line, so the whole instruction arrives intact no matter how long it is or
+  what it contains.
+- **Fixed — Continuity's presence and coordination work again on Windows.** In the installed
+  Windows app, none of continuity's hooks or its MCP tools ever ran: every session ended with
+  a "Stop hook error … EISDIR … lstat 'C:'" and the rest failed silently, so no session
+  reported its presence, file activity or handoffs. The plugin was being located through a
+  path shape Node refuses to load from. Sessions started from a development build were never
+  affected.
+- **Added — Command Code can be orchestrated.** The Conductor could not spawn a Command Code
+  worker at all: it was missing from the list of agents `fleet_spawn` accepts. It is now a
+  first-class choice, which matters because Command Code reaches its ~58 models through a
+  separate subscription — so it keeps working when your Claude window closes.
+- **Added — Pick the model a spawned worker runs on.** Workers used to be limited to a coarse
+  cheap/standard/hard tier, which for Command Code could not name most of its catalogue. A
+  spawn can now pin one exact model (`claude-opus-5`, `google/gemini-3.7-flash`,
+  `deepseek/deepseek-v4-flash`, `gpt-5.5`, `xai/grok-4.5`, …), and the three tiers now map to
+  real Command Code models instead of being ignored — cheap deliberately lands on an
+  open-source model so mechanical work stops spending a frontier budget.
+- **Added — Command Code workers hand their results back.** A Command Code session could only
+  be watched through its terminal output; it had no way to report what it did or to exchange
+  notes with its peers. It now gets the same structured hand-back and project mailbox a Claude
+  worker has, so the Conductor learns whether a worker succeeded instead of guessing from
+  scraped text.
+
+## 0.29.0 — 2026-08-23
+
+- **Added — Drag a session straight into a pane.** Drag any session from the sidebar onto the
+  workspace: drop it on the left or right third of a pane to split beside it, or in the
+  middle (or on a tab strip) to add it to that pane. Sessions from other projects work the
+  same way, which is what the previous release's cross-project panes were missing — until
+  now the only way in was the right-click menu.
+
+## 0.28.1 — 2026-08-23
+
+- **Fixed — Usage meters no longer disagree with each other.** The collapsed summary reported
+  an account's worst window while the expanded view showed every window, so one view said
+  "79%" and the other showed 18%, 3% and 79% with no hint of the connection. The summary now
+  names the window it is reporting, and the low-alert list, the sort order and the health dot
+  all read the same windows the meters draw — so hiding a window no longer leaves the
+  headline number describing one you cannot see.
+- **Fixed — A rate-limited check no longer blanks your usage.** Claude's usage endpoint
+  throttles, and Conduit was polling it once a minute for every account (plus your real
+  `claude` sessions doing the same). A throttled check wiped that account's meters and, worse,
+  drew it as a healthy green dot — so the panel changed its mind minute to minute. Conduit
+  now keeps the last good reading, marks it "last known", and checks every five minutes
+  instead of every minute. An account whose quota genuinely could not be read shows a hollow
+  dot and "not read" rather than a clean bill of health.
+- **Fixed — The single-account view no longer shows another account's numbers.** With two
+  Claude accounts signed in, a session that didn't name one would display whichever account
+  happened to sort first — different figures from the stacked view for the same session. It
+  now asks you to pick one instead of guessing.
+
+## 0.28.0 — 2026-08-23
+
+- **Added — Split panes across projects.** Sessions from different projects can now sit
+  side by side. Right-click any session in the sidebar and choose **Open beside <project>**
+  to borrow it into the panes you are already looking at. The session stays where it lives:
+  it keeps its own project, its own sidebar row and its own working directory, and closing
+  the borrowed tab leaves it running.
+- **Added — Tabs say which project they belong to.** As soon as a set of panes holds more
+  than one project, every tab gains its project's name and colour, and a pane whose tabs are
+  all one project wears that colour along its top edge. Panes holding a single project look
+  exactly as they did. Each project's colour is derived from the project itself, so it is
+  the same in every window and on every machine — and the sidebar's folder icon now carries
+  it too, so the colour on a tab always has something to point back to.
+- **Changed — Clicking a borrowed session focuses it where it is.** Selecting a session in
+  the sidebar that is already visible in the panes on screen now focuses that tab instead of
+  switching projects and tearing down the split.
+
+## 0.27.0 — 2026-08-23
+
+- **Changed — Usage meters read one way, everywhere.** The number and the bar used to point
+  in opposite directions: a meter that said "62% left" drew a bar filled to 38%. Every meter
+  now shows how much you have **used** — the number, the bar and the collapsed summary all
+  agreeing — which is what `claude /usage` and the agents' own usage views show. Reset times
+  read "resets 3:50pm" instead of a bare timestamp.
+- **Added — "Meters show" preference (Settings → Usage display).** Prefer a fuel gauge? Switch
+  the whole panel to "Amount left" and the number, the bar and the summary all flip together.
+  Colour still warns on consumption either way, so a meter reading "8% left" is red whichever
+  direction you read.
+- **Changed — The same window is named the same thing across agents.** Claude reported
+  "Current session" / "Current week (all)", Command Code "5-hour window" / "Weekly", and
+  Antigravity its own variants, so a stacked panel read as unrelated kinds of limit. They are
+  now all "5-hour", "Weekly" and "Weekly · Opus"; Antigravity keeps its pool prefix
+  ("Gemini · Weekly") because those genuinely are separate quotas.
+- **Changed — Sessions show their agent's real logo.** The coloured monogram tiles (C, x, G,
+  o, A, c) are gone, replaced by each agent's actual brand mark — Claude, Codex, Gemini,
+  opencode, Antigravity and Command Code — tinted to stay legible in both the dark and the
+  light themes.
+- **Added — A ring around the agent logo shows what the session is doing.** No ring means it
+  has not started; a faint ring means it is loaded and waiting; a slow pulse means it is
+  working; a faster amber pulse means it needs you; a green ring means it just finished. The
+  animation respects your system's reduce-motion setting, and every state is spelled out in
+  the tooltip rather than left to colour.
+
+## 0.26.3 — 2026-08-23
+
+- **Fixed — Command Code usage appears for accounts, not just the default profile.** An
+  account tagged for Command Code stores one Claude-shaped config directory, and the usage
+  meter was looking for Command Code's credentials inside it. It never found them, so the
+  account was reported as signed out and left out of the panel entirely — while its
+  sessions ran perfectly well on the signed-in profile. The meter and the session now
+  resolve the profile through one shared function, so they cannot describe different
+  accounts.
+
+## 0.26.2 — 2026-08-23
+
+- **Fixed — Command Code usage now actually appears in the usage bar.** The meter read
+  Command Code's quota from an endpoint that reports billing-period *spend* rather than
+  *limits* — it answered normally, just with no caps in it, so every poll parsed to nothing
+  and the account was left out of the panel entirely. It now reads the real limits endpoint
+  and draws the 5-hour and weekly windows like every other agent.
+
+## 0.26.1 — 2026-08-23
+
+- **Fixed — launch no longer opens whichever project is at the top.** Conduit used to
+  select the first project in the sidebar every time it started, open its tabs and (with
+  restore-on-open) spawn all of its sessions — so reordering the sidebar changed which
+  project launched, and coming back to a specific session meant clicking away from one you
+  never asked for. It now reopens the project you were actually last in.
+- **Added — a launch preference.** Settings → General — *Reopen the last project on
+  launch*, on by default. Turn it off to start with nothing selected and nothing spawned.
+  A stale memory (the project was deleted) also starts empty rather than falling back to
+  someone else's project.
+
+## 0.26.0 — 2026-08-23
+
+- **Added — Read a session as a conversation.** A new Chat button on each session tab
+  swaps the terminal for a rendered view of what the agent is doing: your prompts and its
+  replies as messages, tool calls as one-line rows, and a proper input box instead of a
+  terminal prompt. The terminal keeps running underneath the whole time and is one click
+  away — nothing is paused, restarted, or lost. Turn it on in Settings → General.
+  Claude sessions only for now.
+
+---
+
+## 0.25.0 — 2026-08-23
+
+- **Added — Tell Conduit which agent should do which kind of work.** Settings →
+  Routing lets you say that planning goes to Opus, implementation to Sonnet, checks to
+  Haiku, research to Antigravity, and bulk edits to a local model — globally or for one
+  project. The new-session dialog then asks what the session is for and picks the agent and
+  model for you.
+- **Added — Fall back automatically when an agent runs out.** Each kind of work has an
+  ordered list, so if your first choice isn't installed or its quota is spent, the next one
+  takes the job and the dialog tells you why it switched. The defaults come from what each
+  agent is actually good at, and always fall back to a *different* agent — a second
+  model on the same subscription runs out at the same moment as the first.
+
+---
+
+## 0.24.0 — 2026-08-23
+
+- **Added — Command Code is now a Conduit agent.** Install it in one click from Settings
+  → Agents and run it in sessions like any other agent, with live session status, resume
+  across restarts, MCP server management, and multi-account support.
+- **Added — Command Code usage in the usage bar.** Its five-hour and weekly rolling
+  windows sit alongside your Claude and Antigravity meters, so you can see which
+  subscription has room before you start.
+- **Added — A settings page for Command Code.** Settings → Command Code sets the
+  model, reasoning effort, taste learning, and which cheap model handles its internal
+  housekeeping — without having to open a session to reach `/config`. Your existing
+  config file is preserved and backed up before the first change.
+
+---
+
+## 0.23.2 — 2026-08-23
+
+- **Added — A Windows installer.** Releases now publish a Windows `.msi` alongside the
+  macOS build, and the updater knows about it. The installer is not yet code-signed, so
+  Windows will warn about an unrecognized app on first run.
+- **Fixed — Conduit builds and runs on Windows again.** The Windows build had been
+  broken for 76 commits behind a macOS-only CI gate. Windows is now compiled, linted, and
+  tested on every change, so it cannot break silently again.
+- **Fixed — Honest advice about session persistence on Windows.** Settings used to say
+  sessions would survive a quit once you installed tmux, which cannot be done on Windows.
+  It now says persistence isn't available there, and the nagging banner about it is gone.
+
+---
+
 ## 0.23.1 — 2026-08-27
 
 - **Fixed — Leaving a root chat no longer traps you there.** Clicking a session in the

@@ -312,7 +312,16 @@ impl PtyManager {
                     effort.as_deref(),
                     resume_token.as_deref(),
                 );
-                cmd.args(["/K", inner.as_str()]);
+                // Never pass `inner` itself: a quoted argument inside it does not survive
+                // cmd's re-parse (see `write_spawn_script`). Route through a generated
+                // batch file whose caret-escaped path is the only token on the command
+                // line, so nothing here needs quoting at all. The fallback keeps a
+                // quote-free invocation working if the write fails.
+                let arg = match write_spawn_script(&session_id, &inner) {
+                    Some(path) => cmd_caret_escape(&path),
+                    None => inner,
+                };
+                cmd.args(["/K", arg.as_str()]);
             }
             // shell_only: a bare `cmd.exe` in the cwd is already an interactive shell.
             cmd
@@ -860,6 +869,59 @@ pub(crate) fn win_quote(s: &str) -> String {
     }
 }
 
+/// Caret-escape every character cmd.exe's parser treats specially, so a token survives
+/// cmd's re-parse as a literal. Used for exactly one thing: the PATH of the generated
+/// spawn script (see `write_spawn_script`), which is the only token left on the
+/// `cmd /K` command line.
+///
+/// Why carets and not quotes. `portable_pty::CommandBuilder` builds the child command
+/// line with MSVCRT/`ArgvQuote` rules, which escape an embedded `"` as `\"`. cmd.exe has
+/// no such escape -- it only ever counts quotes -- so a quoted token handed to `cmd /K`
+/// comes back out with literal backslash-quotes in it and the child's CRT then splits the
+/// contents on spaces. `^` passes through `ArgvQuote` untouched (it escapes only `"` and
+/// runs of `\`), so it is the one escape that reaches cmd intact. Verified against a real
+/// cmd.exe: a batch path containing a space runs correctly as `...has^ space\spawn.cmd`.
+#[cfg(windows)]
+pub(crate) fn cmd_caret_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() * 2);
+    for c in s.chars() {
+        if " &()[]{}^=;!'+,`~%<>|\"".contains(c) {
+            out.push('^');
+        }
+        out.push(c);
+    }
+    out
+}
+
+/// Windows: write this session's agent invocation to a `.cmd` script and return its path.
+///
+/// **This is the whole reason a Windows spawn is not fragile any more.** An invocation
+/// containing a quoted argument -- a fleet worker's initial prompt, a `--settings` path
+/// with a space in it, the Conductor's persona-file flag -- cannot survive being passed
+/// as a single `cmd /K` argument: cmd strips the outer quote pair and hands the rest to
+/// the child with `\"` sequences where the quotes were, so `cmdc "a b c"` reaches the
+/// agent as three separate arguments. That is the "too many arguments. Expected 1
+/// argument but got N" spawn failure, and it hit EVERY adapter that puts a prompt on the
+/// command line, not just one. `hooks::write_codex_result_script` already worked around
+/// the same re-parse locally; this generalizes the fix to the spawn itself.
+///
+/// Inside a batch file the ordinary cmd quoting rules apply and `win_quote` is exactly
+/// right, so nothing about `build_invocation` has to change. The body is one line
+/// prefixed with `@` -- which suppresses the echo of that line ONLY, rather than
+/// `@echo off`, which would leave echo disabled for the interactive shell `/K` drops the
+/// user into and hide their prompt.
+///
+/// One file per session id, overwritten on each cold spawn, so the set is bounded by the
+/// session count rather than growing per launch (same convention as
+/// `fleet::write_persona_file`). Returns None on any I/O failure; the caller then falls
+/// back to the inline command, which is still correct for a quote-free invocation.
+#[cfg(windows)]
+fn write_spawn_script(session_id: &str, invocation: &str) -> Option<String> {
+    let path = crate::store::data_dir().join(format!("spawn-{session_id}.cmd"));
+    fs::write(&path, format!("@{invocation}\r\n")).ok()?;
+    Some(path.to_string_lossy().into_owned())
+}
+
 /// OS-appropriate argument quoting for the agent invocation string: POSIX single-quoting
 /// under a `sh -c` login shell, cmd.exe quoting under `cmd /K`. Used by the provider
 /// adapters so one `build_invocation` implementation serves both platforms.
@@ -1161,6 +1223,68 @@ mod tests {
             !script.contains("--append-system-prompt "),
             "persona must never be inlined: {script}"
         );
+    }
+
+    /// The regression this whole indirection exists for. A multi-word initial prompt used
+    /// to reach the agent as one argument per WORD ("too many arguments. Expected 1
+    /// argument but got 16"), because cmd re-parses the `/K` argument and `ArgvQuote`'s
+    /// `\"` is not an escape it understands. The command line must therefore carry no
+    /// double quote at all -- only the caret-escaped script path.
+    #[cfg(windows)]
+    #[test]
+    fn windows_spawn_arg_carries_no_quotes_and_hides_the_prompt() {
+        let adapter = crate::agent::adapter_for(crate::agent::AgentId::CommandCode);
+        let inner = build_script_win(
+            &*adapter,
+            ID,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some("Refactor the parser and add sixteen distinct words here right now ok"),
+            None,
+            None,
+            None,
+            None,
+        );
+        assert!(
+            inner.contains('"'),
+            "the invocation itself is quoted: {inner}"
+        );
+
+        let path = write_spawn_script(ID, &inner).expect("write spawn script");
+        let arg = cmd_caret_escape(&path);
+        assert!(
+            !arg.contains('"'),
+            "a quote on the /K command line is the bug: {arg}"
+        );
+
+        let body = fs::read_to_string(&path).unwrap();
+        assert!(body.starts_with('@'), "line-local echo suppression: {body}");
+        assert!(
+            !body.contains("echo off"),
+            "`@echo off` would disable the prompt of the shell /K leaves behind: {body}"
+        );
+        assert!(body.contains(&inner), "{body}");
+        let _ = fs::remove_file(&path);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn caret_escape_covers_cmd_metacharacters_and_spaces() {
+        // A data dir under a user profile with a space is the common case, and the one
+        // that silently produced a truncated path before.
+        assert_eq!(
+            cmd_caret_escape(r"C:\Users\A B\ConduitTauri\spawn-1.cmd"),
+            r"C:\Users\A^ B\ConduitTauri\spawn-1.cmd"
+        );
+        // `%` must be escaped or cmd substitutes an env var into the path; `&` would end
+        // the command outright.
+        assert_eq!(cmd_caret_escape("a%B%c&d"), "a^%B^%c^&d");
+        // Backslash and colon are NOT special to cmd and must pass through untouched,
+        // or every path on Windows would be mangled.
+        assert_eq!(cmd_caret_escape(r"C:\x\y"), r"C:\x\y");
     }
 
     #[cfg(not(windows))]

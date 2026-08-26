@@ -3,16 +3,26 @@ import { open } from "@tauri-apps/plugin-dialog";
 import { useStore, type Account } from "../store";
 import { agentMeta, type AgentId } from "../agents";
 
-/** Agents that support multi-account today (Claude + agy). The rest is deferred, so they
- *  are intentionally not offered here — see the multi-account design doc. */
-const MANAGED_AGENTS: AgentId[] = ["claude", "antigravity"];
+/** Agents that support multi-account today. The rest is deferred, so they are
+ *  intentionally not offered here — see the multi-account design doc.
+ *
+ *  The bar for membership is a working `account_env` on the Rust adapter, i.e. the agent
+ *  can actually be pointed at a different profile. Claude and agy redirect HOME to a
+ *  profile root; Command Code does the same, because it resolves its config root from
+ *  HOME/USERPROFILE and ships no config-dir override to use instead. */
+const MANAGED_AGENTS: AgentId[] = ["claude", "antigravity", "commandcode"];
 
 /** Turn a picked path into a short label ("...\.claude-personal\.claude" -> "Personal"). */
 function labelFromPath(picked: string): string {
   const clean = picked.replace(/[\\/]+$/, "");
   const parts = clean.split(/[\\/]/);
   let base = parts[parts.length - 1] || "Account";
-  if (base === ".claude") base = parts[parts.length - 2] || "Account";
+  // A profile is named by the directory ABOVE its config dir, so step up out of any of
+  // them. Without `.commandcode` here every Command Code account would be labelled
+  // "Commandcode" instead of the profile it belongs to.
+  if (base === ".claude" || base === ".commandcode") {
+    base = parts[parts.length - 2] || "Account";
+  }
   base = base.replace(/^\./, "").replace(/^claude-?/, "") || "Account";
   return base.charAt(0).toUpperCase() + base.slice(1);
 }

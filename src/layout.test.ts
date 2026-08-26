@@ -1,5 +1,21 @@
 import { describe, it, expect } from "vitest";
-import { cycleTabRef, moveTab, reopenTabAt, splitTab } from "./layout";
+import {
+  cycleTabRef,
+  isMixedLayout,
+  layoutProjectIds,
+  moveTab,
+  projectAccent,
+  projectHue,
+  reopenTabAt,
+  hasSessionDrag,
+  insertTabAt,
+  readSessionDrag,
+  repairLayout,
+  SESSION_DRAG_MIME,
+  splitTab,
+  tabProjectId,
+  type LayoutProject,
+} from "./layout";
 import type { ProjectLayout } from "./store";
 
 const L = (): ProjectLayout => ({
@@ -95,5 +111,191 @@ describe("reopenTabAt", () => {
     expect(r.groups[1].tabs.map((t) => t.ref)).toEqual(["s1"]);
     expect(r.groups[0].activeRef).toBe("/b");
     expect(r.activeGroupId).toBe("g1");
+  });
+});
+
+
+// ---- cross-project panes ----
+
+/** Project A hosts the layout; project B's session s2 is BORROWED into a second pane. */
+const MIXED = (): ProjectLayout => ({
+  groups: [
+    { id: "g1", tabs: [{ kind: "session", ref: "s1" }], activeRef: "s1" },
+    { id: "g2", tabs: [{ kind: "session", ref: "s2", projectId: "B" }], activeRef: "s2" },
+  ],
+  activeGroupId: "g1",
+  weights: [0.5, 0.5],
+});
+const PROJECTS: LayoutProject[] = [
+  { id: "A", sessions: [{ id: "s1" }] },
+  { id: "B", sessions: [{ id: "s2" }] },
+];
+
+describe("tabProjectId", () => {
+  it("falls back to the host, which is what every pre-feature tab is", () => {
+    expect(tabProjectId({ kind: "session", ref: "s1" }, "A")).toBe("A");
+  });
+  it("honours an explicit owner", () => {
+    expect(tabProjectId({ kind: "session", ref: "s2", projectId: "B" }, "A")).toBe("B");
+  });
+});
+
+describe("layoutProjectIds / isMixedLayout", () => {
+  it("lists the host first, then borrowed projects in first-appearance order", () => {
+    expect(layoutProjectIds(MIXED(), "A")).toEqual(["A", "B"]);
+  });
+  it("does not call an all-local layout mixed", () => {
+    // The common case must stay badge-free, or every user pays for a feature few use.
+    expect(isMixedLayout(L(), "A")).toBe(false);
+    expect(isMixedLayout(MIXED(), "A")).toBe(true);
+  });
+  it("counts the host even when it contributes no tabs", () => {
+    const l: ProjectLayout = {
+      groups: [{ id: "g1", tabs: [{ kind: "session", ref: "s2", projectId: "B" }], activeRef: "s2" }],
+      activeGroupId: "g1",
+      weights: [1],
+    };
+    expect(isMixedLayout(l, "A")).toBe(true);
+  });
+});
+
+describe("projectAccent", () => {
+  it("is stable for an id and lands on the hue circle", () => {
+    expect(projectHue("A")).toBe(projectHue("A"));
+    for (const id of ["A", "B", "conduit", "9f3c1e", ""]) {
+      const h = projectHue(id);
+      expect(h).toBeGreaterThanOrEqual(0);
+      expect(h).toBeLessThan(360);
+    }
+    expect(projectAccent("A")).toMatch(/^hsl\(\d+ 58% 62%\)$/);
+  });
+  it("separates ids that differ by one character", () => {
+    // Sequential uids are the norm, and neighbouring hues would defeat the whole point.
+    const a = projectHue("p1");
+    const b = projectHue("p2");
+    const gap = Math.min(Math.abs(a - b), 360 - Math.abs(a - b));
+    expect(gap).toBeGreaterThan(20);
+  });
+});
+
+describe("repairLayout", () => {
+  it("keeps a borrowed tab whose own project still has the session", () => {
+    // The regression that would collapse the feature instantly: a repair runs on EVERY
+    // layout write, so validating a foreign tab against the HOST would drop it at once.
+    const r = repairLayout(MIXED(), "A", PROJECTS, "new");
+    expect(r.groups).toHaveLength(2);
+    expect(r.groups[1].tabs[0].ref).toBe("s2");
+    expect(r.groups[1].tabs[0].projectId).toBe("B");
+  });
+
+  it("drops a borrowed tab when its session is gone", () => {
+    const r = repairLayout(MIXED(), "A", [{ id: "A", sessions: [{ id: "s1" }] }, { id: "B", sessions: [] }], "new");
+    expect(r.groups).toHaveLength(1);
+    expect(r.groups[0].id).toBe("g1");
+    expect(r.weights).toEqual([1]);
+  });
+
+  it("drops a borrowed tab when its whole project is gone", () => {
+    const r = repairLayout(MIXED(), "A", [{ id: "A", sessions: [{ id: "s1" }] }], "new");
+    expect(r.groups).toHaveLength(1);
+    expect(r.groups[0].tabs.map((t) => t.ref)).toEqual(["s1"]);
+  });
+
+  it("does not let a borrowed id validate against the host by accident", () => {
+    // s2 exists under A here, but the tab claims B — which no longer has it. Matching on
+    // ref alone would keep a tab pointing at a session that is not the one it names.
+    const r = repairLayout(MIXED(), "A", [{ id: "A", sessions: [{ id: "s1" }, { id: "s2" }] }, { id: "B", sessions: [] }], "new");
+    expect(r.groups).toHaveLength(1);
+    expect(r.groups[0].tabs.map((t) => t.ref)).toEqual(["s1"]);
+  });
+
+  it("keeps file tabs, which belong to no session", () => {
+    const r = repairLayout(L(), "A", PROJECTS, "new");
+    expect(r.groups[0].tabs.map((t) => t.ref)).toEqual(["/a", "/b"]);
+  });
+
+  it("normalizes weights and returns an empty group when nothing survives", () => {
+    const r = repairLayout(MIXED(), "A", [], "new");
+    expect(r.groups).toEqual([{ id: "new", tabs: [], activeRef: null }]);
+    expect(r.activeGroupId).toBe("new");
+    expect(r.weights).toEqual([1]);
+  });
+
+  it("re-points a dangling activeRef at the last surviving tab", () => {
+    const l: ProjectLayout = {
+      groups: [
+        {
+          id: "g1",
+          tabs: [{ kind: "session", ref: "s1" }, { kind: "session", ref: "gone" }],
+          activeRef: "gone",
+        },
+      ],
+      activeGroupId: "g1",
+      weights: [1],
+    };
+    const r = repairLayout(l, "A", PROJECTS, "new");
+    expect(r.groups[0].activeRef).toBe("s1");
+  });
+});
+
+
+// ---- dragging a sidebar session into a pane ----
+
+const dt = (entries: Record<string, string>) => ({
+  types: Object.keys(entries),
+  getData: (t: string) => entries[t] ?? "",
+});
+
+describe("session drag payload", () => {
+  it("is recognisable from `types` alone, which is all dragover can see", () => {
+    // The whole reason for a custom MIME type: `getData` is blocked during dragover, so
+    // without this the pane overlay could never know to appear before the drop.
+    const d = dt({ "text/plain": "s2", [SESSION_DRAG_MIME]: "{}" });
+    expect(hasSessionDrag(d)).toBe(true);
+    expect(hasSessionDrag(dt({ "text/plain": "s2" }))).toBe(false);
+    expect(hasSessionDrag(null)).toBe(false);
+  });
+
+  it("round-trips the session and its owning project", () => {
+    const d = dt({
+      [SESSION_DRAG_MIME]: JSON.stringify({ sessionId: "s2", projectId: "B" }),
+    });
+    expect(readSessionDrag(d)).toEqual({ sessionId: "s2", projectId: "B" });
+  });
+
+  it("refuses a malformed or foreign payload instead of trusting it", () => {
+    // Anything on the desktop can advertise a MIME type; a bad payload must not become a
+    // tab pointing at nothing.
+    expect(readSessionDrag(dt({ [SESSION_DRAG_MIME]: "not json" }))).toBeNull();
+    expect(readSessionDrag(dt({ [SESSION_DRAG_MIME]: '{"sessionId":"s2"}' }))).toBeNull();
+    expect(readSessionDrag(dt({ "text/plain": "s2" }))).toBeNull();
+  });
+});
+
+describe("insertTabAt", () => {
+  it("places a foreign session in the target group and activates it", () => {
+    const r = insertTabAt(L(), "g2", 0, { kind: "session", ref: "s9", projectId: "B" });
+    expect(r.groups[1].tabs.map((t) => t.ref)).toEqual(["s9", "s1"]);
+    expect(r.groups[1].activeRef).toBe("s9");
+    expect(r.activeGroupId).toBe("g2");
+  });
+
+  it("moves rather than duplicates a session already open elsewhere", () => {
+    // A ref twice in one layout is not cosmetic: the terminal is placed by the FIRST group
+    // holding it, so the second pane would sit permanently blank.
+    const r = insertTabAt(L(), "g1", 0, { kind: "session", ref: "s1" });
+    expect(r.groups[0].tabs.map((t) => t.ref)).toEqual(["s1", "/a", "/b"]);
+    expect(r.groups[1].tabs).toEqual([]);
+    expect(r.groups[1].activeRef).toBeNull();
+  });
+
+  it("clamps an out-of-range index instead of leaving a hole", () => {
+    const r = insertTabAt(L(), "g1", 99, { kind: "session", ref: "s9" });
+    expect(r.groups[0].tabs.map((t) => t.ref)).toEqual(["/a", "/b", "s9"]);
+  });
+
+  it("falls back to the first group when the target is gone", () => {
+    const r = insertTabAt(L(), "nope", 0, { kind: "session", ref: "s9" });
+    expect(r.groups[0].tabs[0].ref).toBe("s9");
   });
 });

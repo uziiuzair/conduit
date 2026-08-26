@@ -17,8 +17,11 @@
 //! To Conduit a reaped session is indistinguishable from one that lost its tmux server to a
 //! reboot: the next open finds no session, replays the snapshot (`scrollback`), and resumes
 //! the agent. Break that and the reaper stops being safe.
-
-#![cfg(not(windows))]
+//!
+//! Windows has no tmux and so nothing to reap; the mod site carries
+//! `#[cfg_attr(windows, allow(dead_code))]` and the only caller is behind
+//! `#[cfg(not(windows))]`. Compiling it there anyway keeps one code path under the
+//! Windows compiler instead of two, so a refactor cannot rot it unnoticed.
 
 use std::path::Path;
 use std::process::Command;

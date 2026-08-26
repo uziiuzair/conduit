@@ -12,6 +12,8 @@ mod broker;
 mod claude_status;
 mod claude_usage;
 mod clipboard;
+mod commandcode_config;
+mod commandcode_usage;
 mod context_window;
 mod continuity;
 mod continuity_feed;
@@ -31,6 +33,7 @@ mod notify;
 mod plugins;
 mod pty;
 mod root_chat;
+mod routing;
 mod scrollback;
 mod search;
 #[cfg_attr(windows, allow(dead_code))]
@@ -203,20 +206,29 @@ fn pty_spawn(
     // `session_account_config_dir`'s session->project lookup.
     let project_board_on = !shell_only && store.board_enabled_for_session(&session_id);
     let gets_fleet_mcp = mission_record.is_some() || opted_into_mailbox || project_board_on;
-    // SPEC-B: model_tier -> concrete model id + effort, Claude only -- the only adapter
-    // with a verified per-invocation flag for either (`claude --help` lists both `--model
-    // <model>` and `--effort <low|medium|high|xhigh|max>`). Other adapters have no
-    // equivalent CLI knob today; model_tier/effort are still recorded on the Session (by
-    // fleet_spawn) so they're visible/queryable, just not acted on here.
-    let claude_model = (!shell_only && agent == crate::agent::AgentId::Claude)
+    // `--model` / `--effort`, for the adapters that verifiably take them (Claude and
+    // Command Code). This used to be spelled `agent == Claude`; asking the ADAPTER means
+    // adding a sixth agent with the same flags is a one-line capability rather than another
+    // condition to remember here. An adapter that does not take them still RECORDS
+    // model_tier/effort on the Session (fleet_spawn sets them), so they stay visible and
+    // queryable -- they are simply not acted on.
+    //
+    // Two sources, in precedence order. A concrete `model` is what a route pins ("sonnet",
+    // "google/gemini-3.7-flash"), and it wins because the user chose it for THIS session.
+    // `model_tier` is the fleet's coarse cheap/standard/hard, resolved per agent.
+    let takes_model_flags = !shell_only && crate::agent::adapter_for(agent).supports_model_flags();
+    let agent_model = takes_model_flags
         .then(|| {
-            this_session
-                .as_ref()
-                .and_then(|s| s.model_tier.as_deref())
-                .and_then(|tier| crate::agent::model_for_tier(agent, tier))
+            let s = this_session.as_ref()?;
+            s.model.clone().or_else(|| {
+                s.model_tier
+                    .as_deref()
+                    .and_then(|tier| crate::agent::model_for_tier(agent, tier))
+                    .map(str::to_string)
+            })
         })
         .flatten();
-    let claude_effort = (!shell_only && agent == crate::agent::AgentId::Claude)
+    let agent_effort = takes_model_flags
         .then(|| this_session.as_ref().and_then(|s| s.effort.as_deref()))
         .flatten();
     let is_conductor = !shell_only
@@ -355,6 +367,27 @@ fn pty_spawn(
         if let Some(mission) = &mission_record {
             hooks::write_mission_context(&wt_path, &mission.payload);
         }
+        // SPEC-A Tier 1 for a non-Claude adapter: Command Code has no `--mcp-config`
+        // flag, but it does read `<cwd>/.mcp.json`, and a Conduit-driven worktree IS this
+        // worker's cwd -- so the same session-scoped fleet MCP server a Claude worker gets
+        // is delivered as a file instead of a flag. That is what turns a Command Code
+        // worker from "status only, hand back nothing" into a real fleet participant with
+        // `fleet_result` and the mailbox.
+        //
+        // Deliberately only on the WORKTREE path. The non-worktree branch below runs in
+        // the shared project root, where writing `.mcp.json` would both drop an untracked
+        // file into the user's checkout and give every session in that project the same
+        // session-scoped callback URL -- so a manual Command Code session stays on the
+        // status channel alone.
+        if gets_fleet_mcp {
+            if let Some(rel) = adapter.project_mcp_config_rel_path() {
+                let mcp_port = fleet.mcp_port.load(Ordering::SeqCst);
+                crate::fleet::write_project_mcp_config(&wt_path, rel, mcp_port, &session_id);
+                // The tools are useless if the worker does not know it has them, and
+                // this adapter has no system-prompt flag to be told through.
+                hooks::write_worker_brief_context(&wt_path);
+            }
+        }
         // SPEC-A Tier 2: Codex has no MCP, so its structured result rides the hook
         // channel instead -- provision the schema (and, on Windows, the curl helper
         // script) its build_invocation references, for every Codex worktree spawn, not
@@ -384,7 +417,8 @@ fn pty_spawn(
     };
 
     // Resume token: the agent's own captured conversation id. agy resumes via
-    // `--conversation=<id>`; Claude ignores it (keys off session_id). None for shell-only
+    // `--conversation=<id>` and Command Code via `--session <id>`; Claude ignores it (it
+    // keys off session_id, which Conduit gets to pin itself). None for shell-only
     // companions and for a session we haven't captured an id for yet.
     let resume_token = (!shell_only)
         .then(|| store.session_agent_conversation_id(&session_id))
@@ -407,8 +441,8 @@ fn pty_spawn(
         suppress_remote,
         opencode,
         is_conductor,
-        claude_model.map(str::to_string),
-        claude_effort.map(str::to_string),
+        agent_model,
+        agent_effort.map(str::to_string),
         resume_token,
         on_event,
     )
@@ -445,6 +479,14 @@ fn pty_is_running(session_id: String, pty: State<Arc<PtyManager>>) -> bool {
 /// with an install hint instead of silently doing nothing when switched on.
 #[derive(serde::Serialize)]
 struct TmuxInfo {
+    /// Can this platform persist sessions AT ALL. False on Windows, where tmux does not
+    /// exist and no install would change that.
+    ///
+    /// Separate from `available` because the two call for opposite UI: `available: false`
+    /// with `supported: true` is a fixable gap and earns an install hint, while
+    /// `supported: false` is a property of the OS and must NOT tell someone to go install
+    /// tmux with their package manager.
+    supported: bool,
     available: bool,
     path: Option<String>,
     /// How to install tmux on this host, when there is a sensible suggestion. Resolved here
@@ -461,6 +503,7 @@ fn tmux_available(pty: State<Arc<PtyManager>>) -> TmuxInfo {
         let path = pty.tmux_path().map(|p| p.to_string_lossy().into_owned());
         let available = path.is_some();
         TmuxInfo {
+            supported: true,
             available,
             path,
             install: if available {
@@ -475,6 +518,7 @@ fn tmux_available(pty: State<Arc<PtyManager>>) -> TmuxInfo {
     {
         let _ = pty;
         TmuxInfo {
+            supported: false,
             available: false,
             path: None,
             install: None,
@@ -860,6 +904,9 @@ fn continuity_feed(
 /// deep history lives in continuity itself.
 const CONTINUITY_FEED_LIMIT: usize = 100;
 
+/// `model` is a concrete model id chosen by a route. It is applied HERE rather than in a
+/// second call from the frontend so the session is never briefly persisted without it --
+/// and so nothing can spawn in between reading a model that was not chosen.
 #[tauri::command]
 fn add_session(
     project_id: String,
@@ -867,15 +914,20 @@ fn add_session(
     use_worktree: bool,
     agent: crate::agent::AgentId,
     role: Option<SessionRole>,
+    model: Option<String>,
     store: State<Arc<Store>>,
 ) -> Option<Session> {
-    store.add_session(
+    let session = store.add_session(
         &project_id,
         name,
         use_worktree,
         agent,
         role.unwrap_or_default(),
-    )
+    )?;
+    if model.is_some() {
+        store.set_session_model(&session.id, model.clone());
+    }
+    Some(Session { model, ..session })
 }
 
 #[tauri::command]
@@ -1616,11 +1668,10 @@ fn reveal_path(path: String) -> Result<(), String> {
         // only launch failures are reported.
         let mut c = Command::new("explorer.exe");
         c.raw_arg(format!("/select,\"{path}\""));
-        return c
-            .no_window()
+        c.no_window()
             .status()
             .map(|_| ())
-            .map_err(|e| format!("failed to launch explorer: {e}"));
+            .map_err(|e| format!("failed to launch explorer: {e}"))
     }
     #[cfg(all(unix, not(target_os = "macos")))]
     {
@@ -1897,6 +1948,14 @@ pub fn run() {
             reveal_path,
             claude_status::fetch_claude_status,
             claude_usage::fetch_claude_usage,
+            transcript::session_transcript,
+            routing::agent_routes,
+            routing::set_agent_route,
+            routing::task_kinds,
+            commandcode_config::command_code_config,
+            commandcode_config::set_command_code_config,
+            commandcode_config::command_code_models,
+            commandcode_usage::fetch_command_code_usage,
             claude_usage::connect_claude_plan_usage,
             agy_usage::fetch_agy_usage,
             agy_usage::agy_usage_tracking_enabled,

@@ -205,6 +205,41 @@ pub fn start(
             // Mirror status into the fleet map so the Conductor can read it (fleet_list).
             fleet.record(&session, &event, &parsed);
 
+            // Capture Command Code's own session id, once, so the next spawn can resume
+            // this conversation with `--session <id>`. Command Code has no `--session-id`
+            // to pin OUR id up front, so the id has to come back from the agent.
+            //
+            // Unlike the agy capture below in this file, nothing here is a heuristic: the
+            // payload carries Command Code's `session_id` and the URL carries Conduit's,
+            // so both halves of the mapping arrive together in one request. No spawn-time
+            // baseline, no filesystem scan, no ambiguity when two sessions share a home.
+            // Resist the pull to reuse the agy path just because the constraint looks the
+            // same -- that path exists only because agy fires no lifecycle hooks at all.
+            if event == "sessionstart"
+                && store.session_agent(&session) == crate::agent::AgentId::CommandCode
+            {
+                if let Some(cid) = parsed
+                    .get("session_id")
+                    .and_then(|v| v.as_str())
+                    .filter(|v| !v.is_empty())
+                {
+                    // `source` says which of the two cases this is, and the difference
+                    // matters. On "resume" the id we asked for was accepted and there is
+                    // nothing to learn. On "startup"/"clear" a NEW conversation began, and
+                    // its id REPLACES whatever we held -- including the case that motivates
+                    // this: a stale id whose `--session` failed and fell through to the
+                    // bare `|| cmd`. Storing only when the slot was empty would pin that
+                    // dead id forever and make every later launch pay a failed resume.
+                    let source = parsed.get("source").and_then(|v| v.as_str());
+                    let fresh = source != Some("resume");
+                    // Two sessions must never point at one conversation; a resume would
+                    // then drag both into the same transcript.
+                    if fresh && !store.conversation_id_in_use(cid, &session) {
+                        store.set_session_agent_conversation_id(&session, cid);
+                    }
+                }
+            }
+
             // SPEC-D: reactively wake the project's Conductor instead of making it poll
             // fleet_list on a timer. Only for a wake-eligible event (worker stop /
             // needsInput), only when the Conductor is not mid-turn, and debounced so a
@@ -553,7 +588,6 @@ pub fn write_codex_result_script(worktree_path: &str, port: u16) -> std::io::Res
 /// otherwise. Only ever called for a session with a real Mission record -- a manual
 /// session's context file is never touched.
 pub fn write_mission_context(worktree_path: &str, mission: &Value) {
-    let path = Path::new(worktree_path).join("AGENTS.md");
     let objective = mission
         .get("objective")
         .and_then(|v| v.as_str())
@@ -566,11 +600,36 @@ pub fn write_mission_context(worktree_path: &str, mission: &Value) {
         block.push_str(&format!("\n**Boundaries:** {b}\n"));
     }
 
+    append_agents_md(worktree_path, &block);
+}
+
+/// Tell a worker on a non-Claude adapter which fleet tools it has and what it owes back.
+///
+/// Claude gets this through `--append-system-prompt-file`; an adapter with no such flag
+/// has to be told in the file it already reads. Without it a Command Code worker would be
+/// handed `fleet_result`/`fleet_note` by `.mcp.json` and never know it was expected to
+/// call them -- the channel would exist and stay silent, which looks exactly like the
+/// missing channel it replaces. `authorize()` still enforces the restriction server-side,
+/// so this text informs, it does not grant.
+pub fn write_worker_brief_context(worktree_path: &str) {
+    append_agents_md(
+        worktree_path,
+        &format!(
+            "\n## Fleet tools\n\n{}\n",
+            crate::fleet::WORKER_BRIEF_SUFFIX
+        ),
+    );
+}
+
+/// Append a block to the worktree's `AGENTS.md`, creating it if absent. The context file
+/// every non-Claude adapter reads (Claude uses `CLAUDE.md` and ignores this one).
+fn append_agents_md(worktree_path: &str, block: &str) {
+    let path = Path::new(worktree_path).join("AGENTS.md");
     let mut content = fs::read_to_string(&path).unwrap_or_default();
     if !content.is_empty() && !content.ends_with('\n') {
         content.push('\n');
     }
-    content.push_str(&block);
+    content.push_str(block);
     let _ = fs::write(&path, content);
 }
 
@@ -651,6 +710,64 @@ pub fn claude_profile() -> HooksProfile {
                 event: "SessionEnd",
                 matcher: None,
                 verb: "sessionend",
+            },
+        ],
+    }
+}
+
+/// Command Code's lifecycle profile.
+///
+/// Command Code implements Claude Code's hook SCHEMA -- same `hooks` object, same
+/// `matcher`/`hooks[]` nesting, same stdin payload keys (`session_id`, `transcript_path`,
+/// `cwd`, `hook_event_name`, `tool_name`, `tool_input`, `tool_response`) -- so the generic
+/// installer and the platform-aware `command()` above carry over with no change at all.
+///
+/// It supports exactly FOUR events, and this profile lists exactly those four. Claude's
+/// profile also installs `UserPromptSubmit`, `Notification`, `PreCompact` and `SessionEnd`;
+/// writing those here would put keys into a user's settings file that Command Code will
+/// never fire, which at best is litter in a file we do not own.
+///
+/// Two consequences of that smaller set are worth knowing rather than rediscovering:
+///
+/// - **No `prompt` verb**, so a session does not turn `running` the instant the user hits
+///   enter -- it turns `running` at the first tool call. A turn that answers in prose and
+///   touches no tool never reads as busy at all. That is a real gap, and the honest one:
+///   inventing a synthetic prompt event would mean guessing.
+/// - **No `notification` verb**, so Command Code sessions never raise the `needsInput`
+///   badge. Its permission prompts are handled inside its own TUI.
+///
+/// `SessionStart` is load-bearing beyond status: its payload carries the session id Command
+/// Code chose for itself, which is the only way to resume it later (there is no
+/// `--session-id` to pin one up front). See `CommandCodeAdapter::build_invocation`.
+///
+/// Written to `settings.local.json`, not `settings.json`, for the same reason Claude's is:
+/// the non-local file is the one a team commits.
+pub fn command_code_profile() -> HooksProfile {
+    HooksProfile {
+        config_rel_path: ".commandcode/settings.local.json",
+        // Command Code's todo list is a TUI affordance (`/todos`), not a tool call with a
+        // `todos` array in its input, so there is nothing for the todos panel to read.
+        structured_todos: false,
+        rows: vec![
+            HookRow {
+                event: "PreToolUse",
+                matcher: None,
+                verb: "pretool",
+            },
+            HookRow {
+                event: "PostToolUse",
+                matcher: None,
+                verb: "tooluse",
+            },
+            HookRow {
+                event: "Stop",
+                matcher: None,
+                verb: "stop",
+            },
+            HookRow {
+                event: "SessionStart",
+                matcher: None,
+                verb: "sessionstart",
             },
         ],
     }
@@ -1618,5 +1735,51 @@ mod tests {
             1,
             "re-install must overwrite, not duplicate the plugin body"
         );
+    }
+
+    #[test]
+    fn command_code_profile_installs_only_the_four_events_it_supports() {
+        let p = command_code_profile();
+        // Not settings.json: that is the file a team commits, and Conduit does not own it.
+        assert_eq!(p.config_rel_path, ".commandcode/settings.local.json");
+        assert!(!p.structured_todos);
+
+        let events: Vec<&str> = p.rows.iter().map(|r| r.event).collect();
+        assert_eq!(
+            events,
+            vec!["PreToolUse", "PostToolUse", "Stop", "SessionStart"]
+        );
+        // Claude-only events must never leak in: Command Code will never fire them, so
+        // they would be dead keys written into someone else's settings file.
+        for absent in [
+            "UserPromptSubmit",
+            "Notification",
+            "PreCompact",
+            "SessionEnd",
+        ] {
+            assert!(
+                !events.contains(&absent),
+                "{absent} is not a Command Code event"
+            );
+        }
+    }
+
+    #[test]
+    fn command_code_hooks_serialize_in_claude_shape() {
+        // Command Code implements Claude's hook SCHEMA, which is the whole reason the
+        // generic installer carries over. Pin that: same nesting, same command entry.
+        let entries = entries_for(&command_code_profile().rows, 8423);
+        let (event, values) = entries
+            .iter()
+            .find(|(e, _)| *e == "SessionStart")
+            .expect("SessionStart row");
+        assert_eq!(*event, "SessionStart");
+        let hooks = values[0]["hooks"].as_array().expect("hooks array");
+        assert_eq!(hooks[0]["type"], "command");
+        let cmd = hooks[0]["command"].as_str().unwrap();
+        // SessionStart is how Command Code's own session id reaches Conduit, so this verb
+        // is load-bearing for resume, not just for the status dot.
+        assert!(cmd.contains("event=sessionstart"), "got {cmd}");
+        assert!(cmd.contains("CONDUIT_SESSION_ID"), "got {cmd}");
     }
 }

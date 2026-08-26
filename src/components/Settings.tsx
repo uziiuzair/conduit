@@ -10,6 +10,8 @@ import { GeneralSettings } from "./GeneralSettings";
 import { TerminalSettings } from "./TerminalSettings";
 import { TrustPanel } from "./TrustPanel";
 import { OpenCodePanel } from "./OpenCodePanel";
+import { CommandCodePanel } from "./CommandCodePanel";
+import { RoutingPanel } from "./RoutingPanel";
 import { PluginsPanel } from "./PluginsPanel";
 
 // Exported for the native menu integration (menu → open Settings at a specific tab).
@@ -21,6 +23,8 @@ export type SettingsTab =
   | "usage"
   | "mcp"
   | "localmodels"
+  | "commandcode"
+  | "routing"
   | "formatting"
   | "security"
   | "privacy"
@@ -41,6 +45,8 @@ const NAV: Array<{ group: string; items: Array<{ id: SettingsTab; label: string 
     items: [
       { id: "agents", label: "Agents" },
       { id: "localmodels", label: "Local models" },
+      { id: "commandcode", label: "Command Code" },
+      { id: "routing", label: "Routing" },
       { id: "mcp", label: "MCP servers" },
     ],
   },
@@ -150,6 +156,8 @@ export function Settings({
                   <OpenCodePanel />
                 </>
               )}
+              {tab === "commandcode" && <CommandCodePanel />}
+              {tab === "routing" && <RoutingPanel />}
               {tab === "formatting" && <FormatPrefsPanel />}
               {tab === "security" && (
                 <>

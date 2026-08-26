@@ -4,69 +4,25 @@ import {
   globalSelectedSessionId,
   findSession,
   resolvedAccountKey,
-  accountKey,
-  type AgyUsage,
-  type ClaudeAccountUsage,
   type UsagePrefs,
 } from "../store";
+// The row shapes and the "how full is this account" arithmetic live outside this file so
+// the ROUTER can share them -- see usageRows.ts.
+import {
+  agyRow,
+  claudeRow,
+  commandCodeRow,
+  meterView,
+  rowHealth,
+  visibleWindows,
+  type RowHealth,
+  type URow,
+  type UsageMetric,
+  type UWindow,
+} from "../usageRows";
 import { AgentGlyph } from "./AgentGlyph";
 import { fmtTokens } from "./ClaudeStatusPill";
-import type { AgentId } from "../agents";
-
-/** A window's kind, used both for the prefs filter and for labeling. */
-type WinKind = "fiveHour" | "weekly" | "weeklyOpus" | "context";
-/** A normalized meter across agents: "remaining" (Claude plan / agy quota) or "used" (context). */
-interface UWindow {
-  key: string;
-  label: string;
-  kind: WinKind;
-  /** Pool this window belongs to (agy has redundant pools: "Gemini Models", "Claude & GPT
-   *  Models"). Used to ignore a whole unavailable pool in the summary metric. */
-  group: string;
-  mode: "remaining" | "used";
-  value: number; // 0..1 (remaining fraction, or used fraction for context)
-  resetsAt: string | null;
-  disabled: boolean;
-}
-
-/** The single "how healthy is this account" number for the summary/sort/low-alert. It's the
- *  minimum remaining across windows, BUT a pool whose windows are all disabled or at 0 is
- *  treated as structurally unavailable (e.g. agy's Claude/GPT pool on a Pro tier) and ignored
- *  -- so one unavailable pool can't paint an otherwise-healthy account red. A genuinely low
- *  window in a live pool still drives the number down. */
-function summaryRemaining(windows: UWindow[]): number {
-  const byGroup = new Map<string, UWindow[]>();
-  for (const w of windows) {
-    if (w.mode !== "remaining") continue;
-    const arr = byGroup.get(w.group) ?? [];
-    arr.push(w);
-    byGroup.set(w.group, arr);
-  }
-  if (byGroup.size === 0) return 1;
-  const groupMins: number[] = [];
-  for (const ws of byGroup.values()) {
-    const live = ws.filter((w) => !w.disabled);
-    if (live.length === 0) continue; // whole pool disabled
-    if (Math.max(...live.map((w) => w.value)) <= 0) continue; // whole pool exhausted/unavailable
-    groupMins.push(Math.min(...live.map((w) => w.value)));
-  }
-  return groupMins.length ? Math.min(...groupMins) : 0;
-}
-interface URow {
-  agent: AgentId;
-  key: string; // account key
-  accountId: string | null;
-  label: string;
-  windows: UWindow[];
-  /** Claude only: present when plan limits couldn't be fetched (offer a Connect button). */
-  connectable: boolean;
-  planSource?: string;
-  tier?: string | null;
-  /** Claude local token total (from stats-cache.json), shown even before plan-connect. */
-  localTotal?: number;
-  /** Least remaining across non-context, non-disabled windows (1 = healthy / unknown). */
-  minRemaining: number;
-}
+import { agentMeta, type AgentId } from "../agents";
 
 /** RFC3339 → "3:41pm" (today) / "Mon" (later). Never throws. */
 function shortReset(iso: string | null): string {
@@ -79,108 +35,40 @@ function shortReset(iso: string | null): string {
     : d.toLocaleDateString([], { weekday: "short" });
 }
 
-function claudeKind(label: string): WinKind {
-  if (label.includes("Opus")) return "weeklyOpus";
-  if (label.toLowerCase().includes("week")) return "weekly";
-  return "fiveHour";
-}
-function agyKind(label: string): WinKind {
-  return label.toLowerCase().includes("week") ? "weekly" : "fiveHour";
-}
-
-function claudeRow(entry: ClaudeAccountUsage): URow {
-  const plan = entry.usage.plan;
-  const windows: UWindow[] = (plan ?? []).map((w, i) => ({
-    key: `${w.label}-${i}`,
-    label: w.label,
-    kind: claudeKind(w.label),
-    group: "plan", // Claude's windows are distinct limits, treated as one pool.
-    mode: "remaining",
-    value: Math.max(0, Math.min(1, 1 - w.pctUsed)),
-    resetsAt: w.resetsAt,
-    disabled: false,
-  }));
-  return {
-    agent: "claude",
-    key: accountKey(entry.accountId),
-    accountId: entry.accountId,
-    label: entry.label,
-    windows,
-    connectable: plan == null,
-    planSource: entry.usage.planSource,
-    localTotal: entry.usage.local.totalTokens,
-    minRemaining: summaryRemaining(windows),
-  };
-}
-
-function agyRow(u: AgyUsage): URow {
-  const windows: UWindow[] = [];
-  for (const g of u.groups) {
-    const short = g.displayName.startsWith("Gemini")
-      ? "Gemini"
-      : g.displayName.startsWith("Claude")
-        ? "Claude/GPT"
-        : g.displayName;
-    for (const b of g.buckets) {
-      windows.push({
-        key: b.bucketId,
-        label: `${short} ${b.label}`,
-        kind: agyKind(b.label),
-        group: g.displayName,
-        mode: "remaining",
-        value: Math.max(0, Math.min(1, b.remainingFraction)),
-        resetsAt: b.resetsAt,
-        disabled: b.disabled,
-      });
-    }
-  }
-  if (u.context && u.context.contextWindowSize > 0) {
-    windows.push({
-      key: "context",
-      label: "Context",
-      kind: "context",
-      group: "context",
-      mode: "used",
-      value: Math.max(0, Math.min(1, u.context.usedPercentage / 100)),
-      resetsAt: null,
-      disabled: false,
-    });
-  }
-  return {
-    agent: "antigravity",
-    key: accountKey(u.accountId),
-    accountId: u.accountId,
-    label: u.email ? u.email.split("@")[0] : "Antigravity",
-    windows,
-    connectable: false,
-    tier: u.planTier,
-    minRemaining: summaryRemaining(windows),
-  };
-}
-
-function Meter({ w, threshold }: { w: UWindow; threshold: number }) {
-  const pct = Math.round(w.value * 100);
+/**
+ * One meter, laid out like the agents lay out their own: `label ······ 18% used · resets 3:50pm`,
+ * bar underneath filling in the same direction the number counts.
+ *
+ * The number and the bar both come from a single `meterView` call, which is the whole point
+ * of that function — they used to be computed separately here and pointed opposite ways.
+ */
+function Meter({ w, metric, threshold }: { w: UWindow; metric: UsageMetric; threshold: number }) {
+  const v = meterView(w, metric);
   const reset = shortReset(w.resetsAt);
-  const text = w.disabled ? "disabled" : w.mode === "used" ? `${pct}% used` : `${pct}% left`;
-  // Bar fills with consumption: "remaining" windows show the used amount (100 - remaining),
-  // "used"/context windows already track consumption. Label still reads "% left".
-  const fillPct = w.disabled ? 0 : w.mode === "remaining" ? 100 - pct : pct;
+  const text = w.disabled ? "disabled" : `${v.pct}% ${v.word}`;
+  const fillPct = w.disabled ? 0 : v.fraction * 100;
   // Smooth ramp: tint the fill from the agent's base color (var(--meter-base)) toward muted
-  // red as it approaches full. Ramp begins where the amber warn tier used to (100 - 2*threshold)
-  // and hits full red at 100%, so the Settings low-threshold slider still steers the onset.
+  // red as CONSUMPTION approaches full. Keyed on severity, not on the drawn fraction, so a
+  // meter reading "left" still reddens when it runs low instead of when it runs full. Ramp
+  // begins where the amber warn tier used to (100 - 2*threshold) and hits full red at 100%,
+  // so the Settings low-threshold slider still steers the onset.
+  const severityPct = v.severity * 100;
   const rampStart = Math.max(0, 100 - Math.min(50, threshold * 200));
   const redWeight = w.disabled
     ? 0
-    : Math.round(Math.max(0, Math.min(1, (fillPct - rampStart) / (100 - rampStart || 1))) * 100);
-  // disabled keeps its gray (via the class); ctx keeps its dimmed opacity.
-  const fillClass = w.disabled ? "disabled" : w.mode === "used" ? "ctx" : "";
+    : Math.round(
+        Math.max(0, Math.min(1, (severityPct - rampStart) / (100 - rampStart || 1))) * 100,
+      );
+  // disabled keeps its gray (via the class); context keeps its dimmed opacity, because it
+  // is not a quota and should not compete with the windows that are.
+  const fillClass = w.disabled ? "disabled" : w.quota ? "" : "ctx";
   return (
     <div className="usage-meter">
       <div className="usage-meter-head">
         <span>{w.label}</span>
         <span>
           {text}
-          {reset ? ` · ${reset}` : ""}
+          {reset ? ` · resets ${reset}` : ""}
         </span>
       </div>
       <div className="usage-meter-bar">
@@ -198,25 +86,32 @@ function Meter({ w, threshold }: { w: UWindow; threshold: number }) {
 }
 
 function RowBlock({
-  row,
+  view,
   prefs,
   threshold,
 }: {
-  row: URow;
+  view: RowView;
   prefs: UsagePrefs;
   threshold: number;
 }) {
+  const { row, wins } = view;
   const connectPlanUsage = useStore((s) => s.connectPlanUsage);
   // planConnected[key] === false means we tried and found no readable sign-in for this
   // account (undefined = never attempted).
   const connectFailed = useStore((s) => s.planConnected[row.key] === false);
-  const wins = row.windows.filter((w) => prefs.windows[w.kind]);
   return (
     <div className={`usage-row ${row.agent}`}>
       <div className="usage-row-head">
         <AgentGlyph id={row.agent} size={13} />
         <span className="usage-row-label">{row.label}</span>
         {row.tier && <span className="usage-tier-chip">{row.tier}</span>}
+        {/* The endpoint rate-limits; rather than blanking the meters we keep showing the
+            last good read and say so, so a number never silently means "a minute ago". */}
+        {row.stale && (
+          <span className="usage-stale-chip" title="The last check was rate-limited; these are the most recent numbers we could read.">
+            last known
+          </span>
+        )}
       </div>
       {row.connectable ? (
         <>
@@ -242,16 +137,48 @@ function RowBlock({
       ) : wins.length === 0 ? (
         <div className="usage-hint">No windows match your filter.</div>
       ) : (
-        wins.map((w) => <Meter key={w.key} w={w} threshold={threshold} />)
+        wins.map((w) => (
+          <Meter key={w.key} w={w} metric={prefs.metric} threshold={threshold} />
+        ))
       )}
     </div>
   );
 }
 
-/** Dot color for the summary layout, from a row's least-remaining window. */
-function summaryDotClass(row: URow, threshold: number): string {
-  if (row.minRemaining <= threshold) return "hot";
-  if (row.minRemaining <= Math.min(0.5, threshold * 2)) return "warn";
+/**
+ * Everything a layout needs about one account, derived ONCE.
+ *
+ * The panel used to compute its number from `row.minRemaining` (every window) while drawing
+ * meters for `row.windows.filter(...)` (the visible ones), and its dot from a third
+ * expression. Deriving all of it here is what stops the collapsed summary, the expanded
+ * meters, the dot, the sort and the low-alert from disagreeing.
+ */
+interface RowView {
+  row: URow;
+  wins: UWindow[];
+  health: RowHealth;
+}
+
+/**
+ * The one number the collapsed summary shows, in the same direction and over the same
+ * windows as the meters it collapses -- and NAMING the window it came from, because a bare
+ * "79%" above meters reading 18, 3 and 79 looks like a contradiction rather than a worst-case.
+ */
+function summaryText(view: RowView, metric: UsageMetric): string {
+  const { remaining, worst } = view.health;
+  if (remaining === null) return "not read";
+  const pct = Math.round((metric === "used" ? 1 - remaining : remaining) * 100);
+  const word = metric === "used" ? "used" : "left";
+  return worst ? `${pct}% ${word} · ${worst.label}` : `${pct}% ${word}`;
+}
+
+/** Dot colour from the row's worst VISIBLE window. `unknown` is its own state: an account
+ *  whose quota could not be read must not wear the same green as one that was read and is
+ *  fine. */
+function summaryDotClass(health: RowHealth, threshold: number): string {
+  if (health.remaining === null) return "unknown";
+  if (health.remaining <= threshold) return "hot";
+  if (health.remaining <= Math.min(0.5, threshold * 2)) return "warn";
   return "ok";
 }
 
@@ -264,6 +191,7 @@ function summaryDotClass(row: URow, threshold: number): string {
 export function UsagePanel() {
   const claudeUsage = useStore((s) => s.claudeUsage);
   const agyMap = useStore((s) => s.agyUsageByAccount);
+  const commandCodeUsage = useStore((s) => s.commandCodeUsage);
   const prefs = useStore((s) => s.usagePrefs);
   const setShowSettings = useStore((s) => s.setShowSettings);
   const setSettingsTab = useStore((s) => s.setSettingsTab);
@@ -287,13 +215,26 @@ export function UsagePanel() {
 
   const threshold = Math.max(0, Math.min(1, prefs.lowThresholdPct / 100));
 
-  // Build all rows, then sort.
-  let rows: URow[] = [...claudeUsage.map(claudeRow), ...Object.values(agyMap).map(agyRow)];
-  rows.sort((a, b) =>
-    prefs.sort === "label"
-      ? a.label.localeCompare(b.label)
-      : a.minRemaining - b.minRemaining,
-  );
+  // Build every row, derive its VISIBLE windows and health once, then sort. Every layout
+  // below reads this one list, so none of them can compute a different number.
+  const rows: RowView[] = [
+    ...claudeUsage.map(claudeRow),
+    ...Object.values(agyMap).map(agyRow),
+    // A signed-out account has no windows to draw and nothing actionable in this panel,
+    // so it is left out entirely rather than rendered as an empty row.
+    ...commandCodeUsage.filter((u) => u.usage.windows?.length).map(commandCodeRow),
+  ].map((row) => {
+    const wins = visibleWindows(row.windows, prefs.windows);
+    return { row, wins, health: rowHealth(wins) };
+  });
+  rows.sort((a, b) => {
+    if (prefs.sort === "label") return a.row.label.localeCompare(b.row.label);
+    // Unknown last: an account we could not read is not the most critical, and calling it
+    // the healthiest is the lie this used to tell.
+    const av = a.health.remaining ?? Number.POSITIVE_INFINITY;
+    const bv = b.health.remaining ?? Number.POSITIVE_INFINITY;
+    return av - bv;
+  });
 
   const openSettings = () => {
     setSettingsTab("usage");
@@ -302,16 +243,26 @@ export function UsagePanel() {
 
   // ---- "selected": just the selected session's account+agent (today's single panel) ----
   if (prefs.layout === "selected") {
-    const row = selected
-      ? rows.find((r) => r.agent === selected.agent && r.key === selected.key) ??
-        rows.find((r) => r.agent === selected.agent)
-      : null;
+    const forAgent = selected ? rows.filter((v) => v.row.agent === selected.agent) : [];
+    // Exact account first. The fallback is only taken when it is UNAMBIGUOUS -- with two
+    // Claude accounts signed in, picking whichever sorted first showed one account's
+    // numbers under a session running on the other, and switching to "stacked" then showed
+    // different figures for the same session.
+    const view =
+      forAgent.find((v) => v.row.key === selected?.key) ??
+      (forAgent.length === 1 ? forAgent[0] : undefined);
     return (
       <div className="usage-panel">
         <Header onGear={openSettings} />
         <ConnectAllStrip />
-        {row ? (
-          <RowBlock row={row} prefs={prefs} threshold={threshold} />
+        {view ? (
+          <RowBlock view={view} prefs={prefs} threshold={threshold} />
+        ) : forAgent.length > 1 ? (
+          <div className="usage-hint">
+            This session doesn't name an account, and {forAgent.length} are signed in for{" "}
+            {selected ? agentMeta(selected.agent).label : "this agent"}. Pick one on the
+            session (right-click → Account) or switch this panel to "Stacked".
+          </div>
         ) : (
           <SelectedEmptyHint agent={selected?.agent} />
         )}
@@ -321,16 +272,27 @@ export function UsagePanel() {
 
   // ---- "lowAlertOnly": only accounts at/below the low threshold ----
   if (prefs.layout === "lowAlertOnly") {
-    const low = rows.filter((r) => r.minRemaining <= threshold);
+    // Unknown is not low -- but it is not "healthy" either, so it is counted separately
+    // rather than folded into the all-clear.
+    const low = rows.filter((v) => v.health.remaining !== null && v.health.remaining <= threshold);
+    const unread = rows.filter((v) => v.health.remaining === null).length;
     return (
       <div className="usage-panel">
         <Header onGear={openSettings} count={rows.length} />
         <ConnectAllStrip />
         {low.length === 0 ? (
-          <div className="usage-hint">All accounts healthy (above {prefs.lowThresholdPct}%).</div>
+          <div className="usage-hint">
+            All accounts healthy (above {prefs.lowThresholdPct}%)
+            {unread > 0 ? `, ${unread} not read yet` : ""}.
+          </div>
         ) : (
-          low.map((r) => (
-            <RowBlock key={`${r.agent}:${r.key}`} row={r} prefs={prefs} threshold={threshold} />
+          low.map((v) => (
+            <RowBlock
+              key={`${v.row.agent}:${v.row.key}`}
+              view={v}
+              prefs={prefs}
+              threshold={threshold}
+            />
           ))
         )}
       </div>
@@ -347,16 +309,16 @@ export function UsagePanel() {
           <div className="usage-hint">No usage yet.</div>
         ) : (
           <div className="usage-summary" onClick={() => setSummaryOpen(true)}>
-            {rows.map((r) => (
+            {rows.map((v) => (
               <span
-                key={`${r.agent}:${r.key}`}
-                className={`usage-summary-item ${r.agent}`}
-                title={`${r.agent === "antigravity" ? "agy" : "Claude"} · ${r.label}`}
+                key={`${v.row.agent}:${v.row.key}`}
+                className={`usage-summary-item ${v.row.agent}`}
+                title={`${agentMeta(v.row.agent).label} · ${v.row.label}`}
               >
-                <AgentGlyph id={r.agent} size={12} />
-                <span className={`usage-dot ${summaryDotClass(r, threshold)}`} />
-                <span className="usage-summary-label">{r.label}</span>
-                {r.connectable ? "—" : `${Math.round(r.minRemaining * 100)}%`}
+                <AgentGlyph id={v.row.agent} size={12} />
+                <span className={`usage-dot ${summaryDotClass(v.health, threshold)}`} />
+                <span className="usage-summary-label">{v.row.label}</span>
+                {v.row.connectable ? "not connected" : summaryText(v, prefs.metric)}
               </span>
             ))}
           </div>
@@ -378,8 +340,13 @@ export function UsagePanel() {
       {rows.length === 0 ? (
         <div className="usage-hint">No usage yet.</div>
       ) : (
-        rows.map((r) => (
-          <RowBlock key={`${r.agent}:${r.key}`} row={r} prefs={prefs} threshold={threshold} />
+        rows.map((v) => (
+          <RowBlock
+            key={`${v.row.agent}:${v.row.key}`}
+            view={v}
+            prefs={prefs}
+            threshold={threshold}
+          />
         ))
       )}
     </div>

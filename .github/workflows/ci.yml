@@ -49,12 +49,21 @@ jobs:
         run: pnpm build
 
   rust:
-    # macOS, not ubuntu: Conduit's primary target is macOS and several modules are
-    # `#[cfg(not(windows))]` or reach for macOS-only tooling (the Keychain read in
-    # the usage path). A Linux run would compile a different program than the one
-    # that ships. The 10x runner multiplier is acceptable for a job this short —
-    # release.yml is the one where it would matter.
-    runs-on: macos-latest
+    # Both shipping platforms, because they compile DIFFERENT programs. Whole modules
+    # are cfg-gated (`tmux`, `session_budget`) and the spawn, PTY, path, and
+    # process-kill paths each have a Windows arm that a macOS run never type-checks.
+    # That is not hypothetical: the Windows build was broken for 76 commits behind a
+    # macOS-only gate, because an inner `#![cfg(not(windows))]` contradicted the
+    # `allow(dead_code)` at the mod site and nothing ever compiled it.
+    #
+    # Linux is deliberately absent: nothing ships there, so it would be a third
+    # program to keep green for no user.
+    name: Rust (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
     steps:
       - uses: actions/checkout@v4
 
@@ -66,13 +75,20 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: src-tauri
+          # Without this the two legs collide on one cache key and each restores the
+          # other's target dir.
+          key: ${{ matrix.os }}
 
+      # Formatting has no platform arm, so checking it twice would only buy a slower
+      # red. One leg owns it.
       - name: Format
+        if: matrix.os == 'macos-latest'
         run: cargo fmt --manifest-path src-tauri/Cargo.toml --check
 
       # -D warnings from the start: a warning-tolerant lint job stops being read within
       # a month. If the tree does not pass on the first run, fix the lints rather than
-      # weakening this line.
+      # weakening this line. Per-platform, because a lint inside a `#[cfg(windows)]`
+      # block is invisible to the macOS leg -- exactly how two of them survived.
       - name: Clippy
         run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
 
