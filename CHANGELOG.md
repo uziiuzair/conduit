@@ -3,6 +3,18 @@
 All notable changes to Conduit are documented here. This project uses
 [semantic versioning](https://semver.org/).
 
+## 0.23.0 — 2026-08-26
+
+- **Added — Root chat.** A new HQ section above your projects hosts persistent,
+  read-only Claude chats for ideation and project management. A fresh chat opens as a
+  centered home — greeting, composer, and your recent chats — and becomes a thread on
+  the first message. Root chats know your registered projects, can read anything under
+  your workspace root (Settings → General), and never write code, touch git, or run
+  commands: the tool policy enforces it, not just the prompt. Conversations survive
+  restarts and resume with full context; a busy chat guards quit like any running agent.
+
+---
+
 ## 0.22.3 — 2026-08-24
 
 - **Fixed — New terminals no longer open with a `getcwd` error.** Every freshly launched
