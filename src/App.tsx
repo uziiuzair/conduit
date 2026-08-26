@@ -14,6 +14,7 @@ import {
   type AgyUsage,
 } from "./store";
 import { type AgentId } from "./agents";
+import { type ChatItem } from "./rootChat";
 import { holdsOffWorking, notificationStatus } from "./statusRules";
 import { type ThemePref } from "./themes";
 import { useClaudeAmbient } from "./hooks/useClaudeAmbient";
@@ -248,6 +249,27 @@ export default function App() {
     });
     return () => {
       void unlisten.then((f) => f());
+    };
+  }, []);
+
+  // Root chat stream: items/done/error pushed by the per-message `claude -p` child.
+  useEffect(() => {
+    const unItem = listen<{ chatId: string; item: ChatItem }>("root-chat-item", ({ payload }) => {
+      useStore.getState().rootChatItemArrived(payload.chatId, payload.item);
+    });
+    const unDone = listen<{ chatId: string }>("root-chat-done", ({ payload }) => {
+      useStore.getState().rootChatDone(payload.chatId);
+    });
+    const unErr = listen<{ chatId: string; message: string }>(
+      "root-chat-error",
+      ({ payload }) => {
+        useStore.getState().rootChatFailed(payload.chatId, payload.message);
+      },
+    );
+    return () => {
+      void unItem.then((f) => f());
+      void unDone.then((f) => f());
+      void unErr.then((f) => f());
     };
   }, []);
 

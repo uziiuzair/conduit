@@ -23,6 +23,7 @@ import {
   splitTab as reduceSplitTab,
 } from "./layout";
 import { cleanupEdits } from "./trim";
+import { appendItem, type ChatItem, type RootChat } from "./rootChat";
 import type { CanvasState } from "./canvas";
 import type { ContinuityFeed } from "./continuityFeed";
 import type * as Monaco from "monaco-editor";
@@ -499,6 +500,17 @@ function writeRestoreSessionsOnOpen(v: boolean): void {
   }
 }
 
+// Root chat workspace root: the directory the HQ chats read from (their spawn cwd).
+// Empty = the Rust side falls back to the home directory. Same persisted-pref pattern.
+const WORKSPACE_ROOT_KEY = "conduit.workspaceRoot";
+function readWorkspaceRoot(): string {
+  try {
+    return localStorage.getItem(WORKSPACE_ROOT_KEY) ?? "";
+  } catch {
+    return "";
+  }
+}
+
 // Terminal renderer: which xterm rasterizer new panes ask for, and which live panes swap to
 // when it changes. Default WebGL (VS Code's default) — one GPU draw per viewport instead of
 // per-glyph CPU blits. Canvas stays selectable because WebGL costs one live GPU context per
@@ -909,6 +921,29 @@ interface AppState {
   setSessionDir: (sessionId: string, dir: string) => void;
   pruneSessionDirs: (liveIds: Set<string>) => void;
 
+  // ---- root chat (HQ): read-only claude -p conversations above all projects ----
+  rootChats: RootChat[];
+  /** Non-null while the chat view overlays the (still-mounted) terminal workspace. */
+  selectedRootChatId: string | null;
+  /** Chat id → rendered items. History replaces; live stream appends. Runtime-only —
+   *  the transcript on disk is the source of truth, never persisted here. */
+  rootChatItems: Record<string, ChatItem[]>;
+  rootChatRunning: Record<string, boolean>;
+  /** Persisted. Spawn cwd for root chats; empty = home directory. */
+  workspaceRoot: string;
+  loadRootChats: () => Promise<void>;
+  addRootChat: () => Promise<void>;
+  renameRootChat: (id: string, name: string) => Promise<void>;
+  removeRootChat: (id: string) => Promise<void>;
+  openRootChat: (id: string) => Promise<void>;
+  closeRootChat: () => void;
+  sendRootChat: (id: string, text: string) => Promise<void>;
+  stopRootChat: (id: string) => Promise<void>;
+  setWorkspaceRoot: (v: string) => void;
+  rootChatItemArrived: (chatId: string, item: ChatItem) => void;
+  rootChatDone: (chatId: string) => void;
+  rootChatFailed: (chatId: string, message: string) => void;
+
   // ---- panel collapse + Settings dialog (native menu-driven, App-level) ----
   /** Persisted. When true (default), opening/switching to a project eagerly spawns and
    *  resumes all its sessions instead of waiting for a click. */
@@ -1294,6 +1329,11 @@ export const useStore = create<AppState>((set, get) => {
     agyUsageTracking: false,
     usagePrefs: readUsagePrefs(),
     sessionDirs: {},
+    rootChats: [],
+    selectedRootChatId: null,
+    rootChatItems: {},
+    rootChatRunning: {},
+    workspaceRoot: readWorkspaceRoot(),
     restoreSessionsOnOpen: readRestoreSessionsOnOpen(),
     terminalRenderer: readTerminalRenderer(),
     persistSessions: readPersistSessions(),
@@ -1390,6 +1430,7 @@ export const useStore = create<AppState>((set, get) => {
         opencode,
         hotExit,
       });
+      void get().loadRootChats();
     },
 
     setDefaultAgent: (id) => {
@@ -1850,7 +1891,126 @@ export const useStore = create<AppState>((set, get) => {
       });
     },
 
-    selectProject: (projectId) => set({ selectedProjectId: projectId }),
+    selectProject: (projectId) =>
+      set({ selectedProjectId: projectId, selectedRootChatId: null }),
+
+    // ---- root chat (HQ) ----
+
+    loadRootChats: async () => {
+      const chats = await invoke<RootChat[]>("list_root_chats").catch(() => [] as RootChat[]);
+      set({ rootChats: chats });
+    },
+
+    addRootChat: async () => {
+      const chat = await invoke<RootChat>("add_root_chat").catch(() => null);
+      if (!chat) return;
+      set((st) => ({
+        rootChats: [...st.rootChats, chat],
+        selectedRootChatId: chat.id,
+        rootChatItems: { ...st.rootChatItems, [chat.id]: [] },
+      }));
+    },
+
+    renameRootChat: async (id, name) => {
+      const clean = name.trim();
+      if (!clean) return;
+      set((st) => ({
+        rootChats: st.rootChats.map((c) => (c.id === id ? { ...c, title: clean } : c)),
+      }));
+      await invoke("rename_root_chat", { id, name: clean }).catch(() => {});
+    },
+
+    removeRootChat: async (id) => {
+      set((st) => {
+        const { [id]: _items, ...rootChatItems } = st.rootChatItems;
+        const { [id]: _run, ...rootChatRunning } = st.rootChatRunning;
+        return {
+          rootChats: st.rootChats.filter((c) => c.id !== id),
+          selectedRootChatId: st.selectedRootChatId === id ? null : st.selectedRootChatId,
+          rootChatItems,
+          rootChatRunning,
+        };
+      });
+      await invoke("remove_root_chat", { id }).catch(() => {});
+    },
+
+    openRootChat: async (id) => {
+      set({ selectedRootChatId: id });
+      const items = await invoke<ChatItem[]>("root_chat_history", { chatId: id }).catch(
+        () => [] as ChatItem[],
+      );
+      // History replaces (the transcript is the source of truth); a turn streaming right
+      // now keeps appending on top via rootChatItemArrived.
+      set((st) => ({ rootChatItems: { ...st.rootChatItems, [id]: items } }));
+    },
+
+    closeRootChat: () => set({ selectedRootChatId: null }),
+
+    sendRootChat: async (id, text) => {
+      if (get().rootChatRunning[id]) return;
+      set((st) => ({
+        rootChatItems: {
+          ...st.rootChatItems,
+          [id]: appendItem(st.rootChatItems[id], { kind: "bubble", role: "user", text }),
+        },
+        rootChatRunning: { ...st.rootChatRunning, [id]: true },
+      }));
+      try {
+        await invoke("root_chat_send", {
+          chatId: id,
+          text,
+          workspaceRoot: get().workspaceRoot || null,
+        });
+      } catch (e) {
+        get().rootChatFailed(id, String(e));
+        return;
+      }
+      // First-message auto-title, same titler the terminal sessions use.
+      const chat = get().rootChats.find((c) => c.id === id);
+      if (chat && chat.title === "New Chat") {
+        const name = await invoke<string>("suggest_session_name", { prompt: text }).catch(
+          () => "",
+        );
+        if (name) void get().renameRootChat(id, name);
+      }
+    },
+
+    stopRootChat: async (id) => {
+      await invoke("root_chat_stop", { chatId: id }).catch(() => {});
+    },
+
+    setWorkspaceRoot: (v) => {
+      try {
+        localStorage.setItem(WORKSPACE_ROOT_KEY, v);
+      } catch {
+        /* quota — non-fatal */
+      }
+      set({ workspaceRoot: v });
+    },
+
+    rootChatItemArrived: (chatId, item) =>
+      set((st) => ({
+        rootChatItems: {
+          ...st.rootChatItems,
+          [chatId]: appendItem(st.rootChatItems[chatId], item),
+        },
+      })),
+
+    rootChatDone: (chatId) =>
+      set((st) => ({ rootChatRunning: { ...st.rootChatRunning, [chatId]: false } })),
+
+    rootChatFailed: (chatId, message) =>
+      set((st) => ({
+        rootChatItems: {
+          ...st.rootChatItems,
+          [chatId]: appendItem(st.rootChatItems[chatId], {
+            kind: "event",
+            event: "generic",
+            label: `error: ${message}`,
+          }),
+        },
+        rootChatRunning: { ...st.rootChatRunning, [chatId]: false },
+      })),
 
     selectSession: (projectId, sessionId) => {
       set({ selectedProjectId: projectId });
