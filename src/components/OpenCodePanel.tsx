@@ -5,6 +5,7 @@ import {
   type LocalProviderStatus,
   type OpenCodeSettings,
 } from "../store";
+import { Dropdown } from "./Dropdown";
 
 /**
  * Local models — route OpenCode sessions to a local GPU / self-hosted endpoint. Zero-config
@@ -296,24 +297,31 @@ export function OpenCodePanel() {
           </span>
         </div>
         {models.length > 0 ? (
-          <select
-            className="oc-model-select"
+          <Dropdown
+            className="dd-fill"
             value={models.some((m) => m.id === oc.model) ? oc.model : ""}
-            onChange={(e) => e.target.value && pickModel(e.target.value)}
-          >
-            {!models.some((m) => m.id === oc.model) && (
-              <option value="">{oc.model ? `${oc.model} (not on server)` : "Pick a model…"}</option>
-            )}
-            {rankModels(models).map((m) => (
-              <option key={m.id} value={m.id}>
-                {m.id}
-                {m.context ? ` — ${fmtCtx(m.context)}` : ""}
-                {m.tools ? " — tools ✓" : ""}
-                {m.tools === false ? " — no tools ✗" : ""}
-                {m.detail ? ` — ${m.detail}` : ""}
-              </option>
-            ))}
-          </select>
+            options={[
+              ...(models.some((m) => m.id === oc.model)
+                ? []
+                : [
+                    {
+                      value: "",
+                      label: oc.model ? `${oc.model} (not on server)` : "Pick a model…",
+                      disabled: true,
+                    },
+                  ]),
+              ...rankModels(models).map((m) => ({
+                value: m.id,
+                label:
+                  m.id +
+                  (m.context ? ` — ${fmtCtx(m.context)}` : "") +
+                  (m.tools ? " — tools ✓" : "") +
+                  (m.tools === false ? " — no tools ✗" : "") +
+                  (m.detail ? ` — ${m.detail}` : ""),
+              })),
+            ]}
+            onChange={(v) => v && pickModel(v)}
+          />
         ) : (
           <p className="trust-note">
             {busy
@@ -412,6 +420,7 @@ export function OpenCodePanel() {
                   />
                 </label>
                 <button
+                  className="oc-detect"
                   disabled={!keyInput.trim()}
                   onClick={() => {
                     void setOpenCodeKey(keyInput);
@@ -420,7 +429,11 @@ export function OpenCodePanel() {
                 >
                   Set
                 </button>
-                {keySet && <button onClick={() => void setOpenCodeKey("")}>Clear</button>}
+                {keySet && (
+                  <button className="oc-detect" onClick={() => void setOpenCodeKey("")}>
+                    Clear
+                  </button>
+                )}
               </div>
             )}
             <label className="telemetry-toggle">

@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { isGitRepo, useStore, type SessionRole } from "../store";
 import { AGENTS, agentMeta, type AgentId } from "../agents";
 import { AgentGlyph } from "./AgentGlyph";
+import { Dropdown } from "./Dropdown";
 
 export function NewSessionDialog({
   projectPath,
@@ -132,18 +133,15 @@ export function NewSessionDialog({
         {eligibleAccounts.length > 0 && (
           <>
             <div className="dialog-label">Account</div>
-            <select
-              className="dialog-input"
+            <Dropdown
+              className="dd-dialog"
               value={account}
-              onChange={(e) => setAccount(e.target.value)}
-            >
-              <option value="">Default account for {agentMeta(effectiveAgent).label}</option>
-              {eligibleAccounts.map((a) => (
-                <option key={a.id} value={a.id}>
-                  {a.label}
-                </option>
-              ))}
-            </select>
+              options={[
+                { value: "", label: `Default account for ${agentMeta(effectiveAgent).label}` },
+                ...eligibleAccounts.map((a) => ({ value: a.id, label: a.label })),
+              ]}
+              onChange={setAccount}
+            />
           </>
         )}
 

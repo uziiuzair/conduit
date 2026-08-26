@@ -1,4 +1,5 @@
 import { useStore, type UsagePrefs } from "../store";
+import { Dropdown } from "./Dropdown";
 
 const LAYOUTS: Array<{ id: UsagePrefs["layout"]; label: string; hint: string }> = [
   { id: "selected", label: "Selected session only", hint: "Just the current session's account (default)." },
@@ -67,14 +68,15 @@ export function UsagePrefsPanel() {
 
       <div className="usage-prefs-section">
         <div className="usage-prefs-title">Sort accounts by</div>
-        <select
-          className="account-select"
+        <Dropdown
+          className="dd-settings"
           value={prefs.sort}
-          onChange={(e) => setUsagePrefs({ sort: e.target.value as UsagePrefs["sort"] })}
-        >
-          <option value="critical">Most critical first</option>
-          <option value="label">Name (A–Z)</option>
-        </select>
+          options={[
+            { value: "critical", label: "Most critical first" },
+            { value: "label", label: "Name (A–Z)" },
+          ]}
+          onChange={(v) => setUsagePrefs({ sort: v as UsagePrefs["sort"] })}
+        />
       </div>
 
       <div className="usage-prefs-section">

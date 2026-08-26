@@ -2,6 +2,7 @@ import type { CSSProperties } from "react";
 import { useState } from "react";
 import { useStore } from "../store";
 import type { McpServer } from "../agents";
+import { Dropdown } from "./Dropdown";
 import { agentMeta, type AgentId } from "../agents";
 import { AgentGlyph } from "./AgentGlyph";
 
@@ -255,14 +256,15 @@ export function McpMatrix() {
           </div>
           <div className="mcp-form-field">
             <label className="mcp-form-label">Transport</label>
-            <select
-              className="dialog-input mcp-form-select"
+            <Dropdown
+              className="dd-dialog"
               value={ftransport}
-              onChange={(e) => setFtransport(e.target.value as "stdio" | "http")}
-            >
-              <option value="stdio">stdio</option>
-              <option value="http">http</option>
-            </select>
+              options={[
+                { value: "stdio", label: "stdio" },
+                { value: "http", label: "http" },
+              ]}
+              onChange={(v) => setFtransport(v as "stdio" | "http")}
+            />
           </div>
           {ftransport === "stdio" ? (
             <>
