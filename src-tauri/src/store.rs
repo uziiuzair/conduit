@@ -275,6 +275,24 @@ pub struct Project {
     pub board_enabled: bool,
 }
 
+/// A root-level chat: a headless, read-only `claude -p` conversation that lives above all
+/// projects (design doc 2026-08-26). `id` doubles as the pinned Claude session id — the
+/// first send uses `--session-id <id>`, later sends `--resume <id>` — so there is no
+/// separate captured session id.
+#[derive(Serialize, Deserialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct RootChat {
+    pub id: String,
+    pub title: String,
+    /// Registered account whose config dir holds this chat's transcript. Pinned at
+    /// creation (the global Claude default at that moment) and never rebound — switching
+    /// would orphan the resume chain. None = the default `~/.claude` tree.
+    #[serde(default)]
+    pub account_id: Option<String>,
+    #[serde(default)]
+    pub created_at: u64,
+}
+
 /// A registered agent account: a profile dir that holds its own credentials (a `.claude`
 /// dir, whose profile root may ALSO carry a `.gemini/antigravity-cli` agy login). Selecting
 /// it for a session redirects that agent's config at spawn (see `ProviderAdapter::account_env`).
@@ -367,6 +385,8 @@ pub struct PersistState {
     pub opencode: OpenCodeSettings,
     #[serde(default)]
     pub plugins: Vec<crate::plugins::PluginRecord>,
+    #[serde(default)]
+    pub root_chats: Vec<RootChat>,
 }
 
 pub struct Store {
@@ -378,6 +398,7 @@ pub struct Store {
     trust: Mutex<TrustSettings>,
     opencode: Mutex<OpenCodeSettings>,
     plugins: Mutex<Vec<crate::plugins::PluginRecord>>,
+    root_chats: Mutex<Vec<RootChat>>,
     /// The local-endpoint API key, held in memory for the app's lifetime only. Never part
     /// of `PersistState`/`save()`, never logged; injected into an `opencode` child's env.
     opencode_key: Mutex<Option<String>>,
@@ -504,6 +525,7 @@ impl Store {
             trust: Mutex::new(state.trust),
             opencode: Mutex::new(state.opencode),
             plugins: Mutex::new(state.plugins),
+            root_chats: Mutex::new(state.root_chats),
             opencode_key: Mutex::new(None),
             save_path,
         }
@@ -538,6 +560,11 @@ impl Store {
                 .clone(),
             plugins: self
                 .plugins
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone(),
+            root_chats: self
+                .root_chats
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
                 .clone(),
@@ -611,6 +638,97 @@ impl Store {
         let mut projects = self.projects.lock().unwrap_or_else(|e| e.into_inner());
         projects.retain(|p| p.id != project_id);
         self.save(&projects);
+    }
+
+    // ---- Root chats -----------------------------------------------------------------
+    // Lock order: mutate `root_chats`, DROP that lock, then take `projects` for `save()`
+    // — save() locks accounts/default_accounts/etc. internally and must never run while
+    // the caller still holds `root_chats` (matches how the account methods sequence).
+
+    pub fn list_root_chats(&self) -> Vec<RootChat> {
+        self.root_chats
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+
+    pub fn add_root_chat(&self) -> RootChat {
+        let account_id = self
+            .default_accounts
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&AgentId::Claude)
+            .cloned();
+        let chat = RootChat {
+            id: Uuid::new_v4().to_string(),
+            title: "New Chat".to_string(),
+            account_id,
+            created_at: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0),
+        };
+        self.root_chats
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push(chat.clone());
+        let projects = self.projects.lock().unwrap_or_else(|e| e.into_inner());
+        self.save(&projects);
+        chat
+    }
+
+    pub fn rename_root_chat(&self, id: &str, name: &str) -> bool {
+        let renamed = {
+            let mut chats = self.root_chats.lock().unwrap_or_else(|e| e.into_inner());
+            match chats.iter_mut().find(|c| c.id == id) {
+                Some(c) => {
+                    c.title = name.to_string();
+                    true
+                }
+                None => false,
+            }
+        };
+        if renamed {
+            let projects = self.projects.lock().unwrap_or_else(|e| e.into_inner());
+            self.save(&projects);
+        }
+        renamed
+    }
+
+    /// Removes the chat record only. The Claude transcript on disk is deliberately left
+    /// alone — it belongs to Claude's own store, and palette search still finds it.
+    pub fn remove_root_chat(&self, id: &str) -> bool {
+        let removed = {
+            let mut chats = self.root_chats.lock().unwrap_or_else(|e| e.into_inner());
+            let before = chats.len();
+            chats.retain(|c| c.id != id);
+            chats.len() != before
+        };
+        if removed {
+            let projects = self.projects.lock().unwrap_or_else(|e| e.into_inner());
+            self.save(&projects);
+        }
+        removed
+    }
+
+    pub fn root_chat(&self, id: &str) -> Option<RootChat> {
+        self.root_chats
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .find(|c| c.id == id)
+            .cloned()
+    }
+
+    /// The chat's transcript home: its pinned account's config dir. None = default tree.
+    pub fn root_chat_config_dir(&self, id: &str) -> Option<String> {
+        let account_id = self.root_chat(id)?.account_id?;
+        self.accounts
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .find(|a| a.id == account_id)
+            .map(|a| a.config_dir.clone())
     }
 
     /// Rename a project's display label only. Does not touch `path` or anything on disk.
@@ -1377,6 +1495,7 @@ mod tests {
                 trust: Mutex::new(TrustSettings::default()),
                 opencode: Mutex::new(OpenCodeSettings::default()),
                 plugins: Mutex::new(Vec::new()),
+                root_chats: Mutex::new(Vec::new()),
                 opencode_key: Mutex::new(None),
                 save_path: dir.join("state.json"),
             }
@@ -2136,5 +2255,74 @@ mod tests {
         assert_eq!(recs[0].consented_version, "1.0.0");
         // Persisted to disk and reloads.
         assert!(dir.join("state.json").exists());
+    }
+
+    #[test]
+    fn root_chat_crud_and_account_pinning() {
+        let dir = temp_dir("root_chat");
+        let store = Store::for_test(&dir);
+        // Pin: the global Claude default at creation time travels onto the chat.
+        store.set_default_account(crate::agent::AgentId::Claude, Some("acct-1".into()));
+        let chat = store.add_root_chat();
+        assert_eq!(chat.title, "New Chat");
+        assert_eq!(chat.account_id.as_deref(), Some("acct-1"));
+        assert!(chat.created_at > 0);
+        // Changing the default later does NOT rebind an existing chat.
+        store.set_default_account(crate::agent::AgentId::Claude, Some("acct-2".into()));
+        assert_eq!(
+            store.root_chat(&chat.id).unwrap().account_id.as_deref(),
+            Some("acct-1")
+        );
+        assert!(store.rename_root_chat(&chat.id, "Q3 Roadmap"));
+        assert_eq!(store.root_chat(&chat.id).unwrap().title, "Q3 Roadmap");
+        assert!(!store.rename_root_chat("nope", "x"));
+        assert_eq!(store.list_root_chats().len(), 1);
+        assert!(store.remove_root_chat(&chat.id));
+        assert!(store.list_root_chats().is_empty());
+        // Persisted to disk (save runs on every mutation).
+        assert!(dir.join("state.json").exists());
+    }
+
+    #[test]
+    fn root_chat_config_dir_resolves_pinned_account() {
+        let dir = temp_dir("root_chat_cfg");
+        let store = Store::for_test(&dir);
+        // add_account validates the dir exists, so register a real temp path.
+        let profile = dir.join("claude-work");
+        fs::create_dir_all(&profile).unwrap();
+        let acct = store
+            .add_account("Work".into(), profile.to_string_lossy().into_owned())
+            .unwrap();
+        store.set_default_account(crate::agent::AgentId::Claude, Some(acct.id.clone()));
+        let chat = store.add_root_chat();
+        assert_eq!(
+            store.root_chat_config_dir(&chat.id).as_deref(),
+            Some(profile.to_string_lossy().as_ref())
+        );
+        // No default at creation -> no pinned account -> None (caller falls back to
+        // pty::claude_projects_dir()).
+        store.set_default_account(crate::agent::AgentId::Claude, None);
+        let bare = store.add_root_chat();
+        assert!(store.root_chat_config_dir(&bare.id).is_none());
+    }
+
+    #[test]
+    fn persist_state_root_chats_roundtrip_and_legacy_default() {
+        let back: PersistState = serde_json::from_str(r#"{"projects":[]}"#).unwrap();
+        assert!(back.root_chats.is_empty(), "legacy state loads without the field");
+        let st = PersistState {
+            root_chats: vec![RootChat {
+                id: "c1".into(),
+                title: "Roadmap".into(),
+                account_id: Some("a1".into()),
+                created_at: 1_724_000_000,
+            }],
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&st).unwrap();
+        assert!(json.contains("\"accountId\":\"a1\""), "camelCase wire shape: {json}");
+        let back: PersistState = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.root_chats.len(), 1);
+        assert_eq!(back.root_chats[0].title, "Roadmap");
     }
 }
