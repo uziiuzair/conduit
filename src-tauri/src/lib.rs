@@ -30,6 +30,7 @@ mod menu;
 mod notify;
 mod plugins;
 mod pty;
+mod root_chat;
 mod scrollback;
 mod search;
 #[cfg_attr(windows, allow(dead_code))]
