@@ -52,8 +52,8 @@ export function AboutPanel() {
         Multiple real Claude Code terminals across your projects, in one window.
       </p>
       <p className="about-credit">
-        Built with love by Uzair Hayat at {link(SITE_URL, "Arlo")}, with Fahed Yasin and
-        Usman Kaisser.
+        Built with love by Uzair Hayat, Fahed Yasin, and Usman Kaisser at{" "}
+        {link(SITE_URL, "Arlo")}.
       </p>
       <div className="about-rows">
         <div className="about-row">
