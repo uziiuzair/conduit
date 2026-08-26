@@ -16,6 +16,7 @@ import {
   type Session,
 } from "../store";
 import type { RootChat as RootChatMeta } from "../rootChat";
+import { inProfile } from "../profiles";
 import {
   FolderIcon,
   FolderPlusIcon,
@@ -27,6 +28,7 @@ import {
 } from "./Icons";
 import { AgentGlyph, glyphStateFor } from "./AgentGlyph";
 import { projectAccent, SESSION_DRAG_MIME } from "../layout";
+import { Dropdown } from "./Dropdown";
 import { ThemeSwitcher } from "./ThemeSwitcher";
 import { ClaudeStatusPill } from "./ClaudeStatusPill";
 import { UsagePanel } from "./UsagePanel";
@@ -136,6 +138,19 @@ export function Sidebar() {
   const addRootChat = useStore((s) => s.addRootChat);
   const addProject = useStore((s) => s.addProject);
   const setShowSettings = useStore((s) => s.setShowSettings);
+  const profiles = useStore((s) => s.profiles);
+  const activeProfileId = useStore((s) => s.activeProfileId);
+  // The profile filter applies HERE (and to selection repair in the store) only. The
+  // workspace keeps the full projects array — hidden projects' terminals stay mounted.
+  const knownProfileIds = useMemo(() => new Set(profiles.map((p) => p.id)), [profiles]);
+  const visibleProjects = useMemo(
+    () => projects.filter((p) => inProfile(p.profileId, activeProfileId, knownProfileIds)),
+    [projects, activeProfileId, knownProfileIds],
+  );
+  const visibleChats = useMemo(
+    () => rootChats.filter((c) => inProfile(c.profileId, activeProfileId, knownProfileIds)),
+    [rootChats, activeProfileId, knownProfileIds],
+  );
   const selectedAgent = useStore((s) => {
     const id = globalSelectedSessionId(s);
     if (!id) return "claude" as const;
@@ -159,7 +174,7 @@ export function Sidebar() {
       <div className="sidebar-scroll">
         <div className="section-label">HQ</div>
         <div className="hq-list">
-          {rootChats.map((c) => (
+          {visibleChats.map((c) => (
             <RootChatRow key={c.id} chat={c} />
           ))}
           <div className="session-row-slot">
@@ -170,7 +185,7 @@ export function Sidebar() {
           </div>
         </div>
         <div className="section-label">Projects</div>
-        {projects.map((p) => (
+        {visibleProjects.map((p) => (
           <ProjectBlock key={p.id} project={p} />
         ))}
       </div>
@@ -184,7 +199,75 @@ export function Sidebar() {
         <button className="settings-btn" title="Settings" onClick={() => setShowSettings(true)}>⚙</button>
         <ThemeSwitcher />
       </div>
+      <ProfileBar />
       <SessionContextMenu />
+    </div>
+  );
+}
+
+/** The profile selector row (below the add-project row): a dropdown over the known
+ *  profiles plus the implicit Default, and a `+` that flips to an inline name input —
+ *  window.prompt is unreliable in WKWebView, and the inline input matches the rename
+ *  idiom used everywhere else in this sidebar. */
+function ProfileBar() {
+  const profiles = useStore((s) => s.profiles);
+  const activeProfileId = useStore((s) => s.activeProfileId);
+  const setActiveProfile = useStore((s) => s.setActiveProfile);
+  const addProfile = useStore((s) => s.addProfile);
+  const [creating, setCreating] = useState(false);
+  const done = useRef(false);
+
+  // A dangling active id (profile removed under us) renders as Default.
+  const value = profiles.some((p) => p.id === activeProfileId) ? activeProfileId! : "";
+
+  const commit = (name: string) => {
+    if (done.current) return;
+    done.current = true;
+    setCreating(false);
+    if (name.trim()) void addProfile(name);
+  };
+
+  return (
+    <div className="profile-bar">
+      {creating ? (
+        <input
+          className="profile-new-input"
+          placeholder="Profile name"
+          autoFocus
+          spellCheck={false}
+          onKeyDown={(e) => {
+            e.stopPropagation();
+            if (e.key === "Enter") commit(e.currentTarget.value);
+            else if (e.key === "Escape") {
+              e.preventDefault();
+              done.current = true;
+              setCreating(false);
+            }
+          }}
+          onBlur={(e) => commit(e.currentTarget.value)}
+        />
+      ) : (
+        <Dropdown
+          up
+          value={value}
+          title="Profile — filters which projects and chats the sidebar shows"
+          options={[
+            { value: "", label: "Default" },
+            ...profiles.map((p) => ({ value: p.id, label: p.name })),
+          ]}
+          onChange={(v) => void setActiveProfile(v || null)}
+        />
+      )}
+      <button
+        className="profile-add-btn"
+        title={creating ? "Cancel" : "New profile"}
+        onClick={() => {
+          done.current = false;
+          setCreating((v) => !v);
+        }}
+      >
+        <PlusIcon size={12} />
+      </button>
     </div>
   );
 }

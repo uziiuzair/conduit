@@ -2288,6 +2288,154 @@ button {
   background: transparent;
 }
 
+/* ---- Custom dropdown (.dd) — replaces every native <select>: a styled select still
+   opens the OS popup menu, and Conduit's chrome bans system UI. Trigger matches the
+   old .account-select look; the menu matches .theme-popover / .context-menu. ---- */
+.dd {
+  position: relative;
+  display: flex;
+  min-width: 0;
+}
+.dd-trigger {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  width: 100%;
+  font-size: 12px;
+  color: var(--text-bright);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 4px 8px;
+  background: var(--sidebar-bg);
+  cursor: pointer;
+}
+.dd-trigger:hover,
+.dd-trigger.open {
+  border-color: var(--accent);
+}
+.dd-trigger:disabled {
+  opacity: 0.5;
+  cursor: default;
+  border-color: var(--border);
+}
+.dd-label {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-align: left;
+}
+.dd-caret {
+  flex: 0 0 auto;
+  color: var(--text-mid);
+}
+.dd-menu {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  min-width: 100%;
+  max-width: 320px;
+  max-height: 240px;
+  overflow-y: auto;
+  z-index: 60;
+  background: var(--panel-bg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 4px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+}
+.dd-menu.up {
+  top: auto;
+  bottom: calc(100% + 4px);
+}
+.dd-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  padding: 5px 8px;
+  font-size: 12px;
+  color: var(--text-mid);
+  border-radius: 5px;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.dd-row:hover {
+  background: var(--hover);
+  color: var(--text-bright);
+}
+.dd-row.sel {
+  color: var(--text-bright);
+}
+.dd-row:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+.dd-check {
+  width: 12px;
+  flex: 0 0 12px;
+  color: var(--accent);
+  font-size: 11px;
+}
+.dd-row-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* ---- Profile selector (sidebar footer, below the add-project row). Same design
+   language as .add-bar: hairline top border, muted text that brightens on hover, a
+   36px square accessory button with a left hairline. ---- */
+.profile-bar {
+  display: flex;
+  align-items: stretch;
+  border-top: 1px solid var(--border);
+}
+/* The footer variant of .dd: quiet flat row, no border box (the bar draws those). */
+.profile-bar .dd {
+  flex: 1;
+}
+.profile-bar .dd-trigger {
+  border: none;
+  border-radius: 0;
+  background: transparent;
+  padding: 7px 10px;
+  font-size: 11.5px;
+  color: var(--text-mid);
+}
+.profile-bar .dd-trigger:hover {
+  color: var(--text-bright);
+}
+.profile-bar .dd-menu {
+  max-height: 300px;
+}
+.profile-bar .profile-add-btn {
+  width: 36px;
+  flex: 0 0 36px;
+  padding: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-left: 1px solid var(--border);
+  color: var(--text-mid);
+}
+.profile-bar .profile-add-btn:hover {
+  color: var(--text-bright);
+  background: var(--hover);
+}
+.profile-bar .profile-new-input {
+  flex: 1;
+  min-width: 0;
+  background: transparent;
+  border: none;
+  outline: none;
+  padding: 7px 10px;
+  font-size: 11.5px;
+  color: var(--text-bright);
+}
+
 /* ---- Theme switcher (sidebar footer) ---- */
 .add-bar {
   display: flex;
@@ -2407,13 +2555,20 @@ button {
 .dialog-input:focus {
   border-color: var(--accent);
 }
-.dialog-toggle {
+.dialog-toggle,
+.telemetry-toggle {
   display: flex;
-  align-items: center;
+  /* Top-align: these labels routinely run several lines, and a box centered against a
+     paragraph looks adrift. The 1px nudge sits the 15px box on the first text line. */
+  align-items: flex-start;
   gap: 7px;
   font-size: 12px;
   color: var(--text-mid);
   cursor: pointer;
+}
+.dialog-toggle input[type="checkbox"],
+.telemetry-toggle input[type="checkbox"] {
+  margin-top: 1px;
 }
 .dialog-toggle.disabled {
   opacity: 0.5;
@@ -2426,6 +2581,11 @@ button {
   color: var(--text-dim, var(--text-mid));
   font-style: normal;
   opacity: 0.75;
+  /* Explicit size: outside a dialog (e.g. Settings → Terminal) this inherits the body
+     size and dwarfs the 12px control it explains. */
+  display: block;
+  font-size: 11.5px;
+  line-height: 1.55;
 }
 .dialog-hint code {
   font-family: var(--mono-font);
@@ -2608,7 +2768,7 @@ button {
   display: inline-flex; align-items: center; gap: 6px; margin-top: 4px;
   font-size: 11px; color: var(--text-mid); cursor: pointer; user-select: none;
 }
-.agy-track-toggle input { accent-color: var(--agy); cursor: pointer; }
+.agy-track-toggle input { cursor: pointer; }
 
 /* ---- Unified multi-account usage bar (replaces the per-agent panels) ---- */
 .usage-panel {
@@ -3108,6 +3268,23 @@ button {
   align-items: center;
   gap: 10px;
 }
+/* The Scan action was a bare text node — give it real button affordance. */
+.trust-scan-actions > button {
+  font-size: 12px;
+  color: var(--text-bright);
+  background: var(--sidebar-bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 4px 12px;
+  cursor: pointer;
+}
+.trust-scan-actions > button:hover:not(:disabled) {
+  border-color: var(--accent);
+}
+.trust-scan-actions > button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
 .trust-scan-clean {
   font-size: 11px;
   color: var(--text-mid);
@@ -3592,24 +3769,6 @@ button {
 .oc-field.oc-num {
   flex: 0 0 110px;
 }
-.oc-model-select {
-  width: 100%;
-  font-size: 12px;
-  padding: 6px 8px;
-  border-radius: 5px;
-  border: 1px solid var(--border);
-  background: var(--panel-bg);
-  color: var(--text-bright);
-  font-family: var(--mono-font);
-  outline: none;
-}
-.oc-model-select:focus {
-  border-color: var(--accent);
-}
-.oc-model-select option {
-  background: var(--panel-bg);
-  color: var(--text-bright);
-}
 .oc-advanced-toggle {
   align-self: flex-start;
   font-size: 11px;
@@ -3756,37 +3915,41 @@ button {
   font-size: 12px;
   color: var(--text-mid);
 }
-.account-select {
+/* Dropdown (.dd) sizing variants per site. The old .account-select /
+   .mcp-form-select / .oc-model-select native selects are gone — every dropdown
+   is the custom .dd component now. */
+.dd-account {
   flex: 1;
   max-width: 60%;
-  font-size: 12px;
-  color: var(--text-bright);
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  padding: 4px 24px 4px 8px;
-  cursor: pointer;
-  /* Strip the native macOS chevron and draw our own, matching .mcp-form-select. */
-  appearance: none;
-  -webkit-appearance: none;
-  background-color: var(--sidebar-bg);
-  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'%3E%3Cpath d='M1 1l4 4 4-4' fill='none' stroke='%239a938c' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
-  background-repeat: no-repeat;
-  background-position: right 8px center;
-  background-size: 10px 6px;
 }
-.account-select:hover,
-.account-select:focus {
-  outline: none;
-  border-color: var(--accent);
+.dd-settings {
+  max-width: 260px;
+}
+.dd-dialog {
+  width: 100%;
+}
+.dd-dialog .dd-trigger {
+  padding: 6px 8px;
+  background: var(--panel-bg);
+}
+.dd-fill {
+  width: 100%;
+}
+.dd-fill .dd-trigger {
+  padding: 6px 8px;
+  background: var(--panel-bg);
+  font-family: var(--mono-font);
+}
+.dd-fill .dd-menu {
+  font-family: var(--mono-font);
 }
 
-/* ── Settings native-control polish ──────────────────────────────────────────
-   Replace the glossy OS checkbox and range slider with theme-matched controls.
-   Checkboxes are scoped to the settings/dialog toggle wrappers so md-preview
-   task-list boxes and the accent-color agy toggle stay untouched. */
-.dialog-toggle input[type="checkbox"],
-.telemetry-toggle input[type="checkbox"],
-.account-tag-check input[type="checkbox"] {
+/* ── No native/web controls ──────────────────────────────────────────────────
+   EVERY checkbox in the app is drawn by this rule — appearance:none strips the OS
+   rendering entirely, so nothing system-styled ever appears in the product. New
+   checkboxes need no wrapper class to opt in. (The agy toggle keeps its brand color
+   via the variant below; markdown-preview task boxes pick this style up too.) */
+input[type="checkbox"] {
   appearance: none;
   -webkit-appearance: none;
   flex-shrink: 0;
@@ -3800,21 +3963,15 @@ button {
   position: relative;
   transition: background 0.12s ease, border-color 0.12s ease;
 }
-.dialog-toggle input[type="checkbox"]:hover,
-.telemetry-toggle input[type="checkbox"]:hover,
-.account-tag-check input[type="checkbox"]:hover {
+input[type="checkbox"]:hover {
   border-color: var(--accent);
 }
-.dialog-toggle input[type="checkbox"]:checked,
-.telemetry-toggle input[type="checkbox"]:checked,
-.account-tag-check input[type="checkbox"]:checked {
+input[type="checkbox"]:checked {
   background: var(--accent);
   border-color: var(--accent);
 }
 /* Checkmark punched out of the accent fill in the panel color (like .agent-radio). */
-.dialog-toggle input[type="checkbox"]:checked::after,
-.telemetry-toggle input[type="checkbox"]:checked::after,
-.account-tag-check input[type="checkbox"]:checked::after {
+input[type="checkbox"]:checked::after {
   content: "";
   position: absolute;
   left: 50%;
@@ -3824,6 +3981,36 @@ button {
   border: solid var(--sidebar-bg);
   border-width: 0 2px 2px 0;
   transform: translate(-50%, -50%) rotate(45deg);
+}
+/* agy quota toggle keeps its brand color on the same custom box. */
+.agy-track-toggle input[type="checkbox"]:checked {
+  background: var(--agy);
+  border-color: var(--agy);
+}
+.agy-track-toggle input[type="checkbox"]:hover {
+  border-color: var(--agy);
+}
+
+/* Number inputs: kill the native stepper so only the themed text box remains. */
+input[type="number"]::-webkit-inner-spin-button,
+input[type="number"]::-webkit-outer-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+input[type="number"] {
+  appearance: textfield;
+  -moz-appearance: textfield;
+  width: 56px;
+  font-size: 11.5px;
+  color: var(--text-bright);
+  background: var(--sidebar-bg);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  padding: 3px 6px;
+  outline: none;
+}
+input[type="number"]:focus {
+  border-color: var(--accent);
 }
 
 .usage-prefs input[type="range"] {
@@ -4361,32 +4548,15 @@ button {
   text-align: right;
 }
 
-.mcp-form-input,
-.mcp-form-select {
+.mcp-form-input {
   flex: 1;
   min-width: 0;
   font-size: 12px;
   padding: 5px 8px;
 }
 
-.mcp-form-select {
-  /* Strip the native macOS chrome and draw our own chevron so it matches the
-     warm-dark theme instead of the glossy system control. */
-  cursor: pointer;
-  appearance: none;
-  -webkit-appearance: none;
-  -webkit-user-select: none;
-  user-select: none;
-  padding-right: 26px;
-  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'%3E%3Cpath d='M1 1l4 4 4-4' fill='none' stroke='%239a938c' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
-  background-repeat: no-repeat;
-  background-position: right 9px center;
-  background-size: 10px 6px;
-}
-
 /* Unified hover/focus + monospace code fields for the add-server form. */
 .mcp-form-input:hover,
-.mcp-form-select:hover,
 .mcp-form-textarea:hover {
   border-color: var(--text-dim);
 }
@@ -5166,4 +5336,17 @@ button {
   flex: 1; background: color-mix(in srgb, var(--border) 40%, transparent);
   color: var(--text-bright); border: 1px solid var(--border); border-radius: 6px;
   padding: 6px 10px; font-size: 12px; font-family: var(--mono-font);
+}
+/* "Choose…" was a bare text node — give it the same button affordance as Scan. */
+.workspace-root-input > button {
+  font-size: 12px;
+  color: var(--text-bright);
+  background: var(--sidebar-bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 4px 12px;
+  cursor: pointer;
+}
+.workspace-root-input > button:hover {
+  border-color: var(--accent);
 }

@@ -1,5 +1,6 @@
 import { useStore } from "../store";
 import type { PrettierOptions } from "../format/options";
+import { Dropdown } from "./Dropdown";
 
 /** Settings → Formatting: global prettier config for the bundled fallback + the two
  *  save toggles. A project's own .prettierrc overrides these global values. */
@@ -79,29 +80,31 @@ export function FormatPrefsPanel() {
 
       <div className="usage-prefs-section">
         <div className="usage-prefs-title">Trailing commas</div>
-        <select
-          className="account-select"
+        <Dropdown
+          className="dd-settings"
           value={cfg.trailingComma}
-          onChange={(e) => setCfg({ trailingComma: e.target.value as PrettierOptions["trailingComma"] })}
-        >
-          <option value="all">All</option>
-          <option value="es5">ES5</option>
-          <option value="none">None</option>
-        </select>
+          options={[
+            { value: "all", label: "All" },
+            { value: "es5", label: "ES5" },
+            { value: "none", label: "None" },
+          ]}
+          onChange={(v) => setCfg({ trailingComma: v as PrettierOptions["trailingComma"] })}
+        />
       </div>
 
       <div className="usage-prefs-section">
         <div className="usage-prefs-title">End of line</div>
-        <select
-          className="account-select"
+        <Dropdown
+          className="dd-settings"
           value={cfg.endOfLine}
-          onChange={(e) => setCfg({ endOfLine: e.target.value as PrettierOptions["endOfLine"] })}
-        >
-          <option value="lf">LF</option>
-          <option value="crlf">CRLF</option>
-          <option value="cr">CR</option>
-          <option value="auto">Auto</option>
-        </select>
+          options={[
+            { value: "lf", label: "LF" },
+            { value: "crlf", label: "CRLF" },
+            { value: "cr", label: "CR" },
+            { value: "auto", label: "Auto" },
+          ]}
+          onChange={(v) => setCfg({ endOfLine: v as PrettierOptions["endOfLine"] })}
+        />
       </div>
     </div>
   );

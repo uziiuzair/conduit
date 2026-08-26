@@ -3,6 +3,28 @@
 All notable changes to Conduit are documented here. This project uses
 [semantic versioning](https://semver.org/).
 
+## 0.31.0 — 2026-08-27
+
+- **Added — Profiles.** Named workspaces for the sidebar: a selector row below the
+  add-project row switches between profiles, and the `+` beside it creates one. Projects
+  and root chats created while a profile is active belong to it, and switching profiles
+  shows only that profile's items — ideal for streaming, when client projects shouldn't
+  be on screen. This filters visibility only: hidden sessions keep running, and the app
+  reopens in the profile you left it in. The Default profile always exists; removing a
+  profile returns its items to Default.
+- **Changed — No more native dropdowns (or any system controls).** Every dropdown in the
+  app — Settings (Terminal renderer, Formatting, Usage display, account defaults), the
+  new-session dialog, the MCP add-server form, the local-models picker, and the new
+  profile selector — now opens a Conduit-styled menu instead of the macOS popup.
+  Checkboxes are drawn by the app everywhere (including the agy quota toggle), and
+  number fields lose their system stepper, so no glossy OS control appears anywhere.
+  The settings sweep also fixed toggle-label spacing, the oversized Terminal renderer
+  hint, and bare text-buttons (Scan, Choose…, Set/Clear).
+- **Changed — About.** Credits now read Uzair Hayat, Fahed Yasin, and Usman Kaisser
+  at Arlo (arlo.fyi).
+
+---
+
 ## 0.30.0 — 2026-08-25
 
 - **Fixed — Starting a session with a task no longer fails on Windows.** Any agent handed an

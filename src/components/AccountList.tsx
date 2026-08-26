@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import { useStore, type Account } from "../store";
 import { agentMeta, type AgentId } from "../agents";
+import { Dropdown } from "./Dropdown";
 
 /** Agents that support multi-account today. The rest is deferred, so they are
  *  intentionally not offered here — see the multi-account design doc.
@@ -160,20 +161,15 @@ export function AccountList() {
             return (
               <label key={agent} className="account-default-row">
                 <span className="account-default-label">{agentMeta(agent).label}</span>
-                <select
-                  className="account-select"
+                <Dropdown
+                  className="dd-account"
                   value={defaultAccounts[agent] ?? ""}
-                  onChange={(e) =>
-                    void setDefaultAccount(agent, e.target.value || null)
-                  }
-                >
-                  <option value="">Default (your normal config)</option>
-                  {opts.map((a) => (
-                    <option key={a.id} value={a.id}>
-                      {a.label}
-                    </option>
-                  ))}
-                </select>
+                  options={[
+                    { value: "", label: "Default (your normal config)" },
+                    ...opts.map((a) => ({ value: a.id, label: a.label })),
+                  ]}
+                  onChange={(v) => void setDefaultAccount(agent, v || null)}
+                />
               </label>
             );
           })}
@@ -194,20 +190,15 @@ export function AccountList() {
               return (
                 <label key={agent} className="account-default-row">
                   <span className="account-default-label">{agentMeta(agent).label}</span>
-                  <select
-                    className="account-select"
+                  <Dropdown
+                    className="dd-account"
                     value={p.defaultAccounts?.[agent] ?? ""}
-                    onChange={(e) =>
-                      void setProjectDefaultAccount(p.id, agent, e.target.value || null)
-                    }
-                  >
-                    <option value="">Use global default</option>
-                    {opts.map((a) => (
-                      <option key={a.id} value={a.id}>
-                        {a.label}
-                      </option>
-                    ))}
-                  </select>
+                    options={[
+                      { value: "", label: "Use global default" },
+                      ...opts.map((a) => ({ value: a.id, label: a.label })),
+                    ]}
+                    onChange={(v) => void setProjectDefaultAccount(p.id, agent, v || null)}
+                  />
                 </label>
               );
             }).filter(Boolean);

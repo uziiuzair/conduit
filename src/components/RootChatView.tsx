@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { useStore } from "../store";
 import { canSend, greeting, isRenderable, relativeTime, type ChatItem } from "../rootChat";
+import { inProfile } from "../profiles";
 import { renderMarkdown } from "../markdown";
 import { ArrowUpIcon, ChatBubbleIcon } from "./Icons";
 
@@ -34,8 +35,12 @@ export function RootChatView() {
 function HqHome({ chatId }: { chatId: string }) {
   const rootChats = useStore((s) => s.rootChats);
   const openRootChat = useStore((s) => s.openRootChat);
+  const profiles = useStore((s) => s.profiles);
+  const activeProfileId = useStore((s) => s.activeProfileId);
+  // Same profile filter as the sidebar: this list is on screen while streaming.
+  const knownProfileIds = new Set(profiles.map((p) => p.id));
   const recents = rootChats
-    .filter((c) => c.id !== chatId)
+    .filter((c) => c.id !== chatId && inProfile(c.profileId, activeProfileId, knownProfileIds))
     .sort((a, b) => b.createdAt - a.createdAt)
     .slice(0, 6);
 
