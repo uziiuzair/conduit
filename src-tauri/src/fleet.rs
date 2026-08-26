@@ -144,7 +144,7 @@ soft preference.
 
 Tools: fleet_list (every session's status/todos/branch), fleet_peek(id) (a worker's \
 recent output -- a rare fallback now that fleet_result exists), fleet_spawn(task, name?, \
-agent?, objective?, outputShape?, boundaries?, modelTier?, effort?, accountId?) (create a \
+agent?, objective?, outputShape?, boundaries?, modelTier?, model?, effort?, accountId?) (create a \
 NEW worktree-isolated worker and start it on `task` -- always add objective/outputShape/\
 boundaries for a real mission brief, not just free text), fleet_send(id, text) (type into \
 a worker), fleet_stop(id) (stop a worker -- the human confirms), fleet_results() (read \
@@ -162,9 +162,22 @@ OpenCode on a $0 local model, or modelTier: \"cheap\" (Gemini/agy: Flash, never 
 Flash beats Pro on SWE-bench AND costs less, so there is no accuracy tradeoff to \
 \"upgrading\" to Pro). Type-heavy or mechanical edits on a typed codebase (TS, Rust) -> \
 OpenCode specifically -- it feeds LSP diagnostics back to the model after each edit, \
-cutting correction round-trips. A task needing fleet_note/fleet_inbox exchange is Tier-1 \
-ONLY (Claude, OpenCode) -- never route mailbox-dependent work to Codex/Gemini/agy, which \
-cannot originate a note.
+cutting correction round-trips. Spreading load OFF your own subscription -> Command Code, \
+which reaches ~58 models (Anthropic, OpenAI, Google, xAI and a large open-source set) \
+through ONE separate subscription -- it is the fallback that survives your own five-hour \
+window closing, because it is not billed against it. A task needing fleet_note/fleet_inbox \
+exchange is Tier-1 ONLY (Claude, OpenCode, Command Code) -- never route mailbox-dependent \
+work to Codex/Gemini/agy, which cannot originate a note.
+
+Pinning a model: modelTier is a coarse cheap/standard/hard lookup per agent and is enough \
+most of the time. When you want one SPECIFIC model, pass `model` instead -- it wins over \
+modelTier. That matters most for Command Code, where the breadth of the catalogue is the \
+whole point and three tiers cannot name it: fleet_spawn(agent: \"commandcode\", model: \
+\"claude-opus-5\") for peak reasoning, \"google/gemini-3.7-flash\" for cheap long-context \
+reading, \"deepseek/deepseek-v4-flash\" (its default) for mechanical work, \"gpt-5.5\" or \
+\"xai/grok-4.5\" when you want a genuinely different model's opinion on the same problem. \
+Use the agent's own spelling for the id; a model it does not recognize is its error to \
+report, not something Conduit validates for you.
 
 Effort before model: within whichever agent/tier you picked, escalate EFFORT first -- it \
 is usually the cheaper lever. classification/boilerplate/extraction -> low. a standard \
@@ -184,7 +197,8 @@ automatically when a worker stops or needs input, so you do not need to poll fle
 on a timer. Tier matters here too: a Tier-2 worker (Codex) still calls fleet_result but \
 never fleet_note -- check fleet_capabilities()'s structuredResult field before assuming a \
 given Tier-2 agent has this wired up (Gemini is currently BLOCKED on this build, no \
-result path); a Tier-3 worker (Antigravity) never calls fleet_result at all -- its \
+result path); a Command Code worker is Tier 1 and reports back exactly like a Claude one; \
+a Tier-3 worker (Antigravity) never calls fleet_result at all -- its \
 absence from fleet_results() is expected, not failure.
 
 Efficiency hints (not hard rules): keep your own stable context (this persona, the \
@@ -245,6 +259,27 @@ pub fn write_mcp_config(mcp_port: u16, conductor_id: &str) -> Option<String> {
     let path = crate::store::data_dir().join(format!("conductor-mcp-{conductor_id}.json"));
     std::fs::write(&path, mcp_config_json(mcp_port, conductor_id)).ok()?;
     Some(path.to_string_lossy().to_string())
+}
+
+/// Write the fleet MCP config into a worker's own working directory, for an adapter that
+/// reads MCP servers from a file there instead of taking Claude's `--mcp-config` flag
+/// (`ProviderAdapter::project_mcp_config_rel_path` -- Command Code's `.mcp.json`).
+///
+/// Same JSON as `write_mcp_config`, same session-scoped URL; only the delivery differs.
+/// `dir` is the worker's WORKTREE, never the shared project root -- the URL identifies one
+/// session, so a file in a directory two sessions share would hand the second one the
+/// first one's identity. The call site enforces that; this function only writes where it
+/// is told.
+pub fn write_project_mcp_config(dir: &str, rel_path: &str, mcp_port: u16, session_id: &str) {
+    let path = std::path::Path::new(dir).join(rel_path);
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    if let Err(e) = std::fs::write(&path, mcp_config_json(mcp_port, session_id)) {
+        // Never fatal: the worker still runs, it just reports through the terminal
+        // instead of `fleet_result`. Degrading is the documented Tier-2 behaviour.
+        eprintln!("conduit: failed to write {rel_path} for {session_id}: {e}");
+    }
 }
 
 /// Write a session's system-prompt text (the `CONDUCTOR_PERSONA` or `WORKER_BRIEF_SUFFIX`)

@@ -11,6 +11,10 @@ import {
   writeStoredPref,
 } from "./themes";
 import type { TerminalRenderer } from "./terminalRenderer";
+import { initialProjectSelection, type OpenBehavior } from "./startup";
+import { insertTabAt, repairLayout } from "./layout";
+import { accountKey, type UsageMetric } from "./usageRows";
+import type { Chain, RoutesView, TaskKind, TaskKindInfo } from "./routing";
 import { AGENTS, type AgentId, type AgentInfo, DEFAULT_AGENT, type McpServer } from "./agents";
 import { check, type Update } from "@tauri-apps/plugin-updater";
 import { relaunch } from "@tauri-apps/plugin-process";
@@ -163,6 +167,12 @@ export interface WsTab {
    *  Pinned by editing, double-click, or an explicit (non-preview) open. Mirrored in
    *  the Rust WsTab struct so it survives layout persistence. */
   preview?: boolean;
+  /** Set ONLY on a foreign session tab -- one borrowed from another project into this
+   *  layout's panes, so two projects can sit side by side. Absent means "this layout's own
+   *  project", which is what every tab written before this feature is. Read it through
+   *  `tabProjectId` (layout.ts), never directly, so the absent case stays handled in one
+   *  place. Mirrored in the Rust WsTab struct or persistence would drop it. */
+  projectId?: string;
 }
 
 /** A recently closed file tab, restorable via ⌘⇧T (explicit closes only). */
@@ -339,18 +349,60 @@ export interface LocalUsage {
   sessions: number;
   messages: number;
 }
+/** One parsed transcript item (mirrors `transcript.rs`'s `parse_line` output).
+ *
+ *  A loose union on purpose: the Rust side emits `kind` plus whatever that kind needs, and
+ *  the renderer switches on `kind`. An unknown kind renders as nothing rather than breaking
+ *  the pane, so adding an item type on the Rust side stays additive. */
+export interface TranscriptItem {
+  kind: "bubble" | "event" | "usage" | string;
+  role?: "user" | "assistant";
+  text?: string;
+  event?: string;
+  label?: string;
+  mono?: string | null;
+  model?: string | null;
+  inputTokens?: number;
+  outputTokens?: number;
+  cacheReadTokens?: number;
+  cacheCreationTokens?: number;
+}
+
 /** resetsAt is an RFC3339 timestamp string (the endpoint's format). */
 export interface PlanWindow { label: string; pctUsed: number; resetsAt: string | null; }
 export interface ClaudeUsage {
   local: LocalUsage;
   plan: PlanWindow[] | null;
-  planSource: "live" | "unavailable" | "disconnected";
+  /** "stale" = this poll failed (the endpoint rate-limits) and a recent good read stood in
+   *  for it. The numbers are real, just not from this minute -- see claude_usage.rs. */
+  planSource: "live" | "stale" | "unavailable" | "disconnected";
 }
 /** One account's Claude usage (mirrors Rust ClaudeAccountUsage). accountId null = env default. */
 export interface ClaudeAccountUsage {
   accountId: string | null;
   label: string;
   usage: ClaudeUsage;
+}
+
+// ---- Command Code usage — mirrors Rust commandcode_usage.rs (camelCase) ----
+
+/** Command Code's two rolling windows, read from its own `/alpha/billing/credits`.
+ *  Reuses `PlanWindow` because the shape is identical, which is what lets the meter
+ *  component render Claude and Command Code without knowing which it is looking at. */
+export interface CommandCodeUsage {
+  windows: PlanWindow[] | null;
+  /** "disconnected" = not signed in (run `cmd login`); "unavailable" = signed in but the
+   *  call failed or answered a shape we do not know. Different states because different
+   *  things fix them. */
+  source: "live" | "unavailable" | "disconnected";
+  /** Whether this account is currently capped. `false` is the normal state — extra
+   *  pay-as-you-go credits bypass the windows entirely. */
+  limited: boolean;
+}
+export interface CommandCodeAccountUsage {
+  accountId: string | null;
+  label: string;
+  usage: CommandCodeUsage;
 }
 
 // ---- Antigravity (agy) usage — mirror Rust agy_usage.rs (camelCase) ----
@@ -381,10 +433,9 @@ export interface AgyUsage {
   agentState: string | null;
   updatedAt: number; // epoch ms
 }
-/** The map key for an account snapshot (env default has no id). */
-export function accountKey(accountId: string | null | undefined): string {
-  return accountId ?? "default";
-}
+// The map key for an account snapshot lives in `usageRows.ts` (which must stay importable
+// without this file) and is re-exported here so its many callers did not have to move.
+export { accountKey };
 
 // ---- Usage bar view preferences (user-configurable; persisted in localStorage) ----
 export interface UsagePrefs {
@@ -394,6 +445,9 @@ export interface UsagePrefs {
   windows: { fiveHour: boolean; weekly: boolean; weeklyOpus: boolean; context: boolean };
   /** Row order: most-critical (least remaining) first, or alphabetical by label. */
   sort: "critical" | "label";
+  /** Which direction every meter reads. Defaults to "used" -- what each agent's own usage
+   *  view shows -- and applies to the number AND the bar together; see `meterView`. */
+  metric: UsageMetric;
   /** A window at or below this % remaining is "low" (drives the hot color + lowAlertOnly). */
   lowThresholdPct: number;
 }
@@ -401,6 +455,7 @@ export const DEFAULT_USAGE_PREFS: UsagePrefs = {
   layout: "selected",
   windows: { fiveHour: true, weekly: true, weeklyOpus: true, context: true },
   sort: "critical",
+  metric: "used",
   lowThresholdPct: 20,
 };
 const USAGE_PREFS_KEY = "conduit.usagePrefs";
@@ -516,6 +571,44 @@ function readWorkspaceRoot(): string {
   }
 }
 
+// Which project (if any) a launch lands on, and the memory that feeds it. The decision
+// itself lives in `./startup` so it can be tested; these only persist its inputs. The
+// last-project memory is written by a subscription at the bottom of this file rather than
+// by each caller, so a new place that changes the selection cannot forget to record it.
+const OPEN_BEHAVIOR_KEY = "conduit.openBehavior";
+const LAST_PROJECT_KEY = "conduit.lastProject";
+function readOpenBehavior(): OpenBehavior {
+  try {
+    return localStorage.getItem(OPEN_BEHAVIOR_KEY) === "none" ? "none" : "last";
+  } catch {
+    return "last";
+  }
+}
+function writeOpenBehavior(v: OpenBehavior): void {
+  try {
+    localStorage.setItem(OPEN_BEHAVIOR_KEY, v);
+  } catch {
+    /* quota — non-fatal */
+  }
+}
+function readLastProject(): string | null {
+  try {
+    return localStorage.getItem(LAST_PROJECT_KEY);
+  } catch {
+    return null;
+  }
+}
+function writeLastProject(id: string | null): void {
+  try {
+    // Closing the last project forgets it, rather than leaving the next launch pointed at
+    // a project the user deliberately closed.
+    if (id) localStorage.setItem(LAST_PROJECT_KEY, id);
+    else localStorage.removeItem(LAST_PROJECT_KEY);
+  } catch {
+    /* quota — non-fatal */
+  }
+}
+
 // Terminal renderer: which xterm rasterizer new panes ask for, and which live panes swap to
 // when it changes. Default WebGL (VS Code's default) — one GPU draw per viewport instead of
 // per-glyph CPU blits. Canvas stays selectable because WebGL costs one live GPU context per
@@ -571,6 +664,25 @@ function writeCanvases(v: Record<string, CanvasState>): void {
 //
 // Turning it off never kills anything already running; it only stops new spawns from
 // using tmux. Same persisted-pref pattern as everything else here.
+// Rich session view: render the agent's conversation as UI instead of reading it out of the
+// terminal. Off by default -- it is an alternative way to look at a session, not a
+// replacement for the terminal, and defaulting it on would hide the thing people came for.
+const RICH_VIEW_KEY = "conduit.richSessionView";
+function readRichView(): boolean {
+  try {
+    return localStorage.getItem(RICH_VIEW_KEY) === "1";
+  } catch {
+    return false;
+  }
+}
+function writeRichView(v: boolean): void {
+  try {
+    localStorage.setItem(RICH_VIEW_KEY, v ? "1" : "0");
+  } catch {
+    /* quota - non-fatal */
+  }
+}
+
 const PERSIST_SESSIONS_KEY = "conduit.persistSessions";
 function readPersistSessions(): boolean {
   try {
@@ -699,31 +811,62 @@ function defaultLayout(project: Project): ProjectLayout {
   };
 }
 
-/** Repair a layout against the current project: drop dead session tabs, prune empty
- *  groups (and their weights, index-aligned), fix dangling active ids, normalize weights. */
-function validateLayout(layout: ProjectLayout, project: Project | undefined): ProjectLayout {
-  const valid = new Set(project?.sessions.map((s) => s.id) ?? []);
-  const groups: EditorGroup[] = [];
-  const weights: number[] = [];
-  layout.groups.forEach((g, i) => {
-    const tabs = g.tabs.filter((t) => t.kind === "file" || valid.has(t.ref));
-    if (tabs.length === 0) return; // prune empty group + its weight
-    const activeRef = tabs.some((t) => t.ref === g.activeRef)
-      ? g.activeRef
-      : tabs[tabs.length - 1].ref;
-    groups.push({ id: g.id, tabs, activeRef });
-    weights.push(layout.weights?.[i] ?? 1);
-  });
-  if (groups.length === 0) {
-    const gid = uid();
-    return { groups: [{ id: gid, tabs: [], activeRef: null }], activeGroupId: gid, weights: [1] };
+/** `repairLayout` (layout.ts) with a fresh group id supplied. Kept as a wrapper so the
+ *  repair itself stays pure and testable -- it is the function that decides whether a
+ *  borrowed cross-project tab survives, and it runs on EVERY layout write. */
+function validateLayout(
+  layout: ProjectLayout,
+  project: Project | undefined,
+  all: Project[],
+): ProjectLayout {
+  return repairLayout(layout, project?.id ?? null, all, uid());
+}
+
+/**
+ * Repair EVERY layout after a session or project disappears.
+ *
+ * Before cross-project panes, a session could only be referenced by its own project's
+ * layout, so removing it needed one repair. A borrowed session lives in someone else's
+ * panes, so a targeted repair would leave a tab pointing at a session that no longer
+ * exists. Only changed layouts are persisted -- this runs on every removal.
+ */
+function revalidateAllLayouts(
+  layouts: Record<string, ProjectLayout>,
+  maximized: Record<string, string>,
+  projects: Project[],
+): { layouts: Record<string, ProjectLayout>; maximized: Record<string, string> } {
+  const nextLayouts = { ...layouts };
+  const nextMax = { ...maximized };
+  for (const p of projects) {
+    const cur = layouts[p.id];
+    if (!cur) continue;
+    const next = validateLayout(cur, p, projects);
+    if (sameLayout(cur, next)) continue;
+    persistLayout(p.id, next);
+    nextLayouts[p.id] = next;
+    // Same maximize hygiene as applyLayout: a pruned or deactivated maximized group must
+    // drop the flag, or the next ⇧⌘M is a silent no-op on a stale id.
+    const maxId = maximized[p.id];
+    if (maxId && (next.activeGroupId !== maxId || !next.groups.some((g) => g.id === maxId))) {
+      delete nextMax[p.id];
+    }
   }
-  const sum = weights.reduce((a, b) => a + b, 0) || 1;
-  const norm = weights.map((w) => w / sum);
-  const activeGroupId = groups.some((g) => g.id === layout.activeGroupId)
-    ? layout.activeGroupId
-    : groups[0].id;
-  return { groups, activeGroupId, weights: norm };
+  return { layouts: nextLayouts, maximized: nextMax };
+}
+
+/** Cheap structural equality, only enough to skip a no-op persist. */
+function sameLayout(a: ProjectLayout, b: ProjectLayout): boolean {
+  return (
+    a.activeGroupId === b.activeGroupId &&
+    a.groups.length === b.groups.length &&
+    a.groups.every(
+      (g, i) =>
+        g.id === b.groups[i].id &&
+        g.activeRef === b.groups[i].activeRef &&
+        g.tabs.length === b.groups[i].tabs.length &&
+        g.tabs.every((t, j) => t.ref === b.groups[i].tabs[j].ref),
+    )
+  );
 }
 
 // ---- layout reducers (mutate a cloned layout in place) ----
@@ -908,6 +1051,35 @@ interface AppState {
   claudeStatus: ClaudeStatus | null;
   /** Claude usage per account (env default + every registered Claude account). */
   claudeUsage: ClaudeAccountUsage[];
+  /** Routing tables for the open project (defaults + global + project overlays), or null
+   *  before the first load. See routing.ts / routing.rs. */
+  /** Persisted. Whether the rich session view is offered at all. Per-session visibility is
+   *  `richViewOpen` -- this is the master switch that makes the toggle exist. */
+  richSessionView: boolean;
+  setRichSessionView: (v: boolean) => void;
+  /** Which sessions currently SHOW the rich view. Not persisted: it is a way of looking at
+   *  a session right now, and coming back to a terminal you cannot see would be a bad
+   *  surprise after a restart. */
+  richViewOpen: Record<string, boolean>;
+  toggleRichView: (sessionId: string) => void;
+  /** Parsed transcript items per session, newest last. Absent = never loaded. */
+  transcripts: Record<string, TranscriptItem[]>;
+  loadTranscript: (sessionId: string) => Promise<void>;
+  routes: RoutesView | null;
+  /** Task kinds and their copy, supplied by Rust so the labels live in one language. */
+  taskKinds: TaskKindInfo[];
+  /** Load both, for a project (or global-only when projectId is omitted). */
+  loadRouting: (projectId?: string | null) => Promise<void>;
+  /** Pin or clear one task kind's chain. `chain: null` CLEARS the override so the scope
+   *  inherits again -- which is NOT the same as pinning an empty chain. */
+  setAgentRoute: (
+    projectId: string | null,
+    task: TaskKind,
+    chain: Chain | null,
+  ) => Promise<void>;
+  /** Per-account Command Code usage. Empty when Command Code is not set up at all —
+   *  the usage bar then simply has no Command Code rows, rather than showing zeros. */
+  commandCodeUsage: CommandCodeAccountUsage[];
   /** Per-account "plan usage connected" flags, keyed by accountKey. */
   planConnected: Record<string, boolean>;
   /** agy usage per account, keyed by accountKey (accountId ?? "default"). */
@@ -968,6 +1140,11 @@ interface AppState {
    *  resumes all its sessions instead of waiting for a click. */
   restoreSessionsOnOpen: boolean;
   setRestoreSessionsOnOpen: (v: boolean) => void;
+  /** Persisted. Whether a launch reopens the project you were last on ("last", the
+   *  default) or opens nothing ("none"). Neither one reopens the topmost project as
+   *  such — see `initialProjectSelection`. */
+  openBehavior: OpenBehavior;
+  setOpenBehavior: (v: OpenBehavior) => void;
   /** Persisted. Which xterm rasterizer panes ask for; live panes swap on change. Intent
    *  only — a pane that can't hold a WebGL context degrades without rewriting this. */
   terminalRenderer: TerminalRenderer;
@@ -981,6 +1158,11 @@ interface AppState {
    *  `null` = not yet probed, which the Settings toggle renders as neither on nor
    *  disabled rather than flashing a false "unavailable". */
   tmuxAvailable: boolean | null;
+  /** Whether this PLATFORM can persist sessions at all — false on Windows, where tmux does
+   *  not exist and no install would change that. Distinct from `tmuxAvailable`, which is a
+   *  fixable gap: only one of the two earns an install hint, and telling a Windows user to
+   *  install tmux with their package manager is advice that cannot be taken. */
+  tmuxSupported: boolean | null;
   /** How to install tmux on this host, when tmux is missing and there is a sensible
    *  suggestion. Resolved by the backend — the right command depends on the platform and
    *  on what is already installed. */
@@ -1103,7 +1285,7 @@ interface AppState {
 
   addProject: (path: string) => Promise<void>;
   removeProject: (id: string) => Promise<void>;
-  addSession: (projectId: string, opts?: { name?: string; useWorktree?: boolean; agent?: AgentId; role?: SessionRole; account?: string | null }) => Promise<void>;
+  addSession: (projectId: string, opts?: { name?: string; useWorktree?: boolean; agent?: AgentId; role?: SessionRole; account?: string | null; model?: string | null }) => Promise<void>;
   renameSession: (projectId: string, sessionId: string, name: string) => Promise<void>;
   /** Rename a project's display label only (not the directory on disk). */
   renameProject: (projectId: string, name: string) => Promise<void>;
@@ -1136,6 +1318,15 @@ interface AppState {
     toIndex: number,
   ) => void;
   splitTab: (projectId: string, ref: string, targetGroupId: string, side: "left" | "right") => void;
+  /** Drop a session (possibly from ANOTHER project) onto a pane: into the group, or split
+   *  beside it. The one entry point for the sidebar-to-pane drag. */
+  dropSessionIntoPane: (
+    hostProjectId: string,
+    groupId: string,
+    zone: "left" | "center" | "right",
+    ownerProjectId: string,
+    sessionId: string,
+  ) => void;
   setGroupWeights: (projectId: string, weights: number[]) => void;
   /** Open a file tab. `preview: true` opens transiently: it replaces the active
    *  group's current preview tab; a later explicit open (or an edit) pins it.
@@ -1254,6 +1445,7 @@ interface AppState {
 
   refreshClaudeStatus: () => Promise<void>;
   refreshClaudeUsage: () => Promise<void>;
+  refreshCommandCodeUsage: () => Promise<void>;
   /** Connect plan usage for one account (null = env default). */
   connectPlanUsage: (accountId: string | null) => Promise<boolean>;
   /** One click: enable agy push-tracking + connect plan usage for every Claude account. */
@@ -1299,7 +1491,7 @@ export const useStore = create<AppState>((set, get) => {
       const cur = s.layouts[projectId];
       if (!cur) return {};
       const project = s.projects.find((p) => p.id === projectId);
-      const next = validateLayout(fn(clone(cur)), project);
+      const next = validateLayout(fn(clone(cur)), project, s.projects);
       persistLayout(projectId, next);
       const patch: Partial<AppState> = { layouts: { ...s.layouts, [projectId]: next } };
       // Maximize follows the active group: any layout action that activates a
@@ -1339,6 +1531,12 @@ export const useStore = create<AppState>((set, get) => {
     pendingReveal: null,
     claudeStatus: null,
     claudeUsage: [],
+    richSessionView: readRichView(),
+    richViewOpen: {},
+    transcripts: {},
+    routes: null,
+    taskKinds: [],
+    commandCodeUsage: [],
     planConnected: readPlanConnected(),
     updateInfo: null,
     updatePhase: "idle",
@@ -1357,9 +1555,11 @@ export const useStore = create<AppState>((set, get) => {
     workspaceRoot: readWorkspaceRoot(),
     editingRootChatId: null,
     restoreSessionsOnOpen: readRestoreSessionsOnOpen(),
+    openBehavior: readOpenBehavior(),
     terminalRenderer: readTerminalRenderer(),
     persistSessions: readPersistSessions(),
     tmuxAvailable: null,
+    tmuxSupported: null,
     tmuxInstall: null,
     tmuxNoticeDismissed: readTmuxNoticeDismissed(),
     sessionContext: {},
@@ -1438,7 +1638,7 @@ export const useStore = create<AppState>((set, get) => {
       ]);
       const layouts: Record<string, ProjectLayout> = {};
       for (const p of projects) {
-        layouts[p.id] = validateLayout(p.layout ?? defaultLayout(p), p);
+        layouts[p.id] = validateLayout(p.layout ?? defaultLayout(p), p, projects);
       }
       // Balance close/removeProject release: acquire a model ref for every restored file tab.
       for (const p of projects) {
@@ -1452,17 +1652,22 @@ export const useStore = create<AppState>((set, get) => {
       // one-shot as panes create models. Never blocks load.
       const hotExit: Record<string, string> = {};
       for (const e of hotExitEntries) hotExit[e.path] = e.content;
-      // Reopen in the profile you left: the initial selection is the first project the
-      // sidebar will actually show under the persisted active profile.
+      // Reopen in the profile you left: the launch pick is constrained to the projects the
+      // sidebar will actually show under the persisted active profile. A remembered project
+      // the profile hides resolves to null (open nothing) — it must not leak on screen.
       const knownProfiles = new Set(profiles.map((p) => p.id));
-      const firstVisible = projects.find((p) =>
-        inProfile(p.profileId, activeProfileId, knownProfiles),
-      );
+      const visibleIds = projects
+        .filter((p) => inProfile(p.profileId, activeProfileId, knownProfiles))
+        .map((p) => p.id);
       set({
         projects,
         homeDir: home,
         layouts,
-        selectedProjectId: firstVisible?.id ?? null,
+        selectedProjectId: initialProjectSelection(
+          visibleIds,
+          get().openBehavior,
+          readLastProject(),
+        ),
         accounts,
         defaultAccounts,
         privateMode: trust.privateMode,
@@ -1805,11 +2010,13 @@ export const useStore = create<AppState>((set, get) => {
         registry.disposeIfUnreferenced(ref);
       }
       set((st) => {
-        const layouts = { ...st.layouts };
-        delete layouts[id];
-        const maximized = { ...st.maximized };
-        delete maximized[id];
+        const remaining = { ...st.layouts };
+        delete remaining[id];
+        const maxima = { ...st.maximized };
+        delete maxima[id];
         const projects = st.projects.filter((p) => p.id !== id);
+        // Other projects may have borrowed this one's sessions into their panes.
+        const { layouts, maximized } = revalidateAllLayouts(remaining, maxima, projects);
         const selectedProjectId =
           st.selectedProjectId === id ? projects[0]?.id ?? null : st.selectedProjectId;
         return { projects, layouts, selectedProjectId, maximized };
@@ -1822,7 +2029,10 @@ export const useStore = create<AppState>((set, get) => {
       const useWorktree = opts?.useWorktree ?? false;
       const agent = opts?.agent ?? DEFAULT_AGENT;
       const role = opts?.role ?? "worker";
-      const session = await invoke<Session | null>("add_session", { projectId, name, useWorktree, agent, role });
+      // `model` is the concrete id a route picked. It rides the CREATE call rather than a
+      // follow-up so the session is never persisted, however briefly, without it.
+      const model = opts?.model ?? null;
+      const session = await invoke<Session | null>("add_session", { projectId, name, useWorktree, agent, role, model });
       if (!session) return;
       // Pin an explicitly-chosen account (blank = inherit the project/global default).
       if (opts?.account) {
@@ -1947,22 +2157,9 @@ export const useStore = create<AppState>((set, get) => {
             ? { ...p, sessions: p.sessions.filter((x) => x.id !== sessionId) }
             : p,
         );
-        let layouts = s.layouts;
-        let maximized = s.maximized;
-        const cur = s.layouts[projectId];
-        if (cur) {
-          const next = validateLayout(cur, projects.find((p) => p.id === projectId));
-          persistLayout(projectId, next);
-          layouts = { ...s.layouts, [projectId]: next };
-          // Same maximize hygiene as applyLayout (this path commits a layout
-          // directly): a pruned/deactivated maximized group must drop the flag or
-          // the next ⇧⌘M is a silent no-op on a stale id.
-          const maxId = s.maximized[projectId];
-          if (maxId && (next.activeGroupId !== maxId || !next.groups.some((g) => g.id === maxId))) {
-            maximized = { ...s.maximized };
-            delete maximized[projectId];
-          }
-        }
+        // Every layout, not just this project's: a removed session may have been borrowed
+        // into ANOTHER project's panes, and that tab would otherwise point at nothing.
+        const { layouts, maximized } = revalidateAllLayouts(s.layouts, s.maximized, projects);
         return { projects, live, sessionContext, layouts, maximized };
       });
     },
@@ -2096,6 +2293,20 @@ export const useStore = create<AppState>((set, get) => {
     // is a CSS layer OVER the (still-mounted) terminal workspace, so any action that
     // means "show me the workspace" must drop the layer or the chat hijacks the click.
     selectSession: (projectId, sessionId) => {
+      // If this session is already borrowed into the layout on screen, focus it THERE
+      // rather than jumping to its own project. Switching would tear down the side-by-side
+      // view the user built, to show them the session they can already see.
+      const host = get().selectedProjectId;
+      if (host && host !== projectId) {
+        const hosted = get().layouts[host];
+        const g = hosted?.groups.find((x) => x.tabs.some((t) => t.ref === sessionId));
+        if (g) {
+          set({ selectedRootChatId: null });
+          get().setActiveTab(host, g.id, sessionId);
+          clearNeeds(sessionId);
+          return;
+        }
+      }
       set({ selectedProjectId: projectId, selectedRootChatId: null });
       applyLayout(projectId, (l) => rOpenTab(l, { kind: "session", ref: sessionId }));
       clearNeeds(sessionId);
@@ -2642,6 +2853,26 @@ export const useStore = create<AppState>((set, get) => {
         return next;
       }),
 
+    dropSessionIntoPane: (hostProjectId, groupId, zone, ownerProjectId, sessionId) => {
+      // `projectId` set only for a genuinely foreign session, so a same-project drop still
+      // writes the plain, absent-is-local tab shape every existing layout uses.
+      const tab: WsTab = {
+        kind: "session",
+        ref: sessionId,
+        ...(ownerProjectId === hostProjectId ? {} : { projectId: ownerProjectId }),
+      };
+      set({ selectedProjectId: hostProjectId });
+      applyLayout(hostProjectId, (l) => {
+        const group = l.groups.find((g) => g.id === groupId);
+        // Land it in the target group first either way: splitting reads the tab out of a
+        // group, so an external drop has to exist somewhere before it can be split off.
+        const placed = insertTabAt(l, groupId, group?.tabs.length ?? 0, tab);
+        if (zone === "center") return placed;
+        return reduceSplitTab(placed, sessionId, groupId, zone, uid());
+      });
+      clearNeeds(sessionId);
+    },
+
     setGroupWeights: (projectId, weights) =>
       applyLayout(projectId, (l) => {
         l.weights = weights;
@@ -2654,6 +2885,11 @@ export const useStore = create<AppState>((set, get) => {
     setRestoreSessionsOnOpen: (v) => {
       writeRestoreSessionsOnOpen(v);
       set({ restoreSessionsOnOpen: v });
+    },
+
+    setOpenBehavior: (v) => {
+      writeOpenBehavior(v);
+      set({ openBehavior: v });
     },
 
     setTerminalRenderer: (v) => {
@@ -2701,17 +2937,26 @@ export const useStore = create<AppState>((set, get) => {
     probeTmux: async () => {
       try {
         const info = await invoke<{
+          supported: boolean;
           available: boolean;
           path: string | null;
           install: TmuxInstallHint | null;
         }>("tmux_available");
-        set({ tmuxAvailable: info.available, tmuxInstall: info.install ?? null });
+        set({
+          tmuxAvailable: info.available,
+          // `?? true` keeps an older backend (which has no `supported` field) reading as
+          // the Unix it must have been, rather than silently claiming Windows.
+          tmuxSupported: info.supported ?? true,
+          tmuxInstall: info.install ?? null,
+        });
         // Push the persisted preference down at boot. Without this the backend would
         // start on its own default and disagree with the toggle the user is looking at.
         void invoke("set_session_persistence", {
           enabled: info.available && get().persistSessions,
         }).catch(() => {});
       } catch {
+        // A failed probe says nothing about the platform, so `tmuxSupported` stays as it
+        // was rather than claiming an unsupported OS and hiding the install hint.
         set({ tmuxAvailable: false });
       }
     },
@@ -2791,6 +3036,53 @@ export const useStore = create<AppState>((set, get) => {
       try {
         const u = await invoke<ClaudeAccountUsage[]>("fetch_claude_usage");
         set({ claudeUsage: u });
+      } catch { /* fail-open: keep last-known */ }
+    },
+
+    setRichSessionView: (v) => {
+      writeRichView(v);
+      // Turning the feature off closes every open pane too, so the terminals are visible
+      // again immediately rather than after a click per session.
+      set(v ? { richSessionView: true } : { richSessionView: false, richViewOpen: {} });
+    },
+
+    toggleRichView: (sessionId) =>
+      set((s) => ({
+        richViewOpen: { ...s.richViewOpen, [sessionId]: !s.richViewOpen[sessionId] },
+      })),
+
+    loadTranscript: async (sessionId) => {
+      try {
+        const items = await invoke<TranscriptItem[]>("session_transcript", { sessionId });
+        set((s) => ({ transcripts: { ...s.transcripts, [sessionId]: items } }));
+      } catch { /* fail-open: keep last-known */ }
+    },
+
+    loadRouting: async (projectId) => {
+      try {
+        const [routes, taskKinds] = await Promise.all([
+          invoke<RoutesView>("agent_routes", { projectId: projectId ?? null }),
+          invoke<TaskKindInfo[]>("task_kinds"),
+        ]);
+        set({ routes, taskKinds });
+      } catch { /* fail-open: the dialog falls back to picking an agent by hand */ }
+    },
+
+    setAgentRoute: async (projectId, task, chain) => {
+      try {
+        const routes = await invoke<RoutesView>("set_agent_route", {
+          projectId,
+          task,
+          chain,
+        });
+        set({ routes });
+      } catch { /* fail-open: keep last-known */ }
+    },
+
+    refreshCommandCodeUsage: async () => {
+      try {
+        const u = await invoke<CommandCodeAccountUsage[]>("fetch_command_code_usage");
+        set({ commandCodeUsage: u });
       } catch { /* fail-open: keep last-known */ }
     },
 
@@ -3011,6 +3303,16 @@ export const useStore = create<AppState>((set, get) => {
     setContinuityFeed: (projectId, feed) =>
       set((s) => ({ continuityFeed: { ...s.continuityFeed, [projectId]: feed } })),
   };
+});
+
+// Record which project is open so the next launch can come back to it. A subscription
+// rather than a line in each action: `selectProject` is only one of seven places that move
+// the selection (opening a session, opening to the side, adding a project or a session,
+// reopening a closed tab, removing a project), and a memory that six of them forget to
+// update is worse than none. Cheap — one localStorage write per project switch, and only when
+// the id actually changes.
+useStore.subscribe((s, prev) => {
+  if (s.selectedProjectId !== prev.selectedProjectId) writeLastProject(s.selectedProjectId);
 });
 
 // ---- selectors / helpers ----

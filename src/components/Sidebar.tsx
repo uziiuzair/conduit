@@ -26,7 +26,8 @@ import {
   ChevronRightIcon,
   GitBranchIcon,
 } from "./Icons";
-import { AgentGlyph } from "./AgentGlyph";
+import { AgentGlyph, glyphStateFor } from "./AgentGlyph";
+import { projectAccent, SESSION_DRAG_MIME } from "../layout";
 import { Dropdown } from "./Dropdown";
 import { ThemeSwitcher } from "./ThemeSwitcher";
 import { ClaudeStatusPill } from "./ClaudeStatusPill";
@@ -326,6 +327,11 @@ function ProjectBlock({ project }: { project: Project }) {
     >
       <div
         className="project-head"
+        // The project's stable accent, as a variable rather than a colour on the icon:
+        // the same colour the tab badge and the pane edge use when panes hold more than
+        // one project. Without this anchor in the sidebar, a coloured badge over there
+        // would be a colour with no referent.
+        style={{ ["--proj-accent" as string]: projectAccent(project.id) }}
         role="button"
         aria-expanded={!collapsed}
         title={collapsed ? "Expand project" : "Collapse project"}
@@ -389,6 +395,7 @@ function ProjectBlock({ project }: { project: Project }) {
       </div>
       {showNew && (
         <NewSessionDialog
+          projectId={project.id}
           projectPath={project.path}
           hasConductor={project.sessions.some((s) => s.role === "conductor")}
           onCancel={() => setShowNew(false)}
@@ -415,6 +422,9 @@ function SessionRow({
   const status = useStore((s) => liveState(s.live, session.id).status);
   const activity = useStore((s) => liveState(s.live, session.id).activity);
   const compacting = useStore((s) => liveState(s.live, session.id).compacting);
+  // A `live` entry exists only once the session has emitted a hook, so its presence IS
+  // "this session has started this run" — see glyphStateFor.
+  const loaded = useStore((s) => s.live[session.id] !== undefined);
   const editing = useStore((s) => s.editingSessionId === session.id);
   const selectSession = useStore((s) => s.selectSession);
   const openMenu = useStore((s) => s.openMenu);
@@ -454,6 +464,14 @@ function SessionRow({
         e.stopPropagation();
         sidebarDrag = { kind: "session", projectId: project.id, sessionId: session.id };
         e.dataTransfer.setData("text/plain", session.id);
+        // A second, custom type so the WORKSPACE can recognise this drag. Only
+        // `dataTransfer.types` is readable during dragover, so advertising the type is the
+        // only way the pane overlay can know to appear before the drop happens. Carries the
+        // owning project too: dropping into another project's panes borrows the session.
+        e.dataTransfer.setData(
+          SESSION_DRAG_MIME,
+          JSON.stringify({ sessionId: session.id, projectId: project.id }),
+        );
         e.dataTransfer.effectAllowed = "move";
         setDragSelf(true);
       }}
@@ -509,7 +527,11 @@ function SessionRow({
         });
       }}
     >
-      <AgentGlyph id={session.agent} size={14} />
+      <AgentGlyph
+        id={session.agent}
+        size={14}
+        state={glyphStateFor(status, loaded, compacting)}
+      />
       {session.role === "conductor" && (
         <span className="conductor-chip" title="Conductor — orchestrates this project">
           ◆
@@ -771,6 +793,8 @@ function SessionContextMenu() {
   const removeSession = useStore((s) => s.removeSession);
   const removeProject = useStore((s) => s.removeProject);
   const openToSide = useStore((s) => s.openToSide);
+  // The project whose panes are on screen -- the HOST for a cross-project split.
+  const selectedProjectId = useStore((s) => s.selectedProjectId);
   const setSessionTrust = useStore((s) => s.setSessionTrust);
   const privateMode = useStore((s) => s.privateMode);
   const accounts = useStore((s) => s.accounts);
@@ -948,6 +972,27 @@ function SessionContextMenu() {
       >
         Open to the Side
       </button>
+      {/* Cross-project split. Only offered when the session is NOT in the project you are
+          looking at -- otherwise it is the button above with extra words. `projectId` on
+          the tab is what makes the pane borrow this session rather than move it: the
+          session stays in its own project, its own sidebar row and its own layout. */}
+      {selectedProjectId && selectedProjectId !== menu.projectId && (
+        <button
+          onClick={() => {
+            openToSide(selectedProjectId, {
+              kind: "session",
+              ref: sid,
+              projectId: menu.projectId,
+            });
+            closeMenu();
+          }}
+          title={`Show this session beside ${
+            projects.find((p) => p.id === selectedProjectId)?.name ?? "the open project"
+          }'s sessions`}
+        >
+          Open beside {projects.find((p) => p.id === selectedProjectId)?.name ?? "current project"}
+        </button>
+      )}
       <button onClick={toggleSensitive} title="Silo this session: no other agent can read it">
         {siloed ? "Clear sensitive mark" : "Mark sensitive (silo)"}
       </button>

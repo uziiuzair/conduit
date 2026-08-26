@@ -304,7 +304,9 @@ button {
 }
 
 .project-head .folder-icon {
-  color: var(--accent);
+  /* Falls back to the theme accent so the rule still works anywhere --proj-accent is
+     not set (and so a stylesheet-only read of this file is not a puzzle). */
+  color: var(--proj-accent, var(--accent));
   flex: none;
 }
 
@@ -1534,6 +1536,37 @@ button {
   }
 }
 
+/* ---- Cross-project panes ----
+   A layout can borrow sessions from other projects (WsTab.projectId). Once it does, EVERY
+   tab is badged with its project, so no tab's origin is implied by the absence of a badge.
+   The colour comes from `projectAccent` (layout.ts), derived from the project id -- one
+   function, so the tab bar and the pane edge can never disagree about a project's colour. */
+.tab.badged {
+  /* Widened only when badged: the badge needs the room and an unbadged strip must look
+     exactly as it did before this feature existed. */
+  max-width: 260px;
+  box-shadow: inset 3px 0 0 var(--proj-accent, transparent);
+  padding-left: 12px;
+}
+.tab-project {
+  flex-shrink: 0;
+  max-width: 88px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 10px;
+  letter-spacing: 0.02em;
+  padding: 1px 5px;
+  border-radius: 4px;
+  color: var(--proj-accent, var(--text-mid));
+  background: color-mix(in srgb, var(--proj-accent, var(--text-mid)) 16%, transparent);
+}
+/* A pane whose tabs are all one project wears that colour along its top edge, so panes are
+   told apart before a single tab is read. */
+.tab-strip.has-project-accent {
+  border-top: 2px solid var(--proj-accent);
+}
+
 .tab:hover {
   color: var(--text-bright);
 }
@@ -2695,6 +2728,9 @@ button {
 
 /* ---- Antigravity (agy) usage panel — violet, to distinguish it from Claude ---- */
 :root { --agy: #a78bfa; }
+/* Command Code's meter tint. Matches the amber monogram in `agents.ts` so the glyph and
+   the bar in the same row read as one agent. */
+:root { --commandcode: #e0b341; }
 .agy-usage-panel {
   padding: 8px 12px 10px;
   border-top: 1px solid color-mix(in srgb, var(--agy) 22%, transparent);
@@ -2818,6 +2854,9 @@ button {
 .usage-row.antigravity .usage-meter-fill {
   --meter-base: var(--agy);
 }
+.usage-row.commandcode .usage-meter-fill {
+  --meter-base: var(--commandcode);
+}
 /* Scaled, not width-sized: the fill animates on the compositor instead of relaying out the
    row on every tick. `width: 100%` plus a left origin means scaleX(f) IS the fraction. */
 .usage-meter-fill {
@@ -2879,10 +2918,6 @@ button {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-/* Tint the agent glyph in summary rows so Claude vs agy reads at a glance. */
-.usage-summary-item.antigravity {
-  color: var(--agy);
-}
 .usage-summary {
   display: flex;
   flex-direction: column;
@@ -2911,6 +2946,19 @@ button {
 }
 .usage-dot.hot {
   background: var(--red);
+}
+/* Not read: hollow, so it cannot be mistaken for the green of an account we checked and
+   found healthy. That conflation is what made a rate-limited poll look like good news. */
+.usage-dot.unknown {
+  background: transparent;
+  box-shadow: inset 0 0 0 1.5px var(--text-dim);
+}
+.usage-stale-chip {
+  font-size: 9px;
+  padding: 1px 5px;
+  border-radius: 999px;
+  color: var(--text-dim);
+  background: color-mix(in srgb, var(--text-mid) 14%, transparent);
 }
 /* Settings → Usage display */
 .usage-prefs {
@@ -2952,15 +3000,91 @@ button {
 .claude-warning-icon { flex-shrink: 0; }
 .claude-warning-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
+/* ---- Agent glyph: brand mark + session-state ring ----
+   The mark is drawn in the agent's tint on a faint plate of the same tint, so one colour
+   (--glyph-tint, set inline from AgentMeta.tint) drives the whole glyph. The ring around
+   it carries SESSION STATE, which is why the plate stays constant: if both the fill and
+   the ring moved, neither would read. */
 .agent-glyph {
+  position: relative;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  border-radius: 4px;
-  color: #161310;
+  /* Proportional so the squircle looks the same at 12px (usage bar) and 20px (pickers). */
+  border-radius: 30%;
+  /* The brand tints are fixed constants (agents.ts), but Conduit ships a LIGHT theme too,
+     and #e0b341 on cream is about 1.5:1 -- unreadable. Bending each tint toward the
+     theme's own text colour brightens it on the dark themes and darkens it on the light
+     one from a single expression, clearing the 3:1 that WCAG 1.4.11 asks of a graphic.
+     The tint stays recognisable because it is still 72% of the mix. */
+  --glyph-ink: color-mix(in srgb, var(--glyph-tint, var(--accent)) 72%, var(--text-bright));
+  color: var(--glyph-ink);
+  background: color-mix(in srgb, var(--glyph-tint, var(--accent)) 15%, transparent);
   font-weight: 700;
   flex-shrink: 0;
   line-height: 1;
+}
+.agent-glyph svg {
+  width: 66%;
+  height: 66%;
+  display: block;
+}
+/* Idle = spawned and quiet: present, not shouting. */
+.agent-glyph.st-idle {
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--glyph-ink) 45%, transparent);
+}
+.agent-glyph.st-running {
+  box-shadow: 0 0 0 1px var(--glyph-ink);
+}
+/* needsInput and done leave the agent's tint deliberately: they are about YOU, not about
+   which agent it is, so they use the same amber/green the rest of the app reserves for
+   "blocked" and "finished". */
+.agent-glyph.st-needs {
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--amber) 85%, transparent);
+}
+.agent-glyph.st-done {
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--green) 70%, transparent);
+}
+/* The "working" halo: a ring that breathes outward and fades. Only `opacity` and
+   `transform` animate, so it stays on the compositor and costs nothing per frame even
+   with a dozen sessions running. 2.4s is slow enough to read as ambient rather than as an
+   alert, and far below the 3Hz flash threshold in WCAG 2.3.1. */
+.agent-glyph.st-running::after,
+.agent-glyph.st-needs::after {
+  content: "";
+  position: absolute;
+  inset: -2px;
+  border-radius: 30%;
+  border: 1px solid currentColor;
+  animation: glyph-pulse 2.4s ease-in-out infinite;
+  pointer-events: none;
+}
+.agent-glyph.st-needs::after {
+  color: var(--amber);
+  /* Faster and tighter: this one IS an alert, and should catch the eye the working ring
+     deliberately does not. */
+  animation-duration: 1.6s;
+}
+@keyframes glyph-pulse {
+  0%,
+  100% {
+    opacity: 0.6;
+    transform: scale(0.92);
+  }
+  60% {
+    opacity: 0;
+    transform: scale(1.28);
+  }
+}
+/* Motion is the ONLY thing removed — the ring itself still distinguishes the states, so a
+   reduced-motion user loses nothing but the animation. */
+@media (prefers-reduced-motion: reduce) {
+  .agent-glyph.st-running::after,
+  .agent-glyph.st-needs::after {
+    animation: none;
+    opacity: 0.55;
+    transform: none;
+  }
 }
 
 .dialog-label { font-size: 10px; letter-spacing: 0.06em; text-transform: uppercase; color: var(--text-dim); margin: 2px 0 6px; }
@@ -3180,6 +3304,384 @@ button {
 }
 
 /* ---- OpenCode local-provider panel (Settings -> Local models) ---- */
+/* The new-session routing explanation. Always present when a task is chosen, so it reads
+   as the router narrating itself rather than as an error that only appears when something
+   went wrong. */
+.route-note {
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--text-mid);
+  padding: 4px 0 0 0;
+}
+.route-note.warn {
+  color: var(--text-bright);
+}
+
+/* ---- Rich session view ----
+   Absolutely positioned INSIDE .term-host, on top of .term-inner. The xterm underneath
+   stays mounted and attached -- covering it is the whole point, because unmounting one
+   kills its PTY. */
+.chat-pane {
+  position: absolute;
+  inset: 0;
+  z-index: 3;
+  display: flex;
+  flex-direction: column;
+  background: var(--panel-bg, #16161e);
+  overflow: hidden;
+}
+.chat-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--border);
+  flex: 0 0 auto;
+}
+.chat-title {
+  font-size: 11px;
+  color: var(--text-mid);
+}
+.chat-close {
+  margin-left: auto;
+  font-size: 11px;
+  padding: 2px 9px;
+  border-radius: 5px;
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--text-mid);
+  cursor: pointer;
+}
+.chat-close:hover {
+  color: var(--text-bright);
+  border-color: var(--accent);
+}
+.chat-scroll {
+  flex: 1 1 auto;
+  overflow-y: auto;
+  padding: 10px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.chat-empty {
+  font-size: 11px;
+  color: var(--text-mid);
+  line-height: 1.6;
+  margin: 0;
+}
+.chat-bubble {
+  max-width: 88%;
+  border-radius: 8px;
+  padding: 7px 10px;
+  font-size: 12px;
+  line-height: 1.55;
+}
+.chat-bubble.user {
+  align-self: flex-end;
+  background: color-mix(in srgb, var(--accent) 16%, transparent);
+  border: 1px solid color-mix(in srgb, var(--accent) 30%, transparent);
+  color: var(--text-bright);
+}
+.chat-bubble.assistant {
+  align-self: flex-start;
+  background: color-mix(in srgb, var(--text-mid) 8%, transparent);
+  border: 1px solid var(--border);
+  color: var(--text-bright);
+}
+/* A typed prompt is literal text, so it wraps but is never re-interpreted as markdown. */
+.chat-user-text {
+  margin: 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-family: inherit;
+  font-size: inherit;
+}
+.chat-md > *:first-child { margin-top: 0; }
+.chat-md > *:last-child { margin-bottom: 0; }
+.chat-md pre {
+  background: color-mix(in srgb, var(--text-mid) 12%, transparent);
+  border-radius: 6px;
+  padding: 8px 10px;
+  overflow-x: auto;
+  font-family: var(--mono-font);
+  font-size: 11px;
+}
+.chat-md code {
+  font-family: var(--mono-font);
+  font-size: 11px;
+}
+.chat-md :not(pre) > code {
+  background: color-mix(in srgb, var(--text-mid) 14%, transparent);
+  border-radius: 4px;
+  padding: 1px 4px;
+}
+.chat-md table { border-collapse: collapse; display: block; overflow-x: auto; }
+.chat-md th, .chat-md td { border: 1px solid var(--border); padding: 3px 7px; }
+/* Tool calls are one dense line each: they are context for the prose around them, not
+   the thing being read. */
+.chat-event {
+  display: flex;
+  align-items: baseline;
+  gap: 7px;
+  font-size: 10px;
+  color: var(--text-mid);
+  padding-left: 2px;
+  min-width: 0;
+}
+.chat-event-kind {
+  flex: 0 0 auto;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  padding: 0 4px;
+}
+.chat-event-kind.edit { color: var(--green, #6cc29a); }
+.chat-event-kind.bash { color: var(--commandcode, #e0b341); }
+.chat-event-kind.subagent { color: var(--agy, #a78bfa); }
+.chat-event-arg {
+  font-family: var(--mono-font);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.chat-input-row {
+  flex: 0 0 auto;
+  display: flex;
+  gap: 6px;
+  padding: 8px 10px;
+  border-top: 1px solid var(--border);
+}
+.chat-input {
+  flex: 1;
+  resize: none;
+  font-family: inherit;
+  font-size: 12px;
+  padding: 6px 8px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: var(--bg, #1a1b26);
+  color: var(--text-bright);
+  outline: none;
+}
+.chat-input:focus {
+  border-color: var(--accent);
+}
+.chat-send {
+  align-self: flex-end;
+  font-size: 11px;
+  padding: 6px 12px;
+  border-radius: 6px;
+  border: 1px solid var(--accent);
+  background: color-mix(in srgb, var(--accent) 18%, transparent);
+  color: var(--text-bright);
+  cursor: pointer;
+}
+.chat-send:disabled {
+  opacity: 0.4;
+  cursor: default;
+  border-color: var(--border);
+  background: transparent;
+}
+
+/* ---- Settings > Routing ---- */
+.routing-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.route-scope {
+  display: inline-flex;
+  gap: 6px;
+}
+.route-scope-btn {
+  font-size: 11px;
+  padding: 4px 10px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--text-mid);
+  cursor: pointer;
+}
+.route-scope-btn.on {
+  border-color: var(--accent);
+  color: var(--text-bright);
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+}
+.route-scope-btn:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+.route-task {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  border-top: 1px solid var(--border);
+  padding-top: 10px;
+}
+.route-task-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.route-task-name {
+  font-size: 12px;
+  color: var(--text-bright);
+}
+/* Where the chain in force came from. Deliberately always shown, not only when
+   overridden: "which of the three scopes am I looking at" is the question this page
+   exists to answer. */
+.route-origin {
+  font-size: 10px;
+  color: var(--text-mid);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 1px 7px;
+}
+.route-hint {
+  font-size: 10px;
+  color: var(--text-mid);
+  margin: 0;
+}
+.route-target {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.route-rank {
+  font-size: 10px;
+  color: var(--text-mid);
+  width: 26px;
+  flex: 0 0 26px;
+}
+.route-select {
+  font-size: 11px;
+  padding: 4px 6px;
+  border-radius: 5px;
+  border: 1px solid var(--border);
+  background: var(--panel-bg);
+  color: var(--text-bright);
+  outline: none;
+  min-width: 0;
+  flex: 1;
+}
+.route-select:focus {
+  border-color: var(--accent);
+}
+.route-nomodel {
+  font-size: 10px;
+  color: var(--text-mid);
+  flex: 1;
+  font-style: italic;
+}
+.route-btn {
+  font-size: 11px;
+  padding: 2px 7px;
+  border-radius: 5px;
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--text-mid);
+  cursor: pointer;
+}
+.route-btn:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+.route-btn:not(:disabled):hover {
+  color: var(--text-bright);
+  border-color: var(--accent);
+}
+.route-reset {
+  margin-left: auto;
+}
+.route-add {
+  align-self: flex-start;
+  font-size: 11px;
+  color: var(--text-mid);
+  background: transparent;
+  border: 1px dashed var(--border);
+  border-radius: 5px;
+  padding: 3px 9px;
+  cursor: pointer;
+}
+.route-add:hover {
+  color: var(--text-bright);
+  border-color: var(--accent);
+}
+
+/* ---- Settings > Command Code ---- */
+.cc-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.cc-section {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  border-top: 1px solid var(--border);
+  padding-top: 12px;
+}
+.cc-field {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.cc-field > span {
+  font-size: 11px;
+  color: var(--text-mid);
+}
+.cc-select {
+  width: 100%;
+  font-size: 12px;
+  padding: 6px 8px;
+  border-radius: 5px;
+  border: 1px solid var(--border);
+  background: var(--panel-bg);
+  color: var(--text-bright);
+  font-family: var(--mono-font);
+  outline: none;
+}
+.cc-select:focus {
+  border-color: var(--accent);
+}
+.cc-select:disabled {
+  opacity: 0.55;
+}
+.cc-select option,
+.cc-select optgroup {
+  background: var(--panel-bg);
+  color: var(--text-bright);
+}
+.cc-toggle {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  font-size: 11px;
+  color: var(--text-mid);
+  line-height: 1.5;
+}
+.cc-toggle input {
+  margin-top: 2px;
+  flex: 0 0 auto;
+}
+.cc-note {
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--text-mid);
+}
+.cc-note code {
+  font-family: var(--mono-font);
+  font-size: 10px;
+}
+/* Errors and unreachable-CLI notices: same shape as a note, tinted so it reads as a
+   problem without becoming an alarm — none of these states break the panel. */
+.cc-warn {
+  color: var(--text-bright);
+  border-left: 2px solid var(--commandcode);
+  padding-left: 8px;
+}
 .oc-section {
   display: flex;
   flex-direction: column;

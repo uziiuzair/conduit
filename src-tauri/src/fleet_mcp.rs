@@ -68,11 +68,12 @@ pub fn tool_specs() -> Vec<Value> {
                 "properties": {
                     "task": { "type": "string" },
                     "name": { "type": "string" },
-                    "agent": { "type": "string", "enum": ["claude", "codex", "gemini", "opencode", "antigravity"], "description": "Defaults to \"claude\". See fleet_capabilities for what each agent is good at and its tier (structured-result support)." },
+                    "agent": { "type": "string", "enum": ["claude", "codex", "gemini", "opencode", "antigravity", "commandcode"], "description": "Defaults to \"claude\". See fleet_capabilities for what each agent is good at and its tier (structured-result support)." },
                     "objective": { "type": "string", "description": "The mandate, if different/more precise than `task`." },
                     "outputShape": { "type": "string", "description": "What a done result should look like." },
                     "boundaries": { "type": "string", "description": "What the worker must NOT do." },
                     "modelTier": { "type": "string", "enum": ["cheap", "standard", "hard"], "description": "Cost/capability tier, mapped to a concrete model per agent. Omit to use the agent's own default." },
+                    "model": { "type": "string", "description": "Pin one exact model id, in the agent's own spelling (\"opus\" for claude; \"claude-opus-5\", \"google/gemini-3.7-flash\", \"deepseek/deepseek-v4-flash\" for commandcode). Wins over modelTier, which is only a coarse per-agent lookup. Acted on by the agents whose CLI takes --model (claude, commandcode); recorded but inert for the rest." },
                     "effort": { "type": "string", "enum": ["low", "medium", "high", "xhigh", "max"], "description": "Claude only today. xhigh is Opus-only -- silently clamped to high on any other modelTier." },
                     "accountId": { "type": "string", "description": "Pin this worker to a specific registered Claude account (Settings -> Accounts), instead of the global default." }
                 },
@@ -421,6 +422,19 @@ fn dispatch_tool(name: &str, args: &Value, ctx: &Ctx) -> Result<String, String> 
                     },
                 );
             }
+            // An EXACT model id, separate from the coarse tier above and applied through
+            // its own setter: `SessionTrust` carries no `model` field (it is pinned at
+            // creation by the routing picker, not part of a trust update), so folding it
+            // into `set_session_trust` would have meant widening that struct for one
+            // caller. `lib.rs` already gives a concrete model precedence over a tier, so
+            // passing both is well-defined rather than ambiguous. This is what lets a
+            // Conductor reach any one of Command Code's ~58 models instead of only the
+            // three a tier can name.
+            let model = args.get("model").and_then(|v| v.as_str());
+            if let Some(m) = model {
+                ctx.store
+                    .set_session_model(&session.id, Some(m.to_string()));
+            }
             if let Some(account_id) = args.get("accountId").and_then(|v| v.as_str()) {
                 ctx.store
                     .set_session_account(&session.id, Some(account_id.to_string()));
@@ -431,6 +445,7 @@ fn dispatch_tool(name: &str, args: &Value, ctx: &Ctx) -> Result<String, String> 
             // structured mandate, not nothing.
             let mission = json!({
                 "agent": agent_str,
+                "model": model,
                 "modelTier": model_tier,
                 "effort": effort,
                 "objective": args.get("objective").and_then(|v| v.as_str()).unwrap_or(task),
@@ -957,6 +972,41 @@ mod tests {
         assert_eq!(v["result"]["ok"], true);
     }
 
+    /// The schema is the Conductor's ONLY list of legal agent values, so an adapter
+    /// missing from it is an adapter the fleet cannot address no matter how complete the
+    /// rest of its wiring is -- `commandcode` was absent for exactly that reason. Derived
+    /// from the adapter registry so adding a seventh agent fails here rather than silently
+    /// shipping unreachable.
+    #[test]
+    fn fleet_spawn_offers_every_registered_agent_and_an_exact_model_pin() {
+        let spawn = tool_specs()
+            .into_iter()
+            .find(|t| t["name"] == "fleet_spawn")
+            .expect("fleet_spawn is registered");
+        let props = &spawn["inputSchema"]["properties"];
+        let offered: Vec<&str> = props["agent"]["enum"]
+            .as_array()
+            .expect("agent is an enum")
+            .iter()
+            .map(|v| v.as_str().unwrap())
+            .collect();
+        for a in crate::agent::all_adapters() {
+            let id = serde_json::to_value(a.id()).unwrap();
+            let id = id.as_str().unwrap().to_string();
+            assert!(
+                offered.contains(&id.as_str()),
+                "{id} is a registered adapter but fleet_spawn will not accept it"
+            );
+        }
+        // Both levers must be advertised: the coarse tier AND the exact id. Command Code
+        // reaches ~58 models, which three tiers cannot name.
+        assert!(props["modelTier"].is_object());
+        assert!(
+            props["model"]["type"] == "string",
+            "no way to pin one specific model: {props}"
+        );
+    }
+
     #[test]
     fn tools_list_includes_fleet_and_task_tools() {
         let names: Vec<String> = tool_specs()
@@ -1281,7 +1331,7 @@ mod tests {
         let oversized = "x".repeat(513);
         assert!(oversized.len() > crate::board::NOTE_MAX_BYTES);
         let ok_sized = "x".repeat(512);
-        assert!(!(ok_sized.len() > crate::board::NOTE_MAX_BYTES));
+        assert!(ok_sized.len() <= crate::board::NOTE_MAX_BYTES);
     }
 
     #[test]
@@ -1513,9 +1563,9 @@ mod tests {
     }
 
     #[test]
-    fn fleet_capabilities_returns_all_five_tier_labeled_cards() {
+    fn fleet_capabilities_returns_a_tier_labeled_card_per_agent() {
         let cards = crate::agent::capability_cards();
-        assert_eq!(cards.len(), 5);
+        assert_eq!(cards.len(), crate::agent::all_adapters().len());
         assert!(cards.iter().all(|c| c["tier"].is_number()));
     }
 
