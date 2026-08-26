@@ -24,7 +24,6 @@ export function RootChatView() {
 
   return (
     <div className={`root-chat ${home ? "home" : "thread"}`}>
-      <div className="hq-glow" aria-hidden />
       <div className="hq-grid" aria-hidden />
       {home ? <HqHome chatId={chatId} /> : <HqThread chatId={chatId} title={chat.title} items={shown} running={running} />}
     </div>

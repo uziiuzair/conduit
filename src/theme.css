@@ -4502,8 +4502,6 @@ button {
   --hq-rose-soft: rgba(215, 163, 182, 0.2);
   --hq-rose-line: rgba(215, 163, 182, 0.34);
   --hq-grid-line: rgba(255, 255, 255, 0.04);
-  --hq-glow-rose: rgba(215, 163, 182, 0.17);
-  --hq-glow-sage: rgba(169, 194, 168, 0.13);
 
   position: relative; overflow: hidden;
   display: flex; flex-direction: column; flex: 1; min-width: 0; height: 100%;
@@ -4517,17 +4515,9 @@ button {
   --hq-rose-soft: rgba(140, 70, 83, 0.12);
   --hq-rose-line: rgba(140, 70, 83, 0.3);
   --hq-grid-line: rgba(0, 0, 0, 0.05);
-  --hq-glow-rose: rgba(140, 70, 83, 0.1);
-  --hq-glow-sage: rgba(99, 115, 95, 0.08);
 }
 
-/* Texture: radial glows under a masked 60px grid (arlo's vault backdrop). */
-.hq-glow {
-  position: absolute; inset: 0; pointer-events: none;
-  background:
-    radial-gradient(1400px 800px at 18% -5%, var(--hq-glow-rose), transparent 60%),
-    radial-gradient(1100px 750px at 92% 105%, var(--hq-glow-sage), transparent 65%);
-}
+/* Texture: a masked 60px grid (arlo's vault backdrop, sans glow). */
 .hq-grid {
   position: absolute; inset: 0; pointer-events: none;
   background-image:
