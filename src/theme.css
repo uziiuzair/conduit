@@ -4543,8 +4543,7 @@ button {
 .root-chat-send:disabled { opacity: 0.4; }
 
 /* HQ sidebar section + workspace-root setting */
-.section-label.hq-label { display: flex; align-items: center; justify-content: space-between; }
-.hq-add { display: inline-flex; align-items: center; }
+.hq-list { margin-bottom: 6px; }
 .root-chat-row .name { flex: 1; }
 .root-chat-running { color: var(--accent); flex: none; }
 .workspace-root-field { flex-direction: column; align-items: stretch; gap: 8px; }

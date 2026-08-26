@@ -156,22 +156,18 @@ export function Sidebar() {
       <div className="drag-region" data-tauri-drag-region />
       {showClaudeAmbient && <ClaudeStatusWarning />}
       <div className="sidebar-scroll">
-        <div className="section-label hq-label">
-          HQ
-          <button
-            className="menu-btn hq-add"
-            title="New chat"
-            onClick={(e) => {
-              e.stopPropagation();
-              void addRootChat();
-            }}
-          >
-            <PlusIcon size={11} />
-          </button>
+        <div className="section-label">HQ</div>
+        <div className="hq-list">
+          {rootChats.map((c) => (
+            <RootChatRow key={c.id} chat={c} />
+          ))}
+          <div className="session-row-slot">
+            <button className="new-session" onClick={() => void addRootChat()}>
+              <PlusIcon size={12} />
+              <span>New chat</span>
+            </button>
+          </div>
         </div>
-        {rootChats.map((c) => (
-          <RootChatRow key={c.id} chat={c} />
-        ))}
         <div className="section-label">Projects</div>
         {projects.map((p) => (
           <ProjectBlock key={p.id} project={p} />
