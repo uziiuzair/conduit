@@ -14,6 +14,7 @@ import {
   type AgyUsage,
 } from "./store";
 import { type AgentId } from "./agents";
+import { type ChatItem } from "./rootChat";
 import { holdsOffWorking, notificationStatus } from "./statusRules";
 import { type ThemePref } from "./themes";
 import { useClaudeAmbient } from "./hooks/useClaudeAmbient";
@@ -21,6 +22,7 @@ import { useSessionDirs } from "./hooks/useSessionDirs";
 import { useSessionContext } from "./hooks/useSessionContext";
 import { getLastFocusedEditor } from "./monaco/setup";
 import { Sidebar } from "./components/Sidebar";
+import { RootChatView } from "./components/RootChatView";
 import { WorkspaceCenter } from "./components/WorkspaceCenter";
 import { RightColumn } from "./components/RightColumn";
 import { Onboarding } from "./components/Onboarding";
@@ -69,6 +71,7 @@ export default function App() {
   const telemetryOptOut = useStore((s) => s.telemetryOptOut);
   const sidebarCollapsed = useStore((s) => s.sidebarCollapsed);
   const rightCollapsed = useStore((s) => s.rightCollapsed);
+  const rootChatActive = useStore((s) => s.selectedRootChatId !== null);
   const showSettings = useStore((s) => s.showSettings);
   const settingsTab = useStore((s) => s.settingsTab);
   const setShowSettings = useStore((s) => s.setShowSettings);
@@ -248,6 +251,27 @@ export default function App() {
     });
     return () => {
       void unlisten.then((f) => f());
+    };
+  }, []);
+
+  // Root chat stream: items/done/error pushed by the per-message `claude -p` child.
+  useEffect(() => {
+    const unItem = listen<{ chatId: string; item: ChatItem }>("root-chat-item", ({ payload }) => {
+      useStore.getState().rootChatItemArrived(payload.chatId, payload.item);
+    });
+    const unDone = listen<{ chatId: string }>("root-chat-done", ({ payload }) => {
+      useStore.getState().rootChatDone(payload.chatId);
+    });
+    const unErr = listen<{ chatId: string; message: string }>(
+      "root-chat-error",
+      ({ payload }) => {
+        useStore.getState().rootChatFailed(payload.chatId, payload.message);
+      },
+    );
+    return () => {
+      void unItem.then((f) => f());
+      void unDone.then((f) => f());
+      void unErr.then((f) => f());
     };
   }, []);
 
@@ -587,12 +611,18 @@ export default function App() {
         className="detail"
         style={{ ["--right-w" as string]: `${rightWidth}px` }}
       >
-        <WorkspaceCenter
-          projects={projects}
-          projectId={selectedProjectId}
-          home={home}
-        />
-        {!rightCollapsed && (
+        {/* Root chat swap is CSS-only: the terminal workspace (and the keep-alive
+            shell in RightColumn below) stays mounted under display:none while the
+            chat layer shows — unmounting either would kill live PTYs. */}
+        <div style={rootChatActive ? { display: "none" } : { display: "contents" }}>
+          <WorkspaceCenter
+            projects={projects}
+            projectId={selectedProjectId}
+            home={home}
+          />
+        </div>
+        {rootChatActive && <RootChatView />}
+        {!rightCollapsed && !rootChatActive && (
           <div
             className={`resizer ${dragging ? "dragging" : ""}`}
             onMouseDown={startResize}
@@ -601,8 +631,14 @@ export default function App() {
         {/* RightColumn hosts a keep-alive shell TerminalView — never conditionally
             unmount it (kills the PTY). display:contents makes this wrapper
             layout-transparent when expanded, and display:none hides it (still
-            mounted) when collapsed. */}
-        <div style={rightCollapsed ? { display: "none" } : { display: "contents" }}>
+            mounted) when collapsed or while a root chat is showing. */}
+        <div
+          style={
+            rightCollapsed || rootChatActive
+              ? { display: "none" }
+              : { display: "contents" }
+          }
+        >
           <RightColumn projects={projects} projectId={selectedProjectId} />
         </div>
       </div>

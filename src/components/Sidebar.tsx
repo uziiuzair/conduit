@@ -15,6 +15,7 @@ import {
   type Project,
   type Session,
 } from "../store";
+import type { RootChat as RootChatMeta } from "../rootChat";
 import {
   FolderIcon,
   FolderPlusIcon,
@@ -130,6 +131,8 @@ export async function deleteSession(
 
 export function Sidebar() {
   const projects = useStore((s) => s.projects);
+  const rootChats = useStore((s) => s.rootChats);
+  const addRootChat = useStore((s) => s.addRootChat);
   const addProject = useStore((s) => s.addProject);
   const setShowSettings = useStore((s) => s.setShowSettings);
   const selectedAgent = useStore((s) => {
@@ -153,6 +156,18 @@ export function Sidebar() {
       <div className="drag-region" data-tauri-drag-region />
       {showClaudeAmbient && <ClaudeStatusWarning />}
       <div className="sidebar-scroll">
+        <div className="section-label">HQ</div>
+        <div className="hq-list">
+          {rootChats.map((c) => (
+            <RootChatRow key={c.id} chat={c} />
+          ))}
+          <div className="session-row-slot">
+            <button className="new-session" onClick={() => void addRootChat()}>
+              <PlusIcon size={12} />
+              <span>New chat</span>
+            </button>
+          </div>
+        </div>
         <div className="section-label">Projects</div>
         {projects.map((p) => (
           <ProjectBlock key={p.id} project={p} />
@@ -443,6 +458,85 @@ function SessionRow({
   );
 }
 
+/** One HQ chat row. Reuses the session-row look; no live PTY, so the only state
+ *  dot is "a turn is streaming right now". */
+function RootChatRow({ chat }: { chat: RootChatMeta }) {
+  const selected = useStore((s) => s.selectedRootChatId === chat.id);
+  const editing = useStore((s) => s.editingRootChatId === chat.id);
+  const running = useStore((s) => !!s.rootChatRunning[chat.id]);
+  const openRootChat = useStore((s) => s.openRootChat);
+  const openMenu = useStore((s) => s.openMenu);
+  const startRootChatRename = useStore((s) => s.startRootChatRename);
+
+  return (
+    <div className="session-row-slot">
+      <div
+        className={`session-row root-chat-row ${selected ? "selected" : ""}`}
+        onClick={() => {
+          if (!editing) void openRootChat(chat.id);
+        }}
+        onDoubleClick={(e) => {
+          e.stopPropagation();
+          startRootChatRename(chat.id);
+        }}
+        onContextMenu={(e) => {
+          e.preventDefault();
+          e.stopPropagation();
+          openMenu({
+            x: e.clientX,
+            y: e.clientY,
+            kind: "rootchat",
+            projectId: "",
+            rootChatId: chat.id,
+          });
+        }}
+      >
+        {running && <CircleFilledIcon size={8} className="root-chat-running" />}
+        {editing ? (
+          <RootChatRenameInput chatId={chat.id} initial={chat.title} />
+        ) : (
+          <span className="name">{chat.title}</span>
+        )}
+      </div>
+    </div>
+  );
+}
+
+/** Inline editor for an HQ chat title. Mirrors ProjectRenameInput. */
+function RootChatRenameInput({ chatId, initial }: { chatId: string; initial: string }) {
+  const renameRootChat = useStore((s) => s.renameRootChat);
+  const cancelRootChatRename = useStore((s) => s.cancelRootChatRename);
+  const done = useRef(false);
+
+  const commit = (value: string) => {
+    if (done.current) return;
+    done.current = true;
+    void renameRootChat(chatId, value);
+  };
+
+  return (
+    <input
+      className="session-rename-input"
+      defaultValue={initial}
+      autoFocus
+      spellCheck={false}
+      onClick={(e) => e.stopPropagation()}
+      onDoubleClick={(e) => e.stopPropagation()}
+      onFocus={(e) => e.currentTarget.select()}
+      onKeyDown={(e) => {
+        e.stopPropagation();
+        if (e.key === "Enter") commit(e.currentTarget.value);
+        else if (e.key === "Escape") {
+          e.preventDefault();
+          done.current = true;
+          cancelRootChatRename();
+        }
+      }}
+      onBlur={(e) => commit(e.currentTarget.value)}
+    />
+  );
+}
+
 function RenameInput({
   projectId,
   sessionId,
@@ -583,9 +677,12 @@ function StatusAccessory({
 function SessionContextMenu() {
   const menu = useStore((s) => s.menu);
   const projects = useStore((s) => s.projects);
+  const rootChats = useStore((s) => s.rootChats);
   const closeMenu = useStore((s) => s.closeMenu);
   const startRename = useStore((s) => s.startRename);
   const startProjectRename = useStore((s) => s.startProjectRename);
+  const startRootChatRename = useStore((s) => s.startRootChatRename);
+  const removeRootChat = useStore((s) => s.removeRootChat);
   const selectProject = useStore((s) => s.selectProject);
   const setCenterMode = useStore((s) => s.setCenterMode);
   const removeSession = useStore((s) => s.removeSession);
@@ -619,6 +716,35 @@ function SessionContextMenu() {
   }, [menu, closeMenu]);
 
   if (!menu) return null;
+
+  if (menu.kind === "rootchat") {
+    const chatId = menu.rootChatId;
+    const chat = rootChats.find((c) => c.id === chatId);
+    if (!chatId || !chat) return null;
+    return (
+      <div
+        className="context-menu"
+        style={{ left: menu.x, top: menu.y }}
+        onClick={(e) => e.stopPropagation()}
+      >
+        <button onClick={() => startRootChatRename(chatId)}>Rename</button>
+        <button
+          className="danger"
+          onClick={() => {
+            if (
+              confirm(
+                `Delete chat "${chat.title}"?\n\nIts conversation transcript stays on disk and remains searchable.`,
+              )
+            )
+              void removeRootChat(chatId);
+            closeMenu();
+          }}
+        >
+          Delete Chat
+        </button>
+      </div>
+    );
+  }
 
   if (menu.kind === "project") {
     const project = projects.find((p) => p.id === menu.projectId);
