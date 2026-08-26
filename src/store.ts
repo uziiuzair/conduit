@@ -2023,19 +2023,26 @@ export const useStore = create<AppState>((set, get) => {
         rootChatRunning: { ...st.rootChatRunning, [chatId]: false },
       })),
 
+    // Every workspace-focus action below also clears selectedRootChatId: the HQ chat
+    // is a CSS layer OVER the (still-mounted) terminal workspace, so any action that
+    // means "show me the workspace" must drop the layer or the chat hijacks the click.
     selectSession: (projectId, sessionId) => {
-      set({ selectedProjectId: projectId });
+      set({ selectedProjectId: projectId, selectedRootChatId: null });
       applyLayout(projectId, (l) => rOpenTab(l, { kind: "session", ref: sessionId }));
       clearNeeds(sessionId);
     },
 
-    openTab: (projectId, tab) => applyLayout(projectId, (l) => rOpenTab(l, tab)),
+    openTab: (projectId, tab) => {
+      set({ selectedRootChatId: null });
+      applyLayout(projectId, (l) => rOpenTab(l, tab));
+    },
     openToSide: (projectId, tab) => {
-      set({ selectedProjectId: projectId });
+      set({ selectedProjectId: projectId, selectedRootChatId: null });
       applyLayout(projectId, (l) => rOpenToSide(l, tab));
       if (tab.kind === "session") clearNeeds(tab.ref);
     },
     openFile: (projectId, path, opts) => {
+      set({ selectedRootChatId: null });
       const l = get().layouts[projectId];
       // Only a genuinely new tab bumps the ref (rOpenTab just re-activates an existing one).
       const already = !!l && l.groups.some((g) => g.tabs.some((t) => t.ref === path));

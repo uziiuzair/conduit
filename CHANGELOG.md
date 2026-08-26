@@ -3,6 +3,14 @@
 All notable changes to Conduit are documented here. This project uses
 [semantic versioning](https://semver.org/).
 
+## 0.23.1 — 2026-08-27
+
+- **Fixed — Leaving a root chat no longer traps you there.** Clicking a session in the
+  sidebar, a tab in the tab strip, or opening a file while a root chat was showing left
+  the chat covering the terminals. Any of those now returns you to the workspace.
+
+---
+
 ## 0.23.0 — 2026-08-26
 
 - **Added — Root chat.** A new HQ section above your projects hosts persistent,
