@@ -34,19 +34,20 @@ The user-facing shape:
 Each user message runs one short-lived headless CLI invocation:
 
 ```
-claude -p <message> \
-  --resume <claude_session_id>          # omitted on the first message of a chat
+claude -p \
+  --session-id <chat-id>                # first message; --resume <chat-id> after
   --output-format stream-json --verbose \
-  --allowedTools Read Glob Grep WebSearch WebFetch \
-  --disallowedTools Bash Write Edit NotebookEdit \
+  --allowedTools Read,Glob,Grep,WebSearch,WebFetch \
+  --disallowedTools Bash,Write,Edit,NotebookEdit \
   --strict-mcp-config \
-  --append-system-prompt <charter>
+  --append-system-prompt <charter>      # prompt itself rides stdin (titler pattern)
 ```
 
 with `cwd` = the workspace root. Rust parses the stream-json lines from stdout and emits
-Tauri events; the React chat view renders them. The first turn captures the CLI-chosen
-`session_id` from the `init` event and stores it on the chat record; every later turn
-resumes it.
+Tauri events; the React chat view renders them. **The chat id IS the Claude session id**,
+pinned with `--session-id` on the first turn exactly the way Conduit pins terminal
+sessions' ids — `pty::transcript_exists` decides fresh vs `--resume`; nothing is captured
+from the `init` event.
 
 Why this over the alternatives considered:
 
@@ -79,11 +80,10 @@ Properties that fall out of spawn-per-message:
 
   ```rust
   struct RootChat {
-      id: String,                        // Conduit-side id
+      id: String,                 // doubles as the pinned Claude session id
       title: String,
-      claude_session_id: Option<String>, // captured from init event on first turn
-      account_id: Option<String>,        // pinned at creation, immutable (see §6)
-      created_at: String, // same timestamp convention store.rs already uses
+      account_id: Option<String>, // pinned at creation, immutable (see §6)
+      created_at: u64,            // unix seconds
   }
   ```
 
@@ -99,13 +99,15 @@ Properties that fall out of spawn-per-message:
   - Account env resolved through the existing `ProviderAdapter::account_env` seam using
     the chat's pinned `account_id` (chat → global default → env), mirroring
     `session_account_config_dir` resolution.
-  - A reader thread parses stdout line-by-line into a `RootChatEvent` enum (pure
-    function, unit-tested) and emits Tauri events:
-    - `root-chat-delta` — assistant text chunks for streaming render
-    - `root-chat-tool` — tool_use name + input summary (for collapsed chips)
-    - `root-chat-done` — result record (cost, duration, turn count)
-    - `root-chat-error` — spawn failure, non-zero exit, resume failure
-  - On the first turn, writes the captured `session_id` back to the store.
+  - A reader thread classifies stdout line-by-line (`classify_line`, pure and
+    unit-tested) and emits Tauri events. Stream-json assistant lines share the exact
+    shape of transcript JSONL lines, so the classifier delegates to
+    `transcript::parse_line` — live stream and history replay produce ONE unified item
+    type:
+    - `root-chat-item` — a chat item (markdown bubble / tool-event chip); streaming
+      granularity is per assistant message (turn-level; token-level deltas deferred)
+    - `root-chat-done` — result record (cost, turn count, error flag)
+    - `root-chat-error` — spawn failure, non-zero exit, resume failure (stderr tail)
   - **One live child per chat.** A send while a child is running for that chat is
     rejected; the UI disables the composer instead of queueing.
 - `root_chat_stop(chat_id)` — kills the live child, if any.
@@ -158,12 +160,12 @@ across project switches. Never conditionally render the grid away.
 
 ### `RootChatView.tsx`
 
-- Message list: user bubbles plain, assistant bubbles markdown-rendered.
-  - New frontend deps: `react-markdown` + `remark-gfm`. (The lean-dependency rule in
-    CLAUDE.md governs the Rust side; this is a frontend rendering concern.)
-- Streaming: assistant text accumulates from `root-chat-delta` events.
-- Tool chips: `root-chat-tool` events render as collapsed one-line chips
-  ("Read src/store.ts") — visible proof of read-only work without transcript noise.
+- Message list: user bubbles plain, assistant bubbles markdown-rendered through the
+  existing sanitized `renderMarkdown` (`src/markdown.ts`, `marked` + whitelist
+  sanitizer) — zero new dependencies.
+- Streaming: items arrive per assistant message via `root-chat-item` events.
+- Tool chips: tool-use items render as collapsed one-line chips
+  ("read src/store.ts") — visible proof of read-only work without transcript noise.
 - Composer: textarea; Enter sends, Shift+Enter inserts newline; Stop button while a
   child is live; composer disabled (not queued) while running.
 - Empty state for a fresh chat.
@@ -194,9 +196,10 @@ lives in testable functions.
 
 ## 7. Edge cases
 
-- **Resume failure** (transcript deleted, CLI error): surface an error bubble with a
-  "start fresh thread" action — clears `claude_session_id`, keeps the chat record and
-  title; prior history is gone and the UI says so.
+- **Resume failure** (transcript deleted, CLI error): surfaced as an error chip in the
+  stream (from `root-chat-error`, with the stderr tail). Since the chat id IS the
+  session id, there is no field to clear — the recovery is starting a new chat, and the
+  error copy says so.
 - **Chat deletion:** removes the `RootChat` record only. The transcript on disk belongs
   to Claude's own store and stays (palette search over past conversations still finds
   it).
@@ -221,8 +224,8 @@ When the copilot increment happens:
 ## 9. Testing
 
 - **Rust (`#[cfg(test)]`, colocated):**
-  - stream-json line parser: line → `RootChatEvent` (init, delta, tool_use, result,
-    error, junk line tolerance).
+  - stream-json line classifier: line → `LineOut` (Items via `transcript::parse_line`,
+    Done on `result`, Nothing on init/junk/tool-result lines).
   - charter builder: roster injection, workspace-root fallback to home.
 - **Frontend (vitest, colocated):** root-chat store slice — message append, delta
   accumulation, send-while-running rejection.
