@@ -37,6 +37,7 @@ export function RootChatView() {
     <div className="root-chat">
       <div className="root-chat-header">{chat.title}</div>
       <div className="root-chat-scroll" ref={scrollRef}>
+        <div className="root-chat-column">
         {shown.length === 0 && (
           <div className="root-chat-empty">
             What are we thinking about today? Ideas, roadmaps, cross-project questions —
@@ -67,8 +68,10 @@ export function RootChatView() {
           ),
         )}
         {running && <div className="root-chat-chip working">thinking…</div>}
+        </div>
       </div>
       <div className="root-chat-composer">
+        <div className="root-chat-column composer-row">
         <textarea
           value={draft}
           placeholder="Message the root chat…"
@@ -93,6 +96,7 @@ export function RootChatView() {
             Send
           </button>
         )}
+        </div>
       </div>
     </div>
   );
