@@ -4495,12 +4495,16 @@ button {
    Tokens borrowed from @arlo/branding (packages/branding/src/styles.css); dark set
    on the two dark themes, arlo's light set under warm-light. */
 .root-chat {
-  --hq-bg: #0e0d12; --hq-surface: #1c1a23; --hq-surface-2: #221f2a;
-  --hq-line: #2a2734; --hq-line-2: #3a3545;
-  --hq-ink: #f2eae2; --hq-ink-2: #c7beb6; --hq-ink-3: #8e8689;
-  --hq-rose: #d7a3b6; --hq-rose-2: #b6849a;
-  --hq-rose-soft: rgba(215, 163, 182, 0.2);
-  --hq-rose-line: rgba(215, 163, 182, 0.34);
+  /* Vault-chat structure on Conduit's own skin: every value derives from the live
+     theme vars, so all three Conduit themes carry through. */
+  --hq-bg: var(--panel-bg); --hq-surface: var(--sidebar-bg); --hq-surface-2: var(--selection-bg);
+  --hq-line: var(--border); --hq-line-2: color-mix(in srgb, var(--border) 55%, var(--text-dim));
+  --hq-ink: var(--text-bright);
+  --hq-ink-2: color-mix(in srgb, var(--text-bright) 45%, var(--text-mid));
+  --hq-ink-3: var(--text-mid);
+  --hq-rose: var(--accent); --hq-rose-2: color-mix(in srgb, var(--accent) 85%, #000);
+  --hq-rose-soft: color-mix(in srgb, var(--accent) 18%, transparent);
+  --hq-rose-line: color-mix(in srgb, var(--accent) 34%, transparent);
   --hq-grid-line: rgba(255, 255, 255, 0.04);
 
   position: relative; overflow: hidden;
@@ -4508,12 +4512,6 @@ button {
   background: var(--hq-bg); color: var(--hq-ink);
 }
 [data-theme="warm-light"] .root-chat {
-  --hq-bg: #faf7f2; --hq-surface: #ffffff; --hq-surface-2: #f7f4ee;
-  --hq-line: #e4ded2; --hq-line-2: #d9d4c7;
-  --hq-ink: #2d2d2d; --hq-ink-2: #6b6b6b; --hq-ink-3: #8a8a8a;
-  --hq-rose: #8c4653; --hq-rose-2: #bf506e;
-  --hq-rose-soft: rgba(140, 70, 83, 0.12);
-  --hq-rose-line: rgba(140, 70, 83, 0.3);
   --hq-grid-line: rgba(0, 0, 0, 0.05);
 }
 
