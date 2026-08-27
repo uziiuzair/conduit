@@ -246,7 +246,7 @@ export function CommandPalette({ onClose }: { onClose: () => void }) {
   let lastSection: string | undefined;
 
   return (
-    <div className="modal-overlay palette-overlay" onMouseDown={onClose}>
+    <div className="dialog-overlay palette-overlay" onMouseDown={onClose}>
       <div className="palette" onMouseDown={(e) => e.stopPropagation()}>
         <input
           ref={inputRef}

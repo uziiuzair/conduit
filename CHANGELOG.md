@@ -13,6 +13,9 @@ All notable changes to Conduit are documented here. This project uses
 - **Changed — A palette that belongs to the UI.** Automatic project colours now come from
   a curated set of ten warm, muted tones picked for Conduit's theme, instead of the raw
   colour wheel that produced neon lime and violet next to everything warm.
+- **Fixed — ⌘K overlays the whole app.** The command palette rendered inline near the
+  right panel instead of floating over everything with a dimmed backdrop, the way Quick
+  Open and Search always did.
 
 ---
 
