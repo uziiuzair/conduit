@@ -683,6 +683,11 @@ fn remove_root_chat(id: String, store: State<Arc<Store>>) {
     store.remove_root_chat(&id);
 }
 
+#[tauri::command]
+fn set_project_color(id: String, color: Option<String>, store: State<Arc<Store>>) -> bool {
+    store.set_project_color(&id, color)
+}
+
 // ---- Profile commands ---------------------------------------------------------
 
 #[tauri::command]
@@ -1900,6 +1905,7 @@ pub fn run() {
             remove_profile,
             get_active_profile,
             set_active_profile,
+            set_project_color,
             root_chat::root_chat_send,
             root_chat::root_chat_stop,
             root_chat::root_chat_history,

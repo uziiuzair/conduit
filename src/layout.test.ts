@@ -6,6 +6,8 @@ import {
   moveTab,
   projectAccent,
   projectHue,
+  PROJECT_PALETTE,
+  resolveProjectColor,
   reopenTabAt,
   hasSessionDrag,
   insertTabAt,
@@ -160,14 +162,15 @@ describe("layoutProjectIds / isMixedLayout", () => {
 });
 
 describe("projectAccent", () => {
-  it("is stable for an id and lands on the hue circle", () => {
+  it("is stable for an id and lands inside the curated palette", () => {
     expect(projectHue("A")).toBe(projectHue("A"));
     for (const id of ["A", "B", "conduit", "9f3c1e", ""]) {
       const h = projectHue(id);
       expect(h).toBeGreaterThanOrEqual(0);
       expect(h).toBeLessThan(360);
+      expect(PROJECT_PALETTE.map((c) => c.value)).toContain(projectAccent(id));
     }
-    expect(projectAccent("A")).toMatch(/^hsl\(\d+ 58% 62%\)$/);
+    expect(projectAccent("A")).toBe(projectAccent("A"));
   });
   it("separates ids that differ by one character", () => {
     // Sequential uids are the norm, and neighbouring hues would defeat the whole point.
@@ -175,6 +178,19 @@ describe("projectAccent", () => {
     const b = projectHue("p2");
     const gap = Math.min(Math.abs(a - b), 360 - Math.abs(a - b));
     expect(gap).toBeGreaterThan(20);
+  });
+});
+
+describe("resolveProjectColor", () => {
+  it("an explicitly chosen colour wins even with auto off", () => {
+    expect(resolveProjectColor("A", "#c4906c", false)).toBe("#c4906c");
+    expect(resolveProjectColor("A", "#c4906c", true)).toBe("#c4906c");
+  });
+  it("falls back to the derived accent only while auto is on", () => {
+    expect(resolveProjectColor("A", null, true)).toBe(projectAccent("A"));
+    expect(resolveProjectColor("A", undefined, true)).toBe(projectAccent("A"));
+    expect(resolveProjectColor("A", null, false)).toBeNull();
+    expect(resolveProjectColor("A", "", false)).toBeNull();
   });
 });
 

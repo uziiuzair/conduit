@@ -3,6 +3,22 @@
 All notable changes to Conduit are documented here. This project uses
 [semantic versioning](https://semver.org/).
 
+## 0.32.0 — 2026-08-27
+
+- **Added — Project colours are yours to control.** Right-click a project and hover
+  "Select color" for a flyout of ten named colours (or "Automatic" to clear), and a new
+  toggle — Settings → General → "Color-code projects automatically" — turns the
+  automatic colouring off entirely for people who prefer a quiet sidebar. Colours you
+  pick stay either way, and each machine keeps its own preference.
+- **Changed — A palette that belongs to the UI.** Automatic project colours now come from
+  a curated set of ten warm, muted tones picked for Conduit's theme, instead of the raw
+  colour wheel that produced neon lime and violet next to everything warm.
+- **Fixed — ⌘K overlays the whole app.** The command palette rendered inline near the
+  right panel instead of floating over everything with a dimmed backdrop, the way Quick
+  Open and Search always did.
+
+---
+
 ## 0.31.0 — 2026-08-27
 
 - **Added — Profiles.** Named workspaces for the sidebar: a selector row below the

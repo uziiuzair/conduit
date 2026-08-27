@@ -297,6 +297,11 @@ pub struct Project {
     /// profile was removed) renders under Default. `#[serde(default)]` so legacy state loads.
     #[serde(default)]
     pub profile_id: Option<String>,
+    /// A user-CHOSEN accent colour (CSS colour string). `None` = not chosen, and the
+    /// frontend derives one (or none, with auto-colouring off). Only a colour the user
+    /// picked becomes state — the derived accent stays derived (see layout.ts).
+    #[serde(default)]
+    pub color: Option<String>,
 }
 
 /// A named sidebar workspace (profiles MVP, 2026-08-27): the sidebar shows only the
@@ -701,6 +706,7 @@ impl Store {
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
                 .clone(),
+            color: None,
         };
         let mut projects = self.projects.lock().unwrap_or_else(|e| e.into_inner());
         projects.push(project.clone());
@@ -901,6 +907,17 @@ impl Store {
                 p.profile_id = None;
             }
         }
+        self.save(&projects);
+        true
+    }
+
+    /// Set (Some) or clear (None) a project's user-chosen accent colour.
+    pub fn set_project_color(&self, project_id: &str, color: Option<String>) -> bool {
+        let mut projects = self.projects.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(project) = projects.iter_mut().find(|p| p.id == project_id) else {
+            return false;
+        };
+        project.color = color;
         self.save(&projects);
         true
     }
@@ -2526,6 +2543,30 @@ mod tests {
         assert_eq!(recs[0].consented_version, "1.0.0");
         // Persisted to disk and reloads.
         assert!(dir.join("state.json").exists());
+    }
+
+    #[test]
+    fn project_color_set_clear_and_persist() {
+        let dir = temp_dir("proj_color");
+        let store = Store::for_test(&dir);
+        let p = store.add_project("/repo".into());
+        assert!(p.color.is_none(), "a new project has no chosen colour");
+        assert!(store.set_project_color(&p.id, Some("#c4906c".into())));
+        assert_eq!(
+            store.list()[0].color.as_deref(),
+            Some("#c4906c"),
+            "chosen colour sticks"
+        );
+        // Round-trips through the persisted file, and a legacy project (no field) loads.
+        let data = fs::read(dir.join("state.json")).unwrap();
+        let back: PersistState = serde_json::from_slice(&data).unwrap();
+        assert_eq!(back.projects[0].color.as_deref(), Some("#c4906c"));
+        assert!(store.set_project_color(&p.id, None));
+        assert!(
+            store.list()[0].color.is_none(),
+            "clearing returns to derived"
+        );
+        assert!(!store.set_project_color("nope", None));
     }
 
     #[test]

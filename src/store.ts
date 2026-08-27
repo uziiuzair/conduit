@@ -231,6 +231,9 @@ export interface Project {
   defaultAccounts?: DefaultAccounts;
   /** Profile this project is visible under (sidebar filter); absent/null = Default. */
   profileId?: string | null;
+  /** User-CHOSEN accent colour; absent/null = derive (or no colour when auto is off).
+   *  Resolved everywhere through resolveProjectColor (layout.ts). */
+  color?: string | null;
 }
 
 // ---- Task board (Conductor board) ----
@@ -575,6 +578,25 @@ function readWorkspaceRoot(): string {
 // itself lives in `./startup` so it can be tested; these only persist its inputs. The
 // last-project memory is written by a subscription at the bottom of this file rather than
 // by each caller, so a new place that changes the selection cannot forget to record it.
+// Auto project colours: whether projects without a chosen colour derive one from their id
+// (the cross-project panes feature) or stay neutral. Default ON — the shipped behavior.
+// Per-machine preference, same persisted-pref pattern as the toggles around it.
+const AUTO_PROJECT_COLORS_KEY = "conduit.autoProjectColors";
+function readAutoProjectColors(): boolean {
+  try {
+    return localStorage.getItem(AUTO_PROJECT_COLORS_KEY) !== "0"; // default on (absent => true)
+  } catch {
+    return true;
+  }
+}
+function writeAutoProjectColors(v: boolean): void {
+  try {
+    localStorage.setItem(AUTO_PROJECT_COLORS_KEY, v ? "1" : "0");
+  } catch {
+    /* quota — non-fatal */
+  }
+}
+
 const OPEN_BEHAVIOR_KEY = "conduit.openBehavior";
 const LAST_PROJECT_KEY = "conduit.lastProject";
 function readOpenBehavior(): OpenBehavior {
@@ -1097,6 +1119,14 @@ interface AppState {
   sessionDirs: Record<string, string>;
   setSessionDir: (sessionId: string, dir: string) => void;
   pruneSessionDirs: (liveIds: Set<string>) => void;
+
+  // ---- project colours ----
+  /** Persisted (per-machine). When true (default), a project without a chosen colour
+   *  derives one from its id; when false, only chosen colours render. */
+  autoProjectColors: boolean;
+  setAutoProjectColors: (v: boolean) => void;
+  /** Set (string) or clear (null) a project's chosen accent colour. */
+  setProjectColor: (projectId: string, color: string | null) => Promise<void>;
 
   // ---- profiles: named sidebar workspaces (visibility filter, never isolation) ----
   profiles: Profile[];
@@ -1677,6 +1707,20 @@ export const useStore = create<AppState>((set, get) => {
         activeProfileId,
       });
       void get().loadRootChats();
+    },
+
+    // ---- project colours ----
+
+    autoProjectColors: readAutoProjectColors(),
+    setAutoProjectColors: (v) => {
+      writeAutoProjectColors(v);
+      set({ autoProjectColors: v });
+    },
+    setProjectColor: async (projectId, color) => {
+      await invoke("set_project_color", { id: projectId, color }).catch(() => {});
+      set((s) => ({
+        projects: s.projects.map((p) => (p.id === projectId ? { ...p, color } : p)),
+      }));
     },
 
     // ---- profiles ----

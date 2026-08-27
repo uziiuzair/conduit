@@ -542,6 +542,45 @@ button {
   content: "✓";
 }
 
+/* "Select color" flyout: a second menu panel that opens to the RIGHT of its parent row
+   (hover or click), like a native context submenu — but drawn by us. The colours are
+   the curated PROJECT_PALETTE (layout.ts) — the same family the derived accents come
+   from, so a chosen colour never clashes with an automatic one. */
+.context-flyout-item {
+  position: relative;
+}
+.context-flyout-item > button {
+  width: 100%;
+  display: flex;
+  align-items: center;
+}
+.context-flyout-caret {
+  margin-left: auto;
+  padding-left: 14px;
+  font-size: 9px;
+  color: var(--text-mid);
+}
+.context-flyout {
+  position: absolute;
+  left: calc(100% + 2px);
+  top: -5px;
+  min-width: 140px;
+  background: var(--sidebar-bg);
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  padding: 4px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
+  z-index: 1;
+}
+.context-color-dot {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  margin-right: 6px;
+  vertical-align: -1px;
+}
+
 .add-bar {
   border-top: 1px solid var(--border);
 }
