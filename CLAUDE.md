@@ -204,10 +204,15 @@ layout's panes.
   pointer over a strip. `insertTabAt` dedupes by ref because a session is ONE mounted
   terminal placed by the first group holding it -- a duplicate ref leaves the second pane
   permanently blank.
-- **`projectAccent` is derived from the project id, never stored.** A colour the user did
-  not choose must not become state to migrate, and it has to work for every project that
-  already exists the moment they update. The sidebar's folder icon uses the same function,
-  so a colour on a tab always has a referent.
+- **Project colours resolve through ONE function: `resolveProjectColor` (layout.ts).**
+  Precedence: a user-CHOSEN colour (`Project.color` in state.json, set via the project's
+  right-click swatch row) > the derived `projectAccent` while the per-machine
+  `autoProjectColors` pref (Settings → General, default on) is on > null, which every
+  `--proj-accent` consumer renders through its neutral CSS fallback. The original rule
+  survives in halves: a colour the user did NOT choose is still never stored (derived
+  accents stay derived, now mapped onto the curated `PROJECT_PALETTE` instead of the raw
+  HSL wheel), and only an explicit pick becomes state. Never call `projectAccent`
+  directly from UI — go through the resolver or the sidebar/tab colours disagree.
 - Design: `docs/superpowers/specs/2026-08-23-cross-project-panes-design.md`, which also
   records why this ships BORROWED TABS rather than the single global `workspaceLayout` the
   July spike proposed, and which of that spike's risks do and do not apply.

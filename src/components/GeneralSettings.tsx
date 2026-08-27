@@ -15,6 +15,8 @@ export function GeneralSettings() {
   const tmuxSupported = useStore((s) => s.tmuxSupported);
   const richSessionView = useStore((s) => s.richSessionView);
   const setRichSessionView = useStore((s) => s.setRichSessionView);
+  const autoProjectColors = useStore((s) => s.autoProjectColors);
+  const setAutoProjectColors = useStore((s) => s.setAutoProjectColors);
   const probeTmux = useStore((s) => s.probeTmux);
   const workspaceRoot = useStore((s) => s.workspaceRoot);
   const setWorkspaceRoot = useStore((s) => s.setWorkspaceRoot);
@@ -52,6 +54,20 @@ export function GeneralSettings() {
           Restore sessions when opening a project — relaunch and resume every session of a
           project the moment you open it (Claude and agy reopen the conversation where you left
           off), instead of waiting for a click. Off = sessions spawn only when you click their tab.
+        </span>
+      </label>
+
+      <label className="dialog-toggle">
+        <input
+          type="checkbox"
+          checked={autoProjectColors}
+          onChange={(e) => setAutoProjectColors(e.target.checked)}
+        />
+        <span>
+          Color-code projects automatically — every project gets a stable accent colour
+          (sidebar folder, tab badges in mixed panes). Off = projects stay neutral unless
+          you pick a colour yourself by right-clicking the project. Colours you pick stay
+          either way.
         </span>
       </label>
 

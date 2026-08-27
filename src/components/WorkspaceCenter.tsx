@@ -16,7 +16,7 @@ import {
 import {
   hasSessionDrag,
   isMixedLayout,
-  projectAccent,
+  resolveProjectColor,
   readSessionDrag,
   tabProjectId,
 } from "../layout";
@@ -593,13 +593,16 @@ function GroupTabStrip({
       ? findSession(projects, t.ref)?.session.name ?? "Session"
       : baseName(t.ref);
 
-  /** The project a tab belongs to, and its stable accent. Files are always the host's. */
-  const ownerOf = (t: WsTab): { id: string; name: string; accent: string } => {
+  /** The project a tab belongs to, and its accent (chosen > derived > none — see
+   *  resolveProjectColor). Files are always the host's. */
+  const autoProjectColors = useStore((s) => s.autoProjectColors);
+  const ownerOf = (t: WsTab): { id: string; name: string; accent: string | null } => {
     const id = t.kind === "session" ? tabProjectId(t, projectId) : projectId;
+    const project = projects.find((p) => p.id === id);
     return {
       id,
-      name: projects.find((p) => p.id === id)?.name ?? "",
-      accent: projectAccent(id),
+      name: project?.name ?? "",
+      accent: resolveProjectColor(id, project?.color, autoProjectColors),
     };
   };
 
@@ -610,8 +613,14 @@ function GroupTabStrip({
   const groupProjects = new Set(
     group.tabs.filter((t) => t.kind === "session").map((t) => tabProjectId(t, projectId)),
   );
-  const stripAccent =
-    mixed && groupProjects.size === 1 ? projectAccent([...groupProjects][0]) : undefined;
+  const stripId = mixed && groupProjects.size === 1 ? [...groupProjects][0] : null;
+  const stripAccent = stripId
+    ? resolveProjectColor(
+        stripId,
+        projects.find((p) => p.id === stripId)?.color,
+        autoProjectColors,
+      ) ?? undefined
+    : undefined;
 
   return (
     <div
@@ -640,7 +649,7 @@ function GroupTabStrip({
               t.preview ? "preview" : ""
             } ${mixed ? "badged" : ""}`}
             style={
-              mixed
+              mixed && ownerOf(t).accent
                 ? ({ ["--proj-accent" as string]: ownerOf(t).accent } as React.CSSProperties)
                 : undefined
             }

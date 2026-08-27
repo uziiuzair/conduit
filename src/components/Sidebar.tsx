@@ -27,7 +27,7 @@ import {
   GitBranchIcon,
 } from "./Icons";
 import { AgentGlyph, glyphStateFor } from "./AgentGlyph";
-import { projectAccent, SESSION_DRAG_MIME } from "../layout";
+import { PROJECT_PALETTE, resolveProjectColor, SESSION_DRAG_MIME } from "../layout";
 import { Dropdown } from "./Dropdown";
 import { ThemeSwitcher } from "./ThemeSwitcher";
 import { ClaudeStatusPill } from "./ClaudeStatusPill";
@@ -275,6 +275,8 @@ function ProfileBar() {
 function ProjectBlock({ project }: { project: Project }) {
   const addSession = useStore((s) => s.addSession);
   const openMenu = useStore((s) => s.openMenu);
+  const autoProjectColors = useStore((s) => s.autoProjectColors);
+  const accentColor = resolveProjectColor(project.id, project.color, autoProjectColors);
   const reorderProject = useStore((s) => s.reorderProject);
   const startProjectRename = useStore((s) => s.startProjectRename);
   const editing = useStore((s) => s.editingProjectId === project.id);
@@ -327,11 +329,16 @@ function ProjectBlock({ project }: { project: Project }) {
     >
       <div
         className="project-head"
-        // The project's stable accent, as a variable rather than a colour on the icon:
-        // the same colour the tab badge and the pane edge use when panes hold more than
-        // one project. Without this anchor in the sidebar, a coloured badge over there
-        // would be a colour with no referent.
-        style={{ ["--proj-accent" as string]: projectAccent(project.id) }}
+        // The project's accent, as a variable rather than a colour on the icon: the same
+        // colour the tab badge and the pane edge use when panes hold more than one
+        // project. Without this anchor in the sidebar, a coloured badge over there would
+        // be a colour with no referent. Null (auto off, nothing chosen) leaves the var
+        // unset so the icon falls back to its neutral CSS colour.
+        style={
+          accentColor
+            ? ({ ["--proj-accent" as string]: accentColor } as React.CSSProperties)
+            : undefined
+        }
         role="button"
         aria-expanded={!collapsed}
         title={collapsed ? "Expand project" : "Collapse project"}
@@ -790,6 +797,7 @@ function SessionContextMenu() {
   const removeRootChat = useStore((s) => s.removeRootChat);
   const selectProject = useStore((s) => s.selectProject);
   const setCenterMode = useStore((s) => s.setCenterMode);
+  const setProjectColor = useStore((s) => s.setProjectColor);
   const removeSession = useStore((s) => s.removeSession);
   const removeProject = useStore((s) => s.removeProject);
   const openToSide = useStore((s) => s.openToSide);
@@ -800,11 +808,16 @@ function SessionContextMenu() {
   const accounts = useStore((s) => s.accounts);
   const setSessionAccount = useStore((s) => s.setSessionAccount);
   const [accountOpen, setAccountOpen] = useState(false);
+  const [colorOpen, setColorOpen] = useState(false);
 
   // Reset the inline account expander whenever the menu target changes.
   useEffect(() => {
     setAccountOpen(false);
   }, [menu?.sessionId]);
+  // Same for the colour expander (its target is a project, not a session).
+  useEffect(() => {
+    setColorOpen(false);
+  }, [menu?.projectId]);
 
   useEffect(() => {
     if (!menu) return;
@@ -871,6 +884,42 @@ function SessionContextMenu() {
         >
           Open board
         </button>
+        <div
+          className="context-flyout-item"
+          onMouseEnter={() => setColorOpen(true)}
+          onMouseLeave={() => setColorOpen(false)}
+        >
+          <button onClick={() => setColorOpen((v) => !v)}>
+            Select color <span className="context-flyout-caret">▸</span>
+          </button>
+          {colorOpen && (
+            <div className="context-flyout">
+              <button
+                className={!project?.color ? "sel" : ""}
+                onClick={() => {
+                  void setProjectColor(menu.projectId, null);
+                  closeMenu();
+                }}
+              >
+                {!project?.color ? "✓ " : ""}Automatic
+              </button>
+              {PROJECT_PALETTE.map((c) => (
+                <button
+                  key={c.value}
+                  className={project?.color === c.value ? "sel" : ""}
+                  onClick={() => {
+                    void setProjectColor(menu.projectId, c.value);
+                    closeMenu();
+                  }}
+                >
+                  {project?.color === c.value ? "✓ " : ""}
+                  <span className="context-color-dot" style={{ background: c.value }} />
+                  {c.label}
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
         <button
           className="danger"
           onClick={() => {

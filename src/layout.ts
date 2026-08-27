@@ -58,10 +58,51 @@ export function projectHue(projectId: string): number {
   return (h % 360) * 137 % 360;
 }
 
-/** The project's accent as a CSS colour. One place, so the tab chip, the pane edge and the
- *  sidebar cannot disagree about what colour a project is. */
+/**
+ * The curated project palette: warm, muted tones picked to sit inside Conduit's warm-dark
+ * theme instead of the raw HSL wheel (whose fixed 58%/62% produced neon lime/violet that
+ * fought the UI). Also the swatches the right-click colour picker offers, so a chosen
+ * colour and a derived one always come from the same family.
+ */
+export interface ProjectColor {
+  value: string;
+  label: string;
+}
+export const PROJECT_PALETTE: ProjectColor[] = [
+  { value: "#c4906c", label: "Terracotta" },
+  { value: "#c9a86b", label: "Ochre" },
+  { value: "#b8b072", label: "Sand" },
+  { value: "#93ad7c", label: "Sage" },
+  { value: "#75a898", label: "Seafoam" },
+  { value: "#7c9fb8", label: "Slate" },
+  { value: "#9691c4", label: "Lavender" },
+  { value: "#b989b1", label: "Mauve" },
+  { value: "#c47f88", label: "Rose" },
+  { value: "#a89383", label: "Driftwood" },
+];
+
+/** The project's derived accent as a CSS colour: the id's hue mapped onto the curated
+ *  palette. One place, so the tab chip, the pane edge and the sidebar cannot disagree
+ *  about what colour a project is. */
 export function projectAccent(projectId: string): string {
-  return `hsl(${projectHue(projectId)} 58% 62%)`;
+  return PROJECT_PALETTE[projectHue(projectId) % PROJECT_PALETTE.length].value;
+}
+
+/**
+ * The colour a project actually wears, or null for "no colour".
+ *
+ * Precedence: an explicitly chosen colour (stored on the project) always wins — even with
+ * auto-colouring off, because the user picked it on purpose. Otherwise the derived accent
+ * applies only while auto-colouring is on. Null renders every `--proj-accent` consumer
+ * through its neutral CSS fallback.
+ */
+export function resolveProjectColor(
+  projectId: string,
+  explicit: string | null | undefined,
+  autoColors: boolean,
+): string | null {
+  if (explicit) return explicit;
+  return autoColors ? projectAccent(projectId) : null;
 }
 
 function clone(l: ProjectLayout): ProjectLayout {
