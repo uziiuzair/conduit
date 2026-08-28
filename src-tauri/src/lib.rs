@@ -996,6 +996,11 @@ const CONTINUITY_FEED_LIMIT: usize = 100;
 /// `model` is a concrete model id chosen by a route. It is applied HERE rather than in a
 /// second call from the frontend so the session is never briefly persisted without it --
 /// and so nothing can spawn in between reading a model that was not chosen.
+///
+/// The parameter list of a `#[tauri::command]` IS its IPC payload, so folding these into a
+/// struct would change what the frontend sends for no behavioural gain; every other
+/// wide command in this file takes the same allow.
+#[allow(clippy::too_many_arguments)]
 #[tauri::command]
 fn add_session(
     project_id: String,
