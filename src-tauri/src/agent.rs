@@ -2,12 +2,13 @@
 
 use std::path::Path;
 
-/// Which coding-agent CLI a session runs. Persisted on each Session; serializes
-/// as a lowercase string ("claude"/"codex"/"gemini"/"opencode"). Unknown/absent → Claude (back-compat).
-/// `Hash`/`Eq` let it key the per-agent default-account maps (serde emits it as a JSON string key).
-#[derive(
-    serde::Serialize, serde::Deserialize, Clone, Copy, Debug, PartialEq, Eq, Hash, Default,
-)]
+/// Which coding-agent CLI a session runs. Persisted on each Session; serializes as a
+/// lowercase string ("claude"/"codex"/"gemini"/"opencode"/"antigravity"/"commandcode").
+/// Unknown/absent → Claude, and that back-compat promise is now KEPT rather than merely
+/// documented: see `store::PersistedEnum` for what one unreadable value used to cost.
+/// `Hash`/`Eq` let it key the per-agent default-account maps (serde emits it as a JSON string
+/// key), which is also why the lenient read lives on the type and not on a field.
+#[derive(serde::Serialize, Clone, Copy, Debug, PartialEq, Eq, Hash, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum AgentId {
     #[default]
@@ -17,6 +18,26 @@ pub enum AgentId {
     OpenCode,
     Antigravity,
     CommandCode,
+}
+
+impl crate::store::PersistedEnum for AgentId {
+    fn from_wire(s: &str) -> Option<Self> {
+        match s {
+            "claude" => Some(AgentId::Claude),
+            "codex" => Some(AgentId::Codex),
+            "gemini" => Some(AgentId::Gemini),
+            "opencode" => Some(AgentId::OpenCode),
+            "antigravity" => Some(AgentId::Antigravity),
+            "commandcode" => Some(AgentId::CommandCode),
+            _ => None,
+        }
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for AgentId {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        crate::store::deserialize_lenient(d)
+    }
 }
 
 /// Descriptor for a single MCP server passed to the CLI command builders.
@@ -33,6 +54,114 @@ pub struct McpServer {
     pub url: String,
     #[serde(default)]
     pub env: Vec<(String, String)>, // [(K, V)]
+}
+
+/// Build a `--mcp-config` document for ONE session's allowlist. Emits the standard
+/// `{"mcpServers": {...}}` shape: stdio servers as `{command, args, env}`, http servers as
+/// `{"type": "http", "url": ...}`. `fleet_block` is `fleet::mcp_config_json`'s output for a
+/// Conductor or fleet worker; merging it here is what keeps `--strict-mcp-config` from
+/// stripping the fleet server out from under an orchestrating session.
+///
+/// Paired with `--strict-mcp-config`, this file becomes the session's ENTIRE MCP surface --
+/// which is the point: an MCP server costs memory in every session that loads it, and
+/// user-scope registration (`claude mcp add -s user`) loads all of them everywhere.
+pub fn session_mcp_config_json(servers: &[McpServer], fleet_block: Option<&str>) -> String {
+    let mut map = serde_json::Map::new();
+    // The fleet block goes in first so an allowlisted server with a colliding name
+    // overrides it rather than being silently dropped -- a user-named server winning its
+    // own name is the less surprising of the two.
+    if let Some(raw) = fleet_block {
+        if let Ok(serde_json::Value::Object(obj)) = serde_json::from_str::<serde_json::Value>(raw) {
+            if let Some(serde_json::Value::Object(inner)) = obj.get("mcpServers") {
+                for (k, v) in inner {
+                    map.insert(k.clone(), v.clone());
+                }
+            }
+        }
+    }
+    for s in servers {
+        let entry = if s.transport == "http" {
+            serde_json::json!({ "type": "http", "url": s.url })
+        } else {
+            let env: serde_json::Map<String, serde_json::Value> = s
+                .env
+                .iter()
+                .map(|(k, v)| (k.clone(), serde_json::Value::String(v.clone())))
+                .collect();
+            serde_json::json!({ "command": s.command, "args": s.args, "env": env })
+        };
+        map.insert(s.name.clone(), entry);
+    }
+    serde_json::json!({ "mcpServers": serde_json::Value::Object(map) }).to_string()
+}
+
+/// The MCP servers a plugin declares in its own `.mcp.json`, resolved so they can be
+/// launched from a plain `--mcp-config` file instead of by the plugin loader.
+///
+/// This exists because `--strict-mcp-config` suppresses plugin-provided MCP servers.
+/// (Verified empirically against Claude Code v2.1.222: with `--plugin-dir` alone, or with
+/// `--plugin-dir --mcp-config`, a continuity tool call reaches its database; add
+/// `--strict-mcp-config` and it never runs. The plugin's skills and hooks keep working, so
+/// the failure is silent — the session still believes it has the tools.) A session that
+/// trims its MCP list must not thereby lose the coordination tools its project enabled, so
+/// the plugin's declarations are folded into the generated config.
+///
+/// Reading the plugin's own manifest keeps ONE source of truth: if continuity changes how
+/// its server launches, this follows automatically. Two substitutions are applied:
+/// `${CLAUDE_PLUGIN_ROOT}` becomes the real directory, and any `${user_config.*}` value is
+/// dropped — Conduit never sets plugin user config, and passing the literal placeholder
+/// through as an env value would be worse than omitting it (continuity treats every one of
+/// them as optional and falls back to local mode).
+pub fn plugin_mcp_servers(plugin_dir: &str, manifest_json: &str) -> Vec<McpServer> {
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(manifest_json) else {
+        return Vec::new();
+    };
+    let Some(map) = v.get("mcpServers").and_then(|m| m.as_object()) else {
+        return Vec::new();
+    };
+    let subst = |s: &str| s.replace("${CLAUDE_PLUGIN_ROOT}", plugin_dir);
+    map.iter()
+        .map(|(name, def)| {
+            let env = def
+                .get("env")
+                .and_then(|e| e.as_object())
+                .map(|e| {
+                    e.iter()
+                        .filter_map(|(k, val)| {
+                            let raw = val.as_str()?;
+                            let resolved = subst(raw);
+                            // An unresolved placeholder is a value we cannot supply.
+                            (!resolved.contains("${")).then(|| (k.clone(), resolved))
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            McpServer {
+                name: name.clone(),
+                transport: if def.get("url").is_some() {
+                    "http".to_string()
+                } else {
+                    "stdio".to_string()
+                },
+                command: def
+                    .get("command")
+                    .and_then(|c| c.as_str())
+                    .map(&subst)
+                    .unwrap_or_default(),
+                args: def
+                    .get("args")
+                    .and_then(|a| a.as_array())
+                    .map(|a| a.iter().filter_map(|x| x.as_str()).map(&subst).collect())
+                    .unwrap_or_default(),
+                url: def
+                    .get("url")
+                    .and_then(|u| u.as_str())
+                    .map(&subst)
+                    .unwrap_or_default(),
+                env,
+            }
+        })
+        .collect()
 }
 
 /// Shell-quote a single token: return it bare if it's safe, otherwise single-quote it.
@@ -1842,6 +1971,127 @@ mod tests {
         #[cfg(windows)]
         let expected = "opencode --prompt \"do X\" || opencode --prompt \"do X\"";
         assert_eq!(cmd, expected);
+    }
+
+    fn stdio_server(name: &str) -> McpServer {
+        McpServer {
+            name: name.to_string(),
+            transport: "stdio".into(),
+            command: "npx".into(),
+            args: vec!["-y".into(), "some-server".into()],
+            url: String::new(),
+            env: vec![("TOKEN".into(), "abc".into())],
+        }
+    }
+
+    #[test]
+    fn session_mcp_config_emits_stdio_server_with_args_and_env() {
+        let json = session_mcp_config_json(&[stdio_server("ctx7")], None);
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let s = &v["mcpServers"]["ctx7"];
+        assert_eq!(s["command"], "npx");
+        assert_eq!(s["args"][1], "some-server");
+        assert_eq!(s["env"]["TOKEN"], "abc");
+    }
+
+    #[test]
+    fn session_mcp_config_emits_http_server_as_typed_url() {
+        let http = McpServer {
+            name: "remote".into(),
+            transport: "http".into(),
+            command: String::new(),
+            args: vec![],
+            url: "https://example.test/mcp".into(),
+            env: vec![],
+        };
+        let json = session_mcp_config_json(&[http], None);
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(v["mcpServers"]["remote"]["type"], "http");
+        assert_eq!(v["mcpServers"]["remote"]["url"], "https://example.test/mcp");
+    }
+
+    #[test]
+    fn session_mcp_config_empty_allowlist_is_valid_and_has_no_servers() {
+        let json = session_mcp_config_json(&[], None);
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert!(v["mcpServers"].as_object().unwrap().is_empty());
+    }
+
+    /// The real shape of continuity's `.mcp.json`, trimmed to what matters here.
+    const PLUGIN_MANIFEST: &str = r#"{
+      "mcpServers": {
+        "continuity": {
+          "command": "node",
+          "args": ["${CLAUDE_PLUGIN_ROOT}/mcp/launch.mjs"],
+          "env": {
+            "NODE_NO_WARNINGS": "1",
+            "CONTINUITY_API_URL": "${user_config.apiUrl}"
+          }
+        }
+      }
+    }"#;
+
+    #[test]
+    fn plugin_mcp_servers_resolves_the_plugin_root() {
+        let got = plugin_mcp_servers("/opt/continuity-plugin", PLUGIN_MANIFEST);
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].name, "continuity");
+        assert_eq!(got[0].transport, "stdio");
+        assert_eq!(got[0].command, "node");
+        assert_eq!(got[0].args, vec!["/opt/continuity-plugin/mcp/launch.mjs"]);
+    }
+
+    #[test]
+    fn plugin_mcp_servers_drops_env_we_cannot_supply() {
+        // Conduit never sets plugin user config, so `${user_config.apiUrl}` would arrive as
+        // a literal placeholder. Continuity treats it as optional and falls back to local
+        // mode, so omitting it is right; passing the placeholder through is not.
+        let got = plugin_mcp_servers("/opt/continuity-plugin", PLUGIN_MANIFEST);
+        let env: std::collections::HashMap<_, _> = got[0].env.iter().cloned().collect();
+        assert_eq!(env.get("NODE_NO_WARNINGS").map(String::as_str), Some("1"));
+        assert!(
+            !env.contains_key("CONTINUITY_API_URL"),
+            "unresolved placeholder must be dropped, not passed through: {env:?}"
+        );
+    }
+
+    #[test]
+    fn plugin_mcp_servers_is_empty_for_a_plugin_that_declares_none() {
+        assert!(plugin_mcp_servers("/opt/p", "{}").is_empty());
+        assert!(plugin_mcp_servers("/opt/p", "not json").is_empty());
+    }
+
+    #[test]
+    fn an_allowlisted_session_still_gets_the_plugin_server() {
+        // The regression this guards: `--strict-mcp-config` suppresses plugin MCP, so
+        // continuity has to ride in the generated config or a session that merely trimmed
+        // its MCP list loses its coordination tools silently.
+        let mut servers = vec![stdio_server("ctx7")];
+        servers.extend(plugin_mcp_servers(
+            "/opt/continuity-plugin",
+            PLUGIN_MANIFEST,
+        ));
+        let json = session_mcp_config_json(&servers, None);
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert!(v["mcpServers"]["ctx7"].is_object());
+        assert_eq!(
+            v["mcpServers"]["continuity"]["args"][0],
+            "/opt/continuity-plugin/mcp/launch.mjs"
+        );
+    }
+
+    #[test]
+    fn session_mcp_config_merges_the_fleet_block() {
+        // A Conductor with an allowlist must keep its fleet tools: strict mode would
+        // otherwise drop the very server that makes it a Conductor.
+        let fleet = crate::fleet::mcp_config_json(1234, "cond-1");
+        let json = session_mcp_config_json(&[stdio_server("ctx7")], Some(&fleet));
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert!(v["mcpServers"]["ctx7"].is_object());
+        assert!(v["mcpServers"]["conduit-fleet"]["url"]
+            .as_str()
+            .unwrap()
+            .contains("conductor=cond-1"));
     }
 
     #[test]

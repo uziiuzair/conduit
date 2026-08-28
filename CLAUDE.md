@@ -467,6 +467,43 @@ terminal focus, or the caret lands behind the pane -- and that check reads a REF
 adding it to the reveal effect's deps would re-run a fit and its spawn branch on every
 toggle. Claude-only, enforced in `session_transcript` rather than assumed in the view.
 
+## Where session hibernate + the per-session MCP allowlist live
+
+Stopping a session's processes without deleting it, and letting a session declare which MCP
+servers it loads. Both are driven by two `#[serde(default)]` fields on `Session`
+(`store.rs`): `stopped` and `mcp_servers`.
+
+- **Hibernate.** `stop_session` / `start_session` / `stop_idle_sessions` in `lib.rs` (bulk
+  selection is the pure, tested `idle_stop_targets`). They call **`PtyManager::retire`, never
+  `kill`** — the two share one `tear_down` and differ only in `Teardown::keeps_snapshot()`.
+  `kill` is DESTROY and deletes the scrollback snapshot; a retired session must keep it, so it
+  comes back like one `session_budget` reaped or one that lost its tmux server to a reboot.
+  **Do not "simplify" a retire into a kill.** The frontend must not tear down either: the
+  `stopped` effect in `Terminal.tsx` only manages the pane, because a stray `pty_kill` there
+  would destroy the snapshot the command just preserved.
+  The keep-alive rule is otherwise unchanged: tab switches, layout changes and directory
+  changes must still never touch an agent terminal. The effect fires on *transitions* only
+  (`prevStoppedRef`); the pane is cleared at the NEXT spawn (`resetOnSpawnRef`), not at the
+  stop, because a resume is a cold spawn whose first frame is the snapshot replay — clearing
+  late is what stops the same screen printing twice. Opening a stopped session resumes it
+  (`selectSession` / `openToSide` clear the flag); the eager restore-on-open effect skips it,
+  which is why `stopped` is persisted rather than component state.
+- **MCP allowlist (Claude only).** `agent::session_mcp_config_json` builds a per-session
+  `--mcp-config` file (merging the fleet block when the session has one); `pty_spawn` writes
+  it and sets `strict_mcp`, which appends `--strict-mcp-config` in `build_script` /
+  `build_script_win`. The **store** owns which names apply; the frontend only sends the
+  registry definitions to resolve them against (the registry lives in localStorage). `None`
+  and `Some(<every server>)` are NOT equivalent — strict mode also suppresses a repo's own
+  `.mcp.json` — so "every box checked" must serialize to `None`. UI: `NewSessionDialog`.
+  **`--strict-mcp-config` also suppresses PLUGIN-provided MCP servers** (measured against
+  Claude Code v2.1.222; `--mcp-config` alone does not, so the Conductor path is unaffected).
+  Continuity arrives that way, and the failure is silent — its skills and prompt still load,
+  so the session believes it has tools it cannot call. `agent::plugin_mcp_servers` therefore
+  folds the plugin's own `.mcp.json` into the generated config. If another plugin ever ships
+  MCP tools, it needs the same treatment.
+
+Design: `docs/superpowers/specs/2026-08-13-session-hibernate-and-mcp-allowlist-design.md`.
+
 ## Where multi-account assignment lives
 
 Accounts are per-agent profile pointers (`Account { agents, configDir }`, `store.rs`), assigned
@@ -548,7 +585,47 @@ COLD spawn only — warmth is decided by `tmux::has_session` BEFORE the wrap, si
 sessions under memory pressure. Its safety contract is load-bearing: a reap kills the tmux
 session and **nothing else** — never the snapshot, never the session record — so a reaped
 session is indistinguishable from one that lost its tmux server to a reboot. `pty::kill` (a
-destroy) is the only place a snapshot is deleted.
+destroy) is the only place a snapshot is deleted; `pty::retire` is the same teardown with the
+snapshot kept, and is what user-initiated hibernation uses (see "Where session hibernate …"
+above). Automatic reaping and a deliberate stop end in the same state on purpose — one
+restore path, not two.
+
+Two things about the budget are easy to get wrong and are now pinned by tests:
+
+- **It counts SESSIONS, not tmux sessions.** Conduit creates two tmux sessions per Conduit
+  session (the agent and its `__term` companion shell), so counting tmux sessions made
+  `max_detached: 24` really mean twelve. Worse, a companion shell is a login shell that goes
+  quiet the moment you stop typing, so it dominates the least-recently-active sort — a batch
+  could spend itself killing four ~1 MB shells while the ~300 MB agents beside them survived.
+  `group_sessions` collapses the halves: a group is attached if EITHER half is, its activity
+  is the LATER of the two, and a reap takes both names.
+- **The macOS pressure reading asks the kernel, not `vm_stat` arithmetic.**
+  `free + inactive + speculative` is a Linux-shaped stand-in and it reported 7.4 GB
+  "available" on a 24 GB Mac at 20.7 GB used with 7.8 GB of swap, because on a
+  compressed-memory system "inactive" is not "free". `kern.memorystatus_vm_pressure_level`
+  (`MemInfo.kernel_warned`) is the same verdict Activity Monitor's graph shows. The
+  watermark still applies; the kernel's warning is an additional trigger, and an
+  unrecognized level is NOT read as pressure — same principle as an unreadable figure.
+
+**The orphan sweep is why `state.json` must never fail to parse.** A `Store` that fails to
+load is an EMPTY store, every live tmux session is then an orphan, and the startup sweep kills
+every running agent — so a single unreadable value costs the sidebar AND every session.
+serde aborts the whole document on one bad value and `#[serde(default)]` does not help (it
+covers an ABSENT field, not an unknown VALUE). `store::PersistedEnum` +
+`deserialize_lenient` make the persisted string enums (`AgentId`, `SessionRole`, `Clearance`)
+degrade to their default instead; a downgrade past a newly added agent is all it takes to
+produce the bad value. The lenient read lives on the TYPE, not on a field's
+`deserialize_with`, because `AgentId` is also a map key (`default_accounts`). New persisted
+string enums must implement it, and a round-trip test pins the hand-written `from_wire`
+against the derived `Serialize`.
+
+A reap is logged unconditionally (`[reap] retired …`). It is rare, and after the fact a
+reaped session is indistinguishable from one that lost its tmux server — so without a line
+in the log there is no way to tell "the budget acted" from "the budget never ran", which is
+exactly the question a host hoarding agents raises. `grace_sec` and `interval_sec` join
+`disabled` / `min_available_mb` / `max_detached` as env overrides
+(`CONDUIT_SESSION_REAP_*`), because this policy is only observable by watching it act and a
+six-hour grace makes that untestable against a real socket without waiting six hours.
 
 One tmux rule outranks the rest: **`wrap_command` must `cd /` before `exec`ing tmux.** The
 client that happens to start the server donates its cwd for the server's whole life, and

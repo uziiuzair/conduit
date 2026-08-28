@@ -23,11 +23,19 @@ export function NewSessionDialog({
     agent: AgentId;
     role: SessionRole;
     account?: string | null;
+    /** MCP servers this session may load. null = inherit every configured server. */
+    mcpServers?: string[] | null;
     model?: string | null;
   }) => void;
 }) {
   const defaultAgent = useStore((s) => s.defaultAgent);
   const accounts = useStore((s) => s.accounts);
+  const mcpServers = useStore((s) => s.mcpServers);
+  const mcpEnabled = useStore((s) => s.mcpEnabled);
+  /** Names the user UNCHECKED. Storing the exclusions (rather than the inclusions) means a
+   *  server added to the registry later is on by default, and an empty set unambiguously
+   *  means "inherit" — which is not the same as an allowlist naming everything. */
+  const [mcpOff, setMcpOff] = useState<string[]>([]);
   const routes = useStore((s) => s.routes);
   const taskKinds = useStore((s) => s.taskKinds);
   const loadRouting = useStore((s) => s.loadRouting);
@@ -121,10 +129,24 @@ export function NewSessionDialog({
     if (account && !eligibleAccounts.some((a) => a.id === account)) setAccount("");
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [effectiveAgent]);
+  // Claude is the only agent whose CLI can be restricted to a given MCP set
+  // (`--strict-mcp-config`, verified in `claude --help`), and a server not enabled for
+  // Claude wouldn't load here anyway.
+  const mcpCandidates =
+    effectiveAgent === "claude"
+      ? mcpServers.filter((s) => (mcpEnabled[s.name] ?? []).includes("claude"))
+      : [];
   const submit = () => {
     const acct = account || null;
+    // Nothing unchecked -> null (inherit). An explicit allowlist naming every server is
+    // NOT equivalent: it turns on strict mode, which also suppresses the repo's own
+    // .mcp.json and any plugin-provided servers.
+    const mcp =
+      mcpCandidates.length === 0 || mcpOff.length === 0
+        ? null
+        : mcpCandidates.filter((s) => !mcpOff.includes(s.name)).map((s) => s.name);
     if (conductor) {
-      onCreate({ name: name.trim() || undefined, useWorktree: false, agent: "claude", role: "conductor", account: acct });
+      onCreate({ name: name.trim() || undefined, useWorktree: false, agent: "claude", role: "conductor", account: acct, mcpServers: mcp });
       return;
     }
     if (!isReady(agent)) return;
@@ -134,6 +156,7 @@ export function NewSessionDialog({
       agent,
       role: "worker",
       account: acct,
+      mcpServers: mcp,
       // Only send a model the route actually picked FOR this agent. Picking a different
       // agent by hand clears it (below), so a Claude model can never reach Codex.
       model: routedModel,
@@ -169,22 +192,19 @@ export function NewSessionDialog({
         {taskKinds.length > 0 && !conductor && (
           <>
             <div className="dialog-label">What is this session for?</div>
-            <select
-              className="dialog-input"
+            <Dropdown
+              className="dd-dialog"
               value={task}
-              onChange={(e) => {
-                const next = e.target.value as TaskKind | "";
+              options={[
+                { value: "", label: "Let me choose the agent" },
+                ...taskKinds.map((t) => ({ value: t.id, label: t.label, hint: t.hint })),
+              ]}
+              onChange={(v) => {
+                const next = v as TaskKind | "";
                 setTask(next);
                 if (!next) setRoutedModel(null);
               }}
-            >
-              <option value="">Let me choose the agent</option>
-              {taskKinds.map((t) => (
-                <option key={t.id} value={t.id} title={t.hint}>
-                  {t.label}
-                </option>
-              ))}
-            </select>
+            />
             {decision && (
               // Always shown, never only on a fallback: a router that explains itself only
               // when it deviates teaches you to distrust it the rest of the time.
@@ -271,6 +291,31 @@ export function NewSessionDialog({
           />
           <span>Isolate in a git worktree</span>
         </label>
+
+        {mcpCandidates.length > 0 && (
+          <fieldset className="mcp-picker">
+            <legend>MCP servers</legend>
+            {mcpCandidates.map((s) => (
+              <label key={s.name} className="dialog-toggle">
+                <input
+                  type="checkbox"
+                  checked={!mcpOff.includes(s.name)}
+                  onChange={(e) =>
+                    setMcpOff((prev) =>
+                      e.target.checked ? prev.filter((n) => n !== s.name) : [...prev, s.name],
+                    )
+                  }
+                />
+                <span>{s.name}</span>
+              </label>
+            ))}
+            <div className="dialog-note">
+              Every server loads into every session that allows it, so each one costs memory
+              per session. Unchecking any server restricts this session to exactly those left
+              checked — including servers this repo configures itself.
+            </div>
+          </fieldset>
+        )}
 
         {!anyReady && (
           <div className="dialog-note">No agents installed — install one to start.</div>

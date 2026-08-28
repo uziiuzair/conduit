@@ -111,6 +111,11 @@ fn pty_spawn(
     worktree_name: Option<String>,
     role: Option<String>,
     initial_prompt: Option<String>,
+    // Feature C: resolved MCP server definitions for this session's allowlist. The registry
+    // lives in the frontend's localStorage, so Rust can't resolve names itself -- the caller
+    // sends the definitions it already holds, looked up fresh at every spawn. None =
+    // inherit (no MCP flags), which is the pre-allowlist behavior.
+    mcp_allowlist: Option<Vec<crate::agent::McpServer>>,
     on_event: Channel<String>,
     pty: State<Arc<PtyManager>>,
     hook_state: State<Arc<HookState>>,
@@ -276,20 +281,71 @@ fn pty_spawn(
     // limit on Windows once `build_invocation` doubled the flag string for its `||`
     // fallback -- the "command line is too long" Conductor-spawn failure. See
     // `fleet::write_persona_file`.
-    let (mcp_config_path, system_prompt_file) = if is_conductor {
-        let mcp_port = fleet.mcp_port.load(Ordering::SeqCst);
-        (
-            crate::fleet::write_mcp_config(mcp_port, &session_id),
-            crate::fleet::write_persona_file(&session_id, crate::fleet::CONDUCTOR_PERSONA),
-        )
-    } else if gets_fleet_mcp && agent == crate::agent::AgentId::Claude {
-        let mcp_port = fleet.mcp_port.load(Ordering::SeqCst);
-        (
-            crate::fleet::write_mcp_config(mcp_port, &session_id),
-            crate::fleet::write_persona_file(&session_id, crate::fleet::WORKER_BRIEF_SUFFIX),
-        )
+    let fleet_mcp_port = fleet.mcp_port.load(Ordering::SeqCst);
+    let wants_fleet_mcp =
+        (is_conductor || gets_fleet_mcp) && agent == crate::agent::AgentId::Claude;
+    let system_prompt_file = if is_conductor {
+        crate::fleet::write_persona_file(&session_id, crate::fleet::CONDUCTOR_PERSONA)
+    } else if wants_fleet_mcp {
+        crate::fleet::write_persona_file(&session_id, crate::fleet::WORKER_BRIEF_SUFFIX)
     } else {
-        (None, None)
+        None
+    };
+    // Feature C: a session with its own MCP allowlist gets a GENERATED config (the fleet
+    // block, when it has one, merged with exactly the servers it allows) plus
+    // `--strict-mcp-config`. Without an allowlist this resolves to precisely what it
+    // resolved to before the feature existed: the fleet-only config, unstrict.
+    //
+    // Claude-only, deliberately: `--strict-mcp-config` is verified in `claude --help`, and
+    // guessing the equivalent flag for another CLI would break its invocation outright.
+    //
+    // The STORE decides whether there's an allowlist and which names are in it; the caller's
+    // `mcp_allowlist` is only a dictionary of how to launch them (the registry lives in the
+    // frontend's localStorage, so Rust can't resolve a name to a command on its own). If the
+    // two disagree -- stale frontend state, a server deleted from the registry since -- the
+    // persisted names win and an unresolvable one is simply dropped.
+    let allowlist = (!shell_only && agent == crate::agent::AgentId::Claude)
+        .then(|| store.session_mcp_servers(&session_id))
+        .flatten()
+        .map(|names| {
+            let defs = mcp_allowlist.unwrap_or_default();
+            let mut chosen: Vec<crate::agent::McpServer> = names
+                .iter()
+                .filter_map(|n| defs.iter().find(|d| &d.name == n).cloned())
+                .collect();
+            // `--strict-mcp-config` suppresses PLUGIN-provided MCP servers (verified against
+            // Claude Code v2.1.222 -- see `plugin_mcp_servers`). Continuity's coordination
+            // tools arrive that way, so without this a session that merely trimmed its MCP
+            // list would silently lose them while its prompt still claimed to have them.
+            // Carrying the plugin's own declarations into the generated config keeps the
+            // allowlist a statement about the USER's servers, not a hidden opt-out from a
+            // feature the project turned on.
+            if let Some(dir) = continuity_plugin_dir.as_deref() {
+                match std::fs::read_to_string(std::path::Path::new(dir).join(".mcp.json")) {
+                    Ok(manifest) => chosen.extend(crate::agent::plugin_mcp_servers(dir, &manifest)),
+                    Err(e) => eprintln!("conduit: continuity plugin .mcp.json unreadable ({e}); its tools will be missing under a session MCP allowlist"),
+                }
+            }
+            chosen
+        });
+    let fleet_only_config =
+        || wants_fleet_mcp.then(|| crate::fleet::write_mcp_config(fleet_mcp_port, &session_id));
+    let (mcp_config_path, strict_mcp) = match allowlist {
+        Some(servers) => {
+            let fleet_block =
+                wants_fleet_mcp.then(|| crate::fleet::mcp_config_json(fleet_mcp_port, &session_id));
+            let json = crate::agent::session_mcp_config_json(&servers, fleet_block.as_deref());
+            let path = crate::store::data_dir().join(format!("session-mcp-{session_id}.json"));
+            match std::fs::write(&path, json) {
+                Ok(()) => (Some(path.to_string_lossy().to_string()), true),
+                Err(e) => {
+                    // Never fail a spawn over MCP: fall back to inherit-everything.
+                    eprintln!("conduit: session mcp-config write failed ({e}); inheriting MCP");
+                    (fleet_only_config().flatten(), false)
+                }
+            }
+        }
+        None => (fleet_only_config().flatten(), false),
     };
 
     // Feature 4 silo: a siloed session (under private mode) must not stream its output to any
@@ -444,6 +500,7 @@ fn pty_spawn(
         agent_model,
         agent_effort.map(str::to_string),
         resume_token,
+        strict_mcp,
         on_event,
     )
 }
@@ -939,6 +996,11 @@ const CONTINUITY_FEED_LIMIT: usize = 100;
 /// `model` is a concrete model id chosen by a route. It is applied HERE rather than in a
 /// second call from the frontend so the session is never briefly persisted without it --
 /// and so nothing can spawn in between reading a model that was not chosen.
+///
+/// The parameter list of a `#[tauri::command]` IS its IPC payload, so folding these into a
+/// struct would change what the frontend sends for no behavioural gain; every other
+/// wide command in this file takes the same allow.
+#[allow(clippy::too_many_arguments)]
 #[tauri::command]
 fn add_session(
     project_id: String,
@@ -946,20 +1008,33 @@ fn add_session(
     use_worktree: bool,
     agent: crate::agent::AgentId,
     role: Option<SessionRole>,
+    // Feature C: MCP registry names this session may load. None = inherit everything
+    // (today's behavior). See `Session::mcp_servers` for why None != Some(<everything>).
+    mcp_servers: Option<Vec<String>>,
     model: Option<String>,
     store: State<Arc<Store>>,
 ) -> Option<Session> {
-    let session = store.add_session(
+    let mut session = store.add_session(
         &project_id,
         name,
         use_worktree,
         agent,
         role.unwrap_or_default(),
     )?;
+    // Both applied as follow-up writes rather than `add_session` parameters: that function
+    // has 40+ call sites (nearly all tests) and none of the others carries either. The
+    // returned session must carry them too -- the frontend merges THIS object into its
+    // project list, and a stale None there would make the very first spawn inherit
+    // everything (allowlist) or ignore the routed model.
+    if let Some(list) = mcp_servers {
+        store.set_session_mcp_servers(&session.id, Some(list.clone()));
+        session.mcp_servers = Some(list);
+    }
     if model.is_some() {
         store.set_session_model(&session.id, model.clone());
+        session.model = model;
     }
-    Some(Session { model, ..session })
+    Some(session)
 }
 
 #[tauri::command]
@@ -1164,6 +1239,85 @@ fn remove_session(
     pty.kill(&session_id);
     pty.kill(&format!("{session_id}::term"));
     store.remove_session(&project_id, &session_id);
+}
+
+// ---- Session hibernate (stop without delete) ---------------------------------
+//
+// A session's PTYs used to live exactly as long as the session record: nothing but
+// deletion, project removal, `fleet_stop` or app exit ever killed an agent. That made a
+// finished session cost ~600 MB (the agent plus its MCP servers) until the user threw its
+// history away. These three commands separate "stop the processes" from "delete the
+// session"; the conversation comes back through the adapters' existing resume path.
+
+/// Which of `session_ids` a bulk "stop idle sessions" should stop: those with a live PTY
+/// that the fleet does not report as running. A session with no live PTY is skipped -- it
+/// costs nothing, and marking it stopped would silently opt it out of restore-on-open.
+fn idle_stop_targets(
+    session_ids: &[String],
+    alive: &std::collections::HashSet<String>,
+    running: &std::collections::HashSet<String>,
+) -> Vec<String> {
+    session_ids
+        .iter()
+        .filter(|id| alive.contains(*id) && !running.contains(*id))
+        .cloned()
+        .collect()
+}
+
+/// Kill a session's agent PTY and its companion shell, and persist the intent so the
+/// restore-on-open path leaves it alone. The transcript, worktree and session record are
+/// untouched -- the next spawn resumes the conversation (`claude --resume <id>`, agy
+/// `--conversation=<id>`). Idempotent: stopping an already-stopped session is a no-op.
+#[tauri::command]
+fn stop_session(
+    session_id: String,
+    store: State<Arc<Store>>,
+    pty: State<Arc<PtyManager>>,
+    fleet: State<Arc<crate::fleet::FleetState>>,
+) {
+    // `retire`, never `kill`: the session is coming back, so its scrollback snapshot has to
+    // outlive the teardown. `kill` means destroy and deletes it.
+    pty.retire(&session_id);
+    pty.retire(&format!("{session_id}::term"));
+    // The status mirror is hook-driven; with the agent gone no hook will ever clear a
+    // stale "running", which would keep the quit guard warning about a dead process.
+    fleet.set_running(&session_id, false);
+    store.set_session_stopped(&session_id, true);
+}
+
+/// Clear the stopped flag. Spawning stays with the frontend -- `TerminalView` owns the
+/// cols/rows a spawn needs -- so this only records intent.
+#[tauri::command]
+fn start_session(session_id: String, store: State<Arc<Store>>) {
+    store.set_session_stopped(&session_id, false);
+}
+
+/// Stop every idle session in one project. Returns the ids actually stopped, so the UI can
+/// report a count instead of guessing.
+#[tauri::command]
+fn stop_idle_sessions(
+    project_id: String,
+    store: State<Arc<Store>>,
+    pty: State<Arc<PtyManager>>,
+    fleet: State<Arc<crate::fleet::FleetState>>,
+) -> Vec<String> {
+    let session_ids: Vec<String> = store
+        .list()
+        .into_iter()
+        .find(|p| p.id == project_id)
+        .map(|p| p.sessions.into_iter().map(|s| s.id).collect())
+        .unwrap_or_default();
+    let alive: std::collections::HashSet<String> = pty.session_ids().into_iter().collect();
+    let running: std::collections::HashSet<String> = fleet.running_sessions().into_iter().collect();
+    let targets = idle_stop_targets(&session_ids, &alive, &running);
+    for id in &targets {
+        // Same contract as stop_session: retire, don't destroy.
+        pty.retire(id);
+        pty.retire(&format!("{id}::term"));
+        fleet.set_running(id, false);
+        store.set_session_stopped(id, true);
+    }
+    targets
 }
 
 /// Suggest a short session title from the first prompt. Tries a tiny `claude -p`
@@ -1823,12 +1977,19 @@ pub fn run() {
                             .map(|d| d.as_secs() as i64)
                             .unwrap_or(0);
                         let reaped = crate::session_budget::sweep(tmux, &cfg, now);
-                        if !reaped.is_empty()
-                            && std::env::var("CONDUIT_HOOK_LOG").as_deref() == Ok("1")
-                        {
-                            eprintln!("[reap] retired {} idle session(s)", reaped.len());
+                        // Logged unconditionally. A reap is rare, silent, and indistinguishable
+                        // after the fact from a session that lost its tmux server -- so with no
+                        // record there is nothing to tell "the budget acted" from "the budget
+                        // never ran", which is exactly the question a host hoarding agents
+                        // raises. One line per reap is not noise at this rate.
+                        if !reaped.is_empty() {
+                            eprintln!(
+                                "[reap] retired {} idle tmux session(s): {}",
+                                reaped.len(),
+                                reaped.join(" ")
+                            );
                         }
-                        std::thread::sleep(std::time::Duration::from_secs(300));
+                        std::thread::sleep(std::time::Duration::from_secs(cfg.interval_sec));
                     }
                 });
             }
@@ -1886,6 +2047,9 @@ pub fn run() {
             pty_write,
             pty_resize,
             pty_kill,
+            stop_session,
+            start_session,
+            stop_idle_sessions,
             pty_is_running,
             tmux_available,
             session_context,
@@ -2037,5 +2201,31 @@ mod tests {
             !opts_into_mailbox(true, &["project".to_string()]),
             "a fleet mission already grants fleet MCP -- this predicate is mailbox-opt-in specifically"
         );
+    }
+
+    fn ids(v: &[&str]) -> Vec<String> {
+        v.iter().map(|s| s.to_string()).collect()
+    }
+    fn id_set(v: &[&str]) -> std::collections::HashSet<String> {
+        v.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn idle_targets_stops_alive_and_not_running() {
+        let got = idle_stop_targets(&ids(&["a", "b"]), &id_set(&["a", "b"]), &id_set(&["b"]));
+        assert_eq!(got, ids(&["a"]), "b is running, so only a is stopped");
+    }
+
+    #[test]
+    fn idle_targets_skips_sessions_with_no_pty() {
+        // `c` was never spawned: it costs nothing, and marking it stopped would silently
+        // opt it out of restore-on-open.
+        let got = idle_stop_targets(&ids(&["a", "c"]), &id_set(&["a"]), &id_set(&[]));
+        assert_eq!(got, ids(&["a"]));
+    }
+
+    #[test]
+    fn idle_targets_empty_project_stops_nothing() {
+        assert!(idle_stop_targets(&[], &id_set(&[]), &id_set(&[])).is_empty());
     }
 }

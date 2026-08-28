@@ -3,6 +3,47 @@
 All notable changes to Conduit are documented here. This project uses
 [semantic versioning](https://semver.org/).
 
+## 0.33.0 — 2026-08-29
+
+- **Added — Stop a session without deleting it.** Closing a session's tab now shuts its agent
+  down and frees the memory, instead of only hiding the tab. The session stays in the sidebar,
+  dimmed; opening it again relaunches the agent, resumes the conversation where it left off,
+  and replays the terminal as it was. Previously the only way to reclaim a finished session's
+  memory was to delete it and lose its history. Right-click a session for Stop/Start, or a
+  project for "Stop idle sessions" to reclaim everything that isn't mid-task. Stopping a
+  session that's still working asks first, and stopped sessions stay stopped across restarts.
+  A stopped session reopens exactly like one retired under memory pressure — same restore,
+  nothing lost.
+- **Added — Choose a session's MCP servers.** A new Claude session can launch with only the MCP
+  servers it needs. Servers are otherwise loaded by every session that could use them, so
+  trimming the list is a direct memory saving. Leave every box checked and nothing changes.
+- **Fixed — Blank pane after resuming a session.** A resumed session sometimes came back empty
+  or half-drawn until the window was resized. It now repaints itself on launch.
+- **Fixed — Idle sessions are retired in whole sessions, not half of one.** The automatic
+  memory budget counted each session twice (the agent and its companion shell), so its limit
+  of 24 really meant twelve — and because companion shells sit idle longest, a round of
+  cleanup could spend itself closing shells while the agents beside them, which hold nearly
+  all the memory, survived. It now retires a session and its shell together, and a session
+  you are looking at protects both halves.
+- **Fixed — Memory pressure is read from macOS itself.** The cleanup asked whether memory was
+  short by adding up page counts, which reported 7.4 GB free on a Mac sitting at 20.7 of
+  24 GB with 7.8 GB of swap in use. It now reads the same pressure level Activity Monitor
+  shows.
+- **Changed — Automatic cleanup says so.** Retiring an idle session now writes a line to the
+  log. It used to be silent, which made "the cleanup ran" impossible to tell apart from "the
+  cleanup never ran".
+- **Fixed — One unreadable value can no longer cost you every project.** Conduit stores a
+  session's agent, role and confidentiality as short words. A word this build did not
+  recognise — which is all it takes to open an older Conduit after using a newer one — made
+  the whole saved workspace unreadable, which emptied the sidebar and shut down every running
+  agent along with it. Unrecognised words now fall back to the safe default and everything
+  around them survives.
+- **Changed — The last OS dropdowns are gone.** The new-session dialog's task picker, both
+  routing pickers and the Command Code panel's model, account and effort pickers drew the
+  macOS menu instead of Conduit's own.
+
+---
+
 ## 0.32.0 — 2026-08-27
 
 - **Added — Project colours are yours to control.** Right-click a project and hover

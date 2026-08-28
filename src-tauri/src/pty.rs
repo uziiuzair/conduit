@@ -175,6 +175,30 @@ pub struct PtyManager {
     warm_spawns: DashMap<String, ()>,
 }
 
+/// Why a session's processes are being ended. The two verbs kill the same things; they
+/// differ only in whether the scrollback snapshot survives, and that single bit is
+/// load-bearing enough to name.
+///
+/// A session that is destroyed is gone — its record, its worktree, or the whole project
+/// went with it, so keeping a snapshot would leak a file nothing will ever read. A session
+/// that is retired still exists and will be opened again; its snapshot is the only record
+/// of what was on screen once tmux is gone, and deleting it would hand the user back an
+/// empty terminal after the next launch.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Teardown {
+    /// The session is going away for good (delete, project removal, `fleet_stop`).
+    Destroy,
+    /// The session is being hibernated and will come back (Stop session, stop-idle).
+    Retire,
+}
+
+impl Teardown {
+    /// Whether the scrollback snapshot outlives this teardown.
+    pub fn keeps_snapshot(self) -> bool {
+        matches!(self, Teardown::Retire)
+    }
+}
+
 impl PtyManager {
     pub fn new() -> Self {
         Self {
@@ -247,6 +271,10 @@ impl PtyManager {
         model: Option<String>,
         effort: Option<String>,
         resume_token: Option<String>,
+        // Add `--strict-mcp-config` alongside `mcp_config_path`, restricting the session to
+        // exactly that file's servers. Set only when the session has its own MCP allowlist
+        // (Feature C); false keeps the pre-allowlist inheritance behavior.
+        strict_mcp: bool,
         on_event: Channel<String>,
     ) -> Result<(), String> {
         // Already running → re-attach the live reader to the new channel and force
@@ -311,6 +339,7 @@ impl PtyManager {
                     model.as_deref(),
                     effort.as_deref(),
                     resume_token.as_deref(),
+                    strict_mcp,
                 );
                 // Never pass `inner` itself: a quoted argument inside it does not survive
                 // cmd's re-parse (see `write_spawn_script`). Route through a generated
@@ -353,6 +382,7 @@ impl PtyManager {
                     model.as_deref(),
                     effort.as_deref(),
                     resume_token.as_deref(),
+                    strict_mcp,
                 )
             };
             // Persistence: run `inner` inside a tmux session named after this session id,
@@ -723,6 +753,32 @@ impl PtyManager {
     }
 
     pub fn kill(&self, session_id: &str) {
+        self.tear_down(session_id, Teardown::Destroy);
+    }
+
+    /// Hibernate: end this session's processes and free their memory, while leaving
+    /// everything needed to bring it back — the session record, its transcript, and its
+    /// scrollback snapshot. The session comes back exactly the way one reaped by
+    /// `session_budget` does, or one whose tmux server was lost to a reboot: a cold spawn
+    /// that replays the snapshot and resumes the agent.
+    ///
+    /// The distinction from `kill` is the whole feature. `kill` means DESTROY and deletes
+    /// the snapshot; using it here would free the memory but throw away the scrollback the
+    /// user was promised on their next launch.
+    pub fn retire(&self, session_id: &str) {
+        self.tear_down(session_id, Teardown::Retire);
+    }
+
+    /// The one implementation behind `kill` and `retire`. They differ only in the two
+    /// dispositions `Teardown` names, which is exactly why that decision is a tested table
+    /// rather than a comment.
+    fn tear_down(&self, session_id: &str, how: Teardown) {
+        // Freshen the snapshot BEFORE dropping the PTY: after the entry is gone the live
+        // buffer is unreachable, and a retire that saved nothing would come back to
+        // whatever the slow flush timer last happened to write.
+        if how.keeps_snapshot() {
+            self.save_scrollback_for(session_id);
+        }
         if let Some((_, m)) = self.sessions.remove(session_id) {
             if let Ok(mut session) = m.lock() {
                 // Windows: child.kill() is TerminateProcess on cmd.exe only, which orphans
@@ -740,22 +796,36 @@ impl PtyManager {
                 let _ = session.child.wait(); // reap so we don't leave a zombie
             }
         }
-        // Every caller of `kill` means DESTROY -- session removed, project removed,
-        // worktree removed, fleet_stop, or the companion shell being respawned at a new
-        // directory. Killing the PTY alone would only detach the tmux client and strand
-        // the session (and its agent) running forever with nothing able to reattach.
-        //
-        // This is deliberately asymmetric with `kill_all` below. See its note.
+        // Both verbs kill the tmux session. For DESTROY it prevents stranding a session
+        // (and its agent) running forever with nothing able to reattach; for RETIRE it IS
+        // the point — killing the PTY alone would only detach the client, and the agent
+        // would keep every byte of its memory. Deliberately asymmetric with `kill_all`,
+        // which leaves tmux alone because persistence is its entire purpose.
         #[cfg(not(windows))]
         if let Some(tmux) = self.tmux_path() {
             crate::tmux::kill_session(tmux, session_id);
         }
-        // Destroy means destroy: the snapshot goes too. This is the ONLY place it is
-        // deleted for a session that still exists in the store -- the reaper explicitly
-        // must not, because a reaped session has to come back looking like it survived a
-        // reboot, and it cannot do that without its scrollback.
+        // The next spawn must be COLD either way, so it replays rather than assuming tmux
+        // will repaint a pane that no longer exists.
         self.warm_spawns.remove(session_id);
-        crate::scrollback::remove(session_id);
+        if !how.keeps_snapshot() {
+            crate::scrollback::remove(session_id);
+        }
+    }
+
+    /// Snapshot one session's scrollback now. `save_scrollback` does every session on a
+    /// timer; this is the single-session form a retire needs.
+    fn save_scrollback_for(&self, session_id: &str) {
+        let Some(entry) = self.sessions.get(session_id) else {
+            return;
+        };
+        let Ok(session) = entry.value().lock() else {
+            return;
+        };
+        let bytes = session.output.tail_bytes(crate::scrollback::MAX_BYTES);
+        if !bytes.is_empty() {
+            crate::scrollback::save(session_id, &bytes);
+        }
     }
 
     /// App quit. Drops every PTY and -- unlike `kill` -- deliberately leaves the tmux
@@ -970,6 +1040,7 @@ fn build_script(
     model: Option<&str>,
     effort: Option<&str>,
     resume_token: Option<&str>,
+    strict_mcp: bool,
 ) -> String {
     let mut flags = String::new();
     if let Some(name) = worktree {
@@ -980,6 +1051,13 @@ fn build_script(
     }
     if let Some(cfg) = mcp_config {
         flags.push_str(&format!(" --mcp-config {}", shell_quote(cfg)));
+        // Only ever set alongside a config generated for a session's own MCP allowlist. It
+        // suppresses EVERY other MCP source -- user scope, the repo's own `.mcp.json` --
+        // so it must never appear for a session that didn't opt in. The Conductor's
+        // fleet-only config passes false and keeps inheriting.
+        if strict_mcp {
+            flags.push_str(" --strict-mcp-config");
+        }
     }
     // Continuity (Node-gated, board-enabled Claude sessions only): the bundled plugin
     // dir, resolved by `continuity::continuity_asset_dir`. None (continuity off) leaves
@@ -1043,6 +1121,7 @@ fn build_script_win(
     model: Option<&str>,
     effort: Option<&str>,
     resume_token: Option<&str>,
+    strict_mcp: bool,
 ) -> String {
     let mut flags = String::new();
     if let Some(name) = worktree {
@@ -1053,6 +1132,11 @@ fn build_script_win(
     }
     if let Some(cfg) = mcp_config {
         flags.push_str(&format!(" --mcp-config {}", quote_arg(cfg)));
+        // See build_script's matching comment: strict mode is opt-in per session and
+        // suppresses every other MCP source. The flag itself needs no cmd-quoting.
+        if strict_mcp {
+            flags.push_str(" --strict-mcp-config");
+        }
     }
     // Continuity: same additive shape as the POSIX `build_script` above, cmd-quoted.
     if let Some(dir) = plugin_dir {
@@ -1088,6 +1172,15 @@ mod tests {
     use std::sync::atomic::{AtomicU32, Ordering};
 
     const ID: &str = "11111111-2222-3333-4444-555555555555";
+
+    #[test]
+    fn destroying_a_session_drops_its_scrollback_but_retiring_keeps_it() {
+        // The whole difference between hibernating a session and deleting one. A retired
+        // session has to come back looking like it survived a reboot, and it cannot do that
+        // without its snapshot -- the same contract `session_budget`'s reaper depends on.
+        assert!(!Teardown::Destroy.keeps_snapshot());
+        assert!(Teardown::Retire.keeps_snapshot());
+    }
 
     #[test]
     fn conductor_spawn_sets_subagent_model_env() {
@@ -1184,10 +1277,63 @@ mod tests {
             None,
             None,
             None,
+            false, // strict_mcp
         );
         assert!(script.contains("export CONDUIT_SESSION_ID='sid-1' CONDUIT_HOOK_PORT=7777"));
         assert!(script.contains("claude --session-id 'sid-1' || claude"));
         assert!(script.contains("cd '/repo' &&"));
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn build_script_appends_strict_mcp_config_when_set() {
+        let script = build_script(
+            &crate::agent::ClaudeAdapter,
+            "sid-1",
+            7777,
+            "/repo",
+            "/bin/zsh",
+            None,
+            None,
+            Some("/cfg/mcp.json"),
+            None, // plugin_dir
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            true, // strict_mcp
+        );
+        assert!(script.contains("--mcp-config '/cfg/mcp.json'"));
+        assert!(script.contains("--strict-mcp-config"));
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn build_script_omits_strict_mcp_config_by_default() {
+        // The Conductor passes an mcp-config WITHOUT strict mode: it must keep inheriting
+        // the user's own MCP servers, exactly as it did before session allowlists existed.
+        let script = build_script(
+            &crate::agent::ClaudeAdapter,
+            "sid-1",
+            7777,
+            "/repo",
+            "/bin/zsh",
+            None,
+            None,
+            Some("/cfg/mcp.json"),
+            None, // plugin_dir
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            false, // strict_mcp
+        );
+        assert!(script.contains("--mcp-config '/cfg/mcp.json'"));
+        assert!(!script.contains("--strict-mcp-config"));
     }
 
     #[cfg(not(windows))]
@@ -1210,6 +1356,7 @@ mod tests {
             None,                     // model
             None,                     // effort
             None,
+            false, // strict_mcp
         );
         assert!(script.contains("--settings '/cfg/hooks.json'"), "{script}");
         assert!(script.contains("--mcp-config '/cfg/mcp.json'"), "{script}");
@@ -1307,6 +1454,7 @@ mod tests {
             None,
             None,
             None,
+            false, // strict_mcp
         );
         assert!(
             script.contains("'implement the parser'"),
@@ -1443,6 +1591,27 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
+    fn build_script_win_appends_strict_mcp_config_when_set() {
+        let script = build_script_win(
+            &*crate::agent::adapter_for(crate::agent::AgentId::Claude),
+            "sid-1",
+            None,
+            None,
+            Some(r"C:\cfg\mcp.json"),
+            None, // plugin_dir
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            true, // strict_mcp
+        );
+        assert!(script.contains("--strict-mcp-config"), "{script}");
+    }
+
+    #[cfg(windows)]
+    #[test]
     fn build_script_win_conductor_stays_under_cmd_line_limit() {
         // The actual regression guard for "The command line is too long." The persona
         // rides as a FILE path, so the doubled (`||` fallback) invocation stays far under
@@ -1488,6 +1657,7 @@ mod tests {
             Some("claude-opus-4-8"),
             Some("high"),
             None,
+            false, // strict_mcp
         );
         assert!(script.contains("--model 'claude-opus-4-8'"), "{script}");
         assert!(script.contains("--effort 'high'"), "{script}");
@@ -1534,6 +1704,7 @@ mod tests {
             None,
             None,
             None,
+            false, // strict_mcp
         );
         assert!(
             with_plugin.contains("--plugin-dir '/opt/continuity-plugin'"),
@@ -1543,7 +1714,7 @@ mod tests {
         // None (continuity off) must add nothing -- purely additive.
         let without_plugin = build_script(
             &*adapter, "sid-1", 8423, "/repo", "/bin/zsh", None, None, None, None, None, None,
-            None, None, None, None,
+            None, None, None, None, false,
         );
         assert!(!without_plugin.contains("--plugin-dir"), "{without_plugin}");
     }

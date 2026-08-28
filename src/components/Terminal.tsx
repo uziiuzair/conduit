@@ -39,6 +39,12 @@ interface Props {
   /** "conductor" attaches the fleet MCP server + persona at spawn; default "worker". */
   role?: SessionRole;
   /**
+   * The user stopped this session (hibernate). Its PTYs are killed and NOT respawned
+   * until this goes false again. The xterm instance stays mounted throughout — the
+   * keep-alive rule is untouched — so scrollback survives a whole stop/start cycle.
+   */
+  stopped?: boolean;
+  /**
    * Grab keyboard focus when this terminal becomes visible. The center agent terminal
    * wants this so switching Claude tabs lands your cursor in Claude. The secondary
    * right-panel shell opts out (except when the user explicitly opens the Terminal tab)
@@ -68,6 +74,7 @@ export function TerminalView({
   shellOnly = false,
   dirReady = true,
   role,
+  stopped = false,
   focusOnReveal = true,
   onFocusGroup,
   style,
@@ -103,6 +110,12 @@ export function TerminalView({
    *  Channel closes over its generation so a doomed PTY's late output (including the
    *  "[process exited]" notice) can't paint into the reset terminal. */
   const spawnGenRef = useRef(0);
+  /** Set when this session is hibernated; consumed by the next spawn, which clears the
+   *  pane so Rust's cold-spawn scrollback replay isn't printed on top of the same screen.
+   *  A ref (not the stop effect doing the reset directly) because the resume can arrive
+   *  through either the stop transition or the reveal path, depending on whether the pane
+   *  was on screen when the flag cleared. */
+  const resetOnSpawnRef = useRef(false);
 
   const restoreOnOpen = useStore((s) => s.restoreSessionsOnOpen);
   const rendererPref = useStore((s) => s.terminalRenderer);
@@ -114,10 +127,30 @@ export function TerminalView({
   const spawnPty = (cols: number, rows: number) => {
     if (spawnedRef.current) return;
     spawnedRef.current = true;
+    // Resuming a hibernated session: clear the pane first. Its tmux session is gone, so the
+    // spawn below is COLD, and a cold spawn's first frame is the scrollback snapshot Rust
+    // replays (`take_cold_scrollback`). That snapshot is the same screen this terminal is
+    // still showing — without the reset the user would see it twice, the exact duplication
+    // `warm_spawns` exists to prevent on the reattach path. The snapshot is the better copy
+    // anyway: it also survives quitting the app, which the live buffer does not.
+    if (resetOnSpawnRef.current) {
+      resetOnSpawnRef.current = false;
+      termRef.current?.reset();
+    }
     // Read the dir from the ref, not the render closure: a deferred respawn (below)
     // may run after newer renders, and must spawn into the LATEST resolved dir.
     const wd = wdRef.current;
     spawnedDirRef.current = wd;
+    // The MCP registry lives in localStorage, so Rust can't turn a session's allowlisted
+    // NAMES into launchable commands — send the definitions with the spawn. Looked up fresh
+    // every time, so editing a server in the matrix takes effect on the next start without
+    // rewriting any session record. Rust still decides WHICH names apply (the persisted
+    // allowlist wins); this is only the dictionary it resolves them against.
+    const st = useStore.getState();
+    const session = st.projects.flatMap((p) => p.sessions).find((s) => s.id === sessionId);
+    const allowed = session?.mcpServers;
+    const mcpAllowlist =
+      allowed == null ? null : st.mcpServers.filter((s) => allowed.includes(s.name));
     const gen = spawnGenRef.current;
     const channel = new Channel<string>();
     channel.onmessage = (msg) => {
@@ -134,8 +167,26 @@ export function TerminalView({
       role: role ?? "worker",
       // A backend-spawned worker carries a first prompt; consumed once here.
       initialPrompt: useStore.getState().takePendingPrompt(sessionId) ?? null,
+      mcpAllowlist,
       onEvent: channel,
-    }).catch((e) => termRef.current?.write(`\r\n[spawn error: ${e}]\r\n`));
+    })
+      .then(() => {
+        // Cold-spawn repaint. When the agent resumes (`claude --resume <id>`, agy
+        // `--conversation=<id>`) it replays into the alternate screen and nothing repaints
+        // it, so the pane can come back blank or half-drawn — the long-standing "resume
+        // looks broken" symptom. pty_spawn's RE-ATTACH fast path already nudges the winsize
+        // for exactly this reason; the cold path never did. Harmless for a fresh session
+        // (a resize to rows+1 and straight back).
+        window.setTimeout(() => {
+          if (disposedRef.current || gen !== spawnGenRef.current || !spawnedRef.current) return;
+          const t = termRef.current;
+          if (!t || !visibleRef.current) return;
+          void invoke("pty_resize", { sessionId, cols: t.cols, rows: t.rows + 1 })
+            .then(() => invoke("pty_resize", { sessionId, cols: t.cols, rows: t.rows }))
+            .catch(() => {});
+        }, 400);
+      })
+      .catch((e) => termRef.current?.write(`\r\n[spawn error: ${e}]\r\n`));
   };
 
   // Create the xterm instance exactly once.
@@ -421,7 +472,7 @@ export function TerminalView({
       const rows = term.rows;
 
       if (!spawnedRef.current) {
-        if (dirReady) spawnPty(cols, rows);
+        if (dirReady && !stopped) spawnPty(cols, rows);
       } else {
         void invoke("pty_resize", { sessionId, cols, rows }).catch(() => {});
       }
@@ -438,20 +489,23 @@ export function TerminalView({
       window.setTimeout(() => scheduleFit(), 120);
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [visible, dirReady]);
+  }, [visible, dirReady, stopped]);
 
   // Eager restore-on-open: bring every session of the ACTIVE project live without waiting for
   // a click (VSCode-style — the whole project comes back where you left off). Companion shells
   // (shellOnly) stay lazy. Spawns with fallback dims; the reveal-refit corrects the size when
   // the tab is actually shown. Gated by the restoreSessionsOnOpen setting (default on).
+  // A session the user deliberately stopped is skipped here: without that, restoring the
+  // project on the next open would relaunch it and silently undo the decision — which is
+  // exactly why `stopped` is persisted rather than kept in component state.
   useEffect(() => {
-    if (spawnedRef.current || shellOnly) return;
+    if (spawnedRef.current || shellOnly || stopped) return;
     if (!restoreOnOpen || projectId !== selectedProjectId) return;
     const term = termRef.current;
     if (!term) return;
     spawnPty(term.cols || 80, term.rows || 24);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [restoreOnOpen, selectedProjectId]);
+  }, [restoreOnOpen, selectedProjectId, stopped]);
 
   // Shell-only: the resolved directory changed after spawn — a confirmed worktree was
   // deleted (fall back to the project root) or a deleted one came back. Kill + respawn
@@ -478,6 +532,49 @@ export function TerminalView({
       });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [workingDirectory]);
+
+  // Session hibernate: the user stopped or restarted this session.
+  //
+  // This is the ONLY path that may kill an AGENT PTY without deleting the session, and it
+  // fires exclusively on an explicit user gesture (tab close, sidebar Stop, bulk stop-idle).
+  // The keep-alive rule is otherwise untouched: tab switches, layout changes, group moves
+  // and directory changes must still never reach an agent terminal.
+  const prevStoppedRef = useRef(stopped);
+  useEffect(() => {
+    const was = prevStoppedRef.current;
+    prevStoppedRef.current = stopped;
+    if (was === stopped) return; // first run, or a re-render with no transition
+
+    if (stopped) {
+      if (!spawnedRef.current) return; // never spawned — nothing to do
+      // Bump the generation FIRST so the doomed PTY's trailing frames (including its
+      // "[process exited]" notice) can't paint over the stop marker below.
+      spawnGenRef.current++;
+      spawnedRef.current = false;
+      spawnedDirRef.current = null;
+      resetOnSpawnRef.current = true;
+      // Deliberately NO reset() here: a stopped tab keeps showing where the session got to.
+      // The clear happens at the NEXT spawn, just before Rust replays the snapshot.
+      termRef.current?.write(
+        "\r\n\x1b[2m── session stopped — click this tab to resume ──\x1b[0m\r\n",
+      );
+      // No pty_kill here. Tearing down the processes belongs to the `stop_session` /
+      // `stop_idle_sessions` command that set this flag, and it uses RETIRE. `pty_kill` is
+      // DESTROY — it would delete the scrollback snapshot the resume depends on, so a
+      // second teardown from this side would quietly undo the feature.
+      return;
+    }
+
+    // Restarting. Only spawn if this pane is actually on screen; a hidden one picks it up
+    // through the reveal path above (which now also gates on `stopped`).
+    // The repaint nudge lives in spawnPty, so it covers this path and the reveal path
+    // equally — a stopped session can resume through either, depending on whether its pane
+    // was already on screen when the flag cleared.
+    const term = termRef.current;
+    if (!term || !visibleRef.current || !dirReady) return;
+    spawnPty(term.cols || 80, term.rows || 24);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [stopped]);
 
   // App-wide font zoom (View menu). Setting options.fontSize changes cell metrics
   // WITHOUT firing the ResizeObserver (the host box is unchanged), so cols/rows must
