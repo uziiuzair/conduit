@@ -1394,6 +1394,7 @@ mod tests {
             None,
             None,
             None,
+            false,
         );
         assert!(
             inner.contains('"'),
@@ -1550,6 +1551,7 @@ mod tests {
             None,
             None,
             None,
+            false,
         );
         assert_eq!(script, format!("claude --session-id {ID} || claude"));
         assert!(!script.contains("cd "));
@@ -1572,6 +1574,7 @@ mod tests {
             None,
             None,
             None,
+            false,
         );
         assert!(
             script.contains("--settings \"C:\\cfg dir\\hooks.json\""),
@@ -1630,6 +1633,7 @@ mod tests {
             None,
             None,
             None,
+            false,
         );
         assert!(script.len() < 8000, "len={}: {script}", script.len());
         // Sanity: inlining the real persona twice (the OLD behavior) WOULD have overflowed
@@ -1679,6 +1683,7 @@ mod tests {
             Some("claude-opus-4-8"),
             Some("high"),
             None,
+            false,
         );
         assert!(script.contains("--model claude-opus-4-8"), "{script}");
         assert!(script.contains("--effort high"), "{script}");
@@ -1736,6 +1741,7 @@ mod tests {
             None,
             None,
             None,
+            false,
         );
         assert!(
             with_plugin.contains("--plugin-dir C:\\continuity-plugin"),
@@ -1744,7 +1750,7 @@ mod tests {
 
         // None (continuity off) must add nothing -- purely additive.
         let without_plugin = build_script_win(
-            &*adapter, "sid-1", None, None, None, None, None, None, None, None, None, None,
+            &*adapter, "sid-1", None, None, None, None, None, None, None, None, None, None, false,
         );
         assert!(!without_plugin.contains("--plugin-dir"), "{without_plugin}");
     }
