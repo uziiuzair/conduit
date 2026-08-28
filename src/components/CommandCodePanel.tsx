@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { useStore } from "../store";
+import { Dropdown } from "./Dropdown";
 
 /**
  * Settings → Command Code: edit `~/.commandcode/config.json` without opening a session.
@@ -68,7 +69,7 @@ interface CcConfig {
   values: Record<string, unknown>;
 }
 
-/** A model `<select>`, grouped by vendor. Shared by the main model and every feature model
+/** A model dropdown, grouped by vendor. Shared by the main model and every feature model
  *  so they can never drift apart in what they offer. */
 function ModelSelect({
   value,
@@ -84,26 +85,22 @@ function ModelSelect({
   onPick: (id: string | null) => void;
 }) {
   return (
-    <select
-      className="cc-select"
+    <Dropdown
+      className="dd-fill"
       disabled={disabled}
       value={value}
-      onChange={(e) => onPick(e.target.value || null)}
-    >
-      {/* Empty = the key is absent, so Command Code picks its own. Conduit deliberately
-          does not name that default: it changes with releases, and a stale label here
-          would be a confident lie. */}
-      <option value="">{defaultLabel}</option>
-      {groups.map(([cat, ms]) => (
-        <optgroup key={cat} label={cat}>
-          {ms.map((m) => (
-            <option key={m.id} value={m.id} title={m.description}>
-              {m.id}
-            </option>
-          ))}
-        </optgroup>
-      ))}
-    </select>
+      /* The empty value = the key is absent, so Command Code picks its own. Conduit
+         deliberately does not name that default: it changes with releases, and a stale
+         label here would be a confident lie. Vendor grouping is carried by `group` on a
+         RUN of consecutive options, so the flatten below must keep each vendor together. */
+      options={[
+        { value: "", label: defaultLabel },
+        ...groups.flatMap(([cat, ms]) =>
+          ms.map((m) => ({ value: m.id, label: m.id, group: cat, hint: m.description })),
+        ),
+      ]}
+      onChange={(v) => onPick(v || null)}
+    />
   );
 }
 
@@ -177,18 +174,15 @@ export function CommandCodePanel() {
       {ccAccounts.length > 0 && (
         <label className="cc-field">
           <span>Account</span>
-          <select
-            className="cc-select"
+          <Dropdown
+            className="dd-fill"
             value={accountDir ?? ""}
-            onChange={(e) => setAccountDir(e.target.value || null)}
-          >
-            <option value="">Default (~/.commandcode)</option>
-            {ccAccounts.map((a) => (
-              <option key={a.id} value={a.configDir}>
-                {a.label}
-              </option>
-            ))}
-          </select>
+            options={[
+              { value: "", label: "Default (~/.commandcode)" },
+              ...ccAccounts.map((a) => ({ value: a.configDir, label: a.label })),
+            ]}
+            onChange={(v) => setAccountDir(v || null)}
+          />
         </label>
       )}
 
@@ -224,19 +218,16 @@ export function CommandCodePanel() {
 
         <label className="cc-field">
           <span>Reasoning effort</span>
-          <select
-            className="cc-select"
+          <Dropdown
+            className="dd-fill"
             disabled={busy}
             value={(values.reasoningEffort as string) ?? ""}
-            onChange={(e) => patch({ reasoningEffort: e.target.value || null })}
-          >
-            <option value="">Default</option>
-            {EFFORTS.map((x) => (
-              <option key={x} value={x}>
-                {x}
-              </option>
-            ))}
-          </select>
+            options={[
+              { value: "", label: "Default" },
+              ...EFFORTS.map((x) => ({ value: x, label: x })),
+            ]}
+            onChange={(v) => patch({ reasoningEffort: v || null })}
+          />
         </label>
 
         <label className="cc-toggle">

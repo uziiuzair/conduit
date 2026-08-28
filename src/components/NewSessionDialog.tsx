@@ -169,22 +169,19 @@ export function NewSessionDialog({
         {taskKinds.length > 0 && !conductor && (
           <>
             <div className="dialog-label">What is this session for?</div>
-            <select
-              className="dialog-input"
+            <Dropdown
+              className="dd-dialog"
               value={task}
-              onChange={(e) => {
-                const next = e.target.value as TaskKind | "";
+              options={[
+                { value: "", label: "Let me choose the agent" },
+                ...taskKinds.map((t) => ({ value: t.id, label: t.label, hint: t.hint })),
+              ]}
+              onChange={(v) => {
+                const next = v as TaskKind | "";
                 setTask(next);
                 if (!next) setRoutedModel(null);
               }}
-            >
-              <option value="">Let me choose the agent</option>
-              {taskKinds.map((t) => (
-                <option key={t.id} value={t.id} title={t.hint}>
-                  {t.label}
-                </option>
-              ))}
-            </select>
+            />
             {decision && (
               // Always shown, never only on a fallback: a router that explains itself only
               // when it deviates teaches you to distrust it the rest of the time.

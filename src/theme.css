@@ -2423,6 +2423,18 @@ button {
   overflow: hidden;
   text-overflow: ellipsis;
 }
+/* Vendor/section header inside the menu — the <optgroup> label. Non-interactive, and
+   indented to the check column so the rows beneath it read as its members. */
+.dd-group {
+  color: var(--text-dim);
+  font-size: 10px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  padding: 7px 9px 3px 27px;
+}
+.dd-group:first-child {
+  padding-top: 3px;
+}
 
 /* ---- Profile selector (sidebar footer, below the add-project row). Same design
    language as .add-bar: hairline top border, muted text that brightens on hover, a
@@ -3594,20 +3606,6 @@ button {
   width: 26px;
   flex: 0 0 26px;
 }
-.route-select {
-  font-size: 11px;
-  padding: 4px 6px;
-  border-radius: 5px;
-  border: 1px solid var(--border);
-  background: var(--panel-bg);
-  color: var(--text-bright);
-  outline: none;
-  min-width: 0;
-  flex: 1;
-}
-.route-select:focus {
-  border-color: var(--accent);
-}
 .route-nomodel {
   font-size: 10px;
   color: var(--text-mid);
@@ -3670,28 +3668,6 @@ button {
 .cc-field > span {
   font-size: 11px;
   color: var(--text-mid);
-}
-.cc-select {
-  width: 100%;
-  font-size: 12px;
-  padding: 6px 8px;
-  border-radius: 5px;
-  border: 1px solid var(--border);
-  background: var(--panel-bg);
-  color: var(--text-bright);
-  font-family: var(--mono-font);
-  outline: none;
-}
-.cc-select:focus {
-  border-color: var(--accent);
-}
-.cc-select:disabled {
-  opacity: 0.55;
-}
-.cc-select option,
-.cc-select optgroup {
-  background: var(--panel-bg);
-  color: var(--text-bright);
 }
 .cc-toggle {
   display: flex;
@@ -3969,6 +3945,16 @@ button {
 }
 .dd-dialog .dd-trigger {
   padding: 6px 8px;
+  background: var(--panel-bg);
+}
+/* Routing rows are dense: one glyph, two dropdowns and three buttons on a line. */
+.dd-route {
+  flex: 1;
+  min-width: 0;
+}
+.dd-route .dd-trigger {
+  font-size: 11px;
+  padding: 4px 6px;
   background: var(--panel-bg);
 }
 .dd-fill {

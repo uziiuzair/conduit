@@ -3,6 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { useStore } from "../store";
 import { AGENTS, agentMeta, type AgentId } from "../agents";
 import { AgentGlyph } from "./AgentGlyph";
+import { Dropdown } from "./Dropdown";
 import type { Chain, RouteTarget, TaskKind } from "../routing";
 
 /**
@@ -55,38 +56,30 @@ function TargetRow({
     <div className="route-target">
       <span className="route-rank">{index === 0 ? "1st" : index === 1 ? "2nd" : `${index + 1}th`}</span>
       <AgentGlyph id={target.agent} size={14} />
-      <select
-        className="route-select"
+      <Dropdown
+        className="dd-route"
         value={target.agent}
-        onChange={(e) => {
-          const agent = e.target.value as AgentId;
+        options={AGENTS.map((a) => ({ value: a.id, label: a.label }))}
+        onChange={(v) => {
+          const agent = v as AgentId;
           // Drop the model when the agent changes: model ids are per-CLI, and carrying
           // "sonnet" onto Codex would either fail the spawn or mean something else.
           onChange({ agent });
         }}
-      >
-        {AGENTS.map((a) => (
-          <option key={a.id} value={a.id}>
-            {a.label}
-          </option>
-        ))}
-      </select>
+      />
 
       {meta.supportsModelFlags ? (
-        <select
-          className="route-select"
+        <Dropdown
+          className="dd-route"
           value={target.model ?? ""}
-          onChange={(e) => onChange({ agent: target.agent, model: e.target.value || undefined })}
-        >
-          {/* Absent means "leave the agent's own configured model alone", which is the
-              right answer for an agent whose model choice lives in its own settings. */}
-          <option value="">Agent’s own model</option>
-          {models.map((m) => (
-            <option key={m} value={m}>
-              {m}
-            </option>
-          ))}
-        </select>
+          /* The empty value means "leave the agent's own configured model alone", which is
+             the right answer for an agent whose model choice lives in its own settings. */
+          options={[
+            { value: "", label: "Agent’s own model" },
+            ...models.map((m) => ({ value: m, label: m })),
+          ]}
+          onChange={(v) => onChange({ agent: target.agent, model: v || undefined })}
+        />
       ) : (
         <span className="route-nomodel" title={`${meta.label} has no per-run --model flag`}>
           agent’s own model
