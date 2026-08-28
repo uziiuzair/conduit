@@ -1,10 +1,18 @@
-import { useEffect, useRef, useState } from "react";
+import { Fragment, useEffect, useRef, useState } from "react";
 
 export interface DropdownOption {
   value: string;
   label: string;
   /** Render this option dimmed and unpickable (e.g. a placeholder row). */
   disabled?: boolean;
+  /**
+   * Section this option belongs to — the `<optgroup>` this component replaces. A run of
+   * consecutive options sharing a group gets one non-interactive header row above it, so
+   * the grouping has to be expressed by ORDER, exactly as `<optgroup>` required.
+   */
+  group?: string;
+  /** Tooltip for the row, i.e. the native `<option title>`. */
+  hint?: string;
 }
 
 /**
@@ -82,20 +90,25 @@ export function Dropdown({
       </button>
       {open && (
         <div className={`dd-menu ${up ? "up" : ""}`} onClick={(e) => e.stopPropagation()}>
-          {options.map((o) => (
-            <button
-              type="button"
-              key={o.value}
-              className={`dd-row ${o.value === value ? "sel" : ""}`}
-              disabled={o.disabled}
-              onClick={() => {
-                setOpen(false);
-                if (o.value !== value) onChange(o.value);
-              }}
-            >
-              <span className="dd-check">{o.value === value ? "✓" : ""}</span>
-              <span className="dd-row-label">{o.label}</span>
-            </button>
+          {options.map((o, i) => (
+            <Fragment key={o.value}>
+              {o.group && o.group !== options[i - 1]?.group && (
+                <div className="dd-group">{o.group}</div>
+              )}
+              <button
+                type="button"
+                className={`dd-row ${o.value === value ? "sel" : ""}`}
+                disabled={o.disabled}
+                title={o.hint}
+                onClick={() => {
+                  setOpen(false);
+                  if (o.value !== value) onChange(o.value);
+                }}
+              >
+                <span className="dd-check">{o.value === value ? "✓" : ""}</span>
+                <span className="dd-row-label">{o.label}</span>
+              </button>
+            </Fragment>
           ))}
         </div>
       )}
