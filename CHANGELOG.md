@@ -19,6 +19,22 @@ All notable changes to Conduit are documented here. This project uses
   trimming the list is a direct memory saving. Leave every box checked and nothing changes.
 - **Fixed — Blank pane after resuming a session.** A resumed session sometimes came back empty
   or half-drawn until the window was resized. It now repaints itself on launch.
+- **Fixed — Idle sessions are retired in whole sessions, not half of one.** The automatic
+  memory budget counted each session twice (the agent and its companion shell), so its limit
+  of 24 really meant twelve — and because companion shells sit idle longest, a round of
+  cleanup could spend itself closing shells while the agents beside them, which hold nearly
+  all the memory, survived. It now retires a session and its shell together, and a session
+  you are looking at protects both halves.
+- **Fixed — Memory pressure is read from macOS itself.** The cleanup asked whether memory was
+  short by adding up page counts, which reported 7.4 GB free on a Mac sitting at 20.7 of
+  24 GB with 7.8 GB of swap in use. It now reads the same pressure level Activity Monitor
+  shows.
+- **Changed — Automatic cleanup says so.** Retiring an idle session now writes a line to the
+  log. It used to be silent, which made "the cleanup ran" impossible to tell apart from "the
+  cleanup never ran".
+- **Changed — The last OS dropdowns are gone.** The new-session dialog's task picker, both
+  routing pickers and the Command Code panel's model, account and effort pickers drew the
+  macOS menu instead of Conduit's own.
 
 ---
 

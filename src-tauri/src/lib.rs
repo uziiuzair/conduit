@@ -1977,12 +1977,19 @@ pub fn run() {
                             .map(|d| d.as_secs() as i64)
                             .unwrap_or(0);
                         let reaped = crate::session_budget::sweep(tmux, &cfg, now);
-                        if !reaped.is_empty()
-                            && std::env::var("CONDUIT_HOOK_LOG").as_deref() == Ok("1")
-                        {
-                            eprintln!("[reap] retired {} idle session(s)", reaped.len());
+                        // Logged unconditionally. A reap is rare, silent, and indistinguishable
+                        // after the fact from a session that lost its tmux server -- so with no
+                        // record there is nothing to tell "the budget acted" from "the budget
+                        // never ran", which is exactly the question a host hoarding agents
+                        // raises. One line per reap is not noise at this rate.
+                        if !reaped.is_empty() {
+                            eprintln!(
+                                "[reap] retired {} idle tmux session(s): {}",
+                                reaped.len(),
+                                reaped.join(" ")
+                            );
                         }
-                        std::thread::sleep(std::time::Duration::from_secs(300));
+                        std::thread::sleep(std::time::Duration::from_secs(cfg.interval_sec));
                     }
                 });
             }

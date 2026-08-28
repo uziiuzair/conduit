@@ -42,6 +42,13 @@ pub struct SessionInfo {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct MemInfo {
     pub available_mb: u64,
+    /// The kernel's own verdict, where the platform publishes one (macOS
+    /// `kern.memorystatus_vm_pressure_level`). It is authoritative in a way an arithmetic
+    /// stand-in cannot be: `free + inactive + speculative` reported 7.4 GB "available" on a
+    /// 24 GB Mac sitting at 20.7 GB used with 7.8 GB of swap, because on a
+    /// compressed-memory system "inactive" is not the same as "free". False here means
+    /// "normal, or nothing to ask" -- the `available_mb` watermark still applies either way.
+    pub kernel_warned: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -54,8 +61,10 @@ pub struct Config {
     pub max_detached: usize,
     /// A session touched more recently than this is never reaped.
     pub grace_sec: i64,
-    /// Most kills per sweep. Convergence is gradual and re-evaluated next sweep.
+    /// Most sessions retired per sweep. Convergence is gradual and re-evaluated next sweep.
     pub batch_max: usize,
+    /// Seconds between sweeps. Read by the caller that owns the loop.
+    pub interval_sec: u64,
 }
 
 impl Default for Config {
@@ -66,11 +75,13 @@ impl Default for Config {
             // the difference between slow and unusable.
             min_available_mb: 1536,
             // Well past any plausible working set; this only catches genuine runaway.
+            // Counted in SESSIONS, not tmux sessions -- see `group_sessions`.
             max_detached: 24,
             // Six hours protects a same-day project switch, which is the case where a
             // reap would be most annoying and least useful.
             grace_sec: 6 * 60 * 60,
             batch_max: 4,
+            interval_sec: 300,
         }
     }
 }
@@ -86,6 +97,13 @@ impl Config {
             max_detached: env_num("CONDUIT_SESSION_REAP_MAX_DETACHED")
                 .map(|v| v as usize)
                 .unwrap_or(base.max_detached),
+            // Overridable for the same reason the others are: this policy is only ever
+            // observable by watching it act, and a six-hour grace makes that untestable
+            // against a real socket without waiting six hours.
+            grace_sec: env_num("CONDUIT_SESSION_REAP_GRACE_SEC")
+                .map(|v| v as i64)
+                .unwrap_or(base.grace_sec),
+            interval_sec: env_num("CONDUIT_SESSION_REAP_INTERVAL_SEC").unwrap_or(base.interval_sec),
             ..base
         }
     }
@@ -95,11 +113,86 @@ fn env_num(key: &str) -> Option<u64> {
     std::env::var(key).ok()?.trim().parse().ok()
 }
 
-/// Which sessions to reap this sweep, most-stale first. Pure.
+/// The suffix `tmux::session_name` produces for a session's companion shell, whose Conduit
+/// id is `<session id>::term` and whose `:` are sanitized to `_`.
+const COMPANION_SUFFIX: &str = "__term";
+
+/// Every tmux session belonging to ONE Conduit session — the agent, and the companion shell
+/// if it has one.
 ///
-/// Returns empty unless something is actually wrong: under the memory watermark, or more
-/// detached sessions than the cap allows. When only the COUNT trigger fires, just the excess
-/// is taken — a host with memory to spare has no reason to go below its own cap.
+/// This grouping is what makes the budget mean what its name says. Conduit creates two tmux
+/// sessions per Conduit session, so counting tmux sessions made `max_detached: 24` really
+/// mean twelve — and because a companion shell is a plain login shell that goes quiet the
+/// moment you stop typing in it, the stalest entries were nearly all companions, so a batch
+/// could spend itself killing four ~1 MB shells while the ~300 MB agents beside them
+/// survived to the next sweep.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SessionGroup {
+    /// Conduit session id, in the sanitized form that appears in the tmux name.
+    pub id: String,
+    /// Every tmux session in the group, agent first.
+    pub names: Vec<String>,
+    /// Any part attached. The companion shell of a session you are looking at must not be
+    /// reaped out from under you.
+    pub attached: bool,
+    /// The most recent activity across the group — typing in either half is use of the
+    /// session, so an agent cannot be aged out by a quiet shell or the reverse.
+    pub activity_sec: i64,
+}
+
+/// Split a Conduit tmux session name into its session id and whether it is the companion
+/// shell. `None` for a name that is not ours. Pure.
+pub fn split_name(name: &str) -> Option<(&str, bool)> {
+    let rest = name.strip_prefix(crate::tmux::PREFIX)?;
+    match rest.strip_suffix(COMPANION_SUFFIX) {
+        Some(id) if !id.is_empty() => Some((id, true)),
+        _ => Some((rest, false)),
+    }
+}
+
+/// Collapse tmux sessions into one group per Conduit session. Pure; first-seen order is
+/// preserved so the result is deterministic.
+pub fn group_sessions(sessions: &[SessionInfo]) -> Vec<SessionGroup> {
+    let mut order: Vec<String> = Vec::new();
+    let mut groups: std::collections::HashMap<String, SessionGroup> =
+        std::collections::HashMap::new();
+    for s in sessions {
+        let Some((id, is_companion)) = split_name(&s.name) else {
+            continue;
+        };
+        let g = groups.entry(id.to_string()).or_insert_with(|| {
+            order.push(id.to_string());
+            SessionGroup {
+                id: id.to_string(),
+                names: Vec::new(),
+                attached: false,
+                activity_sec: i64::MIN,
+            }
+        });
+        // Agent first, so a kill tears the group down in the order a human would.
+        if is_companion {
+            g.names.push(s.name.clone());
+        } else {
+            g.names.insert(0, s.name.clone());
+        }
+        g.attached |= s.attached;
+        g.activity_sec = g.activity_sec.max(s.activity_sec);
+    }
+    order
+        .into_iter()
+        .filter_map(|id| groups.remove(&id))
+        .collect()
+}
+
+/// Which tmux sessions to reap this sweep, most-stale first. Pure.
+///
+/// Returns empty unless something is actually wrong: under the memory watermark (or the
+/// kernel saying so), or more detached SESSIONS than the cap allows. When only the COUNT
+/// trigger fires, just the excess is taken — a host with memory to spare has no reason to
+/// go below its own cap.
+///
+/// The cap and the batch count sessions; the names returned are tmux sessions, so one
+/// retired session contributes both of its halves.
 pub fn plan_reap(
     sessions: &[SessionInfo],
     mem: Option<MemInfo>,
@@ -110,12 +203,14 @@ pub fn plan_reap(
         return Vec::new();
     }
 
+    let groups = group_sessions(sessions);
     // Attached = someone is looking at it. Never a candidate, at any pressure.
-    let detached: Vec<&SessionInfo> = sessions.iter().filter(|s| !s.attached).collect();
+    let detached: Vec<&SessionGroup> = groups.iter().filter(|g| !g.attached).collect();
 
     // An unreadable memory figure must not be read as pressure. Only the count backstop
     // applies then, which needs no memory reading at all.
-    let under_pressure = mem.is_some_and(|m| m.available_mb < cfg.min_available_mb);
+    let under_pressure =
+        mem.is_some_and(|m| m.available_mb < cfg.min_available_mb || m.kernel_warned);
     let over_cap = detached.len().saturating_sub(cfg.max_detached);
     if !under_pressure && over_cap == 0 {
         return Vec::new();
@@ -123,13 +218,13 @@ pub fn plan_reap(
 
     // Recently active is protected even under pressure: the session someone was using ten
     // minutes ago is the one they are about to come back to.
-    let mut eligible: Vec<&SessionInfo> = detached
+    let mut eligible: Vec<&SessionGroup> = detached
         .into_iter()
-        .filter(|s| now_sec.saturating_sub(s.activity_sec) > cfg.grace_sec)
+        .filter(|g| now_sec.saturating_sub(g.activity_sec) > cfg.grace_sec)
         .collect();
 
     // Least-recently-active first — the same choice an LRU cache makes, for the same reason.
-    eligible.sort_by_key(|s| s.activity_sec);
+    eligible.sort_by_key(|g| g.activity_sec);
 
     let want = if under_pressure {
         cfg.batch_max
@@ -139,7 +234,7 @@ pub fn plan_reap(
     eligible
         .into_iter()
         .take(want)
-        .map(|s| s.name.clone())
+        .flat_map(|g| g.names.iter().cloned())
         .collect()
 }
 
@@ -196,6 +291,9 @@ pub fn mem_info() -> Option<MemInfo> {
             .ok()?;
         Some(MemInfo {
             available_mb: kb / 1024,
+            // Linux publishes no single pressure verdict comparable to macOS's; MemAvailable
+            // is already the kernel's own estimate, so the watermark is the whole signal.
+            kernel_warned: false,
         })
     }
     #[cfg(target_os = "macos")]
@@ -208,12 +306,34 @@ pub fn mem_info() -> Option<MemInfo> {
         let pages = parse_vm_stat_pages(&text)?;
         Some(MemInfo {
             available_mb: pages.saturating_mul(page_size) / (1024 * 1024),
+            kernel_warned: pressure_level().is_some_and(pressure_is_warned),
         })
     }
     #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     {
         None
     }
+}
+
+/// macOS's own memory-pressure verdict, or `None` if it cannot be read.
+///
+/// `kern.memorystatus_vm_pressure_level` is what Activity Monitor's pressure graph reports
+/// and what the kernel notifies daemons with, so it accounts for the compressor and for swap
+/// in a way `vm_stat` arithmetic does not.
+#[cfg(target_os = "macos")]
+pub fn pressure_level() -> Option<u32> {
+    let out = Command::new("/usr/sbin/sysctl")
+        .args(["-n", "kern.memorystatus_vm_pressure_level"])
+        .output()
+        .ok()?;
+    String::from_utf8_lossy(&out.stdout).trim().parse().ok()
+}
+
+/// Whether a `kern.memorystatus_vm_pressure_level` reading means the host is short of
+/// memory. 1 is normal, 2 warning, 4 critical; anything unrecognized is NOT read as
+/// pressure, on the same principle as an unreadable memory figure. Pure.
+pub fn pressure_is_warned(level: u32) -> bool {
+    level == 2 || level == 4
 }
 
 /// `vm_stat`'s page size from its header line. Pure.
@@ -272,12 +392,36 @@ mod tests {
     }
 
     fn tight() -> Option<MemInfo> {
-        Some(MemInfo { available_mb: 400 })
+        Some(MemInfo {
+            available_mb: 400,
+            kernel_warned: false,
+        })
     }
     fn roomy() -> Option<MemInfo> {
         Some(MemInfo {
             available_mb: 16_000,
+            kernel_warned: false,
         })
+    }
+    /// Plenty of headroom by the arithmetic, but the kernel says otherwise — the case the
+    /// `vm_stat` stand-in gets wrong on a compressed-memory Mac.
+    fn roomy_but_warned() -> Option<MemInfo> {
+        Some(MemInfo {
+            available_mb: 16_000,
+            kernel_warned: true,
+        })
+    }
+
+    /// A session with both halves: the agent, and its companion shell.
+    fn pair(name: &str, attached: bool, agent_age_h: i64, term_age_h: i64) -> Vec<SessionInfo> {
+        vec![
+            s(name, attached, agent_age_h),
+            SessionInfo {
+                name: format!("cdt-{name}__term"),
+                attached: false,
+                activity_sec: NOW - term_age_h * HOUR,
+            },
+        ]
     }
 
     #[test]
@@ -390,6 +534,107 @@ mod tests {
         for junk in ["", "cdt-abc", "cdt-abc\t0", "cdt-abc\t0\tnotanumber"] {
             assert!(parse_session_line(junk).is_none(), "for {junk:?}");
         }
+    }
+
+    #[test]
+    fn the_kernels_own_verdict_is_pressure_even_when_the_arithmetic_looks_fine() {
+        // 7.4 GB "available" on a host at 20.7/24 GB with 7.8 GB of swap is why this exists.
+        let list = vec![s("a", false, 500)];
+        assert!(plan_reap(&list, roomy(), &Config::default(), NOW).is_empty());
+        assert_eq!(
+            plan_reap(&list, roomy_but_warned(), &Config::default(), NOW),
+            vec!["cdt-a".to_string()]
+        );
+    }
+
+    #[test]
+    fn pressure_levels_map_to_warned_and_an_unknown_level_does_not() {
+        assert!(!pressure_is_warned(1), "1 is normal");
+        assert!(pressure_is_warned(2), "2 is warning");
+        assert!(pressure_is_warned(4), "4 is critical");
+        // Same principle as an unreadable memory figure: unknown is not pressure.
+        for junk in [0, 3, 5, 99] {
+            assert!(!pressure_is_warned(junk), "for {junk}");
+        }
+    }
+
+    #[test]
+    fn a_name_splits_into_its_session_id_and_whether_it_is_the_companion() {
+        assert_eq!(split_name("cdt-abc"), Some(("abc", false)));
+        assert_eq!(split_name("cdt-abc__term"), Some(("abc", true)));
+        // Not ours.
+        assert_eq!(split_name("someone-else"), None);
+        // A session whose whole id IS the suffix is the agent, not a headless companion.
+        assert_eq!(split_name("cdt-__term"), Some(("__term", false)));
+    }
+
+    #[test]
+    fn a_companion_shell_is_retired_with_its_agent_rather_than_on_its_own() {
+        // The companion is the stalest thing on the host, but it is not a candidate by
+        // itself: killing it frees a zsh and leaves the agent's memory behind.
+        let list = pair("a", false, 10, 900);
+        let cfg = Config {
+            max_detached: 0,
+            ..Config::default()
+        };
+        assert_eq!(
+            plan_reap(&list, roomy(), &cfg, NOW),
+            vec!["cdt-a".to_string(), "cdt-a__term".to_string()],
+        );
+    }
+
+    #[test]
+    fn an_attached_agent_protects_its_companion_shell() {
+        let list = pair("watching", true, 9_000, 9_000);
+        let cfg = Config {
+            max_detached: 0,
+            ..Config::default()
+        };
+        assert!(plan_reap(&list, tight(), &cfg, NOW).is_empty());
+    }
+
+    #[test]
+    fn recent_use_of_either_half_protects_the_whole_session() {
+        // The agent has been working while the shell sat idle for a week. Ageing the group
+        // out on the shell's clock would reap a session in active use.
+        let list = pair("busy", false, 1, 900);
+        let cfg = Config {
+            max_detached: 0,
+            ..Config::default()
+        };
+        assert!(plan_reap(&list, tight(), &cfg, NOW).is_empty());
+    }
+
+    #[test]
+    fn the_cap_counts_sessions_not_tmux_sessions() {
+        // Five sessions = ten tmux sessions. A cap of 3 is over by two SESSIONS, not seven.
+        let list: Vec<SessionInfo> = (0..5)
+            .flat_map(|i| pair(&format!("s{i}"), false, 100 + i, 100 + i))
+            .collect();
+        let cfg = Config {
+            max_detached: 3,
+            batch_max: 10,
+            ..Config::default()
+        };
+        let out = plan_reap(&list, roomy(), &cfg, NOW);
+        assert_eq!(out.len(), 4, "2 sessions retired, both halves each");
+        assert_eq!(
+            out,
+            vec!["cdt-s4", "cdt-s4__term", "cdt-s3", "cdt-s3__term"]
+        );
+    }
+
+    #[test]
+    fn a_batch_counts_sessions_so_a_run_of_companions_cannot_eat_it() {
+        let list: Vec<SessionInfo> = (0..50)
+            .flat_map(|i| pair(&format!("s{i}"), false, 100 + i, 900))
+            .collect();
+        let out = plan_reap(&list, tight(), &Config::default(), NOW);
+        assert_eq!(
+            out.len(),
+            Config::default().batch_max * 2,
+            "4 sessions, both halves each — not 4 companion shells"
+        );
     }
 
     #[test]

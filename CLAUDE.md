@@ -590,6 +590,31 @@ snapshot kept, and is what user-initiated hibernation uses (see "Where session h
 above). Automatic reaping and a deliberate stop end in the same state on purpose — one
 restore path, not two.
 
+Two things about the budget are easy to get wrong and are now pinned by tests:
+
+- **It counts SESSIONS, not tmux sessions.** Conduit creates two tmux sessions per Conduit
+  session (the agent and its `__term` companion shell), so counting tmux sessions made
+  `max_detached: 24` really mean twelve. Worse, a companion shell is a login shell that goes
+  quiet the moment you stop typing, so it dominates the least-recently-active sort — a batch
+  could spend itself killing four ~1 MB shells while the ~300 MB agents beside them survived.
+  `group_sessions` collapses the halves: a group is attached if EITHER half is, its activity
+  is the LATER of the two, and a reap takes both names.
+- **The macOS pressure reading asks the kernel, not `vm_stat` arithmetic.**
+  `free + inactive + speculative` is a Linux-shaped stand-in and it reported 7.4 GB
+  "available" on a 24 GB Mac at 20.7 GB used with 7.8 GB of swap, because on a
+  compressed-memory system "inactive" is not "free". `kern.memorystatus_vm_pressure_level`
+  (`MemInfo.kernel_warned`) is the same verdict Activity Monitor's graph shows. The
+  watermark still applies; the kernel's warning is an additional trigger, and an
+  unrecognized level is NOT read as pressure — same principle as an unreadable figure.
+
+A reap is logged unconditionally (`[reap] retired …`). It is rare, and after the fact a
+reaped session is indistinguishable from one that lost its tmux server — so without a line
+in the log there is no way to tell "the budget acted" from "the budget never ran", which is
+exactly the question a host hoarding agents raises. `grace_sec` and `interval_sec` join
+`disabled` / `min_available_mb` / `max_detached` as env overrides
+(`CONDUIT_SESSION_REAP_*`), because this policy is only observable by watching it act and a
+six-hour grace makes that untestable against a real socket without waiting six hours.
+
 One tmux rule outranks the rest: **`wrap_command` must `cd /` before `exec`ing tmux.** The
 client that happens to start the server donates its cwd for the server's whole life, and
 Conduit spawns from session directories — so the donor is routinely a worktree. Once that
