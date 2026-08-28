@@ -607,6 +607,18 @@ Two things about the budget are easy to get wrong and are now pinned by tests:
   watermark still applies; the kernel's warning is an additional trigger, and an
   unrecognized level is NOT read as pressure — same principle as an unreadable figure.
 
+**The orphan sweep is why `state.json` must never fail to parse.** A `Store` that fails to
+load is an EMPTY store, every live tmux session is then an orphan, and the startup sweep kills
+every running agent — so a single unreadable value costs the sidebar AND every session.
+serde aborts the whole document on one bad value and `#[serde(default)]` does not help (it
+covers an ABSENT field, not an unknown VALUE). `store::PersistedEnum` +
+`deserialize_lenient` make the persisted string enums (`AgentId`, `SessionRole`, `Clearance`)
+degrade to their default instead; a downgrade past a newly added agent is all it takes to
+produce the bad value. The lenient read lives on the TYPE, not on a field's
+`deserialize_with`, because `AgentId` is also a map key (`default_accounts`). New persisted
+string enums must implement it, and a round-trip test pins the hand-written `from_wire`
+against the derived `Serialize`.
+
 A reap is logged unconditionally (`[reap] retired …`). It is rare, and after the fact a
 reaped session is indistinguishable from one that lost its tmux server — so without a line
 in the log there is no way to tell "the budget acted" from "the budget never ran", which is

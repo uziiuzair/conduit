@@ -32,6 +32,12 @@ All notable changes to Conduit are documented here. This project uses
 - **Changed — Automatic cleanup says so.** Retiring an idle session now writes a line to the
   log. It used to be silent, which made "the cleanup ran" impossible to tell apart from "the
   cleanup never ran".
+- **Fixed — One unreadable value can no longer cost you every project.** Conduit stores a
+  session's agent, role and confidentiality as short words. A word this build did not
+  recognise — which is all it takes to open an older Conduit after using a newer one — made
+  the whole saved workspace unreadable, which emptied the sidebar and shut down every running
+  agent along with it. Unrecognised words now fall back to the safe default and everything
+  around them survives.
 - **Changed — The last OS dropdowns are gone.** The new-session dialog's task picker, both
   routing pickers and the Command Code panel's model, account and effort pickers drew the
   macOS menu instead of Conduit's own.

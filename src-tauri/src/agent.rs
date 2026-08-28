@@ -2,12 +2,13 @@
 
 use std::path::Path;
 
-/// Which coding-agent CLI a session runs. Persisted on each Session; serializes
-/// as a lowercase string ("claude"/"codex"/"gemini"/"opencode"). Unknown/absent → Claude (back-compat).
-/// `Hash`/`Eq` let it key the per-agent default-account maps (serde emits it as a JSON string key).
-#[derive(
-    serde::Serialize, serde::Deserialize, Clone, Copy, Debug, PartialEq, Eq, Hash, Default,
-)]
+/// Which coding-agent CLI a session runs. Persisted on each Session; serializes as a
+/// lowercase string ("claude"/"codex"/"gemini"/"opencode"/"antigravity"/"commandcode").
+/// Unknown/absent → Claude, and that back-compat promise is now KEPT rather than merely
+/// documented: see `store::PersistedEnum` for what one unreadable value used to cost.
+/// `Hash`/`Eq` let it key the per-agent default-account maps (serde emits it as a JSON string
+/// key), which is also why the lenient read lives on the type and not on a field.
+#[derive(serde::Serialize, Clone, Copy, Debug, PartialEq, Eq, Hash, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum AgentId {
     #[default]
@@ -17,6 +18,26 @@ pub enum AgentId {
     OpenCode,
     Antigravity,
     CommandCode,
+}
+
+impl crate::store::PersistedEnum for AgentId {
+    fn from_wire(s: &str) -> Option<Self> {
+        match s {
+            "claude" => Some(AgentId::Claude),
+            "codex" => Some(AgentId::Codex),
+            "gemini" => Some(AgentId::Gemini),
+            "opencode" => Some(AgentId::OpenCode),
+            "antigravity" => Some(AgentId::Antigravity),
+            "commandcode" => Some(AgentId::CommandCode),
+            _ => None,
+        }
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for AgentId {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        crate::store::deserialize_lenient(d)
+    }
 }
 
 /// Descriptor for a single MCP server passed to the CLI command builders.

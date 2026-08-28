@@ -14,8 +14,37 @@ use uuid::Uuid;
 
 use crate::agent::AgentId;
 
+/// A string enum persisted inside `state.json`.
+///
+/// These deserialize LENIENTLY — an unrecognized value becomes the type's `Default` instead
+/// of failing — and that is a data-safety rule, not politeness. serde aborts the WHOLE
+/// document on one bad value; a `Store` that fails to load is an EMPTY store; and an empty
+/// store makes every live tmux session an orphan, so the startup sweep kills every running
+/// agent. One unrecognized string — which is all a downgrade past a newly added agent is —
+/// would otherwise take the sidebar and every running session with it.
+///
+/// The cost is the right way round: a value we cannot read becomes the safest variant of its
+/// type (`worker`, `public`, `claude`) rather than deleting everything around it.
+pub trait PersistedEnum: Sized + Default {
+    /// Parse a persisted value. `None` for anything this build does not know.
+    fn from_wire(s: &str) -> Option<Self>;
+}
+
+/// `Deserialize` body for a [`PersistedEnum`]. Reads a string, never fails on its content.
+///
+/// Goes on the TYPE rather than a field's `deserialize_with`, because `AgentId` is also a
+/// map KEY (`default_accounts`) and a field attribute would not cover that position.
+pub fn deserialize_lenient<'de, D, T>(d: D) -> Result<T, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: PersistedEnum,
+{
+    let raw = String::deserialize(d)?;
+    Ok(T::from_wire(&raw).unwrap_or_default())
+}
+
 /// Whether a session is a normal worker or the project's orchestrating Conductor.
-#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
+#[derive(Serialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum SessionRole {
     #[default]
@@ -23,17 +52,50 @@ pub enum SessionRole {
     Conductor,
 }
 
+impl PersistedEnum for SessionRole {
+    fn from_wire(s: &str) -> Option<Self> {
+        match s {
+            "worker" => Some(SessionRole::Worker),
+            "conductor" => Some(SessionRole::Conductor),
+            _ => None,
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for SessionRole {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        deserialize_lenient(d)
+    }
+}
+
 /// Confidentiality level of a session, lowest to highest. Ordered so a clearance comparison
 /// (`caller >= target`) gates reads: an agent may only read a session at or below its own
 /// clearance. Part of the opt-in trust-boundary regime (see [`TrustSettings`], [`can_read`]);
 /// ignored entirely when private mode is off.
-#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Default)]
+#[derive(Serialize, Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum Clearance {
     #[default]
     Public,
     Internal,
     Confidential,
+}
+
+impl PersistedEnum for Clearance {
+    fn from_wire(s: &str) -> Option<Self> {
+        match s {
+            "public" => Some(Clearance::Public),
+            "internal" => Some(Clearance::Internal),
+            "confidential" => Some(Clearance::Confidential),
+            _ => None,
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for Clearance {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        deserialize_lenient(d)
+    }
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
@@ -2845,5 +2907,92 @@ mod tests {
             project_id: None,
         };
         assert!(!serde_json::to_string(&local).unwrap().contains("projectId"));
+    }
+
+    #[test]
+    fn every_persisted_enum_round_trips_through_its_own_wire_string() {
+        // Serialize is derived, `from_wire` is hand-written, and nothing but this test stops
+        // the two drifting the day a variant is added or renamed.
+        fn round_trip<T>(values: &[T])
+        where
+            T: Serialize + PersistedEnum + std::fmt::Debug + PartialEq + Copy,
+        {
+            for v in values {
+                let json = serde_json::to_string(v).unwrap();
+                let wire = json.trim_matches('"');
+                assert_eq!(
+                    T::from_wire(wire),
+                    Some(*v),
+                    "{wire} does not parse back to {v:?}"
+                );
+            }
+        }
+        round_trip(&[SessionRole::Worker, SessionRole::Conductor]);
+        round_trip(&[
+            Clearance::Public,
+            Clearance::Internal,
+            Clearance::Confidential,
+        ]);
+        round_trip(&[
+            AgentId::Claude,
+            AgentId::Codex,
+            AgentId::Gemini,
+            AgentId::OpenCode,
+            AgentId::Antigravity,
+            AgentId::CommandCode,
+        ]);
+    }
+
+    #[test]
+    fn an_unknown_enum_value_becomes_the_default_rather_than_failing() {
+        assert_eq!(
+            serde_json::from_str::<AgentId>(r#""a-future-agent""#).unwrap(),
+            AgentId::Claude
+        );
+        assert_eq!(
+            serde_json::from_str::<SessionRole>(r#""overseer""#).unwrap(),
+            SessionRole::Worker
+        );
+        assert_eq!(
+            serde_json::from_str::<Clearance>(r#""top-secret""#).unwrap(),
+            Clearance::Public
+        );
+    }
+
+    #[test]
+    fn one_unreadable_agent_string_does_not_cost_the_whole_state_file() {
+        // The failure this prevents is not cosmetic. serde aborts the WHOLE document on one
+        // bad value; a Store that fails to load is an EMPTY store; and an empty store makes
+        // every live tmux session an orphan, so the startup sweep kills every running agent.
+        // A downgrade past a newly added agent is all it takes to produce the bad value.
+        let json = r#"{
+            "projects": [{
+                "id": "p1", "name": "proj", "path": "/tmp/p1",
+                "sessions": [
+                    {"id": "s1", "name": "known", "useWorktree": false, "agent": "claude"},
+                    {"id": "s2", "name": "from the future", "useWorktree": false,
+                     "agent": "quantum-code", "role": "overseer", "clearance": "cosmic"}
+                ]
+            }],
+            "defaultAccounts": {"quantum-code": "acct-1"}
+        }"#;
+        let back: PersistState = serde_json::from_str(json).expect("state must still load");
+        assert_eq!(back.projects.len(), 1, "the project survives");
+        let sessions = &back.projects[0].sessions;
+        assert_eq!(sessions.len(), 2, "both sessions survive");
+        assert_eq!(sessions[0].agent, AgentId::Claude);
+        // The unreadable one degrades to the safest variant of each field, and keeps its
+        // identity -- which is what lets its tmux session still be recognized as live.
+        assert_eq!(sessions[1].id, "s2");
+        assert_eq!(sessions[1].agent, AgentId::Claude);
+        assert_eq!(sessions[1].role, SessionRole::Worker);
+        assert_eq!(sessions[1].clearance, Clearance::Public);
+        // Also covers the MAP KEY position, which a field-level `deserialize_with` could not.
+        assert_eq!(
+            back.default_accounts
+                .get(&AgentId::Claude)
+                .map(String::as_str),
+            Some("acct-1")
+        );
     }
 }
