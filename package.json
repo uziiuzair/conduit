@@ -1,7 +1,7 @@
 {
   "name": "conduit",
   "private": true,
-  "version": "0.21.0",
+  "version": "0.33.0",
   "type": "module",
   "packageManager": "pnpm@10.33.0",
   "description": "A desktop app for running multiple real Claude Code terminals across projects, in one window.",
@@ -25,7 +25,8 @@
     "build": "tsc && vite build",
     "preview": "vite preview",
     "tauri": "tauri",
-    "test": "vitest run"
+    "test": "vitest run",
+    "build:msi": "tauri build --bundles msi --config src-tauri/tauri.unsigned.conf.json"
   },
   "dependencies": {
     "@tauri-apps/api": "^2",
@@ -34,6 +35,7 @@
     "@tauri-apps/plugin-updater": "^2.10.1",
     "@xterm/addon-canvas": "^0.7.0",
     "@xterm/addon-fit": "^0.10.0",
+    "@xterm/addon-webgl": "^0.19.0",
     "@xterm/xterm": "^5.5.0",
     "marked": "^18.0.5",
     "monaco-editor": "^0.55.1",

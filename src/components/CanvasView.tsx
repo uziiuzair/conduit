@@ -26,7 +26,7 @@ import {
 } from "../canvas";
 import { meterLevel, meterTitle } from "../contextMeter";
 import { useProjectCanvas } from "../hooks/useProjectCanvas";
-import { AgentGlyph } from "./AgentGlyph";
+import { AgentGlyph, glyphStateFor } from "./AgentGlyph";
 import { deleteSession } from "./Sidebar";
 
 /**
@@ -368,7 +368,10 @@ export function CanvasUnderlay({
                 }}
                 title="Drag to move · double-click to open in the pane view"
               >
-                <AgentGlyph id={session.agent} />
+                <AgentGlyph
+                  id={session.agent}
+                  state={glyphStateFor(status, live[node.ref] !== undefined, live[node.ref]?.compacting)}
+                />
                 <span className="canvas-card-name">{session.name}</span>
                 <span className={`canvas-dot status-${status}`} title={status} />
               </div>

@@ -3,6 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import {
   useStore,
   activeGroup,
+  findSession,
   workingDirOf,
   effectiveDirOf,
   prettyPath,
@@ -12,6 +13,13 @@ import {
   type EditorGroup,
   type WsTab,
 } from "../store";
+import {
+  hasSessionDrag,
+  isMixedLayout,
+  resolveProjectColor,
+  readSessionDrag,
+  tabProjectId,
+} from "../layout";
 import { TerminalView } from "./Terminal";
 import { CodeEditorPane } from "./CodeEditorPane";
 import { BoardView } from "./BoardView";
@@ -73,11 +81,16 @@ export function WorkspaceCenter({
   const setGroupWeights = useStore((s) => s.setGroupWeights);
   const moveTab = useStore((s) => s.moveTab);
   const splitTab = useStore((s) => s.splitTab);
+  const dropSessionIntoPane = useStore((s) => s.dropSessionIntoPane);
   const wsRef = useRef<HTMLDivElement>(null);
 
   // drag-to-split / move-between-groups
   const dragData = useRef<TabDrag | null>(null);
   const [dragging, setDragging] = useState(false);
+  // A session dragged in from the SIDEBAR. Tracked separately from `dragging` because it
+  // starts in another component tree and carries no TabDrag — without this the pane
+  // overlay never appeared, so dragging a session out of the sidebar did nothing at all.
+  const [sidebarDragging, setSidebarDragging] = useState(false);
   // directional pane overlay: which group + region the cursor is currently over
   const [dropZone, setDropZone] = useState<{ groupId: string; zone: PaneZone } | null>(null);
 
@@ -88,8 +101,29 @@ export function WorkspaceCenter({
   const onTabDragEnd = () => {
     dragData.current = null;
     setDragging(false);
+    setSidebarDragging(false);
     setDropZone(null);
   };
+  // Any drop target that can take a session: a tab being rearranged, or a sidebar row
+  // arriving. The overlay renders for both.
+  const showDropZones = dragging || sidebarDragging;
+
+  // A drag cancelled with Esc while still over the workspace fires no `dragleave`, and the
+  // overlay sits at z-index 30 across the terminals — a stuck one would swallow every click
+  // and read as a frozen app. `dragend` always fires on the source, so listen globally.
+  useEffect(() => {
+    if (!sidebarDragging) return;
+    const clear = () => {
+      setSidebarDragging(false);
+      setDropZone(null);
+    };
+    window.addEventListener("dragend", clear);
+    window.addEventListener("drop", clear);
+    return () => {
+      window.removeEventListener("dragend", clear);
+      window.removeEventListener("drop", clear);
+    };
+  }, [sidebarDragging]);
 
   const activeProject = projectId ? projects.find((p) => p.id === projectId) ?? null : null;
   const ag = activeGroup(layout);
@@ -134,7 +168,14 @@ export function WorkspaceCenter({
   // stack (keep-alive); only CSS position/visibility changes. display:none when its
   // project isn't active or the session isn't open as a tab.
   const placeSession = (ownerProjectId: string, sessionId: string) => {
-    if (ownerProjectId !== projectId || !layout) {
+    if (!layout) {
+      return { visible: false, inActiveGroup: false, style: { display: "none" } as React.CSSProperties };
+    }
+    // Pane mode deliberately does NOT check ownership: a layout may borrow another
+    // project's session (WsTab.projectId), and `groupIndexOfRef` below already hides
+    // anything the active layout does not hold. Canvas mode still does, because a canvas
+    // is reconciled from its own project's sessions and a borrowed one has no node.
+    if (canvasMode && ownerProjectId !== projectId) {
       return { visible: false, inActiveGroup: false, style: { display: "none" } as React.CSSProperties };
     }
     // Canvas mode positions the SAME mounted terminals by absolute canvas coordinates
@@ -186,6 +227,9 @@ export function WorkspaceCenter({
   const nothingVisible =
     !canvasMode && (!layout || layout.groups.every((g) => g.tabs.length === 0));
   const soloGroup = (layout?.groups.length ?? 0) <= 1;
+  // Computed for the LAYOUT, not per group: with project A in one pane and project B in
+  // another, each group is internally uniform yet the panes still need telling apart.
+  const mixed = !!layout && !!projectId && isMixedLayout(layout, projectId);
 
   const startDrag = (e: React.MouseEvent, boundary: number) => {
     if (!layout || !wsRef.current || !projectId) return;
@@ -234,12 +278,38 @@ export function WorkspaceCenter({
 
   return (
     <div className="center">
-      <div className="workspace" ref={wsRef}>
+      <div
+        className="workspace"
+        ref={wsRef}
+        // Watch for a sidebar session ENTERING the workspace so the pane overlay can show.
+        // `dragenter` alone is not enough: it fires once, and a drag that starts over a
+        // child (a tab strip) would never re-fire it — so dragover keeps the flag set.
+        onDragEnter={(e) => {
+          if (hasSessionDrag(e.dataTransfer)) setSidebarDragging(true);
+        }}
+        onDragOver={(e) => {
+          if (hasSessionDrag(e.dataTransfer)) {
+            e.preventDefault();
+            setSidebarDragging(true);
+          }
+        }}
+        onDragLeave={(e) => {
+          if (!e.currentTarget.contains(e.relatedTarget as Node | null)) {
+            setSidebarDragging(false);
+            setDropZone(null);
+          }
+        }}
+        onDrop={() => {
+          setSidebarDragging(false);
+          setDropZone(null);
+        }}
+      >
         {layout && activeProject && canvasMode && (
           <div className="group-chrome" style={{ left: 0, width: "100%" }}>
             <GroupTabStrip
               projectId={projectId!}
-              project={activeProject}
+              projects={projects}
+              mixed={mixed}
               group={activeGroup(layout) ?? layout.groups[0]}
               home={home}
               isActiveGroup
@@ -266,7 +336,8 @@ export function WorkspaceCenter({
               >
                 <GroupTabStrip
                   projectId={projectId!}
-                  project={activeProject}
+                  projects={projects}
+                  mixed={mixed}
                   group={g}
                   home={home}
                   isActiveGroup={ag?.id === g.id}
@@ -312,7 +383,9 @@ export function WorkspaceCenter({
         >
           {allSessions.map(({ project, session }) => {
             const pl = placeSession(project.id, session.id);
-            const gi = project.id === projectId ? groupIndexOfRef(session.id) : -1;
+            // By ref alone, not by ownership: a borrowed session sits in the active
+            // layout's groups too, and clicking into its terminal must activate that group.
+            const gi = groupIndexOfRef(session.id);
             const gid = gi !== -1 ? layout?.groups[gi]?.id : undefined;
             return (
               <TerminalView
@@ -366,7 +439,7 @@ export function WorkspaceCenter({
           {/* Directional drop overlay — a separate absolutely-positioned sibling layer that
               only exists mid-drag. It NEVER wraps/reparents the panes above (keep-alive).
               left/right thirds split into a new column; the center moves into the group. */}
-          {dragging &&
+          {showDropZones &&
             layout &&
             projectId &&
             layout.groups.map((g, gi) =>
@@ -383,7 +456,7 @@ export function WorkspaceCenter({
                       dropZone?.groupId === g.id && dropZone.zone === zone ? "active" : ""
                     }`}
                     onDragOver={(e) => {
-                      if (!dragData.current) return;
+                      if (!dragData.current && !hasSessionDrag(e.dataTransfer)) return;
                       e.preventDefault();
                       setDropZone({ groupId: g.id, zone });
                     }}
@@ -394,8 +467,14 @@ export function WorkspaceCenter({
                     }
                     onDrop={(e) => {
                       e.preventDefault();
+                      e.stopPropagation();
+                      // A sidebar session wins: it is the only payload that can carry a
+                      // FOREIGN project, and a tab drag never sets that MIME type.
+                      const ext = readSessionDrag(e.dataTransfer);
                       const d = dragData.current;
-                      if (d) {
+                      if (ext) {
+                        dropSessionIntoPane(projectId, g.id, zone, ext.projectId, ext.sessionId);
+                      } else if (d) {
                         if (zone === "center") {
                           moveTab(projectId, d.fromGroupId, d.tab.ref, g.id, g.tabs.length);
                         } else {
@@ -435,7 +514,8 @@ export function WorkspaceCenter({
 
 function GroupTabStrip({
   projectId,
-  project,
+  projects,
+  mixed,
   group,
   home,
   isActiveGroup,
@@ -448,7 +528,10 @@ function GroupTabStrip({
   canvasViewportRef,
 }: {
   projectId: string;
-  project: Project;
+  /** Every project: a session tab may belong to any of them, not just the host. */
+  projects: Project[];
+  /** This layout holds sessions from more than one project, so tabs carry a project badge. */
+  mixed: boolean;
   group: EditorGroup;
   home: string | null;
   isActiveGroup: boolean;
@@ -469,15 +552,27 @@ function GroupTabStrip({
   const pinTab = useStore((s) => s.pinTab);
   const dirty = useStore((s) => s.dirty);
   const moveTab = useStore((s) => s.moveTab);
+  const dropSessionIntoPane = useStore((s) => s.dropSessionIntoPane);
   const sessionDirs = useStore((s) => s.sessionDirs);
   const sessionContext = useStore((s) => s.sessionContext);
+  const richSessionView = useStore((s) => s.richSessionView);
+  const richViewOpen = useStore((s) => s.richViewOpen);
+  const toggleRichView = useStore((s) => s.toggleRichView);
 
   // Insertion caret for tab reorder / move-into-strip: index in [0, tabs.length].
   const [caretIndex, setCaretIndex] = useState<number | null>(null);
-  // Drop of the dragged tab into THIS strip at the caret position.
-  const commitDrop = () => {
+  // Drop into THIS strip at the caret position — an existing tab being rearranged, or a
+  // session dragged in from the sidebar. The strip has to take the sidebar drop itself:
+  // `.group-chrome` sits ABOVE `.term-stack`, so the pane overlay never receives a pointer
+  // that is over a tab strip, and the strip is the most natural place to aim.
+  const commitDrop = (dt?: DataTransfer) => {
+    const ext = readSessionDrag(dt);
     const d = dragRef.current;
-    if (d) moveTab(projectId, d.fromGroupId, d.tab.ref, group.id, caretIndex ?? group.tabs.length);
+    if (ext) {
+      dropSessionIntoPane(projectId, group.id, "center", ext.projectId, ext.sessionId);
+    } else if (d) {
+      moveTab(projectId, d.fromGroupId, d.tab.ref, group.id, caretIndex ?? group.tabs.length);
+    }
     setCaretIndex(null);
     onTabDragEnd();
   };
@@ -487,24 +582,55 @@ function GroupTabStrip({
   }, [dragging]);
 
   const activeTab = group.tabs.find((t) => t.ref === group.activeRef) ?? null;
-  const activeSession =
-    activeTab?.kind === "session"
-      ? project.sessions.find((s) => s.id === activeTab.ref) ?? null
-      : null;
-  const wd = activeSession ? effectiveDirOf(project, activeSession, sessionDirs) : null;
+  // Resolved across ALL projects, not this one: the cwd readout and the VS Code button must
+  // follow a borrowed session to ITS repo, or they would quietly point at the host project.
+  const activeFound = activeTab?.kind === "session" ? findSession(projects, activeTab.ref) : null;
+  const wd = activeFound
+    ? effectiveDirOf(activeFound.project, activeFound.session, sessionDirs)
+    : null;
 
   const label = (t: WsTab): string =>
     t.kind === "session"
-      ? project.sessions.find((s) => s.id === t.ref)?.name ?? "Session"
+      ? findSession(projects, t.ref)?.session.name ?? "Session"
       : baseName(t.ref);
+
+  /** The project a tab belongs to, and its accent (chosen > derived > none — see
+   *  resolveProjectColor). Files are always the host's. */
+  const autoProjectColors = useStore((s) => s.autoProjectColors);
+  const ownerOf = (t: WsTab): { id: string; name: string; accent: string | null } => {
+    const id = t.kind === "session" ? tabProjectId(t, projectId) : projectId;
+    const project = projects.find((p) => p.id === id);
+    return {
+      id,
+      name: project?.name ?? "",
+      accent: resolveProjectColor(id, project?.color, autoProjectColors),
+    };
+  };
+
+  // A pane whose tabs all belong to one project wears that project's colour along its top
+  // edge, so panes are distinguishable before you read a single tab. A group holding two
+  // projects gets none -- the per-tab bars already say it, and a strip colour would have to
+  // pick a winner.
+  const groupProjects = new Set(
+    group.tabs.filter((t) => t.kind === "session").map((t) => tabProjectId(t, projectId)),
+  );
+  const stripId = mixed && groupProjects.size === 1 ? [...groupProjects][0] : null;
+  const stripAccent = stripId
+    ? resolveProjectColor(
+        stripId,
+        projects.find((p) => p.id === stripId)?.color,
+        autoProjectColors,
+      ) ?? undefined
+    : undefined;
 
   return (
     <div
-      className={`tab-strip ${isActiveGroup ? "active-group" : ""}`}
+      className={`tab-strip ${isActiveGroup ? "active-group" : ""} ${stripAccent ? "has-project-accent" : ""}`}
+      style={stripAccent ? ({ ["--proj-accent" as string]: stripAccent } as React.CSSProperties) : undefined}
       onMouseDown={() => setActiveGroup(projectId, group.id)}
       onDragOver={(e) => {
         // Allow drops anywhere on the strip (incl. padding); tabs/fill set the caret index.
-        if (dragRef.current) e.preventDefault();
+        if (dragRef.current || hasSessionDrag(e.dataTransfer)) e.preventDefault();
       }}
       onDragLeave={(e) => {
         // Only clear when the pointer truly leaves the strip (not on child→child moves).
@@ -512,7 +638,8 @@ function GroupTabStrip({
       }}
       onDrop={(e) => {
         e.preventDefault();
-        commitDrop();
+        e.stopPropagation();
+        commitDrop(e.dataTransfer);
       }}
     >
       {group.tabs.map((t, i) => (
@@ -521,7 +648,13 @@ function GroupTabStrip({
           <div
             className={`tab ${group.activeRef === t.ref ? "active" : ""} ${
               t.preview ? "preview" : ""
-            }`}
+            } ${mixed ? "badged" : ""}`}
+            style={
+              mixed && ownerOf(t).accent
+                ? ({ ["--proj-accent" as string]: ownerOf(t).accent } as React.CSSProperties)
+                : undefined
+            }
+            title={mixed ? `${ownerOf(t).name} · ${label(t)}` : undefined}
             draggable
             onDragStart={(e) => {
               e.dataTransfer.effectAllowed = "move";
@@ -530,7 +663,7 @@ function GroupTabStrip({
             }}
             onDragEnd={onTabDragEnd}
             onDragOver={(e) => {
-              if (!dragRef.current) return;
+              if (!dragRef.current && !hasSessionDrag(e.dataTransfer)) return;
               e.preventDefault();
               // Insert before this tab if the cursor is left of its horizontal midpoint.
               const rect = e.currentTarget.getBoundingClientRect();
@@ -551,6 +684,10 @@ function GroupTabStrip({
             ) : (
               <FileIcon size={11} />
             )}
+            {/* Shown on EVERY tab once the layout is mixed, never on only the foreign ones:
+                badging just the visitors would make a bare tab mean "the host project",
+                which is knowledge the badge exists to remove. */}
+            {mixed && <span className="tab-project">{ownerOf(t).name}</span>}
             <span className="tab-label">{label(t)}</span>
             {t.kind === "file" && dirty[t.ref] && (
               <span className="tab-dirty" title="Unsaved changes" />
@@ -574,12 +711,30 @@ function GroupTabStrip({
         className="tab-strip-fill"
         data-tauri-drag-region
         onDragOver={(e) => {
-          if (!dragRef.current) return;
+          if (!dragRef.current && !hasSessionDrag(e.dataTransfer)) return;
           e.preventDefault();
           setCaretIndex(group.tabs.length);
         }}
       />
       {wd && soloGroup && <span className="cwd">{prettyPath(wd, home)}</span>}
+      {/* Per-session view switch. Only exists when the preference is on, and only for a
+          session tab -- an editor or a diff has no conversation to render. The terminal is
+          never unmounted by this; the pane simply covers it (see SessionChat). */}
+      {richSessionView && activeTab?.kind === "session" && (
+        <button
+          type="button"
+          className={`header-btn board-tab ${richViewOpen[activeTab.ref] ? "active" : ""}`}
+          title={
+            richViewOpen[activeTab.ref]
+              ? "Back to the terminal (it never stopped running)"
+              : "Read this session as a conversation"
+          }
+          onClick={() => toggleRichView(activeTab.ref)}
+        >
+          <span className="board-tab-dot" />
+          <span>{richViewOpen[activeTab.ref] ? "Terminal" : "Chat"}</span>
+        </button>
+      )}
       {isActiveGroup && (
         <button
           type="button"

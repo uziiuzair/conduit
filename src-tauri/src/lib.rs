@@ -12,8 +12,11 @@ mod broker;
 mod claude_status;
 mod claude_usage;
 mod clipboard;
+mod commandcode_config;
+mod commandcode_usage;
 mod context_window;
 mod continuity;
+mod continuity_feed;
 mod continuity_read;
 mod fleet;
 mod fleet_mcp;
@@ -29,6 +32,8 @@ mod menu;
 mod notify;
 mod plugins;
 mod pty;
+mod root_chat;
+mod routing;
 mod scrollback;
 mod search;
 #[cfg_attr(windows, allow(dead_code))]
@@ -206,20 +211,29 @@ fn pty_spawn(
     // `session_account_config_dir`'s session->project lookup.
     let project_board_on = !shell_only && store.board_enabled_for_session(&session_id);
     let gets_fleet_mcp = mission_record.is_some() || opted_into_mailbox || project_board_on;
-    // SPEC-B: model_tier -> concrete model id + effort, Claude only -- the only adapter
-    // with a verified per-invocation flag for either (`claude --help` lists both `--model
-    // <model>` and `--effort <low|medium|high|xhigh|max>`). Other adapters have no
-    // equivalent CLI knob today; model_tier/effort are still recorded on the Session (by
-    // fleet_spawn) so they're visible/queryable, just not acted on here.
-    let claude_model = (!shell_only && agent == crate::agent::AgentId::Claude)
+    // `--model` / `--effort`, for the adapters that verifiably take them (Claude and
+    // Command Code). This used to be spelled `agent == Claude`; asking the ADAPTER means
+    // adding a sixth agent with the same flags is a one-line capability rather than another
+    // condition to remember here. An adapter that does not take them still RECORDS
+    // model_tier/effort on the Session (fleet_spawn sets them), so they stay visible and
+    // queryable -- they are simply not acted on.
+    //
+    // Two sources, in precedence order. A concrete `model` is what a route pins ("sonnet",
+    // "google/gemini-3.7-flash"), and it wins because the user chose it for THIS session.
+    // `model_tier` is the fleet's coarse cheap/standard/hard, resolved per agent.
+    let takes_model_flags = !shell_only && crate::agent::adapter_for(agent).supports_model_flags();
+    let agent_model = takes_model_flags
         .then(|| {
-            this_session
-                .as_ref()
-                .and_then(|s| s.model_tier.as_deref())
-                .and_then(|tier| crate::agent::model_for_tier(agent, tier))
+            let s = this_session.as_ref()?;
+            s.model.clone().or_else(|| {
+                s.model_tier
+                    .as_deref()
+                    .and_then(|tier| crate::agent::model_for_tier(agent, tier))
+                    .map(str::to_string)
+            })
         })
         .flatten();
-    let claude_effort = (!shell_only && agent == crate::agent::AgentId::Claude)
+    let agent_effort = takes_model_flags
         .then(|| this_session.as_ref().and_then(|s| s.effort.as_deref()))
         .flatten();
     let is_conductor = !shell_only
@@ -409,6 +423,27 @@ fn pty_spawn(
         if let Some(mission) = &mission_record {
             hooks::write_mission_context(&wt_path, &mission.payload);
         }
+        // SPEC-A Tier 1 for a non-Claude adapter: Command Code has no `--mcp-config`
+        // flag, but it does read `<cwd>/.mcp.json`, and a Conduit-driven worktree IS this
+        // worker's cwd -- so the same session-scoped fleet MCP server a Claude worker gets
+        // is delivered as a file instead of a flag. That is what turns a Command Code
+        // worker from "status only, hand back nothing" into a real fleet participant with
+        // `fleet_result` and the mailbox.
+        //
+        // Deliberately only on the WORKTREE path. The non-worktree branch below runs in
+        // the shared project root, where writing `.mcp.json` would both drop an untracked
+        // file into the user's checkout and give every session in that project the same
+        // session-scoped callback URL -- so a manual Command Code session stays on the
+        // status channel alone.
+        if gets_fleet_mcp {
+            if let Some(rel) = adapter.project_mcp_config_rel_path() {
+                let mcp_port = fleet.mcp_port.load(Ordering::SeqCst);
+                crate::fleet::write_project_mcp_config(&wt_path, rel, mcp_port, &session_id);
+                // The tools are useless if the worker does not know it has them, and
+                // this adapter has no system-prompt flag to be told through.
+                hooks::write_worker_brief_context(&wt_path);
+            }
+        }
         // SPEC-A Tier 2: Codex has no MCP, so its structured result rides the hook
         // channel instead -- provision the schema (and, on Windows, the curl helper
         // script) its build_invocation references, for every Codex worktree spawn, not
@@ -438,7 +473,8 @@ fn pty_spawn(
     };
 
     // Resume token: the agent's own captured conversation id. agy resumes via
-    // `--conversation=<id>`; Claude ignores it (keys off session_id). None for shell-only
+    // `--conversation=<id>` and Command Code via `--session <id>`; Claude ignores it (it
+    // keys off session_id, which Conduit gets to pin itself). None for shell-only
     // companions and for a session we haven't captured an id for yet.
     let resume_token = (!shell_only)
         .then(|| store.session_agent_conversation_id(&session_id))
@@ -461,8 +497,8 @@ fn pty_spawn(
         suppress_remote,
         opencode,
         is_conductor,
-        claude_model.map(str::to_string),
-        claude_effort.map(str::to_string),
+        agent_model,
+        agent_effort.map(str::to_string),
         resume_token,
         strict_mcp,
         on_event,
@@ -484,7 +520,8 @@ fn pty_resize(
     pty.resize(&session_id, cols, rows)
 }
 
-#[tauri::command]
+// Thread pool, not the main thread: see the note on `remove_session`.
+#[tauri::command(async)]
 fn pty_kill(session_id: String, pty: State<Arc<PtyManager>>) {
     pty.kill(&session_id);
 }
@@ -499,6 +536,14 @@ fn pty_is_running(session_id: String, pty: State<Arc<PtyManager>>) -> bool {
 /// with an install hint instead of silently doing nothing when switched on.
 #[derive(serde::Serialize)]
 struct TmuxInfo {
+    /// Can this platform persist sessions AT ALL. False on Windows, where tmux does not
+    /// exist and no install would change that.
+    ///
+    /// Separate from `available` because the two call for opposite UI: `available: false`
+    /// with `supported: true` is a fixable gap and earns an install hint, while
+    /// `supported: false` is a property of the OS and must NOT tell someone to go install
+    /// tmux with their package manager.
+    supported: bool,
     available: bool,
     path: Option<String>,
     /// How to install tmux on this host, when there is a sensible suggestion. Resolved here
@@ -515,6 +560,7 @@ fn tmux_available(pty: State<Arc<PtyManager>>) -> TmuxInfo {
         let path = pty.tmux_path().map(|p| p.to_string_lossy().into_owned());
         let available = path.is_some();
         TmuxInfo {
+            supported: true,
             available,
             path,
             install: if available {
@@ -529,6 +575,7 @@ fn tmux_available(pty: State<Arc<PtyManager>>) -> TmuxInfo {
     {
         let _ = pty;
         TmuxInfo {
+            supported: false,
             available: false,
             path: None,
             install: None,
@@ -632,7 +679,8 @@ fn search_transcripts(
 pub(crate) fn live_running_agent<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> bool {
     let fleet = app.state::<Arc<crate::fleet::FleetState>>();
     let pty = app.state::<Arc<PtyManager>>();
-    fleet.running_sessions().iter().any(|sid| pty.has(sid))
+    let root = app.state::<Arc<crate::root_chat::RootChatState>>();
+    fleet.running_sessions().iter().any(|sid| pty.has(sid)) || root.any_running()
 }
 
 /// Whether any agent is actively working (live-PTY-checked). The frontend `live` map can lag
@@ -642,8 +690,9 @@ pub(crate) fn live_running_agent<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -
 fn any_agent_running(
     fleet: State<Arc<crate::fleet::FleetState>>,
     pty: State<Arc<PtyManager>>,
+    root: State<Arc<crate::root_chat::RootChatState>>,
 ) -> bool {
-    fleet.running_sessions().iter().any(|sid| pty.has(sid))
+    fleet.running_sessions().iter().any(|sid| pty.has(sid)) || root.any_running()
 }
 
 // ---- Project / session store commands ---------------------------------------
@@ -667,6 +716,60 @@ fn remove_project(id: String, store: State<Arc<Store>>, pty: State<Arc<PtyManage
         }
     }
     store.remove_project(&id);
+}
+
+// ---- Root chat commands -------------------------------------------------------
+
+#[tauri::command]
+fn list_root_chats(store: State<Arc<Store>>) -> Vec<store::RootChat> {
+    store.list_root_chats()
+}
+
+#[tauri::command]
+fn add_root_chat(store: State<Arc<Store>>) -> store::RootChat {
+    store.add_root_chat()
+}
+
+#[tauri::command]
+fn rename_root_chat(id: String, name: String, store: State<Arc<Store>>) {
+    store.rename_root_chat(&id, &name);
+}
+
+#[tauri::command]
+fn remove_root_chat(id: String, store: State<Arc<Store>>) {
+    store.remove_root_chat(&id);
+}
+
+#[tauri::command]
+fn set_project_color(id: String, color: Option<String>, store: State<Arc<Store>>) -> bool {
+    store.set_project_color(&id, color)
+}
+
+// ---- Profile commands ---------------------------------------------------------
+
+#[tauri::command]
+fn list_profiles(store: State<Arc<Store>>) -> Vec<store::Profile> {
+    store.list_profiles()
+}
+
+#[tauri::command]
+fn add_profile(name: String, store: State<Arc<Store>>) -> store::Profile {
+    store.add_profile(&name)
+}
+
+#[tauri::command]
+fn remove_profile(id: String, store: State<Arc<Store>>) -> bool {
+    store.remove_profile(&id)
+}
+
+#[tauri::command]
+fn get_active_profile(store: State<Arc<Store>>) -> Option<String> {
+    store.active_profile()
+}
+
+#[tauri::command]
+fn set_active_profile(id: Option<String>, store: State<Arc<Store>>) -> bool {
+    store.set_active_profile(id)
 }
 
 // ---- Project task board commands ---------------------------------------------
@@ -852,6 +955,47 @@ fn list_continuity(
     Ok(continuity_read::view_for_project(&project_id, &session_ids))
 }
 
+/// Read-only continuity feed for a project: the decisions and messages recorded by the
+/// sessions that belong to it. Scoped by Conduit session id (exact) plus the git toplevel
+/// of the project and each of its worktrees (for sessions started outside Conduit).
+/// Best-effort -- see `continuity_feed::feed_for_project`.
+#[tauri::command]
+fn continuity_feed(
+    store: State<Arc<Store>>,
+    project_id: String,
+) -> Result<continuity_feed::ContinuityFeed, String> {
+    let Some(project) = store.list().into_iter().find(|p| p.id == project_id) else {
+        return Ok(continuity_feed::ContinuityFeed::default());
+    };
+    let session_ids: Vec<String> = project.sessions.iter().map(|s| s.id.clone()).collect();
+
+    // The project root plus every worktree. Each is its own git toplevel and so its own
+    // cwd_hash; a path that isn't a checkout (a pending worktree) simply drops out.
+    let mut dirs: Vec<String> = vec![project.path.clone()];
+    dirs.extend(
+        project
+            .sessions
+            .iter()
+            .filter_map(|s| s.worktree_path.clone()),
+    );
+    let mut toplevels: Vec<String> = dirs.iter().filter_map(|d| git::toplevel(d)).collect();
+    toplevels.sort();
+    toplevels.dedup();
+
+    Ok(continuity_feed::feed_for_project(
+        &session_ids,
+        &toplevels,
+        CONTINUITY_FEED_LIMIT,
+    ))
+}
+
+/// Rows per table in one `continuity_feed` read. A memory panel, not an archive browser --
+/// deep history lives in continuity itself.
+const CONTINUITY_FEED_LIMIT: usize = 100;
+
+/// `model` is a concrete model id chosen by a route. It is applied HERE rather than in a
+/// second call from the frontend so the session is never briefly persisted without it --
+/// and so nothing can spawn in between reading a model that was not chosen.
 #[tauri::command]
 fn add_session(
     project_id: String,
@@ -862,6 +1006,7 @@ fn add_session(
     // Feature C: MCP registry names this session may load. None = inherit everything
     // (today's behavior). See `Session::mcp_servers` for why None != Some(<everything>).
     mcp_servers: Option<Vec<String>>,
+    model: Option<String>,
     store: State<Arc<Store>>,
 ) -> Option<Session> {
     let mut session = store.add_session(
@@ -871,13 +1016,18 @@ fn add_session(
         agent,
         role.unwrap_or_default(),
     )?;
-    // Applied as a follow-up write rather than an `add_session` parameter: that function has
-    // 40+ call sites (nearly all tests) and none of the others carries an allowlist. The
-    // returned session must carry it too -- the frontend merges THIS object into its project
-    // list, and a stale None there would make the very first spawn inherit everything.
+    // Both applied as follow-up writes rather than `add_session` parameters: that function
+    // has 40+ call sites (nearly all tests) and none of the others carries either. The
+    // returned session must carry them too -- the frontend merges THIS object into its
+    // project list, and a stale None there would make the very first spawn inherit
+    // everything (allowlist) or ignore the routed model.
     if let Some(list) = mcp_servers {
         store.set_session_mcp_servers(&session.id, Some(list.clone()));
         session.mcp_servers = Some(list);
+    }
+    if model.is_some() {
+        store.set_session_model(&session.id, model.clone());
+        session.model = model;
     }
     Some(session)
 }
@@ -1069,7 +1219,12 @@ fn opencode_key_set(store: State<Arc<Store>>) -> bool {
     store.opencode_key().is_some()
 }
 
-#[tauri::command]
+// `(async)` on a sync fn: run it on the thread pool instead of inline on the IPC (main)
+// thread. Destroying a session SIGKILLs a child, reaps it, tears down its tmux session and
+// rewrites state.json -- seconds of work in the worst case, and every one of them a frozen
+// window if it happens on the main thread. Same reasoning for `pty_kill` and the two
+// worktree commands below; the delete path calls all four in a row.
+#[tauri::command(async)]
 fn remove_session(
     project_id: String,
     session_id: String,
@@ -1378,12 +1533,14 @@ fn hotexit_load() -> Vec<hotexit::HotExitEntry> {
 
 // ---- Worktree lifecycle ------------------------------------------------------
 
-#[tauri::command]
+// Both shell out to git against a whole checkout -- `remove` deletes every file in it --
+// so both run on the thread pool. See the note on `remove_session`.
+#[tauri::command(async)]
 fn worktree_is_dirty(worktree_path: String) -> bool {
     worktree::is_dirty(&worktree_path)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn worktree_remove(repo_path: String, worktree_path: String, force: bool) -> Result<(), String> {
     worktree::remove(&repo_path, &worktree_path, force)
 }
@@ -1692,11 +1849,10 @@ fn reveal_path(path: String) -> Result<(), String> {
         // only launch failures are reported.
         let mut c = Command::new("explorer.exe");
         c.raw_arg(format!("/select,\"{path}\""));
-        return c
-            .no_window()
+        c.no_window()
             .status()
             .map(|_| ())
-            .map_err(|e| format!("failed to launch explorer: {e}"));
+            .map_err(|e| format!("failed to launch explorer: {e}"))
     }
     #[cfg(all(unix, not(target_os = "macos")))]
     {
@@ -1731,6 +1887,7 @@ pub fn run() {
         .manage(Arc::new(claude_usage::ClaudeAuth::default()))
         .manage(Arc::new(agy_usage::AgyUsageState::default()))
         .manage(Arc::new(agy_usage::AgyResumeState::default()))
+        .manage(Arc::new(root_chat::RootChatState::default()))
         .manage(Arc::new(hookbus::HookBus::default()))
         .manage(Arc::new(broker::Broker::default()))
         .manage(Arc::new(broker::Presence::default()))
@@ -1891,6 +2048,19 @@ pub fn run() {
             load_projects,
             add_project,
             remove_project,
+            list_root_chats,
+            add_root_chat,
+            rename_root_chat,
+            remove_root_chat,
+            list_profiles,
+            add_profile,
+            remove_profile,
+            get_active_profile,
+            set_active_profile,
+            set_project_color,
+            root_chat::root_chat_send,
+            root_chat::root_chat_stop,
+            root_chat::root_chat_history,
             list_board,
             set_board_enabled,
             board_add_card,
@@ -1902,6 +2072,7 @@ pub fn run() {
             board_start_workflow,
             board_resolve_gate,
             list_continuity,
+            continuity_feed,
             add_session,
             detect_agents,
             rename_session,
@@ -1967,6 +2138,14 @@ pub fn run() {
             reveal_path,
             claude_status::fetch_claude_status,
             claude_usage::fetch_claude_usage,
+            transcript::session_transcript,
+            routing::agent_routes,
+            routing::set_agent_route,
+            routing::task_kinds,
+            commandcode_config::command_code_config,
+            commandcode_config::set_command_code_config,
+            commandcode_config::command_code_models,
+            commandcode_usage::fetch_command_code_usage,
             claude_usage::connect_claude_plan_usage,
             agy_usage::fetch_agy_usage,
             agy_usage::agy_usage_tracking_enabled,

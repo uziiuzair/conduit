@@ -16,6 +16,7 @@ pub enum AgentId {
     Gemini,
     OpenCode,
     Antigravity,
+    CommandCode,
 }
 
 /// Descriptor for a single MCP server passed to the CLI command builders.
@@ -184,6 +185,22 @@ pub fn claude_profile_env(config_dir: &str) -> Vec<(String, String)> {
     }
 }
 
+/// The home-relative directory whose presence means "this agent is set up for the ambient
+/// account", or None for an agent with no account concept.
+///
+/// Only used to decide whether to offer a "Default" usage row when nothing is registered.
+/// Antigravity answers `.claude` rather than `.gemini`: a Conduit agy ACCOUNT is a
+/// `.claude`-style profile root (see `claude_profile_env`), and agy's own state lives at
+/// `.gemini/antigravity-cli` under that same root -- so `.claude` is what marks the root,
+/// and changing it here would change which accounts agy offers, not just cosmetics.
+pub fn default_profile_dir(agent: AgentId) -> Option<&'static str> {
+    match agent {
+        AgentId::Claude | AgentId::Antigravity => Some(".claude"),
+        AgentId::CommandCode => Some(".commandcode"),
+        AgentId::Codex | AgentId::Gemini | AgentId::OpenCode => None,
+    }
+}
+
 /// Knows how to launch one agent CLI inside Conduit's `sh -c` cold-spawn script.
 pub trait ProviderAdapter {
     fn id(&self) -> AgentId;
@@ -191,6 +208,17 @@ pub trait ProviderAdapter {
     fn binary(&self) -> &'static str;
     /// Whether this adapter supports Conduit's `--worktree` isolation (Phase 1: Claude only).
     fn supports_worktree(&self) -> bool {
+        false
+    }
+    /// Whether this CLI takes `--model <id>` and `--effort <level>` per invocation, so a
+    /// route (or a fleet tier) can pin them at spawn.
+    ///
+    /// Default false, and the bar for flipping it is a VERIFIED flag in that CLI's own
+    /// `--help`, not a plausible guess: a wrong flag here does not degrade, it makes every
+    /// session for that agent fail to launch. Claude and Command Code both list the pair;
+    /// Codex and Gemini have a `--model` but no verified `--effort`, so they stay false
+    /// until someone checks rather than shipping half a pair.
+    fn supports_model_flags(&self) -> bool {
         false
     }
     /// Extra env vars to set on the child process for this agent.
@@ -232,6 +260,26 @@ pub trait ProviderAdapter {
         initial_prompt: Option<&str>,
         resume_token: Option<&str>,
     ) -> String;
+    /// A config file, RELATIVE TO THE SESSION'S WORKING DIRECTORY, that this CLI reads
+    /// MCP servers from at startup -- the file-based equivalent of Claude's
+    /// `--mcp-config <path>` flag, for an adapter that has no such flag.
+    ///
+    /// This is the seam that lets a non-Claude worker join the fleet's structured
+    /// channels (`fleet_result`, `fleet_note`/`fleet_inbox`) instead of being limited to
+    /// a lossy `fleet_peek` scrape. It is deliberately a WORKING-DIRECTORY-relative path,
+    /// which is what makes it per-session: a fleet worker always runs in its own
+    /// worktree, so a file written there is scoped to that one worker. Command Code's
+    /// other MCP scopes are not usable for this -- `~/.commandcode/mcp.json` is global
+    /// and its "local" scope keys off the project path, so both would hand every session
+    /// in a project the same session-scoped callback URL.
+    ///
+    /// `None` (the default) means this adapter has no file-based MCP config, and a worker
+    /// on it stays Tier 2/3. Only consulted for a session that has already qualified for
+    /// fleet MCP, and only on the Conduit-driven worktree path -- see the call site in
+    /// `lib.rs`, which explains why the shared project root is deliberately left alone.
+    fn project_mcp_config_rel_path(&self) -> Option<&'static str> {
+        None
+    }
     /// Build the CLI command string to register an MCP server at user scope.
     /// Returns `None` if this adapter doesn't support the given transport yet.
     fn mcp_add_command(&self, _s: &McpServer) -> Option<String> {
@@ -265,6 +313,9 @@ impl ProviderAdapter for ClaudeAdapter {
         Some("npm install -g @anthropic-ai/claude-code".into())
     }
     fn supports_worktree(&self) -> bool {
+        true
+    }
+    fn supports_model_flags(&self) -> bool {
         true
     }
     fn env_overrides(&self) -> Vec<(&'static str, &'static str)> {
@@ -688,6 +739,174 @@ impl ProviderAdapter for AntigravityAdapter {
     }
 }
 
+/// The Command Code CLI's binary name on this platform.
+///
+/// The package installs four aliases -- `cmd`, `cmdc`, `command-code`, `commandcode` --
+/// and on Windows the first one is unusable. `C:\Windows\System32\cmd.exe` sits ahead of
+/// the npm prefix on PATH, and Conduit spawns Windows sessions as
+/// `cmd.exe /K "cd /d <dir> && <agent> ..."`, so an agent named `cmd` would open a nested
+/// command interpreter inside its own shell rather than the agent.
+///
+/// This is not Conduit working around the vendor: Command Code's own bundle carries
+/// `getBinaryCommand(){return"win32"===process.platform?"cmdc":"cmd"}`. Matching it exactly
+/// is deliberate -- if this ever needs to change, change it to `cmdc` on BOTH platforms
+/// (that alias exists everywhere), never back to a bare `cmd` on Windows.
+pub const COMMAND_CODE_BIN: &str = if cfg!(windows) { "cmdc" } else { "cmd" };
+
+/// The HOME-redirect env for a `.commandcode` account profile.
+///
+/// Command Code resolves its config root from `HOME`/`USERPROFILE` and keeps everything --
+/// `auth.json`, `config.json`, `settings.json`, `projects/` -- under `<root>/.commandcode`.
+/// It documents no config-dir override variable, so redirecting the home is the ONLY way to
+/// point a session at a different account, exactly as with Claude and agy.
+///
+/// Unlike `claude_profile_env` there is no non-`.claude` fallback branch to mirror: with no
+/// override variable to fall back TO, a directory that is not a `.commandcode` profile
+/// cannot be honoured, and silently inheriting the ambient account would be worse than
+/// declining. An empty vec means "no redirect" and the session runs as the default account.
+pub fn command_code_profile_env(config_dir: &str) -> Vec<(String, String)> {
+    match command_code_account_dir(config_dir).and_then(|d| d.parent().map(Path::to_path_buf)) {
+        Some(root) => vec![
+            ("USERPROFILE".to_string(), root.display().to_string()),
+            ("HOME".to_string(), root.display().to_string()),
+        ],
+        // No redirect: the session runs as the ambient account. `command_code_profile_dir`
+        // says the same thing, which is the point -- see its doc comment.
+        None => Vec::new(),
+    }
+}
+
+/// The `.commandcode` profile an account NAMES, or None when it names something else.
+///
+/// The account registry stores one directory per account and tags it with several agents,
+/// and that directory is `.claude`-rooted (see `default_profile_dir`). Command Code has no
+/// config-dir override variable, so a `.claude` path cannot be honoured for it -- only a
+/// literal `.commandcode` profile can.
+fn command_code_account_dir(config_dir: &str) -> Option<std::path::PathBuf> {
+    let p = Path::new(config_dir);
+    (p.exists() && p.file_name().and_then(|f| f.to_str()) == Some(".commandcode"))
+        .then(|| p.to_path_buf())
+}
+
+/// The `.commandcode` directory a session using this account will ACTUALLY read.
+///
+/// **This exists so the spawn path and the usage meter cannot disagree**, which is the bug
+/// it replaces: an account tagged for Command Code but pointing at a `.claude` directory got
+/// no HOME redirect (so its sessions ran, correctly, as the ambient account) while the meter
+/// looked for `auth.json` INSIDE that `.claude` directory, found none, and reported the
+/// account as signed out forever. Both now derive from `command_code_account_dir`, so
+/// "which profile" has exactly one answer.
+///
+/// None only when the home directory itself cannot be resolved.
+pub fn command_code_profile_dir(config_dir: Option<&str>) -> Option<std::path::PathBuf> {
+    config_dir
+        .filter(|d| !d.is_empty())
+        .and_then(command_code_account_dir)
+        .or_else(|| dirs::home_dir().map(|h| h.join(".commandcode")))
+}
+
+pub struct CommandCodeAdapter;
+
+impl ProviderAdapter for CommandCodeAdapter {
+    fn id(&self) -> AgentId {
+        AgentId::CommandCode
+    }
+    fn binary(&self) -> &'static str {
+        COMMAND_CODE_BIN
+    }
+    fn install_command(&self) -> Option<String> {
+        Some("npm install -g command-code".into())
+    }
+    // Command Code manages its own worktrees (`-w/--worktree`). Two worktree managers over
+    // one directory is a question worth deciding deliberately, not by default, so Conduit's
+    // isolation stays off until it is.
+    fn supports_worktree(&self) -> bool {
+        false
+    }
+    // `cmdc --help` lists `-m, --model <model>` and `--effort <level>`.
+    fn supports_model_flags(&self) -> bool {
+        true
+    }
+    fn account_env(&self, config_dir: &str) -> Vec<(String, String)> {
+        command_code_profile_env(config_dir)
+    }
+    fn hooks_profile(&self) -> Option<crate::hooks::HooksProfile> {
+        Some(crate::hooks::command_code_profile())
+    }
+    /// Command Code loads `<cwd>/.mcp.json` at startup (its "project" MCP scope), in the
+    /// same `{"mcpServers": {...}}` shape Claude's `--mcp-config` file uses -- its
+    /// `inferTransport` reads either `transport` or `type`, so `fleet::mcp_config_json`
+    /// serves both verbatim. That is what gives a Command Code worker `fleet_result` and
+    /// the mailbox rather than leaving it on a terminal scrape.
+    fn project_mcp_config_rel_path(&self) -> Option<&'static str> {
+        Some(".mcp.json")
+    }
+    /// Resume by the id Command Code chose for itself.
+    ///
+    /// There is no `--session-id` to PIN one the way Claude has, so Conduit cannot decide
+    /// the id up front. `--session <path|id>` resumes an id Command Code already owns, and
+    /// that id reaches us through the `SessionStart` hook (see `command_code_profile`),
+    /// keyed to this session by the hook URL -- so unlike agy, no filesystem heuristic is
+    /// involved and `resume_token` is simply correct or absent.
+    ///
+    /// `|| <bare>` only guards the resume branch: a stale id (the session was cleared, or
+    /// the account changed) must still open a usable terminal. A fresh start has nothing to
+    /// fall back FROM, so it is emitted as a single invocation rather than a pointless
+    /// `cmd || cmd`.
+    fn build_invocation(
+        &self,
+        _session_id: &str,
+        _projects_dir: Option<&Path>,
+        flags: &str,
+        initial_prompt: Option<&str>,
+        resume_token: Option<&str>,
+    ) -> String {
+        let bin = COMMAND_CODE_BIN;
+        let prompt = initial_prompt
+            .map(|p| format!(" {}", crate::pty::quote_arg(p)))
+            .unwrap_or_default();
+        match resume_token {
+            Some(tok) => {
+                let id = crate::pty::quote_arg(tok);
+                format!("{bin}{flags} --session {id}{prompt} || {bin}{flags}{prompt}")
+            }
+            None => format!("{bin}{flags}{prompt}"),
+        }
+    }
+    fn mcp_add_command(&self, s: &McpServer) -> Option<String> {
+        let bin = COMMAND_CODE_BIN;
+        let env: String = s
+            .env
+            .iter()
+            .map(|(k, v)| format!(" -e {}={}", sh_quote(k), sh_quote(v)))
+            .collect();
+        match s.transport.as_str() {
+            "stdio" => {
+                let args: String = s.args.iter().map(|a| format!(" {}", sh_quote(a))).collect();
+                Some(format!(
+                    "{bin} mcp add -s user{env} {} -- {}{}",
+                    sh_quote(&s.name),
+                    sh_quote(&s.command),
+                    args
+                ))
+            }
+            "http" => Some(format!(
+                "{bin} mcp add -s user --transport http {} {}",
+                sh_quote(&s.name),
+                sh_quote(&s.url)
+            )),
+            _ => None,
+        }
+    }
+    fn mcp_remove_command(&self, name: &str) -> Option<String> {
+        Some(format!(
+            "{} mcp remove -s user {}",
+            COMMAND_CODE_BIN,
+            sh_quote(name)
+        ))
+    }
+}
+
 /// The per-spawn OpenCode local-provider payload: an inline config for the
 /// child's OPENCODE_CONFIG_CONTENT env var, plus the endpoint API key that rides in a
 /// SEPARATE env var (CONDUIT_OC_APIKEY) referenced from the config as an `{env:...}`
@@ -852,6 +1071,17 @@ pub fn model_for_tier(agent: AgentId, tier: &str) -> Option<&'static str> {
             Some("gemini-3.5-flash")
         }
         (AgentId::Gemini, "hard") | (AgentId::Antigravity, "hard") => Some("gemini-3.1-pro"),
+        // Command Code fronts ~58 models from one subscription, so its tiers are the one
+        // place a tier can mean "a different VENDOR", not just a smaller model. The ids
+        // are taken verbatim from `routing::default_routes`, which already states an
+        // opinion about which Command Code model suits which kind of work -- an opinion
+        // about an agent lives in one place, so a tier here must not invent a second one.
+        // `cheap` is Command Code's own default model rather than a Claude one: routing a
+        // fleet's mechanical work through a Claude model on Command Code would spend a
+        // frontier budget on exactly the work its capability card says not to.
+        (AgentId::CommandCode, "cheap") => Some("deepseek/deepseek-v4-flash"),
+        (AgentId::CommandCode, "standard") => Some("claude-sonnet-5"),
+        (AgentId::CommandCode, "hard") => Some("claude-opus-5"),
         _ => None,
     }
 }
@@ -923,10 +1153,26 @@ pub fn capability_card(agent: AgentId) -> serde_json::Value {
             "whenToUse": "Cost-optimized coding on a Google model when Gemini CLI is unavailable (Gemini CLI is EOL; agy is its successor).",
             "whenNotToUse": "Anything where you need to know whether the worker succeeded without asking the human or reading fleet_peek -- agy is UNMONITORED: it will never call fleet_result."
         }),
+        AgentId::CommandCode => serde_json::json!({
+            "agent": "commandcode",
+            "tier": 1,
+            // Tier 1 as of the `.mcp.json` wiring: Command Code reads MCP servers from its
+            // working directory, and a fleet worker's working directory is its own
+            // worktree -- so it gets the SAME session-scoped fleet MCP server a Claude
+            // worker does, and with it a real `fleet_result` and mailbox rather than a
+            // `fleet_peek` scrape. It was Tier 2 while no such channel existed. The claim
+            // is load-bearing (design-doc invariant 9), so it is tied to the seam that
+            // implements it: `project_mcp_config_rel_path`. Both flags must go back to
+            // false if that seam or the worktree path ever stops being wired.
+            "structuredResult": true,
+            "mailbox": true,
+            "whenToUse": "Spreading load across ~58 models from one subscription -- Anthropic, OpenAI, Google, xAI and a large open-source set -- when the point is to NOT spend a Claude or Codex quota. Per-session model and reasoning effort are selectable (`--model`, `--effort`): pass `model` to fleet_spawn to pin any one of them exactly (`claude-opus-5`, `google/gemini-3.7-flash`, `deepseek/deepseek-v4-flash`), or `modelTier` for the coarse cheap/standard/hard mapping. A cheap open model can take mechanical work while the expensive quotas stay for work that needs them.",
+            "whenNotToUse": "Conducting: the Conductor persona and its orchestration tools are Claude-only. Work that must run on one specific vendor's own subscription rather than through Command Code's."
+        }),
     }
 }
 
-/// All five capability cards, for `fleet_capabilities`.
+/// Every capability card, for `fleet_capabilities`.
 pub fn capability_cards() -> Vec<serde_json::Value> {
     all_adapters()
         .iter()
@@ -942,6 +1188,7 @@ pub fn adapter_for(agent: AgentId) -> Box<dyn ProviderAdapter> {
         AgentId::Gemini => Box::new(GeminiAdapter),
         AgentId::OpenCode => Box::new(OpenCodeAdapter),
         AgentId::Antigravity => Box::new(AntigravityAdapter),
+        AgentId::CommandCode => Box::new(CommandCodeAdapter),
     }
 }
 
@@ -987,6 +1234,7 @@ pub fn all_adapters() -> Vec<Box<dyn ProviderAdapter>> {
         Box::new(GeminiAdapter),
         Box::new(OpenCodeAdapter),
         Box::new(AntigravityAdapter),
+        Box::new(CommandCodeAdapter),
     ]
 }
 
@@ -997,6 +1245,7 @@ fn label_for(id: AgentId) -> &'static str {
         AgentId::Gemini => "Gemini CLI",
         AgentId::OpenCode => "OpenCode",
         AgentId::Antigravity => "Antigravity (agy)",
+        AgentId::CommandCode => "Command Code",
     }
 }
 
@@ -1098,6 +1347,204 @@ mod tests {
         // Other adapters have no account concept -> no env.
         assert!(CodexAdapter.account_env(&dir).is_empty());
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn the_spawn_redirect_and_the_usage_meter_resolve_the_same_profile() {
+        let base = std::env::temp_dir().join("conduit_cc_profile_agreement");
+        let profile = base.join(".commandcode");
+        std::fs::create_dir_all(&profile).unwrap();
+
+        // An account naming its own `.commandcode`: the session's HOME is redirected to the
+        // parent, so the profile it reads is that directory -- and the meter agrees.
+        let env = command_code_profile_env(profile.to_str().unwrap());
+        assert_eq!(
+            env.len(),
+            2,
+            "a real profile redirects HOME and USERPROFILE"
+        );
+        assert!(env.iter().all(|(_, v)| v == &base.display().to_string()));
+        assert_eq!(
+            command_code_profile_dir(Some(profile.to_str().unwrap())),
+            Some(profile.clone())
+        );
+
+        // A `.claude`-rooted account -- what the registry ACTUALLY stores. No redirect is
+        // possible (Command Code has no config-dir override), so the session runs ambient
+        // and the meter must resolve ambient too. These two lines disagreeing is precisely
+        // the bug that left the usage panel empty.
+        let claude_rooted = base.join(".claude");
+        std::fs::create_dir_all(&claude_rooted).unwrap();
+        let cr = claude_rooted.to_str().unwrap();
+        assert!(
+            command_code_profile_env(cr).is_empty(),
+            "a .claude directory cannot be honoured as a Command Code profile"
+        );
+        assert_eq!(
+            command_code_profile_dir(Some(cr)),
+            command_code_profile_dir(None)
+        );
+
+        // A path that does not exist is not a profile either.
+        let ghost = base.join("nope").join(".commandcode");
+        assert!(command_code_profile_env(ghost.to_str().unwrap()).is_empty());
+        assert_eq!(
+            command_code_profile_dir(Some(ghost.to_str().unwrap())),
+            command_code_profile_dir(None)
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn command_code_binary_is_never_bare_cmd_on_windows() {
+        // The whole reason this constant exists. On Windows a bare `cmd` resolves to
+        // System32's command interpreter, and Conduit spawns sessions as
+        // `cmd.exe /K "cd /d <dir> && <agent> ..."` -- so an agent named `cmd` opens a
+        // nested shell instead of the agent, forever. Command Code's own bundle picks
+        // `cmdc` on win32 for exactly this reason; this test pins the parity.
+        if cfg!(windows) {
+            assert_eq!(CommandCodeAdapter.binary(), "cmdc");
+        } else {
+            assert_eq!(CommandCodeAdapter.binary(), "cmd");
+        }
+        // Whatever the platform, the invocation must use the SAME name the PATH probe
+        // looked for -- a mismatch would report the agent as installed and then fail to
+        // launch it.
+        let inv = CommandCodeAdapter.build_invocation("s1", None, "", None, None);
+        assert!(
+            inv.starts_with(CommandCodeAdapter.binary()),
+            "invocation {inv} must start with the probed binary"
+        );
+    }
+
+    #[test]
+    fn command_code_resumes_only_when_it_has_an_id_of_its_own() {
+        let a = CommandCodeAdapter;
+        let bin = a.binary();
+
+        // Fresh: nothing to resume and nothing to fall back FROM, so a single invocation
+        // rather than a pointless `cmd || cmd`.
+        assert_eq!(a.build_invocation("s1", None, "", None, None), bin);
+
+        // Resume: `--session <id>` guarded by the bare fallback, because a stale id (the
+        // conversation was cleared, or the account changed) must still open a terminal.
+        let resumed = a.build_invocation("s1", None, "", None, Some("cc-abc123"));
+        assert!(resumed.contains("--session"), "got {resumed}");
+        assert!(resumed.contains("cc-abc123"), "got {resumed}");
+        assert!(
+            resumed.contains("|| "),
+            "stale id must fall back: {resumed}"
+        );
+
+        // Conduit's session id is NOT the resume key here -- unlike Claude, Command Code
+        // has no `--session-id` to pin one, so ours must never leak into the command.
+        assert!(
+            !resumed.contains("s1"),
+            "Conduit's own id is not a Command Code session id: {resumed}"
+        );
+    }
+
+    #[test]
+    fn command_code_initial_prompt_rides_as_a_quoted_positional() {
+        let a = CommandCodeAdapter;
+        // A hostile prompt must reach the agent as ONE argument or not at all.
+        let inv = a.build_invocation("s1", None, "", Some("fix it; rm -rf /"), None);
+        assert!(
+            inv.contains(&crate::pty::quote_arg("fix it; rm -rf /")),
+            "got {inv}"
+        );
+        // The prompt is repeated on the fallback branch too, so a stale resume does not
+        // silently drop the task the user asked for.
+        let resumed = a.build_invocation("s1", None, "", Some("do the thing"), Some("cc-1"));
+        let quoted = crate::pty::quote_arg("do the thing");
+        assert_eq!(resumed.matches(&quoted).count(), 2, "got {resumed}");
+    }
+
+    #[test]
+    fn command_code_account_env_redirects_a_commandcode_profile_root() {
+        // Command Code resolves its config root from HOME/USERPROFILE and documents no
+        // config-dir override, so the home redirect is the only way to pin an account.
+        let root = std::env::temp_dir().join(format!("conduit_ccenv_{}", std::process::id()));
+        let profile = root.join(".commandcode");
+        let _ = std::fs::create_dir_all(&profile);
+        let dir = profile.to_string_lossy().into_owned();
+        let root_str = root.to_string_lossy().into_owned();
+        assert_eq!(
+            CommandCodeAdapter.account_env(&dir),
+            vec![
+                ("USERPROFILE".to_string(), root_str.clone()),
+                ("HOME".to_string(), root_str),
+            ]
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn command_code_account_env_declines_what_it_cannot_honour() {
+        // No override variable exists to fall back to, so a directory that is not a
+        // `.commandcode` profile yields NO env rather than a redirect that would point the
+        // agent at a home with no account in it. Same for a path that does not exist.
+        let custom = std::env::temp_dir().join(format!("conduit_cccustom_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&custom);
+        assert!(CommandCodeAdapter
+            .account_env(&custom.to_string_lossy())
+            .is_empty());
+        let _ = std::fs::remove_dir_all(&custom);
+        assert!(
+            CommandCodeAdapter
+                .account_env(&custom.to_string_lossy())
+                .is_empty(),
+            "a missing dir inherits the ambient account rather than guessing"
+        );
+    }
+
+    #[test]
+    fn command_code_mcp_commands_target_user_scope() {
+        let a = CommandCodeAdapter;
+        let bin = a.binary();
+        let stdio = McpServer {
+            name: "demo".into(),
+            transport: "stdio".into(),
+            command: "npx".into(),
+            args: vec!["-y".into(), "some-server".into()],
+            url: String::new(),
+            env: vec![("K".into(), "v".into())],
+        };
+        let cmd = a.mcp_add_command(&stdio).unwrap();
+        assert!(
+            cmd.starts_with(&format!("{bin} mcp add -s user")),
+            "got {cmd}"
+        );
+        assert!(cmd.contains("-e K=v"), "got {cmd}");
+        assert!(cmd.ends_with("-- npx -y some-server"), "got {cmd}");
+
+        let http = McpServer {
+            name: "remote".into(),
+            transport: "http".into(),
+            command: String::new(),
+            args: vec![],
+            url: "https://example.com/mcp".into(),
+            env: vec![],
+        };
+        let cmd = a.mcp_add_command(&http).unwrap();
+        assert!(cmd.contains("--transport http"), "got {cmd}");
+
+        // An unknown transport is declined rather than guessed at.
+        let weird = McpServer {
+            name: "x".into(),
+            transport: "sse".into(),
+            command: String::new(),
+            args: vec![],
+            url: String::new(),
+            env: vec![],
+        };
+        assert!(a.mcp_add_command(&weird).is_none());
+
+        assert_eq!(
+            a.mcp_remove_command("demo").unwrap(),
+            format!("{bin} mcp remove -s user demo")
+        );
     }
 
     #[test]
@@ -1735,14 +2182,23 @@ mod tests {
     #[test]
     fn capability_cards_are_tier_labeled_and_complete() {
         let cards = capability_cards();
-        assert_eq!(cards.len(), 5);
+        // Derived from the registry, not a literal: a hardcoded count only ever fails the
+        // person ADDING an agent, who then bumps it -- which is precisely the moment the
+        // check should be asking whether the new agent got a card at all.
+        assert_eq!(cards.len(), all_adapters().len());
         let expected_tiers = [
             (AgentId::Claude, 1),
             (AgentId::OpenCode, 1),
             (AgentId::Codex, 2),
             (AgentId::Gemini, 2),
+            (AgentId::CommandCode, 1),
             (AgentId::Antigravity, 3),
         ];
+        assert_eq!(
+            expected_tiers.len(),
+            all_adapters().len(),
+            "every registered adapter needs a tier expectation here"
+        );
         for (agent, tier) in expected_tiers {
             let card = capability_card(agent);
             assert_eq!(card["tier"], tier, "agent={agent:?}");
@@ -1771,6 +2227,66 @@ mod tests {
         // Tier 1 adapters get both.
         assert_eq!(capability_card(AgentId::Claude)["mailbox"], true);
         assert_eq!(capability_card(AgentId::OpenCode)["mailbox"], true);
+    }
+
+    /// The other half of invariant 9: a card claiming Tier 1 must be backed by a real
+    /// channel. Command Code has no `--mcp-config` flag, so the ONLY thing that earns it
+    /// `structuredResult`/`mailbox` is the working-directory MCP file -- tie the claim to
+    /// the seam, so removing the seam fails here rather than shipping a lie to the router.
+    #[test]
+    fn command_code_tier_1_claim_is_backed_by_a_real_mcp_channel() {
+        let card = capability_card(AgentId::CommandCode);
+        assert_eq!(card["structuredResult"], true);
+        assert_eq!(card["mailbox"], true);
+        assert_eq!(
+            CommandCodeAdapter.project_mcp_config_rel_path(),
+            Some(".mcp.json"),
+            "the file Command Code reads MCP servers from, relative to its cwd"
+        );
+        // Every OTHER adapter must stay None: Claude has a real flag, and inventing a
+        // path for an agent that does not read one would write a dead file into a worktree.
+        for a in all_adapters() {
+            if a.id() != AgentId::CommandCode {
+                assert_eq!(a.project_mcp_config_rel_path(), None, "agent={:?}", a.id());
+            }
+        }
+    }
+
+    /// Command Code is the one agent whose tiers cross VENDORS, so a wrong id here is not
+    /// a smaller model, it is a failed launch. Every id is checked against the real
+    /// `cmdc --list-models` catalogue.
+    #[test]
+    fn model_tier_command_code_spans_vendors_and_defaults_cheap_to_open_source() {
+        assert_eq!(
+            model_for_tier(AgentId::CommandCode, "cheap"),
+            Some("deepseek/deepseek-v4-flash"),
+            "mechanical work must not spend a frontier budget"
+        );
+        assert_eq!(
+            model_for_tier(AgentId::CommandCode, "standard"),
+            Some("claude-sonnet-5")
+        );
+        assert_eq!(
+            model_for_tier(AgentId::CommandCode, "hard"),
+            Some("claude-opus-5")
+        );
+        // The tiers must agree with the routing table -- one opinion per agent, not two.
+        let routes = crate::routing::default_routes();
+        for (task, tier) in [
+            (crate::routing::TaskKind::Planning, "hard"),
+            (crate::routing::TaskKind::Implementation, "standard"),
+            (crate::routing::TaskKind::Bulk, "cheap"),
+        ] {
+            let pinned = routes.by_task[&task]
+                .iter()
+                .find(|t| t.agent == AgentId::CommandCode)
+                .and_then(|t| t.model.as_deref());
+            assert_eq!(
+                pinned,
+                model_for_tier(AgentId::CommandCode, tier),
+                "routing and model_for_tier disagree for {task:?}"
+            );
+        }
     }
 
     #[test]

@@ -11,8 +11,11 @@
 //! wrapper.
 //!
 //! Design: docs/superpowers/specs/2026-08-10-tmux-session-persistence-design.md
-
-#![cfg(not(windows))]
+//!
+//! tmux is Unix-only, so on Windows every function here is dead -- the mod site carries
+//! `#[cfg_attr(windows, allow(dead_code))]` for exactly that. The module still COMPILES
+//! there on purpose: `InstallHint` is part of the `TmuxInfo` wire contract the frontend
+//! reads on every platform, and cfg-ing the module out would take that type with it.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -168,11 +171,15 @@ pub fn install_hint_here() -> Option<InstallHint> {
     })
 }
 
+/// The separator `PATH` uses on this host. `:` everywhere except Windows, which uses `;`
+/// precisely because a Windows path entry (`C:\Windows`) contains a colon of its own.
+const PATH_SEP: char = if cfg!(windows) { ';' } else { ':' };
+
 /// Scan a `PATH`-shaped string for an executable. Split out so it can be tested without
 /// depending on the machine's real environment.
 pub fn find_in_path(bin: &str, path: Option<&str>) -> Option<PathBuf> {
     path?
-        .split(':')
+        .split(PATH_SEP)
         .filter(|dir| !dir.is_empty())
         .map(|dir| Path::new(dir).join(bin))
         .find(|p| p.is_file())
@@ -247,6 +254,14 @@ pub fn ensure_conf(tmux: &Path, scrollback: u32) -> Option<PathBuf> {
 /// (whose smallest-client-wins rule would shrink the pane) never applies.
 ///
 /// `exec` replaces the login shell, leaving no extra process between the PTY and tmux.
+///
+/// `cd /` first, because whichever client happens to START the server donates its cwd to
+/// it, and the server keeps that directory for its entire life. Conduit spawns from the
+/// session directory, so the donor cwd is routinely a worktree -- and once that worktree is
+/// deleted the server holds a dead inode, which every pane it later forks inherits IN
+/// PREFERENCE to `-c` (measured on tmux 3.7b: `-c` silently loses to a dead server cwd).
+/// `/bin/sh` then opens each new terminal with `shell-init: error retrieving current
+/// directory`. `/` is the one cwd nobody can delete.
 pub fn wrap_command(
     tmux: &Path,
     conf: Option<&Path>,
@@ -259,7 +274,7 @@ pub fn wrap_command(
         None => String::new(),
     };
     format!(
-        "exec {tmux}{conf} -L {socket} new-session -A -D -s {name} -c {dir} sh -c {inner}",
+        "cd / && exec {tmux}{conf} -L {socket} new-session -A -D -s {name} -c {dir} sh -c {inner}",
         tmux = crate::pty::shell_quote(&tmux.to_string_lossy()),
         conf = conf_flag,
         socket = socket(),
@@ -404,13 +419,24 @@ mod tests {
             "/work/proj",
             "echo hi",
         );
-        assert!(cmd.starts_with("exec '/opt/homebrew/bin/tmux'"));
+        assert!(cmd.starts_with("cd / && exec '/opt/homebrew/bin/tmux'"));
         assert!(cmd.contains("-L conduit"));
         assert!(cmd.contains("new-session -A -D"));
         assert!(cmd.contains("-s 'cdt-s1'"));
         assert!(cmd.contains("-c '/work/proj'"));
         assert!(cmd.contains("-f '/data/conduit.tmux.conf'"));
         assert!(cmd.ends_with("sh -c 'echo hi'"));
+    }
+
+    #[test]
+    fn wrap_command_starts_the_server_from_a_stable_directory() {
+        // A tmux client donates its cwd to a server it starts, and the server holds that
+        // directory for its whole life. A worktree there is deleted eventually, and from
+        // then on EVERY pane the server spawns lands in the dead inode -- `-c` included --
+        // so /bin/sh greets each new terminal with a getcwd shell-init error. Starting from
+        // `/` is the only cwd that cannot be deleted out from under the server.
+        let cmd = wrap_command(Path::new("/usr/bin/tmux"), None, "cdt-s1", "/w", "sh");
+        assert!(cmd.starts_with("cd / && exec "));
     }
 
     #[test]
@@ -472,14 +498,36 @@ mod tests {
     }
 
     #[test]
-    fn find_in_path_scans_and_tolerates_junk() {
+    fn find_in_path_tolerates_junk_everywhere() {
         assert!(find_in_path("tmux", None).is_none());
         assert!(find_in_path("tmux", Some("")).is_none());
         assert!(find_in_path("definitely-not-a-binary", Some("/usr/bin:/bin")).is_none());
-        // `sh` exists on every machine this code runs on.
+    }
+
+    /// The hit case needs a real binary at a known absolute path, so it is written once
+    /// per platform rather than skipped on the one where tmux never runs -- a test that
+    /// only ever runs on macOS is a test that breaks silently on the Windows CI leg.
+    #[test]
+    #[cfg(unix)]
+    fn find_in_path_finds_a_real_binary_and_skips_empty_entries() {
+        // `sh` exists on every Unix this code runs on.
         assert_eq!(
             find_in_path("sh", Some("::/nonexistent:/bin")),
             Some(PathBuf::from("/bin/sh"))
+        );
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn find_in_path_finds_a_real_binary_and_splits_on_semicolons() {
+        // Splitting on `:` here would shred `C:\Windows\System32` into `C` and a path
+        // that does not exist, so this is the assertion that pins PATH_SEP.
+        let root = std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".into());
+        let sys32 = PathBuf::from(root).join("System32");
+        let path = format!(";;C:\\nonexistent;{}", sys32.display());
+        assert_eq!(
+            find_in_path("cmd.exe", Some(&path)),
+            Some(sys32.join("cmd.exe"))
         );
     }
 

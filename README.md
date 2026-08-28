@@ -1,12 +1,12 @@
 # Conduit
 
-**Run multiple _real_ coding-agent terminals across your projects — Claude Code, Codex, Gemini, Antigravity, and OpenCode, each a live CLI session — side by side in one window.**
+**Run multiple _real_ coding-agent terminals across your projects — Claude Code, Codex, Gemini, Antigravity, OpenCode, and Command Code, each a live CLI session — side by side in one window.**
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](./LICENSE)
 [![Built with Tauri](https://img.shields.io/badge/built%20with-Tauri%20v2-24C8DB.svg)](https://tauri.app)
 
 Not a chat UI. Not a TUI. Conduit embeds genuine agent CLIs — Claude Code, Codex,
-Gemini, Antigravity, and OpenCode — in a real PTY per session, and lets you arrange
+Gemini, Antigravity, OpenCode, and Command Code — in a real PTY per session, and lets you arrange
 those sessions (and real editor tabs) into side-by-side editor groups — with a file
 tree, a Monaco editor, a branch-lane git graph, per-session to-dos driven by Claude
 Code hooks, and a Conductor that can orchestrate the whole fleet.
@@ -28,14 +28,18 @@ exactly as they do in a normal terminal.
 ## Features
 
 - **Multiple agent CLIs** — run **Claude Code**, **OpenAI Codex**, **Google Gemini**,
-  **Google Antigravity** (`agy`), and **OpenCode** side by side. Pick a global default
-  and override it per session; a first-run wizard and a Settings panel detect which
-  agents are on your `PATH` (and can one-click install the missing ones), and live
-  status (running · tool activity · done) lights up for every agent.
-- **Per-project, multi-group workspace** — open sessions and files as tabs, then
+  **Google Antigravity** (`agy`), **OpenCode**, and **Command Code** side by side. Pick a
+  global default and override it per session; a first-run wizard and a Settings panel detect
+  which agents are on your `PATH` (and can one-click install the missing ones). Every
+  session wears its agent's own logo, ringed with what it's doing — loaded, working (a slow
+  pulse), needs you, or finished.
+- **A multi-group workspace, across projects** — open sessions and files as tabs, then
   drag a tab sideways to reorder it or onto a pane's edge to split the center into
-  resizable groups (or use _Open to the Side_). Watch **multiple live agent sessions
-  at once**.
+  resizable groups (or use _Open to the Side_). Drag a session straight out of the sidebar
+  onto a pane to split beside it — **including a session from another project**, so two
+  repos can sit side by side. When panes hold more than one project, every tab carries its
+  project's name and colour and each pane wears that colour along its top edge. Watch
+  **multiple live agent sessions at once**.
 - **Real terminals, kept alive** — each session runs the genuine agent CLI in a
   PTY. Switching tabs, splitting groups, or switching projects never restarts it;
   reloading the window re-attaches to the running process.
@@ -69,11 +73,14 @@ exactly as they do in a normal terminal.
   accounts (auto-discovered from your home directory, or added via a folder picker)
   and assign one per session, per project, or globally; each session authenticates
   as its account via config-dir redirection, so work and personal quotas never mix.
-- **A unified usage panel** — every account across both Claude and Antigravity in
-  one sidebar readout: local token use, subscription **plan limits** (5-hour &
-  weekly windows), and Antigravity's quota pools — with configurable layouts
-  (stacked / compact summary / low-alerts-only / selected session) and low-quota
-  warnings. Plus Claude **service status** from
+- **A unified usage panel** — every account across Claude, Antigravity, and Command Code
+  in one sidebar readout: local token use, subscription **plan limits** (5-hour & weekly
+  windows), and Antigravity's quota pools — with configurable layouts (stacked / compact
+  summary / low-alerts-only / selected session) and low-quota warnings. Every meter reads
+  the same way — how much you've **used**, matching what `claude /usage` shows — with an
+  _Amount left_ preference that flips the number, the bar and the summary together. An
+  account whose quota couldn't be read says so rather than showing a clean bill of health.
+  Plus Claude **service status** from
   [status.claude.com](https://status.claude.com) (click for component & incident
   detail, with a **warning banner** when something's degraded).
 - **Local models for OpenCode** — point OpenCode at your own GPU (Ollama, LM Studio,
@@ -206,6 +213,10 @@ Updates are Developer ID–signed, notarized, and minisign-verified before insta
 | Claude **service** status (status.claude.com)                 | `src-tauri/src/claude_status.rs`                   |
 | Claude **usage** — local consumption + per-account plan limits | `src-tauri/src/claude_usage.rs`                    |
 | Antigravity **usage** — quota pools + conversation capture    | `src-tauri/src/agy_usage.rs`                        |
+| Command Code **usage** + config GUI                           | `src-tauri/src/commandcode_usage.rs`, `src-tauri/src/commandcode_config.rs` |
+| Agent **routing** — task kind → ordered agent/model chain     | `src-tauri/src/routing.rs`, `src/routing.ts`        |
+| Usage meter semantics (shared by the panel and the router)    | `src/usageRows.ts`                                  |
+| Pure workspace-layout transforms (split/move/repair/drag)     | `src/layout.ts`                                     |
 | Local LLM servers — detect / list models / tool-call probe    | `src-tauri/src/local_llm.rs`                       |
 | Mobile companion WebSocket bridge                             | `src-tauri/src/bridge.rs`                           |
 | Git metadata + branch graph data                              | `src-tauri/src/git.rs`                              |
@@ -225,7 +236,7 @@ persists to `~/Library/Application Support/ConduitTauri/state.json`
 
 ## Tech
 
-Tauri v2 (Rust) · React 19 + TypeScript + Vite · `@xterm/xterm` (canvas renderer) ·
+Tauri v2 (Rust) · React 19 + TypeScript + Vite · `@xterm/xterm` (WebGL renderer, canvas fallback) ·
 `monaco-editor` · `portable-pty` · `tiny_http` (hook listener) ·
 `rusqlite` (Continuity read) · `tauri-plugin-{dialog,notification,window-state}`.
 

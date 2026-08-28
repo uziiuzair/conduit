@@ -25,6 +25,7 @@ interface TranscriptHit {
 /** Settings pages worth a direct row — the ones people go to on purpose. */
 const SETTINGS_PAGES: Array<[SettingsTab, string]> = [
   ["general", "General"],
+  ["terminal", "Terminal"],
   ["accounts", "Accounts"],
   ["agents", "Agents"],
   ["usage", "Usage display"],
@@ -245,7 +246,7 @@ export function CommandPalette({ onClose }: { onClose: () => void }) {
   let lastSection: string | undefined;
 
   return (
-    <div className="modal-overlay palette-overlay" onMouseDown={onClose}>
+    <div className="dialog-overlay palette-overlay" onMouseDown={onClose}>
       <div className="palette" onMouseDown={(e) => e.stopPropagation()}>
         <input
           ref={inputRef}

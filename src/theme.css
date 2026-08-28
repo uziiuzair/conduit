@@ -304,7 +304,9 @@ button {
 }
 
 .project-head .folder-icon {
-  color: var(--accent);
+  /* Falls back to the theme accent so the rule still works anywhere --proj-accent is
+     not set (and so a stylesheet-only read of this file is not a puzzle). */
+  color: var(--proj-accent, var(--accent));
   flex: none;
 }
 
@@ -381,6 +383,15 @@ button {
   min-height: 0;
 }
 
+/* `min-height: 0` only zeroes the CONTENT box — the row's 4px vertical padding still
+   counts toward the item's minimum contribution, so a `0fr` track floors at 8px and the
+   indent guide paints a stub under a collapsed project. Fold the padding away with the
+   track (transitioned on the rows below, so it stays one motion). */
+.session-row-slot.collapsed > * {
+  padding-top: 0;
+  padding-bottom: 0;
+}
+
 .session-row {
   display: flex;
   align-items: center;
@@ -390,7 +401,8 @@ button {
   font-size: 12px;
   color: var(--text-bright);
   overflow: hidden;
-  transition: opacity 0.16s ease, transform 0.2s ease, background 0.12s ease;
+  transition: opacity 0.16s ease, transform 0.2s ease, background 0.12s ease,
+    padding 0.2s ease;
 }
 
 .session-row:hover {
@@ -425,7 +437,7 @@ button {
   font-size: 12px;
   color: var(--accent);
   overflow: hidden;
-  transition: opacity 0.16s ease, transform 0.2s ease;
+  transition: opacity 0.16s ease, transform 0.2s ease, padding 0.2s ease;
 }
 
 /* Folded away while the project is collapsed. The height belongs to `.session-row-slot`;
@@ -528,6 +540,45 @@ button {
 
 .context-menu.canvas-menu button.checked::before {
   content: "✓";
+}
+
+/* "Select color" flyout: a second menu panel that opens to the RIGHT of its parent row
+   (hover or click), like a native context submenu — but drawn by us. The colours are
+   the curated PROJECT_PALETTE (layout.ts) — the same family the derived accents come
+   from, so a chosen colour never clashes with an automatic one. */
+.context-flyout-item {
+  position: relative;
+}
+.context-flyout-item > button {
+  width: 100%;
+  display: flex;
+  align-items: center;
+}
+.context-flyout-caret {
+  margin-left: auto;
+  padding-left: 14px;
+  font-size: 9px;
+  color: var(--text-mid);
+}
+.context-flyout {
+  position: absolute;
+  left: calc(100% + 2px);
+  top: -5px;
+  min-width: 140px;
+  background: var(--sidebar-bg);
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  padding: 4px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
+  z-index: 1;
+}
+.context-color-dot {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  margin-right: 6px;
+  vertical-align: -1px;
 }
 
 .add-bar {
@@ -1524,6 +1575,37 @@ button {
   }
 }
 
+/* ---- Cross-project panes ----
+   A layout can borrow sessions from other projects (WsTab.projectId). Once it does, EVERY
+   tab is badged with its project, so no tab's origin is implied by the absence of a badge.
+   The colour comes from `projectAccent` (layout.ts), derived from the project id -- one
+   function, so the tab bar and the pane edge can never disagree about a project's colour. */
+.tab.badged {
+  /* Widened only when badged: the badge needs the room and an unbadged strip must look
+     exactly as it did before this feature existed. */
+  max-width: 260px;
+  box-shadow: inset 3px 0 0 var(--proj-accent, transparent);
+  padding-left: 12px;
+}
+.tab-project {
+  flex-shrink: 0;
+  max-width: 88px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 10px;
+  letter-spacing: 0.02em;
+  padding: 1px 5px;
+  border-radius: 4px;
+  color: var(--proj-accent, var(--text-mid));
+  background: color-mix(in srgb, var(--proj-accent, var(--text-mid)) 16%, transparent);
+}
+/* A pane whose tabs are all one project wears that colour along its top edge, so panes are
+   told apart before a single tab is read. */
+.tab-strip.has-project-accent {
+  border-top: 2px solid var(--proj-accent);
+}
+
 .tab:hover {
   color: var(--text-bright);
 }
@@ -2245,6 +2327,154 @@ button {
   background: transparent;
 }
 
+/* ---- Custom dropdown (.dd) — replaces every native <select>: a styled select still
+   opens the OS popup menu, and Conduit's chrome bans system UI. Trigger matches the
+   old .account-select look; the menu matches .theme-popover / .context-menu. ---- */
+.dd {
+  position: relative;
+  display: flex;
+  min-width: 0;
+}
+.dd-trigger {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  width: 100%;
+  font-size: 12px;
+  color: var(--text-bright);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 4px 8px;
+  background: var(--sidebar-bg);
+  cursor: pointer;
+}
+.dd-trigger:hover,
+.dd-trigger.open {
+  border-color: var(--accent);
+}
+.dd-trigger:disabled {
+  opacity: 0.5;
+  cursor: default;
+  border-color: var(--border);
+}
+.dd-label {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-align: left;
+}
+.dd-caret {
+  flex: 0 0 auto;
+  color: var(--text-mid);
+}
+.dd-menu {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  min-width: 100%;
+  max-width: 320px;
+  max-height: 240px;
+  overflow-y: auto;
+  z-index: 60;
+  background: var(--panel-bg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 4px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+}
+.dd-menu.up {
+  top: auto;
+  bottom: calc(100% + 4px);
+}
+.dd-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  padding: 5px 8px;
+  font-size: 12px;
+  color: var(--text-mid);
+  border-radius: 5px;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.dd-row:hover {
+  background: var(--hover);
+  color: var(--text-bright);
+}
+.dd-row.sel {
+  color: var(--text-bright);
+}
+.dd-row:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+.dd-check {
+  width: 12px;
+  flex: 0 0 12px;
+  color: var(--accent);
+  font-size: 11px;
+}
+.dd-row-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* ---- Profile selector (sidebar footer, below the add-project row). Same design
+   language as .add-bar: hairline top border, muted text that brightens on hover, a
+   36px square accessory button with a left hairline. ---- */
+.profile-bar {
+  display: flex;
+  align-items: stretch;
+  border-top: 1px solid var(--border);
+}
+/* The footer variant of .dd: quiet flat row, no border box (the bar draws those). */
+.profile-bar .dd {
+  flex: 1;
+}
+.profile-bar .dd-trigger {
+  border: none;
+  border-radius: 0;
+  background: transparent;
+  padding: 7px 10px;
+  font-size: 11.5px;
+  color: var(--text-mid);
+}
+.profile-bar .dd-trigger:hover {
+  color: var(--text-bright);
+}
+.profile-bar .dd-menu {
+  max-height: 300px;
+}
+.profile-bar .profile-add-btn {
+  width: 36px;
+  flex: 0 0 36px;
+  padding: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-left: 1px solid var(--border);
+  color: var(--text-mid);
+}
+.profile-bar .profile-add-btn:hover {
+  color: var(--text-bright);
+  background: var(--hover);
+}
+.profile-bar .profile-new-input {
+  flex: 1;
+  min-width: 0;
+  background: transparent;
+  border: none;
+  outline: none;
+  padding: 7px 10px;
+  font-size: 11.5px;
+  color: var(--text-bright);
+}
+
 /* ---- Theme switcher (sidebar footer) ---- */
 .add-bar {
   display: flex;
@@ -2364,13 +2594,20 @@ button {
 .dialog-input:focus {
   border-color: var(--accent);
 }
-.dialog-toggle {
+.dialog-toggle,
+.telemetry-toggle {
   display: flex;
-  align-items: center;
+  /* Top-align: these labels routinely run several lines, and a box centered against a
+     paragraph looks adrift. The 1px nudge sits the 15px box on the first text line. */
+  align-items: flex-start;
   gap: 7px;
   font-size: 12px;
   color: var(--text-mid);
   cursor: pointer;
+}
+.dialog-toggle input[type="checkbox"],
+.telemetry-toggle input[type="checkbox"] {
+  margin-top: 1px;
 }
 .dialog-toggle.disabled {
   opacity: 0.5;
@@ -2383,6 +2620,11 @@ button {
   color: var(--text-dim, var(--text-mid));
   font-style: normal;
   opacity: 0.75;
+  /* Explicit size: outside a dialog (e.g. Settings → Terminal) this inherits the body
+     size and dwarfs the 12px control it explains. */
+  display: block;
+  font-size: 11.5px;
+  line-height: 1.55;
 }
 .dialog-hint code {
   font-family: var(--mono-font);
@@ -2541,6 +2783,9 @@ button {
 
 /* ---- Antigravity (agy) usage panel — violet, to distinguish it from Claude ---- */
 :root { --agy: #a78bfa; }
+/* Command Code's meter tint. Matches the amber monogram in `agents.ts` so the glyph and
+   the bar in the same row read as one agent. */
+:root { --commandcode: #e0b341; }
 .agy-usage-panel {
   padding: 8px 12px 10px;
   border-top: 1px solid color-mix(in srgb, var(--agy) 22%, transparent);
@@ -2578,7 +2823,7 @@ button {
   display: inline-flex; align-items: center; gap: 6px; margin-top: 4px;
   font-size: 11px; color: var(--text-mid); cursor: pointer; user-select: none;
 }
-.agy-track-toggle input { accent-color: var(--agy); cursor: pointer; }
+.agy-track-toggle input { cursor: pointer; }
 
 /* ---- Unified multi-account usage bar (replaces the per-agent panels) ---- */
 .usage-panel {
@@ -2664,6 +2909,9 @@ button {
 .usage-row.antigravity .usage-meter-fill {
   --meter-base: var(--agy);
 }
+.usage-row.commandcode .usage-meter-fill {
+  --meter-base: var(--commandcode);
+}
 /* Scaled, not width-sized: the fill animates on the compositor instead of relaying out the
    row on every tick. `width: 100%` plus a left origin means scaleX(f) IS the fraction. */
 .usage-meter-fill {
@@ -2725,10 +2973,6 @@ button {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-/* Tint the agent glyph in summary rows so Claude vs agy reads at a glance. */
-.usage-summary-item.antigravity {
-  color: var(--agy);
-}
 .usage-summary {
   display: flex;
   flex-direction: column;
@@ -2757,6 +3001,19 @@ button {
 }
 .usage-dot.hot {
   background: var(--red);
+}
+/* Not read: hollow, so it cannot be mistaken for the green of an account we checked and
+   found healthy. That conflation is what made a rate-limited poll look like good news. */
+.usage-dot.unknown {
+  background: transparent;
+  box-shadow: inset 0 0 0 1.5px var(--text-dim);
+}
+.usage-stale-chip {
+  font-size: 9px;
+  padding: 1px 5px;
+  border-radius: 999px;
+  color: var(--text-dim);
+  background: color-mix(in srgb, var(--text-mid) 14%, transparent);
 }
 /* Settings → Usage display */
 .usage-prefs {
@@ -2798,15 +3055,91 @@ button {
 .claude-warning-icon { flex-shrink: 0; }
 .claude-warning-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
+/* ---- Agent glyph: brand mark + session-state ring ----
+   The mark is drawn in the agent's tint on a faint plate of the same tint, so one colour
+   (--glyph-tint, set inline from AgentMeta.tint) drives the whole glyph. The ring around
+   it carries SESSION STATE, which is why the plate stays constant: if both the fill and
+   the ring moved, neither would read. */
 .agent-glyph {
+  position: relative;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  border-radius: 4px;
-  color: #161310;
+  /* Proportional so the squircle looks the same at 12px (usage bar) and 20px (pickers). */
+  border-radius: 30%;
+  /* The brand tints are fixed constants (agents.ts), but Conduit ships a LIGHT theme too,
+     and #e0b341 on cream is about 1.5:1 -- unreadable. Bending each tint toward the
+     theme's own text colour brightens it on the dark themes and darkens it on the light
+     one from a single expression, clearing the 3:1 that WCAG 1.4.11 asks of a graphic.
+     The tint stays recognisable because it is still 72% of the mix. */
+  --glyph-ink: color-mix(in srgb, var(--glyph-tint, var(--accent)) 72%, var(--text-bright));
+  color: var(--glyph-ink);
+  background: color-mix(in srgb, var(--glyph-tint, var(--accent)) 15%, transparent);
   font-weight: 700;
   flex-shrink: 0;
   line-height: 1;
+}
+.agent-glyph svg {
+  width: 66%;
+  height: 66%;
+  display: block;
+}
+/* Idle = spawned and quiet: present, not shouting. */
+.agent-glyph.st-idle {
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--glyph-ink) 45%, transparent);
+}
+.agent-glyph.st-running {
+  box-shadow: 0 0 0 1px var(--glyph-ink);
+}
+/* needsInput and done leave the agent's tint deliberately: they are about YOU, not about
+   which agent it is, so they use the same amber/green the rest of the app reserves for
+   "blocked" and "finished". */
+.agent-glyph.st-needs {
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--amber) 85%, transparent);
+}
+.agent-glyph.st-done {
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--green) 70%, transparent);
+}
+/* The "working" halo: a ring that breathes outward and fades. Only `opacity` and
+   `transform` animate, so it stays on the compositor and costs nothing per frame even
+   with a dozen sessions running. 2.4s is slow enough to read as ambient rather than as an
+   alert, and far below the 3Hz flash threshold in WCAG 2.3.1. */
+.agent-glyph.st-running::after,
+.agent-glyph.st-needs::after {
+  content: "";
+  position: absolute;
+  inset: -2px;
+  border-radius: 30%;
+  border: 1px solid currentColor;
+  animation: glyph-pulse 2.4s ease-in-out infinite;
+  pointer-events: none;
+}
+.agent-glyph.st-needs::after {
+  color: var(--amber);
+  /* Faster and tighter: this one IS an alert, and should catch the eye the working ring
+     deliberately does not. */
+  animation-duration: 1.6s;
+}
+@keyframes glyph-pulse {
+  0%,
+  100% {
+    opacity: 0.6;
+    transform: scale(0.92);
+  }
+  60% {
+    opacity: 0;
+    transform: scale(1.28);
+  }
+}
+/* Motion is the ONLY thing removed — the ring itself still distinguishes the states, so a
+   reduced-motion user loses nothing but the animation. */
+@media (prefers-reduced-motion: reduce) {
+  .agent-glyph.st-running::after,
+  .agent-glyph.st-needs::after {
+    animation: none;
+    opacity: 0.55;
+    transform: none;
+  }
 }
 
 .dialog-label { font-size: 10px; letter-spacing: 0.06em; text-transform: uppercase; color: var(--text-dim); margin: 2px 0 6px; }
@@ -3013,6 +3346,23 @@ button {
   align-items: center;
   gap: 10px;
 }
+/* The Scan action was a bare text node — give it real button affordance. */
+.trust-scan-actions > button {
+  font-size: 12px;
+  color: var(--text-bright);
+  background: var(--sidebar-bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 4px 12px;
+  cursor: pointer;
+}
+.trust-scan-actions > button:hover:not(:disabled) {
+  border-color: var(--accent);
+}
+.trust-scan-actions > button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
 .trust-scan-clean {
   font-size: 11px;
   color: var(--text-mid);
@@ -3032,6 +3382,384 @@ button {
 }
 
 /* ---- OpenCode local-provider panel (Settings -> Local models) ---- */
+/* The new-session routing explanation. Always present when a task is chosen, so it reads
+   as the router narrating itself rather than as an error that only appears when something
+   went wrong. */
+.route-note {
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--text-mid);
+  padding: 4px 0 0 0;
+}
+.route-note.warn {
+  color: var(--text-bright);
+}
+
+/* ---- Rich session view ----
+   Absolutely positioned INSIDE .term-host, on top of .term-inner. The xterm underneath
+   stays mounted and attached -- covering it is the whole point, because unmounting one
+   kills its PTY. */
+.chat-pane {
+  position: absolute;
+  inset: 0;
+  z-index: 3;
+  display: flex;
+  flex-direction: column;
+  background: var(--panel-bg, #16161e);
+  overflow: hidden;
+}
+.chat-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--border);
+  flex: 0 0 auto;
+}
+.chat-title {
+  font-size: 11px;
+  color: var(--text-mid);
+}
+.chat-close {
+  margin-left: auto;
+  font-size: 11px;
+  padding: 2px 9px;
+  border-radius: 5px;
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--text-mid);
+  cursor: pointer;
+}
+.chat-close:hover {
+  color: var(--text-bright);
+  border-color: var(--accent);
+}
+.chat-scroll {
+  flex: 1 1 auto;
+  overflow-y: auto;
+  padding: 10px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.chat-empty {
+  font-size: 11px;
+  color: var(--text-mid);
+  line-height: 1.6;
+  margin: 0;
+}
+.chat-bubble {
+  max-width: 88%;
+  border-radius: 8px;
+  padding: 7px 10px;
+  font-size: 12px;
+  line-height: 1.55;
+}
+.chat-bubble.user {
+  align-self: flex-end;
+  background: color-mix(in srgb, var(--accent) 16%, transparent);
+  border: 1px solid color-mix(in srgb, var(--accent) 30%, transparent);
+  color: var(--text-bright);
+}
+.chat-bubble.assistant {
+  align-self: flex-start;
+  background: color-mix(in srgb, var(--text-mid) 8%, transparent);
+  border: 1px solid var(--border);
+  color: var(--text-bright);
+}
+/* A typed prompt is literal text, so it wraps but is never re-interpreted as markdown. */
+.chat-user-text {
+  margin: 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-family: inherit;
+  font-size: inherit;
+}
+.chat-md > *:first-child { margin-top: 0; }
+.chat-md > *:last-child { margin-bottom: 0; }
+.chat-md pre {
+  background: color-mix(in srgb, var(--text-mid) 12%, transparent);
+  border-radius: 6px;
+  padding: 8px 10px;
+  overflow-x: auto;
+  font-family: var(--mono-font);
+  font-size: 11px;
+}
+.chat-md code {
+  font-family: var(--mono-font);
+  font-size: 11px;
+}
+.chat-md :not(pre) > code {
+  background: color-mix(in srgb, var(--text-mid) 14%, transparent);
+  border-radius: 4px;
+  padding: 1px 4px;
+}
+.chat-md table { border-collapse: collapse; display: block; overflow-x: auto; }
+.chat-md th, .chat-md td { border: 1px solid var(--border); padding: 3px 7px; }
+/* Tool calls are one dense line each: they are context for the prose around them, not
+   the thing being read. */
+.chat-event {
+  display: flex;
+  align-items: baseline;
+  gap: 7px;
+  font-size: 10px;
+  color: var(--text-mid);
+  padding-left: 2px;
+  min-width: 0;
+}
+.chat-event-kind {
+  flex: 0 0 auto;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  padding: 0 4px;
+}
+.chat-event-kind.edit { color: var(--green, #6cc29a); }
+.chat-event-kind.bash { color: var(--commandcode, #e0b341); }
+.chat-event-kind.subagent { color: var(--agy, #a78bfa); }
+.chat-event-arg {
+  font-family: var(--mono-font);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.chat-input-row {
+  flex: 0 0 auto;
+  display: flex;
+  gap: 6px;
+  padding: 8px 10px;
+  border-top: 1px solid var(--border);
+}
+.chat-input {
+  flex: 1;
+  resize: none;
+  font-family: inherit;
+  font-size: 12px;
+  padding: 6px 8px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: var(--bg, #1a1b26);
+  color: var(--text-bright);
+  outline: none;
+}
+.chat-input:focus {
+  border-color: var(--accent);
+}
+.chat-send {
+  align-self: flex-end;
+  font-size: 11px;
+  padding: 6px 12px;
+  border-radius: 6px;
+  border: 1px solid var(--accent);
+  background: color-mix(in srgb, var(--accent) 18%, transparent);
+  color: var(--text-bright);
+  cursor: pointer;
+}
+.chat-send:disabled {
+  opacity: 0.4;
+  cursor: default;
+  border-color: var(--border);
+  background: transparent;
+}
+
+/* ---- Settings > Routing ---- */
+.routing-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.route-scope {
+  display: inline-flex;
+  gap: 6px;
+}
+.route-scope-btn {
+  font-size: 11px;
+  padding: 4px 10px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--text-mid);
+  cursor: pointer;
+}
+.route-scope-btn.on {
+  border-color: var(--accent);
+  color: var(--text-bright);
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+}
+.route-scope-btn:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+.route-task {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  border-top: 1px solid var(--border);
+  padding-top: 10px;
+}
+.route-task-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.route-task-name {
+  font-size: 12px;
+  color: var(--text-bright);
+}
+/* Where the chain in force came from. Deliberately always shown, not only when
+   overridden: "which of the three scopes am I looking at" is the question this page
+   exists to answer. */
+.route-origin {
+  font-size: 10px;
+  color: var(--text-mid);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 1px 7px;
+}
+.route-hint {
+  font-size: 10px;
+  color: var(--text-mid);
+  margin: 0;
+}
+.route-target {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.route-rank {
+  font-size: 10px;
+  color: var(--text-mid);
+  width: 26px;
+  flex: 0 0 26px;
+}
+.route-select {
+  font-size: 11px;
+  padding: 4px 6px;
+  border-radius: 5px;
+  border: 1px solid var(--border);
+  background: var(--panel-bg);
+  color: var(--text-bright);
+  outline: none;
+  min-width: 0;
+  flex: 1;
+}
+.route-select:focus {
+  border-color: var(--accent);
+}
+.route-nomodel {
+  font-size: 10px;
+  color: var(--text-mid);
+  flex: 1;
+  font-style: italic;
+}
+.route-btn {
+  font-size: 11px;
+  padding: 2px 7px;
+  border-radius: 5px;
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--text-mid);
+  cursor: pointer;
+}
+.route-btn:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+.route-btn:not(:disabled):hover {
+  color: var(--text-bright);
+  border-color: var(--accent);
+}
+.route-reset {
+  margin-left: auto;
+}
+.route-add {
+  align-self: flex-start;
+  font-size: 11px;
+  color: var(--text-mid);
+  background: transparent;
+  border: 1px dashed var(--border);
+  border-radius: 5px;
+  padding: 3px 9px;
+  cursor: pointer;
+}
+.route-add:hover {
+  color: var(--text-bright);
+  border-color: var(--accent);
+}
+
+/* ---- Settings > Command Code ---- */
+.cc-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.cc-section {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  border-top: 1px solid var(--border);
+  padding-top: 12px;
+}
+.cc-field {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.cc-field > span {
+  font-size: 11px;
+  color: var(--text-mid);
+}
+.cc-select {
+  width: 100%;
+  font-size: 12px;
+  padding: 6px 8px;
+  border-radius: 5px;
+  border: 1px solid var(--border);
+  background: var(--panel-bg);
+  color: var(--text-bright);
+  font-family: var(--mono-font);
+  outline: none;
+}
+.cc-select:focus {
+  border-color: var(--accent);
+}
+.cc-select:disabled {
+  opacity: 0.55;
+}
+.cc-select option,
+.cc-select optgroup {
+  background: var(--panel-bg);
+  color: var(--text-bright);
+}
+.cc-toggle {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  font-size: 11px;
+  color: var(--text-mid);
+  line-height: 1.5;
+}
+.cc-toggle input {
+  margin-top: 2px;
+  flex: 0 0 auto;
+}
+.cc-note {
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--text-mid);
+}
+.cc-note code {
+  font-family: var(--mono-font);
+  font-size: 10px;
+}
+/* Errors and unreachable-CLI notices: same shape as a note, tinted so it reads as a
+   problem without becoming an alarm — none of these states break the panel. */
+.cc-warn {
+  color: var(--text-bright);
+  border-left: 2px solid var(--commandcode);
+  padding-left: 8px;
+}
 .oc-section {
   display: flex;
   flex-direction: column;
@@ -3118,24 +3846,6 @@ button {
 }
 .oc-field.oc-num {
   flex: 0 0 110px;
-}
-.oc-model-select {
-  width: 100%;
-  font-size: 12px;
-  padding: 6px 8px;
-  border-radius: 5px;
-  border: 1px solid var(--border);
-  background: var(--panel-bg);
-  color: var(--text-bright);
-  font-family: var(--mono-font);
-  outline: none;
-}
-.oc-model-select:focus {
-  border-color: var(--accent);
-}
-.oc-model-select option {
-  background: var(--panel-bg);
-  color: var(--text-bright);
 }
 .oc-advanced-toggle {
   align-self: flex-start;
@@ -3283,37 +3993,41 @@ button {
   font-size: 12px;
   color: var(--text-mid);
 }
-.account-select {
+/* Dropdown (.dd) sizing variants per site. The old .account-select /
+   .mcp-form-select / .oc-model-select native selects are gone — every dropdown
+   is the custom .dd component now. */
+.dd-account {
   flex: 1;
   max-width: 60%;
-  font-size: 12px;
-  color: var(--text-bright);
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  padding: 4px 24px 4px 8px;
-  cursor: pointer;
-  /* Strip the native macOS chevron and draw our own, matching .mcp-form-select. */
-  appearance: none;
-  -webkit-appearance: none;
-  background-color: var(--sidebar-bg);
-  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'%3E%3Cpath d='M1 1l4 4 4-4' fill='none' stroke='%239a938c' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
-  background-repeat: no-repeat;
-  background-position: right 8px center;
-  background-size: 10px 6px;
 }
-.account-select:hover,
-.account-select:focus {
-  outline: none;
-  border-color: var(--accent);
+.dd-settings {
+  max-width: 260px;
+}
+.dd-dialog {
+  width: 100%;
+}
+.dd-dialog .dd-trigger {
+  padding: 6px 8px;
+  background: var(--panel-bg);
+}
+.dd-fill {
+  width: 100%;
+}
+.dd-fill .dd-trigger {
+  padding: 6px 8px;
+  background: var(--panel-bg);
+  font-family: var(--mono-font);
+}
+.dd-fill .dd-menu {
+  font-family: var(--mono-font);
 }
 
-/* ── Settings native-control polish ──────────────────────────────────────────
-   Replace the glossy OS checkbox and range slider with theme-matched controls.
-   Checkboxes are scoped to the settings/dialog toggle wrappers so md-preview
-   task-list boxes and the accent-color agy toggle stay untouched. */
-.dialog-toggle input[type="checkbox"],
-.telemetry-toggle input[type="checkbox"],
-.account-tag-check input[type="checkbox"] {
+/* ── No native/web controls ──────────────────────────────────────────────────
+   EVERY checkbox in the app is drawn by this rule — appearance:none strips the OS
+   rendering entirely, so nothing system-styled ever appears in the product. New
+   checkboxes need no wrapper class to opt in. (The agy toggle keeps its brand color
+   via the variant below; markdown-preview task boxes pick this style up too.) */
+input[type="checkbox"] {
   appearance: none;
   -webkit-appearance: none;
   flex-shrink: 0;
@@ -3327,21 +4041,15 @@ button {
   position: relative;
   transition: background 0.12s ease, border-color 0.12s ease;
 }
-.dialog-toggle input[type="checkbox"]:hover,
-.telemetry-toggle input[type="checkbox"]:hover,
-.account-tag-check input[type="checkbox"]:hover {
+input[type="checkbox"]:hover {
   border-color: var(--accent);
 }
-.dialog-toggle input[type="checkbox"]:checked,
-.telemetry-toggle input[type="checkbox"]:checked,
-.account-tag-check input[type="checkbox"]:checked {
+input[type="checkbox"]:checked {
   background: var(--accent);
   border-color: var(--accent);
 }
 /* Checkmark punched out of the accent fill in the panel color (like .agent-radio). */
-.dialog-toggle input[type="checkbox"]:checked::after,
-.telemetry-toggle input[type="checkbox"]:checked::after,
-.account-tag-check input[type="checkbox"]:checked::after {
+input[type="checkbox"]:checked::after {
   content: "";
   position: absolute;
   left: 50%;
@@ -3351,6 +4059,36 @@ button {
   border: solid var(--sidebar-bg);
   border-width: 0 2px 2px 0;
   transform: translate(-50%, -50%) rotate(45deg);
+}
+/* agy quota toggle keeps its brand color on the same custom box. */
+.agy-track-toggle input[type="checkbox"]:checked {
+  background: var(--agy);
+  border-color: var(--agy);
+}
+.agy-track-toggle input[type="checkbox"]:hover {
+  border-color: var(--agy);
+}
+
+/* Number inputs: kill the native stepper so only the themed text box remains. */
+input[type="number"]::-webkit-inner-spin-button,
+input[type="number"]::-webkit-outer-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+input[type="number"] {
+  appearance: textfield;
+  -moz-appearance: textfield;
+  width: 56px;
+  font-size: 11.5px;
+  color: var(--text-bright);
+  background: var(--sidebar-bg);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  padding: 3px 6px;
+  outline: none;
+}
+input[type="number"]:focus {
+  border-color: var(--accent);
 }
 
 .usage-prefs input[type="range"] {
@@ -3888,32 +4626,15 @@ button {
   text-align: right;
 }
 
-.mcp-form-input,
-.mcp-form-select {
+.mcp-form-input {
   flex: 1;
   min-width: 0;
   font-size: 12px;
   padding: 5px 8px;
 }
 
-.mcp-form-select {
-  /* Strip the native macOS chrome and draw our own chevron so it matches the
-     warm-dark theme instead of the glossy system control. */
-  cursor: pointer;
-  appearance: none;
-  -webkit-appearance: none;
-  -webkit-user-select: none;
-  user-select: none;
-  padding-right: 26px;
-  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'%3E%3Cpath d='M1 1l4 4 4-4' fill='none' stroke='%239a938c' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
-  background-repeat: no-repeat;
-  background-position: right 9px center;
-  background-size: 10px 6px;
-}
-
 /* Unified hover/focus + monospace code fields for the add-server form. */
 .mcp-form-input:hover,
-.mcp-form-select:hover,
 .mcp-form-textarea:hover {
   border-color: var(--text-dim);
 }
@@ -4480,4 +5201,230 @@ button {
 }
 .toast.error {
   border-color: var(--red);
+}
+
+/* Continuity panels — one-line rows; the prose lives in the detail modal. */
+.continuity-list { display: flex; flex-direction: column; }
+.continuity-row {
+  display: flex; align-items: center; gap: 8px; width: 100%;
+  padding: 5px 10px; background: none; border: none; border-bottom: 1px solid var(--border);
+  font-family: var(--ui-font); font-size: 12px; color: var(--text-mid); text-align: left; cursor: pointer;
+}
+.continuity-row:hover { background: var(--selection-bg); }
+.continuity-row.muted { opacity: 0.55; }
+.continuity-dot { width: 6px; height: 6px; border-radius: 50%; flex: none; background: var(--accent); }
+.continuity-dot.superseded, .continuity-dot.rejected { background: var(--border); }
+.continuity-badge {
+  flex: none; padding: 1px 5px; border-radius: 4px; font-size: 10px; text-transform: uppercase;
+  background: var(--selection-bg); color: var(--text-dim);
+}
+.continuity-badge.collision { color: var(--accent); }
+/* Reached this project as a broadcast from elsewhere: in scope, but not our conversation. */
+.continuity-row.foreign .continuity-key { color: var(--text-dim); }
+.continuity-ext {
+  margin-right: 5px; padding: 0 4px; border: 1px solid var(--border); border-radius: 3px;
+  font-family: var(--ui-font); font-size: 9px; text-transform: uppercase; color: var(--text-dim);
+}
+.continuity-key {
+  flex: none; max-width: 30%; font-family: var(--mono-font); font-size: 11px;
+  color: var(--text-bright); white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.continuity-body { flex: 1; color: var(--text-dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.continuity-meta { flex: none; color: var(--text-dim); font-size: 11px; white-space: nowrap; }
+
+.modal.continuity-detail { width: min(640px, 90vw); }
+.continuity-prose {
+  margin: 0; padding: 10px 12px; border: 1px solid var(--border); border-radius: 8px;
+  background: var(--panel-bg); font-family: var(--mono-font); font-size: 12px;
+  color: var(--text-mid); white-space: pre-wrap; word-break: break-word; max-height: 42vh; overflow-y: auto;
+}
+.continuity-supersede { margin-top: 10px; color: var(--text-dim); font-size: 12px; }
+.continuity-response-head { margin-top: 14px !important; font-size: 13px !important; }
+
+/* ---- Root chat (HQ) — vault-chat visual world, scoped to this surface -------
+   Tokens borrowed from @arlo/branding (packages/branding/src/styles.css); dark set
+   on the two dark themes, arlo's light set under warm-light. */
+.root-chat {
+  /* Vault-chat structure on Conduit's own skin: every value derives from the live
+     theme vars, so all three Conduit themes carry through. */
+  --hq-bg: var(--panel-bg); --hq-surface: var(--sidebar-bg); --hq-surface-2: var(--selection-bg);
+  --hq-line: var(--border); --hq-line-2: color-mix(in srgb, var(--border) 55%, var(--text-dim));
+  --hq-ink: var(--text-bright);
+  --hq-ink-2: color-mix(in srgb, var(--text-bright) 45%, var(--text-mid));
+  --hq-ink-3: var(--text-mid);
+  --hq-rose: var(--accent); --hq-rose-2: color-mix(in srgb, var(--accent) 85%, #000);
+  --hq-rose-soft: color-mix(in srgb, var(--accent) 18%, transparent);
+  --hq-rose-line: color-mix(in srgb, var(--accent) 34%, transparent);
+  --hq-grid-line: rgba(255, 255, 255, 0.04);
+
+  position: relative; overflow: hidden;
+  display: flex; flex-direction: column; flex: 1; min-width: 0; height: 100%;
+  background: var(--hq-bg); color: var(--hq-ink);
+}
+[data-theme="warm-light"] .root-chat {
+  --hq-grid-line: rgba(0, 0, 0, 0.05);
+}
+
+/* Texture: a masked 60px grid (arlo's vault backdrop, sans glow). */
+.hq-grid {
+  position: absolute; inset: 0; pointer-events: none;
+  background-image:
+    linear-gradient(to right, var(--hq-grid-line) 1px, transparent 1px),
+    linear-gradient(to bottom, var(--hq-grid-line) 1px, transparent 1px);
+  background-size: 60px 60px;
+  -webkit-mask-image: radial-gradient(ellipse 75% 65% at 50% 42%, black, transparent 80%);
+  mask-image: radial-gradient(ellipse 75% 65% at 50% 42%, black, transparent 80%);
+  opacity: 0.8;
+}
+
+/* ---- home state ---- */
+.hq-home {
+  position: relative; flex: 1; min-height: 0; overflow-y: auto;
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  gap: 40px; padding: 48px 24px;
+}
+.hq-hero { display: flex; flex-direction: column; align-items: center; gap: 10px; text-align: center; }
+.hq-greeting { margin: 0; font-size: 32px; font-weight: 600; letter-spacing: -0.02em; color: var(--hq-ink); }
+.hq-tagline { margin: 0; font-size: 14px; color: var(--hq-ink-2); }
+.hq-home .hq-composer { width: 100%; max-width: 680px; }
+.hq-recents { width: 100%; max-width: 680px; }
+.hq-recents-label {
+  margin: 0 0 10px; font-size: 11px; font-weight: 600; letter-spacing: 0.08em;
+  text-transform: uppercase; color: var(--hq-ink-3);
+}
+.hq-recents ul { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; }
+.hq-recent-row {
+  display: flex; align-items: center; gap: 10px; width: 100%;
+  padding: 9px 10px; border-radius: 8px; font-size: 13px; text-align: left;
+  color: var(--hq-ink); transition: background 0.15s;
+}
+.hq-recent-row:hover { background: color-mix(in srgb, var(--hq-surface-2) 55%, transparent); }
+.hq-recent-icon { color: color-mix(in srgb, var(--hq-rose) 55%, var(--hq-ink-3)); }
+.hq-recent-row:hover .hq-recent-icon { color: var(--hq-rose); }
+.hq-recent-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.hq-recent-time { font-size: 11.5px; color: var(--hq-ink-3); flex: none; }
+
+/* ---- composer card ---- */
+.hq-composer {
+  position: relative; border: 1px solid color-mix(in srgb, var(--hq-line) 60%, transparent);
+  background: color-mix(in srgb, var(--hq-surface-2) 40%, transparent);
+  border-radius: 24px; padding: 18px 18px 12px;
+  transition: border-color 0.3s, background 0.3s, box-shadow 0.3s;
+}
+.hq-composer:focus-within {
+  border-color: var(--hq-rose);
+  background: color-mix(in srgb, var(--hq-surface-2) 60%, transparent);
+  box-shadow: 0 4px 24px -8px color-mix(in srgb, var(--hq-rose) 20%, transparent);
+}
+.hq-composer textarea {
+  width: 100%; min-height: 40px; resize: none; border: none; outline: none;
+  background: transparent; color: var(--hq-ink);
+  font-family: var(--ui-font); font-size: 15px; line-height: 1.55;
+}
+.hq-composer.hero textarea { min-height: 64px; font-size: 16px; }
+.hq-composer textarea::placeholder { color: var(--hq-ink-3); }
+.hq-composer-foot {
+  display: flex; align-items: center; justify-content: space-between; gap: 8px;
+  margin-top: 8px; padding-top: 10px;
+  border-top: 1px solid color-mix(in srgb, var(--hq-line) 30%, transparent);
+}
+.hq-composer-meta { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.hq-chip {
+  display: inline-flex; align-items: center; padding: 4px 9px; border-radius: 999px;
+  background: var(--hq-rose-soft); border: 1px solid color-mix(in srgb, var(--hq-rose-line) 60%, transparent);
+  color: var(--hq-rose); font-family: var(--mono-font); font-size: 10.5px;
+}
+.hq-hint { font-size: 10.5px; color: var(--hq-ink-3); white-space: nowrap; }
+.hq-send {
+  display: flex; align-items: center; justify-content: center;
+  width: 34px; height: 34px; border-radius: 999px; flex: none;
+  background: var(--hq-rose); color: var(--hq-bg);
+  box-shadow: 0 3px 10px -2px color-mix(in srgb, var(--hq-rose) 30%, transparent);
+  transition: background 0.15s, box-shadow 0.15s;
+}
+.hq-send:hover { background: var(--hq-rose-2); }
+.hq-send:disabled { background: var(--hq-surface-2); color: var(--hq-ink-3); box-shadow: none; }
+.hq-stop {
+  padding: 6px 14px; border-radius: 999px; font-size: 12px;
+  background: var(--hq-surface-2); color: var(--hq-ink);
+  border: 1px solid var(--hq-line);
+}
+
+/* ---- thread state ---- */
+.hq-thread { position: relative; display: flex; flex-direction: column; flex: 1; min-height: 0; }
+.hq-thread-title {
+  flex: none; padding: 12px 20px; font-size: 13px; font-weight: 600;
+  color: var(--hq-ink-2);
+  border-bottom: 1px solid color-mix(in srgb, var(--hq-line) 60%, transparent);
+}
+.hq-scroll { flex: 1; min-height: 0; overflow-y: auto; padding: 24px 20px; }
+.hq-column {
+  width: 100%; max-width: 720px; margin: 0 auto;
+  display: flex; flex-direction: column; gap: 14px;
+}
+.hq-bubble-user {
+  align-self: flex-end; max-width: 80%;
+  background: var(--hq-rose-soft); color: var(--hq-ink);
+  border: 1px solid var(--hq-rose-line);
+  border-radius: 16px; padding: 9px 14px;
+  font-size: 14px; line-height: 1.55; white-space: pre-wrap; word-break: break-word;
+}
+.hq-assistant { align-self: stretch; color: var(--hq-ink); font-size: 14px; line-height: 1.6; word-break: break-word; }
+.hq-assistant p { margin: 8px 0; }
+.hq-assistant p:first-child { margin-top: 0; }
+.hq-assistant p:last-child { margin-bottom: 0; }
+.hq-assistant ul, .hq-assistant ol { margin: 8px 0; padding-left: 22px; }
+.hq-assistant pre {
+  overflow-x: auto; background: color-mix(in srgb, var(--hq-surface) 70%, transparent);
+  border: 1px solid var(--hq-line); border-radius: 8px; padding: 10px 12px; margin: 10px 0;
+}
+.hq-assistant code { font-family: var(--mono-font); font-size: 12.5px; }
+.hq-assistant a { color: var(--hq-rose); }
+.hq-assistant h1, .hq-assistant h2, .hq-assistant h3 { margin: 14px 0 6px; color: var(--hq-ink); }
+.hq-assistant blockquote {
+  margin: 8px 0; padding-left: 12px; color: var(--hq-ink-2);
+  border-left: 1px solid var(--hq-line-2);
+}
+.hq-assistant table { border-collapse: collapse; margin: 10px 0; }
+.hq-assistant th, .hq-assistant td { border: 1px solid var(--hq-line); padding: 4px 10px; font-size: 13px; }
+.hq-tool-line { display: flex; align-items: baseline; gap: 8px; min-width: 0; font-size: 11.5px; color: var(--hq-ink-3); }
+.hq-tool-verb { flex: none; }
+.hq-tool-line code {
+  font-family: var(--mono-font); font-size: 11px; overflow: hidden;
+  text-overflow: ellipsis; white-space: nowrap; color: var(--hq-ink-3);
+}
+.hq-pulse {
+  width: 8px; height: 8px; border-radius: 999px; background: var(--hq-rose);
+  animation: hq-pulse 1.2s ease-in-out infinite;
+}
+@keyframes hq-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.35; } }
+.hq-thread-composer {
+  flex: none; padding: 12px 20px 16px;
+  border-top: 1px solid color-mix(in srgb, var(--hq-line) 40%, transparent);
+}
+.hq-thread-composer .hq-composer { border-radius: 18px; padding: 12px 14px 8px; }
+
+/* HQ sidebar section + workspace-root setting */
+.hq-list { margin-bottom: 6px; }
+.root-chat-row .name { flex: 1; }
+.root-chat-running { color: var(--accent); flex: none; }
+.workspace-root-field { flex-direction: column; align-items: stretch; gap: 8px; }
+.workspace-root-input { display: flex; gap: 8px; }
+.workspace-root-input input {
+  flex: 1; background: color-mix(in srgb, var(--border) 40%, transparent);
+  color: var(--text-bright); border: 1px solid var(--border); border-radius: 6px;
+  padding: 6px 10px; font-size: 12px; font-family: var(--mono-font);
+}
+/* "Choose…" was a bare text node — give it the same button affordance as Scan. */
+.workspace-root-input > button {
+  font-size: 12px;
+  color: var(--text-bright);
+  background: var(--sidebar-bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 4px 12px;
+  cursor: pointer;
+}
+.workspace-root-input > button:hover {
+  border-color: var(--accent);
 }

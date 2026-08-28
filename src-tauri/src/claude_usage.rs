@@ -15,7 +15,8 @@ pub struct ClaudeUsage {
     pub local: LocalUsage,
     /// Present only when plan limits were fetched successfully.
     pub plan: Option<Vec<PlanWindow>>,
-    /// "live" | "unavailable" | "disconnected"
+    /// "live" | "stale" | "unavailable" | "disconnected".
+    /// "stale" = this poll failed (usually a 429) but a recent good read stood in for it.
     pub plan_source: String,
 }
 
@@ -197,9 +198,37 @@ fn read_local_usage(config_dir: Option<&str>) -> LocalUsage {
 
 /// Per-account cached OAuth tokens, keyed by `accountId` (or "default" for the env account).
 /// Held in memory only; never persisted or logged.
+///
+/// `last_plan` caches the most recent SUCCESSFUL window read per account. It exists because
+/// `/api/oauth/usage` rate-limits: Conduit polls it per account, the real `claude` CLI hits
+/// the same endpoint, and a 429 used to blank that account's meters entirely. An account
+/// with no windows also reads as "nothing is known", which the panel drew as a healthy
+/// green dot -- so a throttled poll silently claimed an account was fine. Serving the last
+/// good numbers, labelled stale, is honest and stable; a blank that flips back every minute
+/// is neither. Memory-only, like the tokens.
 #[derive(Default)]
 pub struct ClaudeAuth {
     pub tokens: Mutex<HashMap<String, String>>,
+    last_plan: Mutex<HashMap<String, CachedPlan>>,
+}
+
+#[derive(Clone)]
+struct CachedPlan {
+    windows: Vec<PlanWindow>,
+    /// Unix seconds when this read succeeded, so the UI can say how old it is.
+    fetched_at: u64,
+}
+
+/// How long a cached read may stand in for a live one. Both Claude windows are measured in
+/// hours, so a reading up to an hour old is still roughly true; past that, admitting we do
+/// not know beats showing a number the user might act on.
+const PLAN_STALE_MAX_SECS: u64 = 60 * 60;
+
+fn now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
 }
 
 /// The map key for an account (the env default has no id).
@@ -216,6 +245,34 @@ impl ClaudeAuth {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .remove(account_id);
+        self.last_plan
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(account_id);
+    }
+
+    fn remember_plan(&self, key: &str, windows: &[PlanWindow]) {
+        self.last_plan
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(
+                key.to_string(),
+                CachedPlan {
+                    windows: windows.to_vec(),
+                    fetched_at: now_secs(),
+                },
+            );
+    }
+
+    /// The last good read for this account, if one is recent enough to still mean something.
+    fn recent_plan(&self, key: &str) -> Option<CachedPlan> {
+        let now = now_secs();
+        self.last_plan
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(key)
+            .filter(|c| now.saturating_sub(c.fetched_at) <= PLAN_STALE_MAX_SECS)
+            .cloned()
     }
 }
 
@@ -253,12 +310,24 @@ pub async fn fetch_claude_usage(
                             auth.tokens
                                 .lock()
                                 .unwrap_or_else(|e| e.into_inner())
-                                .insert(key, fresh.clone());
+                                .insert(key.clone(), fresh.clone());
                             let (p, s) = fetch_plan(Some(fresh));
                             if p.is_some() {
                                 plan = p;
                                 plan_source = s;
                             }
+                        }
+                    }
+                }
+                // Remember a good read; fall back to the last one when this poll failed.
+                // The endpoint rate-limits and the CLI competes with us for it, so a failure
+                // is routine and must not blank an account the user was just reading.
+                match plan.as_ref() {
+                    Some(w) => auth.remember_plan(&key, w),
+                    None => {
+                        if let Some(cached) = auth.recent_plan(&key) {
+                            plan = Some(cached.windows);
+                            plan_source = "stale".into();
                         }
                     }
                 }
@@ -684,5 +753,54 @@ mod tests {
         assert_eq!(over[0].resets_at, None);
         // No recognizable windows → None.
         assert!(super::parse_plan(r#"{"unrelated": 1}"#).is_none());
+    }
+
+    #[test]
+    fn a_rate_limited_body_is_not_mistaken_for_an_empty_quota() {
+        // What the endpoint ACTUALLY returns when it throttles us. Parsing this as windows
+        // would report an untouched account; returning None is what lets the cache stand in.
+        let body = r#"{"error":{"type":"rate_limit_error","message":"Rate limited."}}"#;
+        assert!(super::parse_plan(body).is_none());
+    }
+
+    fn win(pct: f64) -> super::PlanWindow {
+        super::PlanWindow {
+            label: "5-hour window".into(),
+            pct_used: pct,
+            resets_at: None,
+        }
+    }
+
+    #[test]
+    fn the_last_good_read_stands_in_for_a_throttled_one() {
+        let auth = super::ClaudeAuth::default();
+        assert!(auth.recent_plan("acc").is_none(), "nothing cached yet");
+        auth.remember_plan("acc", &[win(0.42)]);
+        let got = auth.recent_plan("acc").expect("a fresh read is servable");
+        assert!((got.windows[0].pct_used - 0.42).abs() < 1e-9);
+    }
+
+    #[test]
+    fn a_read_older_than_the_window_is_not_served() {
+        // Past the cutoff, admitting we do not know beats a number the user might act on.
+        let auth = super::ClaudeAuth::default();
+        auth.last_plan.lock().unwrap().insert(
+            "acc".into(),
+            super::CachedPlan {
+                windows: vec![win(0.9)],
+                fetched_at: super::now_secs() - super::PLAN_STALE_MAX_SECS - 1,
+            },
+        );
+        assert!(auth.recent_plan("acc").is_none());
+    }
+
+    #[test]
+    fn evicting_an_account_forgets_its_numbers_too() {
+        // The id could be recycled; serving the previous holder's usage would be worse than
+        // serving nothing.
+        let auth = super::ClaudeAuth::default();
+        auth.remember_plan("acc", &[win(0.1)]);
+        auth.evict("acc");
+        assert!(auth.recent_plan("acc").is_none());
     }
 }

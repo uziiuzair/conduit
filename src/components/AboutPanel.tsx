@@ -4,7 +4,7 @@ import { getVersion } from "@tauri-apps/api/app";
 import { useStore } from "../store";
 
 const REPO_URL = "https://github.com/uziiuzair/conduit";
-const SITE_URL = "https://ooozzy.com";
+const SITE_URL = "https://arlo.fyi";
 
 function openExternal(url: string) {
   void invoke("open_external", { url }).catch(() => {});
@@ -52,7 +52,8 @@ export function AboutPanel() {
         Multiple real Claude Code terminals across your projects, in one window.
       </p>
       <p className="about-credit">
-        Built with love by Uzair Hayat at {link(SITE_URL, "Ooozzy")}.
+        Built with love by Uzair Hayat, Fahed Yasin, and Usman Kaisser at{" "}
+        {link(SITE_URL, "Arlo")}.
       </p>
       <div className="about-rows">
         <div className="about-row">

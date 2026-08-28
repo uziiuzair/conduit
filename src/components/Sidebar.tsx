@@ -15,6 +15,8 @@ import {
   type Project,
   type Session,
 } from "../store";
+import type { RootChat as RootChatMeta } from "../rootChat";
+import { inProfile } from "../profiles";
 import {
   FolderIcon,
   FolderPlusIcon,
@@ -24,7 +26,9 @@ import {
   ChevronRightIcon,
   GitBranchIcon,
 } from "./Icons";
-import { AgentGlyph } from "./AgentGlyph";
+import { AgentGlyph, glyphStateFor } from "./AgentGlyph";
+import { PROJECT_PALETTE, resolveProjectColor, SESSION_DRAG_MIME } from "../layout";
+import { Dropdown } from "./Dropdown";
 import { ThemeSwitcher } from "./ThemeSwitcher";
 import { ClaudeStatusPill } from "./ClaudeStatusPill";
 import { UsagePanel } from "./UsagePanel";
@@ -101,14 +105,19 @@ export async function deleteSession(
   if (!confirm(prompt)) return;
 
   if (session.useWorktree && session.worktreePath) {
+    // Kill the live processes BEFORE asking anything about the worktree. The agent writes
+    // files right up until it dies, so a dirty check taken while it runs — or taken before
+    // a confirm the human sits on for a few seconds — is a reading of a directory that no
+    // longer exists by the time git looks at it. A stale "clean" means `git worktree
+    // remove` runs without --force, refuses ("contains modified or untracked files"), and
+    // the session disappears while its worktree stays on disk.
+    await invoke("pty_kill", { sessionId }).catch(() => {});
+    await invoke("pty_kill", { sessionId: `${sessionId}::term` }).catch(() => {});
     const dirty = await worktreeIsDirty(session.worktreePath);
     const msg = dirty
       ? `Also remove its git worktree (${session.branch})?\n\nIt has uncommitted changes that will be permanently lost.`
       : `Also remove its git worktree (${session.branch})?\n\nThe branch is kept; only the working copy is removed.`;
     if (confirm(msg)) {
-      // Kill the live process first so git can release the worktree lock.
-      await invoke("pty_kill", { sessionId }).catch(() => {});
-      await invoke("pty_kill", { sessionId: `${sessionId}::term` }).catch(() => {});
       try {
         await worktreeRemove(found.project.path, session.worktreePath, dirty);
       } catch (e) {
@@ -125,8 +134,23 @@ export async function deleteSession(
 
 export function Sidebar() {
   const projects = useStore((s) => s.projects);
+  const rootChats = useStore((s) => s.rootChats);
+  const addRootChat = useStore((s) => s.addRootChat);
   const addProject = useStore((s) => s.addProject);
   const setShowSettings = useStore((s) => s.setShowSettings);
+  const profiles = useStore((s) => s.profiles);
+  const activeProfileId = useStore((s) => s.activeProfileId);
+  // The profile filter applies HERE (and to selection repair in the store) only. The
+  // workspace keeps the full projects array — hidden projects' terminals stay mounted.
+  const knownProfileIds = useMemo(() => new Set(profiles.map((p) => p.id)), [profiles]);
+  const visibleProjects = useMemo(
+    () => projects.filter((p) => inProfile(p.profileId, activeProfileId, knownProfileIds)),
+    [projects, activeProfileId, knownProfileIds],
+  );
+  const visibleChats = useMemo(
+    () => rootChats.filter((c) => inProfile(c.profileId, activeProfileId, knownProfileIds)),
+    [rootChats, activeProfileId, knownProfileIds],
+  );
   const selectedAgent = useStore((s) => {
     const id = globalSelectedSessionId(s);
     if (!id) return "claude" as const;
@@ -148,8 +172,20 @@ export function Sidebar() {
       <div className="drag-region" data-tauri-drag-region />
       {showClaudeAmbient && <ClaudeStatusWarning />}
       <div className="sidebar-scroll">
+        <div className="section-label">HQ</div>
+        <div className="hq-list">
+          {visibleChats.map((c) => (
+            <RootChatRow key={c.id} chat={c} />
+          ))}
+          <div className="session-row-slot">
+            <button className="new-session" onClick={() => void addRootChat()}>
+              <PlusIcon size={12} />
+              <span>New chat</span>
+            </button>
+          </div>
+        </div>
         <div className="section-label">Projects</div>
-        {projects.map((p) => (
+        {visibleProjects.map((p) => (
           <ProjectBlock key={p.id} project={p} />
         ))}
       </div>
@@ -163,7 +199,75 @@ export function Sidebar() {
         <button className="settings-btn" title="Settings" onClick={() => setShowSettings(true)}>⚙</button>
         <ThemeSwitcher />
       </div>
+      <ProfileBar />
       <SessionContextMenu />
+    </div>
+  );
+}
+
+/** The profile selector row (below the add-project row): a dropdown over the known
+ *  profiles plus the implicit Default, and a `+` that flips to an inline name input —
+ *  window.prompt is unreliable in WKWebView, and the inline input matches the rename
+ *  idiom used everywhere else in this sidebar. */
+function ProfileBar() {
+  const profiles = useStore((s) => s.profiles);
+  const activeProfileId = useStore((s) => s.activeProfileId);
+  const setActiveProfile = useStore((s) => s.setActiveProfile);
+  const addProfile = useStore((s) => s.addProfile);
+  const [creating, setCreating] = useState(false);
+  const done = useRef(false);
+
+  // A dangling active id (profile removed under us) renders as Default.
+  const value = profiles.some((p) => p.id === activeProfileId) ? activeProfileId! : "";
+
+  const commit = (name: string) => {
+    if (done.current) return;
+    done.current = true;
+    setCreating(false);
+    if (name.trim()) void addProfile(name);
+  };
+
+  return (
+    <div className="profile-bar">
+      {creating ? (
+        <input
+          className="profile-new-input"
+          placeholder="Profile name"
+          autoFocus
+          spellCheck={false}
+          onKeyDown={(e) => {
+            e.stopPropagation();
+            if (e.key === "Enter") commit(e.currentTarget.value);
+            else if (e.key === "Escape") {
+              e.preventDefault();
+              done.current = true;
+              setCreating(false);
+            }
+          }}
+          onBlur={(e) => commit(e.currentTarget.value)}
+        />
+      ) : (
+        <Dropdown
+          up
+          value={value}
+          title="Profile — filters which projects and chats the sidebar shows"
+          options={[
+            { value: "", label: "Default" },
+            ...profiles.map((p) => ({ value: p.id, label: p.name })),
+          ]}
+          onChange={(v) => void setActiveProfile(v || null)}
+        />
+      )}
+      <button
+        className="profile-add-btn"
+        title={creating ? "Cancel" : "New profile"}
+        onClick={() => {
+          done.current = false;
+          setCreating((v) => !v);
+        }}
+      >
+        <PlusIcon size={12} />
+      </button>
     </div>
   );
 }
@@ -171,6 +275,8 @@ export function Sidebar() {
 function ProjectBlock({ project }: { project: Project }) {
   const addSession = useStore((s) => s.addSession);
   const openMenu = useStore((s) => s.openMenu);
+  const autoProjectColors = useStore((s) => s.autoProjectColors);
+  const accentColor = resolveProjectColor(project.id, project.color, autoProjectColors);
   const reorderProject = useStore((s) => s.reorderProject);
   const startProjectRename = useStore((s) => s.startProjectRename);
   const editing = useStore((s) => s.editingProjectId === project.id);
@@ -223,6 +329,16 @@ function ProjectBlock({ project }: { project: Project }) {
     >
       <div
         className="project-head"
+        // The project's accent, as a variable rather than a colour on the icon: the same
+        // colour the tab badge and the pane edge use when panes hold more than one
+        // project. Without this anchor in the sidebar, a coloured badge over there would
+        // be a colour with no referent. Null (auto off, nothing chosen) leaves the var
+        // unset so the icon falls back to its neutral CSS colour.
+        style={
+          accentColor
+            ? ({ ["--proj-accent" as string]: accentColor } as React.CSSProperties)
+            : undefined
+        }
         role="button"
         aria-expanded={!collapsed}
         title={collapsed ? "Expand project" : "Collapse project"}
@@ -286,6 +402,7 @@ function ProjectBlock({ project }: { project: Project }) {
       </div>
       {showNew && (
         <NewSessionDialog
+          projectId={project.id}
           projectPath={project.path}
           hasConductor={project.sessions.some((s) => s.role === "conductor")}
           onCancel={() => setShowNew(false)}
@@ -312,6 +429,9 @@ function SessionRow({
   const status = useStore((s) => liveState(s.live, session.id).status);
   const activity = useStore((s) => liveState(s.live, session.id).activity);
   const compacting = useStore((s) => liveState(s.live, session.id).compacting);
+  // A `live` entry exists only once the session has emitted a hook, so its presence IS
+  // "this session has started this run" — see glyphStateFor.
+  const loaded = useStore((s) => s.live[session.id] !== undefined);
   const editing = useStore((s) => s.editingSessionId === session.id);
   const selectSession = useStore((s) => s.selectSession);
   const openMenu = useStore((s) => s.openMenu);
@@ -351,6 +471,14 @@ function SessionRow({
         e.stopPropagation();
         sidebarDrag = { kind: "session", projectId: project.id, sessionId: session.id };
         e.dataTransfer.setData("text/plain", session.id);
+        // A second, custom type so the WORKSPACE can recognise this drag. Only
+        // `dataTransfer.types` is readable during dragover, so advertising the type is the
+        // only way the pane overlay can know to appear before the drop happens. Carries the
+        // owning project too: dropping into another project's panes borrows the session.
+        e.dataTransfer.setData(
+          SESSION_DRAG_MIME,
+          JSON.stringify({ sessionId: session.id, projectId: project.id }),
+        );
         e.dataTransfer.effectAllowed = "move";
         setDragSelf(true);
       }}
@@ -406,7 +534,11 @@ function SessionRow({
         });
       }}
     >
-      <AgentGlyph id={session.agent} size={14} />
+      <AgentGlyph
+        id={session.agent}
+        size={14}
+        state={glyphStateFor(status, loaded, compacting)}
+      />
       {session.role === "conductor" && (
         <span className="conductor-chip" title="Conductor — orchestrates this project">
           ◆
@@ -443,6 +575,85 @@ function SessionRow({
       )}
     </div>
     </div>
+  );
+}
+
+/** One HQ chat row. Reuses the session-row look; no live PTY, so the only state
+ *  dot is "a turn is streaming right now". */
+function RootChatRow({ chat }: { chat: RootChatMeta }) {
+  const selected = useStore((s) => s.selectedRootChatId === chat.id);
+  const editing = useStore((s) => s.editingRootChatId === chat.id);
+  const running = useStore((s) => !!s.rootChatRunning[chat.id]);
+  const openRootChat = useStore((s) => s.openRootChat);
+  const openMenu = useStore((s) => s.openMenu);
+  const startRootChatRename = useStore((s) => s.startRootChatRename);
+
+  return (
+    <div className="session-row-slot">
+      <div
+        className={`session-row root-chat-row ${selected ? "selected" : ""}`}
+        onClick={() => {
+          if (!editing) void openRootChat(chat.id);
+        }}
+        onDoubleClick={(e) => {
+          e.stopPropagation();
+          startRootChatRename(chat.id);
+        }}
+        onContextMenu={(e) => {
+          e.preventDefault();
+          e.stopPropagation();
+          openMenu({
+            x: e.clientX,
+            y: e.clientY,
+            kind: "rootchat",
+            projectId: "",
+            rootChatId: chat.id,
+          });
+        }}
+      >
+        {running && <CircleFilledIcon size={8} className="root-chat-running" />}
+        {editing ? (
+          <RootChatRenameInput chatId={chat.id} initial={chat.title} />
+        ) : (
+          <span className="name">{chat.title}</span>
+        )}
+      </div>
+    </div>
+  );
+}
+
+/** Inline editor for an HQ chat title. Mirrors ProjectRenameInput. */
+function RootChatRenameInput({ chatId, initial }: { chatId: string; initial: string }) {
+  const renameRootChat = useStore((s) => s.renameRootChat);
+  const cancelRootChatRename = useStore((s) => s.cancelRootChatRename);
+  const done = useRef(false);
+
+  const commit = (value: string) => {
+    if (done.current) return;
+    done.current = true;
+    void renameRootChat(chatId, value);
+  };
+
+  return (
+    <input
+      className="session-rename-input"
+      defaultValue={initial}
+      autoFocus
+      spellCheck={false}
+      onClick={(e) => e.stopPropagation()}
+      onDoubleClick={(e) => e.stopPropagation()}
+      onFocus={(e) => e.currentTarget.select()}
+      onKeyDown={(e) => {
+        e.stopPropagation();
+        if (e.key === "Enter") commit(e.currentTarget.value);
+        else if (e.key === "Escape") {
+          e.preventDefault();
+          done.current = true;
+          cancelRootChatRename();
+        }
+      }}
+      onBlur={(e) => commit(e.currentTarget.value)}
+    />
   );
 }
 
@@ -586,14 +797,20 @@ function StatusAccessory({
 function SessionContextMenu() {
   const menu = useStore((s) => s.menu);
   const projects = useStore((s) => s.projects);
+  const rootChats = useStore((s) => s.rootChats);
   const closeMenu = useStore((s) => s.closeMenu);
   const startRename = useStore((s) => s.startRename);
   const startProjectRename = useStore((s) => s.startProjectRename);
+  const startRootChatRename = useStore((s) => s.startRootChatRename);
+  const removeRootChat = useStore((s) => s.removeRootChat);
   const selectProject = useStore((s) => s.selectProject);
   const setCenterMode = useStore((s) => s.setCenterMode);
+  const setProjectColor = useStore((s) => s.setProjectColor);
   const removeSession = useStore((s) => s.removeSession);
   const removeProject = useStore((s) => s.removeProject);
   const openToSide = useStore((s) => s.openToSide);
+  // The project whose panes are on screen -- the HOST for a cross-project split.
+  const selectedProjectId = useStore((s) => s.selectedProjectId);
   const setSessionTrust = useStore((s) => s.setSessionTrust);
   const privateMode = useStore((s) => s.privateMode);
   const accounts = useStore((s) => s.accounts);
@@ -604,11 +821,16 @@ function SessionContextMenu() {
   const pushToast = useStore((s) => s.pushToast);
   const live = useStore((s) => s.live);
   const [accountOpen, setAccountOpen] = useState(false);
+  const [colorOpen, setColorOpen] = useState(false);
 
   // Reset the inline account expander whenever the menu target changes.
   useEffect(() => {
     setAccountOpen(false);
   }, [menu?.sessionId]);
+  // Same for the colour expander (its target is a project, not a session).
+  useEffect(() => {
+    setColorOpen(false);
+  }, [menu?.projectId]);
 
   useEffect(() => {
     if (!menu) return;
@@ -628,6 +850,35 @@ function SessionContextMenu() {
 
   if (!menu) return null;
 
+  if (menu.kind === "rootchat") {
+    const chatId = menu.rootChatId;
+    const chat = rootChats.find((c) => c.id === chatId);
+    if (!chatId || !chat) return null;
+    return (
+      <div
+        className="context-menu"
+        style={{ left: menu.x, top: menu.y }}
+        onClick={(e) => e.stopPropagation()}
+      >
+        <button onClick={() => startRootChatRename(chatId)}>Rename</button>
+        <button
+          className="danger"
+          onClick={() => {
+            if (
+              confirm(
+                `Delete chat "${chat.title}"?\n\nIts conversation transcript stays on disk and remains searchable.`,
+              )
+            )
+              void removeRootChat(chatId);
+            closeMenu();
+          }}
+        >
+          Delete Chat
+        </button>
+      </div>
+    );
+  }
+
   if (menu.kind === "project") {
     const project = projects.find((p) => p.id === menu.projectId);
     return (
@@ -646,6 +897,42 @@ function SessionContextMenu() {
         >
           Open board
         </button>
+        <div
+          className="context-flyout-item"
+          onMouseEnter={() => setColorOpen(true)}
+          onMouseLeave={() => setColorOpen(false)}
+        >
+          <button onClick={() => setColorOpen((v) => !v)}>
+            Select color <span className="context-flyout-caret">▸</span>
+          </button>
+          {colorOpen && (
+            <div className="context-flyout">
+              <button
+                className={!project?.color ? "sel" : ""}
+                onClick={() => {
+                  void setProjectColor(menu.projectId, null);
+                  closeMenu();
+                }}
+              >
+                {!project?.color ? "✓ " : ""}Automatic
+              </button>
+              {PROJECT_PALETTE.map((c) => (
+                <button
+                  key={c.value}
+                  className={project?.color === c.value ? "sel" : ""}
+                  onClick={() => {
+                    void setProjectColor(menu.projectId, c.value);
+                    closeMenu();
+                  }}
+                >
+                  {project?.color === c.value ? "✓ " : ""}
+                  <span className="context-color-dot" style={{ background: c.value }} />
+                  {c.label}
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
         <button
           onClick={() => {
             void stopIdleSessions(menu.projectId).then((n) => {
@@ -762,6 +1049,27 @@ function SessionContextMenu() {
       >
         Open to the Side
       </button>
+      {/* Cross-project split. Only offered when the session is NOT in the project you are
+          looking at -- otherwise it is the button above with extra words. `projectId` on
+          the tab is what makes the pane borrow this session rather than move it: the
+          session stays in its own project, its own sidebar row and its own layout. */}
+      {selectedProjectId && selectedProjectId !== menu.projectId && (
+        <button
+          onClick={() => {
+            openToSide(selectedProjectId, {
+              kind: "session",
+              ref: sid,
+              projectId: menu.projectId,
+            });
+            closeMenu();
+          }}
+          title={`Show this session beside ${
+            projects.find((p) => p.id === selectedProjectId)?.name ?? "the open project"
+          }'s sessions`}
+        >
+          Open beside {projects.find((p) => p.id === selectedProjectId)?.name ?? "current project"}
+        </button>
+      )}
       <button
         onClick={() => {
           if (!menuSession) return;

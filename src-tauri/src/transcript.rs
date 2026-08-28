@@ -90,10 +90,88 @@ pub fn parse_line(line: &str) -> Vec<Value> {
     out
 }
 
+/// How many transcript items the rich session view asks for by default.
+///
+/// A conversation view, not an archive: the terminal above it still holds the full
+/// scrollback, and rendering ten thousand markdown blocks to show the last twenty is how a
+/// chat pane becomes the slowest thing in the app.
+pub const VIEW_LIMIT: usize = 400;
+
+/// Tauri command: a session's transcript, parsed into chat items, newest-last.
+///
+/// Claude only, and that is stated rather than silently returned as empty: `parse_line`
+/// reads Claude's JSONL schema, and Command Code writes `.jsonl` too but with a shape
+/// nobody has verified. Rendering an unverified schema would produce a confidently wrong
+/// conversation, which is worse than an honest "not supported yet".
+///
+/// Returns an empty vec (never an error) when there is simply nothing yet -- a session that
+/// has not spoken, or one whose transcript has not been written. The view treats empty as
+/// "nothing to show", so an error here would only turn a normal state into a red banner.
+#[tauri::command]
+pub fn session_transcript(
+    session_id: String,
+    limit: Option<usize>,
+    store: tauri::State<'_, std::sync::Arc<crate::store::Store>>,
+) -> Vec<Value> {
+    if store.session_agent(&session_id) != crate::agent::AgentId::Claude {
+        return Vec::new();
+    }
+    let Some(dir) = crate::pty::claude_projects_dir() else {
+        return Vec::new();
+    };
+    let Some(path) = crate::pty::transcript_path(&session_id, &dir) else {
+        return Vec::new();
+    };
+    let Ok(body) = std::fs::read_to_string(&path) else {
+        return Vec::new();
+    };
+    let items: Vec<Value> = body
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .flat_map(parse_line)
+        .collect();
+    tail(items, limit.unwrap_or(VIEW_LIMIT))
+}
+
+/// The last `limit` items. Split out so the boundary is testable without a Store.
+///
+/// The TAIL, not the head: a conversation view is read from the bottom, so truncating the
+/// end would show an old conversation and hide the part someone opened the panel to read.
+fn tail(items: Vec<Value>, limit: usize) -> Vec<Value> {
+    if limit == 0 || items.len() <= limit {
+        // limit 0 means "no cap", not "show nothing" -- a caller asking for zero items has
+        // almost certainly forgotten to pass one.
+        return items;
+    }
+    items[items.len() - limit..].to_vec()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn tail_keeps_the_end_of_the_conversation() {
+        let items: Vec<Value> = (0..10).map(|i| json!({ "n": i })).collect();
+        let last3 = tail(items.clone(), 3);
+        assert_eq!(last3.len(), 3);
+        // The newest items, not the oldest -- truncating the other end would show an old
+        // conversation and hide what the panel was opened to read.
+        assert_eq!(last3[0]["n"], 7);
+        assert_eq!(last3[2]["n"], 9);
+    }
+
+    #[test]
+    fn tail_is_a_no_op_when_it_has_nothing_to_cut() {
+        let items: Vec<Value> = (0..3).map(|i| json!({ "n": i })).collect();
+        assert_eq!(tail(items.clone(), 3).len(), 3, "exactly at the limit");
+        assert_eq!(tail(items.clone(), 99).len(), 3, "under the limit");
+        assert_eq!(tail(vec![], 5).len(), 0, "nothing to show yet");
+        // 0 means "no cap" rather than "show nothing": a caller passing zero has almost
+        // certainly forgotten to supply one, and an empty pane hides that mistake.
+        assert_eq!(tail(items, 0).len(), 3);
+    }
 
     #[test]
     fn parses_user_text_bubble() {

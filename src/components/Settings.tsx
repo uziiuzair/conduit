@@ -7,18 +7,24 @@ import { AccountList } from "./AccountList";
 import { UsagePrefsPanel } from "./UsagePrefsPanel";
 import { FormatPrefsPanel } from "./FormatPrefsPanel";
 import { GeneralSettings } from "./GeneralSettings";
+import { TerminalSettings } from "./TerminalSettings";
 import { TrustPanel } from "./TrustPanel";
 import { OpenCodePanel } from "./OpenCodePanel";
+import { CommandCodePanel } from "./CommandCodePanel";
+import { RoutingPanel } from "./RoutingPanel";
 import { PluginsPanel } from "./PluginsPanel";
 
 // Exported for the native menu integration (menu → open Settings at a specific tab).
 export type SettingsTab =
   | "general"
+  | "terminal"
   | "agents"
   | "accounts"
   | "usage"
   | "mcp"
   | "localmodels"
+  | "commandcode"
+  | "routing"
   | "formatting"
   | "security"
   | "privacy"
@@ -27,12 +33,20 @@ export type SettingsTab =
 
 /** Grouped sidebar navigation — scales past the point where flat tabs got unwieldy. */
 const NAV: Array<{ group: string; items: Array<{ id: SettingsTab; label: string }> }> = [
-  { group: "", items: [{ id: "general", label: "General" }] },
+  {
+    group: "",
+    items: [
+      { id: "general", label: "General" },
+      { id: "terminal", label: "Terminal" },
+    ],
+  },
   {
     group: "Coding agents",
     items: [
       { id: "agents", label: "Agents" },
       { id: "localmodels", label: "Local models" },
+      { id: "commandcode", label: "Command Code" },
+      { id: "routing", label: "Routing" },
       { id: "mcp", label: "MCP servers" },
     ],
   },
@@ -114,6 +128,12 @@ export function Settings({
                   <GeneralSettings />
                 </>
               )}
+              {tab === "terminal" && (
+                <>
+                  <p className="settings-intro">How terminal panes are drawn.</p>
+                  <TerminalSettings />
+                </>
+              )}
               {tab === "agents" && (
                 <>
                   <p className="settings-intro">
@@ -136,6 +156,8 @@ export function Settings({
                   <OpenCodePanel />
                 </>
               )}
+              {tab === "commandcode" && <CommandCodePanel />}
+              {tab === "routing" && <RoutingPanel />}
               {tab === "formatting" && <FormatPrefsPanel />}
               {tab === "security" && (
                 <>

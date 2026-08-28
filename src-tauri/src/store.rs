@@ -73,6 +73,12 @@ pub struct Session {
     /// editor; not yet consulted by `can_read` / `can_inject`.
     #[serde(default)]
     pub channels: Vec<String>,
+    /// A CONCRETE model id pinned for this session (`sonnet`, `google/gemini-3.7-flash`),
+    /// as chosen by a route. Takes precedence over `model_tier`, which is the fleet's
+    /// coarse cheap/standard/hard and needs a per-agent lookup to become a model. Only
+    /// acted on for adapters whose `supports_model_flags()` is true.
+    #[serde(default)]
+    pub model: Option<String>,
     /// Preferred model tier: "cheap" | "standard" | "hard" (SPEC-B, §7.5). Mapped to a
     /// concrete per-adapter model id by `agent::model_for_tier`.
     #[serde(default)]
@@ -243,6 +249,13 @@ pub struct WsTab {
     /// group. Must exist here or serde strips it from persisted layouts.
     #[serde(default)]
     pub preview: bool,
+    /// Owning project, set ONLY when this tab borrows a session from ANOTHER project so
+    /// two projects can sit side by side in one set of panes. `None` means "the project
+    /// whose layout this is", which is what every tab written before the feature is — so
+    /// old state files load unchanged. Skipped when absent so new state files do not grow
+    /// a null on every tab.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_id: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -288,6 +301,54 @@ pub struct Project {
     /// flips this on). `#[serde(default)]` so legacy state (no field) loads as `false`.
     #[serde(default)]
     pub board_enabled: bool,
+    /// This project's routing overrides (task kind -> fallback chain). SPARSE: only the
+    /// kinds actually overridden are stored, so everything else keeps inheriting the global
+    /// scope and the built-in defaults -- including later improvements to them. Empty =
+    /// inherit everything. See routing.rs.
+    #[serde(default)]
+    pub routes: crate::routing::AgentRoutes,
+    /// Profile this project belongs to (sidebar visibility filter). `None` = the implicit
+    /// Default profile. Assigned at creation from the active profile; a dangling id (its
+    /// profile was removed) renders under Default. `#[serde(default)]` so legacy state loads.
+    #[serde(default)]
+    pub profile_id: Option<String>,
+    /// A user-CHOSEN accent colour (CSS colour string). `None` = not chosen, and the
+    /// frontend derives one (or none, with auto-colouring off). Only a colour the user
+    /// picked becomes state — the derived accent stays derived (see layout.ts).
+    #[serde(default)]
+    pub color: Option<String>,
+}
+
+/// A named sidebar workspace (profiles MVP, 2026-08-27): the sidebar shows only the
+/// projects and root chats whose `profile_id` matches the active profile. A visibility
+/// filter, NOT an isolation boundary — hidden sessions keep running. The Default profile
+/// is implicit (`profile_id == None`) and never stored as a record.
+#[derive(Serialize, Deserialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct Profile {
+    pub id: String,
+    pub name: String,
+}
+
+/// A root-level chat: a headless, read-only `claude -p` conversation that lives above all
+/// projects (design doc 2026-08-26). `id` doubles as the pinned Claude session id — the
+/// first send uses `--session-id <id>`, later sends `--resume <id>` — so there is no
+/// separate captured session id.
+#[derive(Serialize, Deserialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct RootChat {
+    pub id: String,
+    pub title: String,
+    /// Registered account whose config dir holds this chat's transcript. Pinned at
+    /// creation (the global Claude default at that moment) and never rebound — switching
+    /// would orphan the resume chain. None = the default `~/.claude` tree.
+    #[serde(default)]
+    pub account_id: Option<String>,
+    #[serde(default)]
+    pub created_at: u64,
+    /// Same semantics as `Project::profile_id`: the profile this chat is visible under.
+    #[serde(default)]
+    pub profile_id: Option<String>,
 }
 
 /// A registered agent account: a profile dir that holds its own credentials (a `.claude`
@@ -382,6 +443,16 @@ pub struct PersistState {
     pub opencode: OpenCodeSettings,
     #[serde(default)]
     pub plugins: Vec<crate::plugins::PluginRecord>,
+    #[serde(default)]
+    pub root_chats: Vec<RootChat>,
+    /// Global routing overrides, layered over the built-in defaults and under any project's.
+    #[serde(default)]
+    pub routes: crate::routing::AgentRoutes,
+    #[serde(default)]
+    pub profiles: Vec<Profile>,
+    /// The profile the sidebar was last filtered to; restored on launch. None = Default.
+    #[serde(default)]
+    pub active_profile_id: Option<String>,
 }
 
 pub struct Store {
@@ -393,6 +464,10 @@ pub struct Store {
     trust: Mutex<TrustSettings>,
     opencode: Mutex<OpenCodeSettings>,
     plugins: Mutex<Vec<crate::plugins::PluginRecord>>,
+    root_chats: Mutex<Vec<RootChat>>,
+    routes: Mutex<crate::routing::AgentRoutes>,
+    profiles: Mutex<Vec<Profile>>,
+    active_profile_id: Mutex<Option<String>>,
     /// The local-endpoint API key, held in memory for the app's lifetime only. Never part
     /// of `PersistState`/`save()`, never logged; injected into an `opencode` child's env.
     opencode_key: Mutex<Option<String>>,
@@ -519,6 +594,10 @@ impl Store {
             trust: Mutex::new(state.trust),
             opencode: Mutex::new(state.opencode),
             plugins: Mutex::new(state.plugins),
+            root_chats: Mutex::new(state.root_chats),
+            routes: Mutex::new(state.routes),
+            profiles: Mutex::new(state.profiles),
+            active_profile_id: Mutex::new(state.active_profile_id),
             opencode_key: Mutex::new(None),
             save_path,
         }
@@ -546,6 +625,11 @@ impl Store {
             default_account: default_accounts.get(&AgentId::Claude).cloned(),
             default_accounts,
             trust: self.trust.lock().unwrap_or_else(|e| e.into_inner()).clone(),
+            routes: self
+                .routes
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone(),
             opencode: self
                 .opencode
                 .lock()
@@ -553,6 +637,21 @@ impl Store {
                 .clone(),
             plugins: self
                 .plugins
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone(),
+            root_chats: self
+                .root_chats
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone(),
+            profiles: self
+                .profiles
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone(),
+            active_profile_id: self
+                .active_profile_id
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
                 .clone(),
@@ -615,6 +714,14 @@ impl Store {
             layout: None,
             default_accounts: HashMap::new(),
             board_enabled: false,
+            routes: Default::default(),
+            // A project created while a profile is active belongs to that profile.
+            profile_id: self
+                .active_profile_id
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone(),
+            color: None,
         };
         let mut projects = self.projects.lock().unwrap_or_else(|e| e.into_inner());
         projects.push(project.clone());
@@ -626,6 +733,208 @@ impl Store {
         let mut projects = self.projects.lock().unwrap_or_else(|e| e.into_inner());
         projects.retain(|p| p.id != project_id);
         self.save(&projects);
+    }
+
+    // ---- Root chats -----------------------------------------------------------------
+    // Lock order: mutate `root_chats`, DROP that lock, then take `projects` for `save()`
+    // — save() locks accounts/default_accounts/etc. internally and must never run while
+    // the caller still holds `root_chats` (matches how the account methods sequence).
+
+    pub fn list_root_chats(&self) -> Vec<RootChat> {
+        self.root_chats
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+
+    pub fn add_root_chat(&self) -> RootChat {
+        let account_id = self
+            .default_accounts
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&AgentId::Claude)
+            .cloned();
+        let chat = RootChat {
+            id: Uuid::new_v4().to_string(),
+            title: "New Chat".to_string(),
+            account_id,
+            created_at: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0),
+            profile_id: self
+                .active_profile_id
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone(),
+        };
+        self.root_chats
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push(chat.clone());
+        let projects = self.projects.lock().unwrap_or_else(|e| e.into_inner());
+        self.save(&projects);
+        chat
+    }
+
+    pub fn rename_root_chat(&self, id: &str, name: &str) -> bool {
+        let renamed = {
+            let mut chats = self.root_chats.lock().unwrap_or_else(|e| e.into_inner());
+            match chats.iter_mut().find(|c| c.id == id) {
+                Some(c) => {
+                    c.title = name.to_string();
+                    true
+                }
+                None => false,
+            }
+        };
+        if renamed {
+            let projects = self.projects.lock().unwrap_or_else(|e| e.into_inner());
+            self.save(&projects);
+        }
+        renamed
+    }
+
+    /// Removes the chat record only. The Claude transcript on disk is deliberately left
+    /// alone — it belongs to Claude's own store, and palette search still finds it.
+    pub fn remove_root_chat(&self, id: &str) -> bool {
+        let removed = {
+            let mut chats = self.root_chats.lock().unwrap_or_else(|e| e.into_inner());
+            let before = chats.len();
+            chats.retain(|c| c.id != id);
+            chats.len() != before
+        };
+        if removed {
+            let projects = self.projects.lock().unwrap_or_else(|e| e.into_inner());
+            self.save(&projects);
+        }
+        removed
+    }
+
+    pub fn root_chat(&self, id: &str) -> Option<RootChat> {
+        self.root_chats
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .find(|c| c.id == id)
+            .cloned()
+    }
+
+    /// The chat's transcript home: its pinned account's config dir. None = default tree.
+    pub fn root_chat_config_dir(&self, id: &str) -> Option<String> {
+        let account_id = self.root_chat(id)?.account_id?;
+        self.accounts
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .find(|a| a.id == account_id)
+            .map(|a| a.config_dir.clone())
+    }
+
+    // ---- Profiles ---------------------------------------------------------------------
+    // Same lock order rule as root chats: mutate `profiles`/`active_profile_id`, DROP
+    // those locks, then take `projects` for `save()`.
+
+    pub fn list_profiles(&self) -> Vec<Profile> {
+        self.profiles
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+
+    pub fn active_profile(&self) -> Option<String> {
+        self.active_profile_id
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+
+    pub fn add_profile(&self, name: &str) -> Profile {
+        let profile = Profile {
+            id: Uuid::new_v4().to_string(),
+            name: name.trim().to_string(),
+        };
+        self.profiles
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push(profile.clone());
+        let projects = self.projects.lock().unwrap_or_else(|e| e.into_inner());
+        self.save(&projects);
+        profile
+    }
+
+    /// Set (Some) or clear (None = Default) the active profile. An unknown id is refused so
+    /// a stale frontend can't filter the sidebar to a profile that no longer exists.
+    pub fn set_active_profile(&self, id: Option<String>) -> bool {
+        if let Some(ref id) = id {
+            let known = self
+                .profiles
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .iter()
+                .any(|p| &p.id == id);
+            if !known {
+                return false;
+            }
+        }
+        *self
+            .active_profile_id
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = id;
+        let projects = self.projects.lock().unwrap_or_else(|e| e.into_inner());
+        self.save(&projects);
+        true
+    }
+
+    /// Remove a profile record. Its projects and root chats fall back to the Default
+    /// profile (their `profile_id` is cleared), and so does the active id if it pointed
+    /// here — nothing is ever deleted or hidden by removing a profile.
+    pub fn remove_profile(&self, id: &str) -> bool {
+        let removed = {
+            let mut profiles = self.profiles.lock().unwrap_or_else(|e| e.into_inner());
+            let before = profiles.len();
+            profiles.retain(|p| p.id != id);
+            profiles.len() != before
+        };
+        if !removed {
+            return false;
+        }
+        {
+            let mut active = self
+                .active_profile_id
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            if active.as_deref() == Some(id) {
+                *active = None;
+            }
+        }
+        {
+            let mut chats = self.root_chats.lock().unwrap_or_else(|e| e.into_inner());
+            for c in chats.iter_mut() {
+                if c.profile_id.as_deref() == Some(id) {
+                    c.profile_id = None;
+                }
+            }
+        }
+        let mut projects = self.projects.lock().unwrap_or_else(|e| e.into_inner());
+        for p in projects.iter_mut() {
+            if p.profile_id.as_deref() == Some(id) {
+                p.profile_id = None;
+            }
+        }
+        self.save(&projects);
+        true
+    }
+
+    /// Set (Some) or clear (None) a project's user-chosen accent colour.
+    pub fn set_project_color(&self, project_id: &str, color: Option<String>) -> bool {
+        let mut projects = self.projects.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(project) = projects.iter_mut().find(|p| p.id == project_id) else {
+            return false;
+        };
+        project.color = color;
+        self.save(&projects);
+        true
     }
 
     /// Rename a project's display label only. Does not touch `path` or anything on disk.
@@ -720,6 +1029,30 @@ impl Store {
         project.sessions.push(session.clone());
         self.save(&projects);
         Some(session)
+    }
+
+    /// Pin a concrete model on a session. Set by the routing picker at creation, before the
+    /// session is ever spawned -- so unlike `model_tier` (which the fleet may set later),
+    /// this is always in place by the time `spawn` reads it.
+    ///
+    /// `None` clears the pin and the session falls back to its tier, then to the agent's own
+    /// configured model.
+    pub fn set_session_model(&self, session_id: &str, model: Option<String>) {
+        {
+            let mut projects = self.projects.lock().unwrap_or_else(|e| e.into_inner());
+            let Some(s) = projects
+                .iter_mut()
+                .flat_map(|p| &mut p.sessions)
+                .find(|s| s.id == session_id)
+            else {
+                return;
+            };
+            if s.model == model {
+                return;
+            }
+            s.model = model;
+        }
+        self.persist();
     }
 
     /// The agent for a session id, searching all projects. Defaults to Claude for an
@@ -894,8 +1227,12 @@ impl Store {
             })
             .collect();
         if out.is_empty() {
-            let home_exists = dirs::home_dir()
-                .map(|h| h.join(".claude").is_dir())
+            // No account registered for this agent, so fall back to the ambient one -- but
+            // only if it actually exists, and the directory that proves it differs per
+            // agent. This probe used to be a hardcoded `.claude`, which quietly meant a
+            // Command Code user with no `~/.claude` got no default row at all.
+            let home_exists = crate::agent::default_profile_dir(agent)
+                .and_then(|name| dirs::home_dir().map(|h| h.join(name).is_dir()))
                 .unwrap_or(false);
             if home_exists {
                 out.push((None, "Default".to_string(), None));
@@ -1210,6 +1547,72 @@ impl Store {
 
     // ---- Trust boundaries (Feature 4: multi-agent silo / controlled sharing) -----
 
+    /// This scope's routing OVERRIDES, not the effective table -- the settings UI has to
+    /// distinguish "inherited" from "pinned here", and an effective table has already lost
+    /// that difference.
+    pub fn global_routes(&self) -> crate::routing::AgentRoutes {
+        self.routes
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+
+    pub fn project_routes(&self, project_id: &str) -> crate::routing::AgentRoutes {
+        self.projects
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .find(|p| p.id == project_id)
+            .map(|p| p.routes.clone())
+            .unwrap_or_default()
+    }
+
+    /// Pin or clear one task kind's chain in the global scope. `None` CLEARS the override,
+    /// which is how a scope goes back to inheriting -- distinct from pinning an empty chain,
+    /// which would mean "this kind routes nowhere".
+    pub fn set_global_route(
+        &self,
+        task: crate::routing::TaskKind,
+        chain: Option<Vec<crate::routing::RouteTarget>>,
+    ) {
+        {
+            let mut r = self.routes.lock().unwrap_or_else(|e| e.into_inner());
+            match chain {
+                Some(c) => {
+                    r.by_task.insert(task, c);
+                }
+                None => {
+                    r.by_task.remove(&task);
+                }
+            }
+        }
+        self.persist();
+    }
+
+    /// Pin or clear one task kind's chain for a project. `None` clears, as above.
+    pub fn set_project_route(
+        &self,
+        project_id: &str,
+        task: crate::routing::TaskKind,
+        chain: Option<Vec<crate::routing::RouteTarget>>,
+    ) {
+        {
+            let mut projects = self.projects.lock().unwrap_or_else(|e| e.into_inner());
+            let Some(p) = projects.iter_mut().find(|p| p.id == project_id) else {
+                return;
+            };
+            match chain {
+                Some(c) => {
+                    p.routes.by_task.insert(task, c);
+                }
+                None => {
+                    p.routes.by_task.remove(&task);
+                }
+            }
+        }
+        self.persist();
+    }
+
     pub fn trust_settings(&self) -> TrustSettings {
         self.trust.lock().unwrap_or_else(|e| e.into_inner()).clone()
     }
@@ -1433,6 +1836,10 @@ mod tests {
                 trust: Mutex::new(TrustSettings::default()),
                 opencode: Mutex::new(OpenCodeSettings::default()),
                 plugins: Mutex::new(Vec::new()),
+                root_chats: Mutex::new(Vec::new()),
+                routes: Mutex::new(Default::default()),
+                profiles: Mutex::new(Vec::new()),
+                active_profile_id: Mutex::new(None),
                 opencode_key: Mutex::new(None),
                 save_path: dir.join("state.json"),
             }
@@ -2243,5 +2650,200 @@ mod tests {
         assert_eq!(recs[0].consented_version, "1.0.0");
         // Persisted to disk and reloads.
         assert!(dir.join("state.json").exists());
+    }
+
+    #[test]
+    fn project_color_set_clear_and_persist() {
+        let dir = temp_dir("proj_color");
+        let store = Store::for_test(&dir);
+        let p = store.add_project("/repo".into());
+        assert!(p.color.is_none(), "a new project has no chosen colour");
+        assert!(store.set_project_color(&p.id, Some("#c4906c".into())));
+        assert_eq!(
+            store.list()[0].color.as_deref(),
+            Some("#c4906c"),
+            "chosen colour sticks"
+        );
+        // Round-trips through the persisted file, and a legacy project (no field) loads.
+        let data = fs::read(dir.join("state.json")).unwrap();
+        let back: PersistState = serde_json::from_slice(&data).unwrap();
+        assert_eq!(back.projects[0].color.as_deref(), Some("#c4906c"));
+        assert!(store.set_project_color(&p.id, None));
+        assert!(
+            store.list()[0].color.is_none(),
+            "clearing returns to derived"
+        );
+        assert!(!store.set_project_color("nope", None));
+    }
+
+    #[test]
+    fn profiles_crud_and_creation_inheritance() {
+        let dir = temp_dir("profiles");
+        let store = Store::for_test(&dir);
+
+        // Default profile: no records, no active id; creations carry no profile.
+        assert!(store.list_profiles().is_empty());
+        assert!(store.active_profile().is_none());
+        let home = store.add_project("/home-proj".into());
+        assert!(home.profile_id.is_none());
+
+        // An unknown id is refused; Some(known) and None both stick.
+        assert!(!store.set_active_profile(Some("nope".into())));
+        let stream = store.add_profile("  Streaming ");
+        assert_eq!(stream.name, "Streaming");
+        assert!(store.set_active_profile(Some(stream.id.clone())));
+        assert_eq!(store.active_profile().as_deref(), Some(stream.id.as_str()));
+
+        // Creations while a profile is active inherit it — projects and root chats both.
+        let p = store.add_project("/stream-proj".into());
+        assert_eq!(p.profile_id.as_deref(), Some(stream.id.as_str()));
+        let chat = store.add_root_chat();
+        assert_eq!(chat.profile_id.as_deref(), Some(stream.id.as_str()));
+
+        // Round-trip: the persisted file carries profiles, the active id, and memberships.
+        let data = fs::read(dir.join("state.json")).unwrap();
+        let reloaded = serde_json::from_slice::<PersistState>(&data).unwrap();
+        assert_eq!(reloaded.profiles.len(), 1);
+        assert_eq!(
+            reloaded.active_profile_id.as_deref(),
+            Some(stream.id.as_str())
+        );
+        assert_eq!(
+            reloaded
+                .projects
+                .iter()
+                .find(|x| x.id == p.id)
+                .unwrap()
+                .profile_id
+                .as_deref(),
+            Some(stream.id.as_str())
+        );
+
+        // Removal: members fall back to Default (profile_id cleared), active id resets,
+        // nothing is deleted.
+        assert!(store.remove_profile(&stream.id));
+        assert!(!store.remove_profile(&stream.id));
+        assert!(store.active_profile().is_none());
+        assert!(store.list().iter().all(|proj| proj.profile_id.is_none()));
+        assert!(store
+            .list_root_chats()
+            .iter()
+            .all(|c| c.profile_id.is_none()));
+        assert_eq!(store.list().len(), 2);
+        assert_eq!(store.list_root_chats().len(), 1);
+    }
+
+    #[test]
+    fn root_chat_crud_and_account_pinning() {
+        let dir = temp_dir("root_chat");
+        let store = Store::for_test(&dir);
+        // Pin: the global Claude default at creation time travels onto the chat.
+        store.set_default_account(crate::agent::AgentId::Claude, Some("acct-1".into()));
+        let chat = store.add_root_chat();
+        assert_eq!(chat.title, "New Chat");
+        assert_eq!(chat.account_id.as_deref(), Some("acct-1"));
+        assert!(chat.created_at > 0);
+        // Changing the default later does NOT rebind an existing chat.
+        store.set_default_account(crate::agent::AgentId::Claude, Some("acct-2".into()));
+        assert_eq!(
+            store.root_chat(&chat.id).unwrap().account_id.as_deref(),
+            Some("acct-1")
+        );
+        assert!(store.rename_root_chat(&chat.id, "Q3 Roadmap"));
+        assert_eq!(store.root_chat(&chat.id).unwrap().title, "Q3 Roadmap");
+        assert!(!store.rename_root_chat("nope", "x"));
+        assert_eq!(store.list_root_chats().len(), 1);
+        assert!(store.remove_root_chat(&chat.id));
+        assert!(store.list_root_chats().is_empty());
+        // Persisted to disk (save runs on every mutation).
+        assert!(dir.join("state.json").exists());
+    }
+
+    #[test]
+    fn root_chat_config_dir_resolves_pinned_account() {
+        let dir = temp_dir("root_chat_cfg");
+        let store = Store::for_test(&dir);
+        // add_account validates the dir exists, so register a real temp path.
+        let profile = dir.join("claude-work");
+        fs::create_dir_all(&profile).unwrap();
+        let acct = store
+            .add_account("Work".into(), profile.to_string_lossy().into_owned())
+            .unwrap();
+        store.set_default_account(crate::agent::AgentId::Claude, Some(acct.id.clone()));
+        let chat = store.add_root_chat();
+        assert_eq!(
+            store.root_chat_config_dir(&chat.id).as_deref(),
+            Some(profile.to_string_lossy().as_ref())
+        );
+        // No default at creation -> no pinned account -> None (caller falls back to
+        // pty::claude_projects_dir()).
+        store.set_default_account(crate::agent::AgentId::Claude, None);
+        let bare = store.add_root_chat();
+        assert!(store.root_chat_config_dir(&bare.id).is_none());
+    }
+
+    #[test]
+    fn persist_state_root_chats_roundtrip_and_legacy_default() {
+        let back: PersistState = serde_json::from_str(r#"{"projects":[]}"#).unwrap();
+        assert!(
+            back.root_chats.is_empty(),
+            "legacy state loads without the field"
+        );
+        let st = PersistState {
+            root_chats: vec![RootChat {
+                id: "c1".into(),
+                title: "Roadmap".into(),
+                account_id: Some("a1".into()),
+                created_at: 1_724_000_000,
+                profile_id: None,
+            }],
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&st).unwrap();
+        assert!(
+            json.contains("\"accountId\":\"a1\""),
+            "camelCase wire shape: {json}"
+        );
+        let back: PersistState = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.root_chats.len(), 1);
+        assert_eq!(back.root_chats[0].title, "Roadmap");
+    }
+
+    #[test]
+    fn a_layout_written_before_cross_project_panes_still_loads() {
+        // Every tab in every existing state.json lacks `projectId`. If that stopped
+        // deserializing, the update would open to an empty workspace on every machine.
+        let tab: WsTab = serde_json::from_str(r#"{"kind":"session","ref":"s1"}"#).unwrap();
+        assert_eq!(tab.r#ref, "s1");
+        assert!(!tab.preview);
+        assert_eq!(
+            tab.project_id, None,
+            "an old tab is a LOCAL tab, not an orphan"
+        );
+    }
+
+    #[test]
+    fn a_borrowed_tab_survives_a_round_trip_and_a_local_one_stays_lean() {
+        // The whole cross-project feature is one optional field; if serde drops it on
+        // write, the split silently collapses to same-project on the next launch.
+        let borrowed = WsTab {
+            kind: "session".into(),
+            r#ref: "s2".into(),
+            preview: false,
+            project_id: Some("proj-b".into()),
+        };
+        let json = serde_json::to_string(&borrowed).unwrap();
+        assert!(json.contains(r#""projectId":"proj-b""#), "{json}");
+        let back: WsTab = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.project_id.as_deref(), Some("proj-b"));
+
+        // skip_serializing_if keeps the common case exactly as small as it was.
+        let local = WsTab {
+            kind: "session".into(),
+            r#ref: "s1".into(),
+            preview: false,
+            project_id: None,
+        };
+        assert!(!serde_json::to_string(&local).unwrap().contains("projectId"));
     }
 }

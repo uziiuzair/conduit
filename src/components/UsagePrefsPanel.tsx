@@ -1,4 +1,5 @@
 import { useStore, type UsagePrefs } from "../store";
+import { Dropdown } from "./Dropdown";
 
 const LAYOUTS: Array<{ id: UsagePrefs["layout"]; label: string; hint: string }> = [
   { id: "selected", label: "Selected session only", hint: "Just the current session's account (default)." },
@@ -7,11 +8,28 @@ const LAYOUTS: Array<{ id: UsagePrefs["layout"]; label: string; hint: string }> 
   { id: "lowAlertOnly", label: "Low alerts only", hint: "Only accounts running low." },
 ];
 
+/** The two honest readings of a quota. "used" first because it is the default and the one
+ *  every agent's own usage view uses; "remaining" is a genuine preference, not a wrong one. */
+const METRICS: Array<{ id: UsagePrefs["metric"]; label: string; hint: string }> = [
+  {
+    id: "used",
+    label: "Amount used",
+    hint: 'Bars fill as you consume, e.g. "18% used" — matches claude /usage and most quota dashboards.',
+  },
+  {
+    id: "remaining",
+    label: "Amount left",
+    hint: 'Bars drain as you consume, e.g. "82% left" — a fuel-gauge reading.',
+  },
+];
+
 const WINDOWS: Array<{ id: keyof UsagePrefs["windows"]; label: string }> = [
-  { id: "fiveHour", label: "5-hour window" },
-  { id: "weekly", label: "Weekly window" },
-  { id: "weeklyOpus", label: "Weekly (Opus) — Claude only" },
-  { id: "context", label: "Context window — agy only" },
+  // Worded exactly as the meters label themselves (see `windowLabel`) so the filter and the
+  // panel are obviously talking about the same rows.
+  { id: "fiveHour", label: "5-hour" },
+  { id: "weekly", label: "Weekly" },
+  { id: "weeklyOpus", label: "Weekly · Opus — Claude only" },
+  { id: "context", label: "Context — agy only" },
 ];
 
 /** Settings → Usage display: how the bottom-left usage bar renders. Purely cosmetic. */
@@ -48,6 +66,31 @@ export function UsagePrefsPanel() {
       </div>
 
       <div className="usage-prefs-section">
+        <div className="usage-prefs-title">Meters show</div>
+        <div className="agent-list">
+          {METRICS.map((m) => (
+            <div key={m.id} className={`agent-list-row ${prefs.metric === m.id ? "def" : ""}`}>
+              <button
+                className="agent-radio"
+                role="radio"
+                aria-checked={prefs.metric === m.id}
+                aria-label={m.label}
+                onClick={() => setUsagePrefs({ metric: m.id })}
+              />
+              <div className="agent-list-main">
+                <div className="agent-list-name">{m.label}</div>
+                <div className="agent-list-meta">{m.hint}</div>
+              </div>
+            </div>
+          ))}
+        </div>
+        <div className="agent-list-meta">
+          Applies to the number and the bar together, everywhere — they always read the same
+          way. Colour still warns on consumption whichever you pick.
+        </div>
+      </div>
+
+      <div className="usage-prefs-section">
         <div className="usage-prefs-title">Windows to show</div>
         <div className="usage-prefs-checks">
           {WINDOWS.map((w) => (
@@ -67,14 +110,15 @@ export function UsagePrefsPanel() {
 
       <div className="usage-prefs-section">
         <div className="usage-prefs-title">Sort accounts by</div>
-        <select
-          className="account-select"
+        <Dropdown
+          className="dd-settings"
           value={prefs.sort}
-          onChange={(e) => setUsagePrefs({ sort: e.target.value as UsagePrefs["sort"] })}
-        >
-          <option value="critical">Most critical first</option>
-          <option value="label">Name (A–Z)</option>
-        </select>
+          options={[
+            { value: "critical", label: "Most critical first" },
+            { value: "label", label: "Name (A–Z)" },
+          ]}
+          onChange={(v) => setUsagePrefs({ sort: v as UsagePrefs["sort"] })}
+        />
       </div>
 
       <div className="usage-prefs-section">
