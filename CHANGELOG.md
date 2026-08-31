@@ -3,6 +3,24 @@
 All notable changes to Conduit are documented here. This project uses
 [semantic versioning](https://semver.org/).
 
+## 0.34.0 — 2026-08-31
+
+- **Added — Root chat can work GitHub.** HQ chats may now use the `gh` CLI: triage pull
+  requests and issues, read CI runs, comment, label. They are told to ask you before
+  anything hard to reverse (merging, closing, creating), and the dangerous tail —
+  `gh api`, `gh auth`, `gh secret`, repo deletion — is denied by tool policy outright.
+- **Added — A scratchpad per root chat.** Each HQ chat gets a private working directory
+  for drafts, notes, and files it builds while thinking. It is the only place besides
+  memory a root chat can write — projects stay untouchable — and it is cleaned up when
+  the chat is deleted.
+- **Added — Root chats share a memory.** Ask any HQ chat to remember something and every
+  other chat knows it on its next message: one shared memory directory, indexed by a
+  MEMORY.md the chats maintain themselves, injected into each conversation as it starts.
+- **Changed — HQ rows carry a chat glyph.** Chats in the sidebar now show a chat-bubble
+  mark (accented while the chat is thinking), matching how sessions show their agent.
+
+---
+
 ## 0.33.0 — 2026-08-29
 
 - **Added — Stop a session without deleting it.** Closing a session's tab now shuts its agent
