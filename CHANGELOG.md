@@ -3,6 +3,14 @@
 All notable changes to Conduit are documented here. This project uses
 [semantic versioning](https://semver.org/).
 
+## 0.34.1 — 2026-08-31
+
+- **Fixed — The terminal answers the mouse itself again.** Dragging in a shell pane
+  no longer drops tmux into copy mode (the yellow `[0/27]` badge and a second cursor);
+  it selects text, double-click takes a word, triple-click takes a line. Right-click
+  no longer opens tmux's own Split / Kill menu — it copies the selection, or pastes
+  when there is none. The wheel still scrolls the shell's full history, as before.
+
 ## 0.34.0 — 2026-08-31
 
 - **Added — Root chat can work GitHub.** HQ chats may now use the `gh` CLI: triage pull
