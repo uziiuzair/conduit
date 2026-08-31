@@ -737,7 +737,12 @@ fn rename_root_chat(id: String, name: String, store: State<Arc<Store>>) {
 
 #[tauri::command]
 fn remove_root_chat(id: String, store: State<Arc<Store>>) {
-    store.remove_root_chat(&id);
+    if store.remove_root_chat(&id) {
+        // The scratchpad is Conduit-owned working space; it dies with the chat. The
+        // Claude transcript deliberately stays (palette search still finds it), and
+        // the shared memory belongs to every chat, so neither is touched.
+        let _ = std::fs::remove_dir_all(root_chat::dirs_for(&id).scratch);
+    }
 }
 
 #[tauri::command]

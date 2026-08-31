@@ -78,8 +78,16 @@ pub fn root_chat_send(
         .iter()
         .map(|p| (p.name.clone(), p.path.clone()))
         .collect();
-    let charter = build_charter(&cwd.to_string_lossy(), &roster);
-    let cmd = build_command(&chat_id, resume, &charter);
+    // Scratch + shared memory exist before the child looks for them; the memory index
+    // is injected fresh each spawn, so a write from any chat is visible to all on
+    // their very next turn.
+    let dirs = dirs_for(&chat_id);
+    let _ = std::fs::create_dir_all(&dirs.scratch);
+    let _ = std::fs::create_dir_all(&dirs.memory);
+    let memory_index =
+        cap_index(&std::fs::read_to_string(dirs.memory.join("MEMORY.md")).unwrap_or_default());
+    let charter = build_charter(&cwd.to_string_lossy(), &roster, &dirs, &memory_index);
+    let cmd = build_command(&chat_id, resume, &charter, &dirs);
 
     // Interactive login shell for PATH parity with the titler / pty.rs (GUI-launched
     // apps get the bare Finder PATH; nvm/Homebrew claude would be missing otherwise).
@@ -249,9 +257,57 @@ pub fn classify_line(line: &str) -> LineOut {
     }
 }
 
-/// The per-spawn system prompt: role, workspace root, and the registered-project roster
-/// (name, path) — rebuilt every message, so the roster is never stale.
-pub fn build_charter(workspace_root: &str, projects: &[(String, String)]) -> String {
+/// The Conduit-owned locations a root chat may write: its own scratchpad and the
+/// global shared memory. Everything else stays read-only by tool policy.
+pub struct Dirs {
+    /// `<base>/rootchat` — rides `--add-dir` so the file tools may leave the cwd.
+    pub root: PathBuf,
+    /// `<base>/rootchat/scratch/<chat-id>` — private per-chat working files.
+    pub scratch: PathBuf,
+    /// `<base>/rootchat/memory` — one shared memory across ALL root chats.
+    pub memory: PathBuf,
+}
+
+impl Dirs {
+    pub fn under(base: &std::path::Path, chat_id: &str) -> Dirs {
+        let root = base.join("rootchat");
+        Dirs {
+            scratch: root.join("scratch").join(chat_id),
+            memory: root.join("memory"),
+            root,
+        }
+    }
+}
+
+/// The real dirs for a chat, under Conduit's data dir.
+pub fn dirs_for(chat_id: &str) -> Dirs {
+    Dirs::under(&crate::store::data_dir(), chat_id)
+}
+
+/// Cap the injected memory index so a runaway MEMORY.md can't eat the system prompt.
+pub fn cap_index(s: &str) -> String {
+    const MAX: usize = 8 * 1024;
+    if s.len() <= MAX {
+        return s.to_string();
+    }
+    let cut = s
+        .char_indices()
+        .take_while(|(i, _)| *i <= MAX)
+        .last()
+        .map(|(i, _)| i)
+        .unwrap_or(0);
+    format!("{}\n… (index truncated)", &s[..cut])
+}
+
+/// The per-spawn system prompt: role, GitHub powers, scratchpad, shared memory (index
+/// injected inline), workspace root, and the registered-project roster — rebuilt every
+/// message, so none of it is ever stale.
+pub fn build_charter(
+    workspace_root: &str,
+    projects: &[(String, String)],
+    dirs: &Dirs,
+    memory_index: &str,
+) -> String {
     let roster = if projects.is_empty() {
         "(none registered yet)".to_string()
     } else {
@@ -261,14 +317,33 @@ pub fn build_charter(workspace_root: &str, projects: &[(String, String)]) -> Str
             .collect::<Vec<_>>()
             .join("\n")
     };
+    let scratch = dirs.scratch.to_string_lossy();
+    let memory = dirs.memory.to_string_lossy();
+    let index = if memory_index.trim().is_empty() {
+        "(empty — no memories yet)"
+    } else {
+        memory_index
+    };
     format!(
         "You are Conduit's root chat: a project-management and ideation partner for the \
-         user's whole workspace. You are not a code agent. You never write, edit, or \
-         create files, never run shell commands, and never make code changes of any kind \
-         — your tools are read-only by policy and you do not attempt to work around \
-         that. When a conversation lands on something that should be built, produce a \
-         concise implementation brief the user can hand to a coding session in the \
-         relevant project; in the future you'll be able to dispatch such work directly.\n\n\
+         user's whole workspace. You are not a code agent. You never modify project files \
+         or write code into repositories — the ONLY locations you may write are your \
+         scratchpad and the shared memory below, and the tool policy enforces that. When \
+         a conversation lands on something that should be built, produce a concise \
+         implementation brief the user can hand to a coding session in the relevant \
+         project.\n\n\
+         GitHub: you may use the `gh` CLI for project management — viewing and triaging \
+         pull requests and issues, reading CI runs, commenting, labeling, editing \
+         descriptions. Ask the user before anything hard to reverse: merging, closing, \
+         creating repos/PRs/issues, or editing things you did not create. `gh api`, \
+         `gh auth`, `gh secret`, and repo deletion are denied by policy — use typed \
+         subcommands.\n\n\
+         Scratchpad (private to THIS chat — drafts, notes, working files):\n{scratch}\n\n\
+         Shared memory (every root chat reads and writes it):\n{memory}\n\
+         `MEMORY.md` there is the index — one line per fact file. To remember something \
+         durable, write one focused markdown file per fact and add or refresh its index \
+         line; update or delete entries that turn out stale. The current index:\n\
+         {index}\n\n\
          Workspace root: {workspace_root}\n\n\
          Registered Conduit projects:\n{roster}"
     )
@@ -276,9 +351,24 @@ pub fn build_charter(workspace_root: &str, projects: &[(String, String)]) -> Str
 
 /// The full shell command for one message. `resume` = a transcript for this chat id
 /// already exists (decided by the caller via `pty::transcript_exists`).
-pub fn build_command(chat_id: &str, resume: bool, charter: &str) -> String {
+pub fn build_command(chat_id: &str, resume: bool, charter: &str, dirs: &Dirs) -> String {
     let id = crate::pty::quote_arg(chat_id);
     let sys = crate::pty::quote_arg(charter);
+    let scratch = dirs.scratch.to_string_lossy();
+    let memory = dirs.memory.to_string_lossy();
+    // Allow: read tools, the GitHub CLI, and writes scoped to the two Conduit-owned
+    // dirs. Generic Bash/Write/Edit are NOT denied — they are simply unallowed, which
+    // `-p` auto-denies; a blanket deny would override the scoped allows (deny wins).
+    let allow = crate::pty::quote_arg(&format!(
+        "Read,Glob,Grep,WebSearch,WebFetch,Bash(gh:*),\
+         Write({scratch}/**),Edit({scratch}/**),Write({memory}/**),Edit({memory}/**)"
+    ));
+    // Deny the dangerous gh tail: `gh api` is arbitrary REST (a DELETE smuggles past
+    // any prefix matcher), and auth/secrets/repo-deletion have no PM use.
+    let deny = crate::pty::quote_arg(
+        "NotebookEdit,Bash(gh repo delete:*),Bash(gh secret:*),Bash(gh auth:*),Bash(gh api:*)",
+    );
+    let add = crate::pty::quote_arg(&dirs.root.to_string_lossy());
     let mode = if resume {
         format!("--resume {id}")
     } else {
@@ -286,8 +376,9 @@ pub fn build_command(chat_id: &str, resume: bool, charter: &str) -> String {
     };
     format!(
         "claude -p --output-format stream-json --verbose \
-         --allowedTools Read,Glob,Grep,WebSearch,WebFetch \
-         --disallowedTools Bash,Write,Edit,NotebookEdit \
+         --allowedTools {allow} \
+         --disallowedTools {deny} \
+         --add-dir {add} \
          --strict-mcp-config \
          --append-system-prompt {sys} {mode}"
     )
@@ -344,33 +435,104 @@ mod tests {
         assert!(matches!(classify_line(&tr), LineOut::Nothing));
     }
 
+    fn tdirs() -> Dirs {
+        // A base with a space, mirroring "Application Support" — quoting must survive it.
+        Dirs::under(std::path::Path::new("/tmp/App Support/CT"), "chat-1")
+    }
+
     #[test]
-    fn charter_carries_root_roster_and_no_code_rule() {
+    fn dirs_nest_scratch_per_chat_and_memory_shared() {
+        let d = tdirs();
+        assert!(d.scratch.ends_with("rootchat/scratch/chat-1"));
+        assert!(d.memory.ends_with("rootchat/memory"));
+        assert!(d.root.ends_with("rootchat"));
+        // Another chat shares memory but not scratch.
+        let e = Dirs::under(std::path::Path::new("/tmp/App Support/CT"), "chat-2");
+        assert_eq!(d.memory, e.memory);
+        assert_ne!(d.scratch, e.scratch);
+    }
+
+    #[test]
+    fn charter_carries_roster_dirs_memory_and_write_boundary() {
+        let d = tdirs();
         let c = build_charter(
             "/Users/u/ooozzy",
             &[("conduit".into(), "/Users/u/ooozzy/conduit".into())],
+            &d,
+            "- [Release cadence](cadence.md) — weekly",
         );
         assert!(c.contains("/Users/u/ooozzy"));
         assert!(c.contains("- conduit: /Users/u/ooozzy/conduit"));
+        assert!(c.contains(d.scratch.to_string_lossy().as_ref()));
+        assert!(c.contains(d.memory.to_string_lossy().as_ref()));
         assert!(
-            c.contains("never write"),
-            "charter must state the no-code rule: {c}"
+            c.contains("Release cadence"),
+            "memory index must be injected"
         );
-        let empty = build_charter("/Users/u", &[]);
+        assert!(
+            c.contains("gh"),
+            "charter must explain the GitHub CLI powers"
+        );
+        assert!(
+            c.contains("never modify project files"),
+            "write boundary must be stated: {c}"
+        );
+        let empty = build_charter("/Users/u", &[], &d, "");
         assert!(empty.contains("(none registered yet)"));
+        assert!(empty.contains("(empty — no memories yet)"));
     }
 
     #[test]
     fn command_pins_session_id_first_then_resumes() {
-        let fresh = build_command("abc-123", false, "charter text");
+        let d = tdirs();
+        let fresh = build_command("abc-123", false, "charter text", &d);
         assert!(fresh.contains("--session-id"), "{fresh}");
         assert!(fresh.contains("--output-format stream-json"));
-        assert!(fresh.contains("--allowedTools Read,Glob,Grep,WebSearch,WebFetch"));
-        assert!(fresh.contains("--disallowedTools Bash,Write,Edit,NotebookEdit"));
         assert!(fresh.contains("--strict-mcp-config"));
         assert!(fresh.contains("--append-system-prompt"));
-        let resumed = build_command("abc-123", true, "charter text");
+        let resumed = build_command("abc-123", true, "charter text", &d);
         assert!(resumed.contains("--resume"));
         assert!(!resumed.contains("--session-id"));
+    }
+
+    #[test]
+    fn command_grants_gh_and_scoped_writes_denies_the_dangerous_tail() {
+        let d = tdirs();
+        let s = d.scratch.to_string_lossy();
+        let m = d.memory.to_string_lossy();
+        let cmd = build_command("abc-123", false, "charter text", &d);
+        // Allow: read tools + gh + writes scoped to the two Conduit-owned dirs.
+        assert!(
+            cmd.contains("Read,Glob,Grep,WebSearch,WebFetch,Bash(gh:*)"),
+            "{cmd}"
+        );
+        assert!(cmd.contains(&format!("Write({s}/**)")));
+        assert!(cmd.contains(&format!("Edit({s}/**)")));
+        assert!(cmd.contains(&format!("Write({m}/**)")));
+        assert!(cmd.contains(&format!("Edit({m}/**)")));
+        // Deny wins: the dangerous gh tail stays unreachable.
+        assert!(cmd.contains("Bash(gh repo delete:*)"));
+        assert!(cmd.contains("Bash(gh secret:*)"));
+        assert!(cmd.contains("Bash(gh auth:*)"));
+        assert!(cmd.contains("Bash(gh api:*)"));
+        // The old blanket denies are GONE (they would override the scoped allows) —
+        // generic Bash/Write/Edit are simply unallowed, which -p auto-denies.
+        assert!(!cmd.contains("Bash,Write,Edit,NotebookEdit"), "{cmd}");
+        // The writable root rides --add-dir so file tools may leave the cwd.
+        assert!(cmd.contains("--add-dir"));
+        assert!(cmd.contains(d.root.to_string_lossy().as_ref()));
+    }
+
+    #[test]
+    fn cap_index_truncates_on_a_char_boundary() {
+        let small = "short index";
+        assert_eq!(cap_index(small), small);
+        let big = "é".repeat(9000); // 2 bytes each -> 18000 bytes
+        let capped = cap_index(&big);
+        assert!(capped.len() < big.len());
+        assert!(capped.ends_with("(index truncated)"));
+        // Must not split a multi-byte char (String ops would have panicked already,
+        // but keep the guarantee explicit).
+        assert!(capped.is_char_boundary(capped.len()));
     }
 }

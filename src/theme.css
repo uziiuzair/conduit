@@ -5414,3 +5414,8 @@ input[type="number"]:focus {
 .workspace-root-input > button:hover {
   border-color: var(--accent);
 }
+
+/* HQ row glyph — the chat counterpart of a session row's agent mark. */
+.root-chat-glyph { color: var(--text-mid); flex: none; }
+.root-chat-glyph.running { color: var(--accent); }
+.session-row.selected .root-chat-glyph { color: var(--accent); }
