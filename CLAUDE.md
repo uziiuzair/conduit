@@ -318,6 +318,34 @@ touch `self` on import, so a static import would break the Node-env vitest. Two 
   above). `Terminal.tsx` keeps the renderer in its own effect keyed on the pref, so a change
   disposes one addon and loads another on the live instance; the create effect stays `[]`.
 
+## Where the terminal's mouse ownership lives
+
+`src/terminalMouse.ts` (pure) + the `shellOnly` block in `Terminal.tsx`. tmux is launched
+with `set -g mouse on`, which the WHEEL needs and the BUTTONS must not have.
+
+- **`mouse on` is load-bearing and must not be turned off.** tmux is a screen painter, so
+  xterm's own scrollback under it is repaint fragments; tmux's history is the only coherent
+  copy, and tmux only reads mouse input while this is on.
+- **The cost is that tmux also answers the buttons.** In a pane whose program wants no
+  mouse -- a bare login shell -- tmux's root bindings fire: `MouseDrag1Pane` -> `copy-mode -M`
+  (the yellow `[0/27]` badge plus a second cursor) and `MouseDown3Pane` -> its own
+  `display-menu` (Horizontal Split / Vertical Split / Kill). Agent panes never see this:
+  Claude Code turns tracking on itself, so every one of those bindings falls through to
+  `send-keys -M` and the program gets the event -- which IS the native answer.
+- **So the shell pane refuses to enter mouse REPORTING at all.** Two
+  `term.parser.registerCsiHandler({prefix:"?"}, ...)` handlers swallow the tracking DECSETs
+  (1000/1001/1002/1003 only -- the 1005/1006/1015 ENCODINGS are inert once nothing reports,
+  and a combined `CSI ? 1002;2004 h` replays its surviving half). xterm then owns selection,
+  word/line click and the right-click, exactly as it does for any non-mouse program.
+- **The wheel is re-encoded by hand** (`attachCustomWheelEventHandler` -> `sgrWheelReport`),
+  one report per whole line moved, carrying the sub-line remainder so a trackpad neither
+  stalls nor bolts. It never scrolls xterm's own buffer. If the swallow ever stops taking
+  (an xterm upgrade moving the parser registry) the handler checks `term.modes.mouseTrackingMode`
+  and hands the wheel back rather than leaving the pane unscrollable.
+- Trade, accepted deliberately: a mouse-aware TUI run INSIDE the companion shell (vim
+  `set mouse=a`) does not get the mouse there. Selection is the commoner need in a scratch
+  shell; agent panes are untouched.
+
 ## Where the unified session directory lives
 
 Every panel (Files/Changes/Git, tab-strip path, Open in VS Code) and the right-panel

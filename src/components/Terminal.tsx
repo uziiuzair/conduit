@@ -1,5 +1,12 @@
 import { useEffect, useRef } from "react";
-import { Terminal as Xterm, type ILink } from "@xterm/xterm";
+import { Terminal as Xterm, type ILink, type IDisposable } from "@xterm/xterm";
+import {
+  cellFromPoint,
+  decPrivateSeq,
+  partitionMouseModes,
+  sgrWheelReport,
+  wheelLines,
+} from "../terminalMouse";
 import { FitAddon } from "@xterm/addon-fit";
 import { attachRenderer, disposePane, type RendererHandle } from "../terminalRenderer";
 import { REAL_ADDONS } from "../terminalRendererAddons";
@@ -389,6 +396,66 @@ export function TerminalView({
       return true;
     });
 
+    // --- Mouse ownership for a bare shell pane (the WHY is in terminalMouse.ts) ---
+    // tmux runs with `mouse on`, which the wheel needs and the buttons must not have: in a
+    // pane whose program wants no mouse, tmux answers a drag with `copy-mode -M` (the
+    // `[0/27]` badge and a stray second cursor) and a right-click with its own
+    // Split/Kill `display-menu`. Refusing to enter mouse REPORTING hands selection,
+    // word/line click and the context menu below back to xterm — the behaviour a native
+    // terminal has whenever the foreground program is not asking for the mouse.
+    // Agent panes are left alone: Claude Code turns tracking on itself, so tmux already
+    // forwards their events to the program, which is the correct native answer there.
+    // Trade: a mouse-aware TUI run INSIDE this shell (vim `set mouse=a`) loses the mouse.
+    const mouseDisposables: IDisposable[] = [];
+    if (shellOnly) {
+      for (const final of ["h", "l"] as const) {
+        mouseDisposables.push(
+          term.parser.registerCsiHandler({ prefix: "?", final }, (params) => {
+            const { mouse, other } = partitionMouseModes(params);
+            if (mouse.length === 0) return false; // not ours — xterm's own handler runs
+            // A combined `CSI ? 1002;1006 h` still owes its other half; replay it.
+            if (other.length > 0) term.write(decPrivateSeq(other, final));
+            return true;
+          }),
+        );
+      }
+      // The wheel is the half tmux keeps. Re-encode the gesture as the report xterm would
+      // have sent and never scroll xterm's own buffer, which under tmux holds repaint
+      // fragments rather than history.
+      let wheelCarry = 0;
+      term.attachCustomWheelEventHandler((ev) => {
+        // Defensive: if the swallow above ever stops taking (an xterm upgrade moving the
+        // parser registry), hand the wheel back instead of leaving the pane unscrollable.
+        if (term.modes.mouseTrackingMode !== "none") return true;
+        // Alternate screen has no history behind it, and xterm's arrow-key fallback is
+        // what a native terminal does there.
+        if (term.buffer.active.type === "alternate") return true;
+        const host = innerRef.current;
+        if (!host) return true;
+        const rect = host.getBoundingClientRect();
+        const moved = wheelLines(
+          wheelCarry,
+          ev.deltaY,
+          ev.deltaMode,
+          rect.height / term.rows,
+          term.rows,
+        );
+        wheelCarry = moved.acc;
+        if (moved.lines !== 0) {
+          const { col, row } = cellFromPoint(
+            ev.clientX - rect.left,
+            ev.clientY - rect.top,
+            rect.width,
+            rect.height,
+            term.cols,
+            term.rows,
+          );
+          writeSeq(sgrWheelReport(moved.lines < 0 ? "up" : "down", col, row));
+        }
+        return false;
+      });
+    }
+
     // Right-click: copy the selection if there is one, otherwise paste — the classic
     // terminal convention (and the discoverable path for users without the key chords).
     const onContextMenu = (ev: MouseEvent) => {
@@ -430,6 +497,7 @@ export function TerminalView({
       window.removeEventListener("keyup", onMod, true);
       window.removeEventListener("blur", onBlur);
       innerRef.current?.removeEventListener("contextmenu", onContextMenu);
+      mouseDisposables.forEach((d) => d.dispose());
       // Renderer addon first, xterm second — see disposePane. React runs this cleanup
       // before the renderer effect's own, so a bare term.dispose() here would be the one
       // that disposes the addon, and its throw would take the whole UI down with it.
