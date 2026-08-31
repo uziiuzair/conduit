@@ -22,6 +22,7 @@ import {
   FolderPlusIcon,
   PlusIcon,
   EllipsisIcon,
+  ChatBubbleIcon,
   CircleFilledIcon,
   ChevronRightIcon,
   GitBranchIcon,
@@ -611,6 +612,10 @@ function RootChatRow({ chat }: { chat: RootChatMeta }) {
           });
         }}
       >
+        <ChatBubbleIcon
+          size={14}
+          className={`root-chat-glyph ${running ? "running" : ""}`}
+        />
         {running && <CircleFilledIcon size={8} className="root-chat-running" />}
         {editing ? (
           <RootChatRenameInput chatId={chat.id} initial={chat.title} />
