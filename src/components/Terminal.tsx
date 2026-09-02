@@ -406,11 +406,24 @@ export function TerminalView({
     // Agent panes are left alone: Claude Code turns tracking on itself, so tmux already
     // forwards their events to the program, which is the correct native answer there.
     // Trade: a mouse-aware TUI run INSIDE this shell (vim `set mouse=a`) loses the mouse.
+    //
+    // ALL OF IT is a workaround for tmux, so none of it may apply to a pane that has no
+    // tmux under it — Windows above all, where tmux does not exist and the shell is a bare
+    // cmd.exe. There, nothing consumes the re-encoded wheel report and xterm's own buffer
+    // IS the real history, so swallowing the gesture just made shell panes unscrollable.
+    // Read lazily, inside the handlers: `tmuxAvailable` is probed asynchronously at boot
+    // and this effect never re-runs, so deciding at mount would let a pane that beat the
+    // probe pin the wrong answer for its whole life.
+    const underTmux = () => {
+      const st = useStore.getState();
+      return st.persistSessions && st.tmuxAvailable !== false;
+    };
     const mouseDisposables: IDisposable[] = [];
     if (shellOnly) {
       for (const final of ["h", "l"] as const) {
         mouseDisposables.push(
           term.parser.registerCsiHandler({ prefix: "?", final }, (params) => {
+            if (!underTmux()) return false; // no tmux to fight — xterm owns the mouse
             const { mouse, other } = partitionMouseModes(params);
             if (mouse.length === 0) return false; // not ours — xterm's own handler runs
             // A combined `CSI ? 1002;1006 h` still owes its other half; replay it.
@@ -424,6 +437,8 @@ export function TerminalView({
       // fragments rather than history.
       let wheelCarry = 0;
       term.attachCustomWheelEventHandler((ev) => {
+        // No tmux under this pane: xterm's buffer holds the real history, so let it scroll.
+        if (!underTmux()) return true;
         // Defensive: if the swallow above ever stops taking (an xterm upgrade moving the
         // parser registry), hand the wheel back instead of leaving the pane unscrollable.
         if (term.modes.mouseTrackingMode !== "none") return true;
