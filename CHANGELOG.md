@@ -13,6 +13,12 @@ All notable changes to Conduit are documented here. This project uses
   handed. It now reads your real PATH from Windows itself, so agent detection, the
   one-click installers, session auto-titling and MCP updates all find your agent CLIs
   however Conduit was started. Sessions already running were never affected.
+- **Fixed — Shell panes scroll again on Windows.** The mouse wheel did nothing in a
+  session's companion shell. The behaviour it was reaching for belongs to tmux, which
+  Windows does not have and never will, so the gesture was being handed to a terminal
+  that had no use for it while the pane's own scrollback sat right there. Wheel, drag
+  selection and right-click now behave the way they do in any other Windows terminal.
+  macOS is unchanged.
 
 ---
 
