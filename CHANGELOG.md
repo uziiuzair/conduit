@@ -3,6 +3,18 @@
 All notable changes to Conduit are documented here. This project uses
 [semantic versioning](https://semver.org/).
 
+## 0.34.3 — 2026-09-03
+
+- **Changed — A quieter tab strip.** A project used to announce itself three times on
+  every tab: a coloured line along the top of the pane, a coloured bar down the left of
+  the tab, and the tinted project name. Stacked with the selected tab's underline, one
+  active tab read as a box drawn in four accent lines. Only the name chip remains — it is
+  the one that tells you *which* project rather than just hinting at a colour.
+- **Added — You can see which pane has focus.** The selected tab in the pane you are
+  working in keeps its accent underline; selected tabs in other panes now draw theirs in
+  a neutral grey, so exactly one accent underline is lit at a time. A single-pane layout
+  looks exactly as it did.
+
 ## 0.34.2 — 2026-09-02
 
 - **Fixed — Your agents are found again after an automatic update on Windows.** Updating
