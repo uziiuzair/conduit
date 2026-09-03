@@ -1579,13 +1579,14 @@ button {
    A layout can borrow sessions from other projects (WsTab.projectId). Once it does, EVERY
    tab is badged with its project, so no tab's origin is implied by the absence of a badge.
    The colour comes from `projectAccent` (layout.ts), derived from the project id -- one
-   function, so the tab bar and the pane edge can never disagree about a project's colour. */
+   function, so every surface wearing a project's colour agrees on it. The badge is the ONLY
+   place a tab carries that colour: it used to be joined by a 3px inset bar on each tab and a
+   2px accent along the strip's top edge, which put three accent cues in a 34px band and made
+   one active tab read as an orange box. */
 .tab.badged {
   /* Widened only when badged: the badge needs the room and an unbadged strip must look
      exactly as it did before this feature existed. */
   max-width: 260px;
-  box-shadow: inset 3px 0 0 var(--proj-accent, transparent);
-  padding-left: 12px;
 }
 .tab-project {
   flex-shrink: 0;
@@ -1600,12 +1601,6 @@ button {
   color: var(--proj-accent, var(--text-mid));
   background: color-mix(in srgb, var(--proj-accent, var(--text-mid)) 16%, transparent);
 }
-/* A pane whose tabs are all one project wears that colour along its top edge, so panes are
-   told apart before a single tab is read. */
-.tab-strip.has-project-accent {
-  border-top: 2px solid var(--proj-accent);
-}
-
 .tab:hover {
   color: var(--text-bright);
 }
@@ -1614,6 +1609,17 @@ button {
   color: var(--text-bright);
   background: var(--panel-bg);
   border-bottom-color: var(--accent);
+}
+
+/* Which pane has focus, spent on NO new pixels: an unfocused group renders the underline it
+   already draws in the neutral border colour, so exactly one accent underline exists in the
+   window at a time. `active-group` had been applied since panes shipped and styled nowhere;
+   the pane top-edge accent was answering this question by accident, so removing it left the
+   question unanswered. A single-group layout always resolves to the active group
+   (`repairLayout`), so this can never dim a solo pane. */
+.tab-strip:not(.active-group) .tab.active {
+  color: var(--text-mid);
+  border-bottom-color: var(--border);
 }
 
 /* Preview (transient) tab — VS Code's italic-label convention. */

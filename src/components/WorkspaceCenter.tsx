@@ -607,26 +607,9 @@ function GroupTabStrip({
     };
   };
 
-  // A pane whose tabs all belong to one project wears that project's colour along its top
-  // edge, so panes are distinguishable before you read a single tab. A group holding two
-  // projects gets none -- the per-tab bars already say it, and a strip colour would have to
-  // pick a winner.
-  const groupProjects = new Set(
-    group.tabs.filter((t) => t.kind === "session").map((t) => tabProjectId(t, projectId)),
-  );
-  const stripId = mixed && groupProjects.size === 1 ? [...groupProjects][0] : null;
-  const stripAccent = stripId
-    ? resolveProjectColor(
-        stripId,
-        projects.find((p) => p.id === stripId)?.color,
-        autoProjectColors,
-      ) ?? undefined
-    : undefined;
-
   return (
     <div
-      className={`tab-strip ${isActiveGroup ? "active-group" : ""} ${stripAccent ? "has-project-accent" : ""}`}
-      style={stripAccent ? ({ ["--proj-accent" as string]: stripAccent } as React.CSSProperties) : undefined}
+      className={`tab-strip ${isActiveGroup ? "active-group" : ""}`}
       onMouseDown={() => setActiveGroup(projectId, group.id)}
       onDragOver={(e) => {
         // Allow drops anywhere on the strip (incl. padding); tabs/fill set the caret index.
