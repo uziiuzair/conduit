@@ -1270,29 +1270,216 @@ fn label_for(id: AgentId) -> &'static str {
     }
 }
 
-/// Windows: resolve each agent binary with `where` (the `command -v` analogue). Unlike a
-/// zsh login shell there is no per-call rc/nvm init cost, so one `where` per binary is
-/// cheap; `where` finds the `.cmd`/`.exe` shims via PATHEXT, matching how `cmd.exe`
-/// resolves the agents at spawn. Scrubs npm_config_prefix for PATH parity with sessions.
+// ---------------------------------------------------------------------------
+// Finding agent binaries when Conduit's own PATH cannot be trusted
+// ---------------------------------------------------------------------------
+//
+// The POSIX arm below resolves agents through `$SHELL -i -l -c`, and that login shell
+// re-derives PATH from the user's rc files — so however oddly the app was launched, the
+// probe repairs itself. Windows has no equivalent step, and it used to simply trust the
+// PATH it inherited.
+//
+// Inheriting is not safe, because of how updates are applied. `tauri-plugin-updater` runs
+// the MSI, and msiexec — the Windows Installer SERVICE — relaunches the app with a minimal
+// service environment whose PATH carries only the MACHINE entries. Every agent CLI lives in
+// a USER entry (`%APPDATA%\npm`, `%LOCALAPPDATA%\agy\bin`), so after an auto-update every
+// agent read "not installed": the New Session dialog disabled every agent tile AND its
+// Create button, and "Re-scan PATH" could not help, because it re-probed the same broken
+// environment. Sessions kept working throughout, which is what made it hard to see —
+// `portable-pty` builds the child's environment itself and hands it the real user PATH.
+//
+// So the search path is rebuilt from the registry, where the user's PATH actually lives,
+// instead of from whatever environment happened to start this process.
+//
+// The parsing/merging/lookup helpers are deliberately NOT `#[cfg(windows)]`: a helper only
+// the Windows CI leg compiles is a helper only the Windows CI leg tests. (Same reasoning as
+// `continuity::strip_verbatim_prefix`.)
+
+/// Pull the `Path` value out of `reg query … /v Path` output:
+///
+/// ```text
+/// HKEY_CURRENT_USER\Environment
+///     Path    REG_EXPAND_SZ    C:\a;C:\b
+/// ```
+///
+/// The value itself contains spaces, so only the name and the `REG_*` type are split off.
+#[cfg_attr(not(windows), allow(dead_code))]
+pub fn parse_reg_path(stdout: &str) -> Option<String> {
+    stdout.lines().find_map(|line| {
+        let (name, rest) = line.trim().split_once(char::is_whitespace)?;
+        if !name.eq_ignore_ascii_case("path") {
+            return None;
+        }
+        let (ty, value) = rest.trim_start().split_once(char::is_whitespace)?;
+        if !ty.starts_with("REG_") {
+            return None;
+        }
+        let value = value.trim();
+        (!value.is_empty()).then(|| value.to_string())
+    })
+}
+
+/// Expand `%VAR%` references, which a `REG_EXPAND_SZ` PATH is full of
+/// (`%USERPROFILE%\.local\bin`). An UNSET variable is left written as it was rather than
+/// blanked, so a stray `%` can never silently delete a directory from the list.
+#[cfg_attr(not(windows), allow(dead_code))]
+pub fn expand_env_refs(raw: &str, lookup: impl Fn(&str) -> Option<String>) -> String {
+    let mut out = String::with_capacity(raw.len());
+    let mut rest = raw;
+    while let Some(start) = rest.find('%') {
+        let (before, after) = rest.split_at(start);
+        out.push_str(before);
+        match after[1..].find('%') {
+            Some(end) => {
+                let name = &after[1..1 + end];
+                match lookup(name) {
+                    Some(v) => out.push_str(&v),
+                    None => {
+                        out.push('%');
+                        out.push_str(name);
+                        out.push('%');
+                    }
+                }
+                rest = &after[end + 2..];
+            }
+            // An unpaired `%` is not a reference — keep the remainder verbatim.
+            None => {
+                out.push_str(after);
+                return out;
+            }
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
+/// Merge PATH fragments into one search list: order preserved, blanks dropped, duplicates
+/// removed case-insensitively (Windows paths are case-insensitive, and the machine PATH is
+/// normally already a prefix of the user's).
+#[cfg_attr(not(windows), allow(dead_code))]
+pub fn merge_paths(parts: &[&str]) -> String {
+    let mut seen: Vec<String> = Vec::new();
+    let mut out: Vec<String> = Vec::new();
+    for dir in parts
+        .iter()
+        .flat_map(|p| p.split(';'))
+        .map(str::trim)
+        .filter(|d| !d.is_empty())
+    {
+        let key = dir.trim_end_matches(['\\', '/']).to_ascii_lowercase();
+        if seen.contains(&key) {
+            continue;
+        }
+        seen.push(key);
+        out.push(dir.to_string());
+    }
+    out.join(";")
+}
+
+/// Resolve `bin` against `path_var` the way `cmd.exe` will at spawn time: each directory in
+/// turn, each `PATHEXT` extension in turn. Extensionless matches are ignored on purpose —
+/// `cmd.exe` cannot launch them, so reporting one as "installed" would be a lie the New
+/// Session dialog then acts on. `exists` is injected so the search ORDER is testable
+/// without touching the filesystem.
+#[cfg_attr(not(windows), allow(dead_code))]
+pub fn resolve_in(
+    path_var: &str,
+    pathext: &str,
+    bin: &str,
+    exists: impl Fn(&std::path::Path) -> bool,
+) -> Option<String> {
+    let exts: Vec<&str> = pathext
+        .split(';')
+        .map(str::trim)
+        .filter(|e| !e.is_empty())
+        .collect();
+    for dir in path_var.split(';').map(str::trim).filter(|d| !d.is_empty()) {
+        let base = std::path::Path::new(dir);
+        for ext in &exts {
+            let candidate = base.join(format!("{bin}{ext}"));
+            if exists(&candidate) {
+                return Some(candidate.to_string_lossy().into_owned());
+            }
+        }
+    }
+    None
+}
+
+/// Read one `Path` value from the registry. `reg.exe` lives in System32, which
+/// `CreateProcess` locates even when PATH itself is unusable — which is the whole point.
+#[cfg(windows)]
+fn registry_path(key: &str) -> Option<String> {
+    use crate::NoWindow;
+    let out = std::process::Command::new("reg")
+        .args(["query", key, "/v", "Path"])
+        .no_window()
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    parse_reg_path(&String::from_utf8_lossy(&out.stdout))
+}
+
+/// The PATH a spawned session will actually have: the user's real one, rebuilt from the
+/// registry rather than inherited. See the section note above for why inheriting is unsafe.
+#[cfg(windows)]
+pub fn effective_path() -> String {
+    let inherited = std::env::var("PATH").unwrap_or_default();
+    let expand = |s: String| expand_env_refs(&s, |k| std::env::var(k).ok());
+    let user = expand(registry_path(r"HKCU\Environment").unwrap_or_default());
+    let machine = expand(
+        registry_path(r"HKLM\SYSTEM\CurrentControlSet\Control\Session Manager\Environment")
+            .unwrap_or_default(),
+    );
+    // Last resort: the two roots the agent installers target. `%APPDATA%`/`%LOCALAPPDATA%`
+    // survive even the stripped service environment, so these still hold if `reg` is denied.
+    let extra = [
+        std::env::var("APPDATA").ok().map(|d| format!(r"{d}\npm")),
+        std::env::var("LOCALAPPDATA")
+            .ok()
+            .map(|d| format!(r"{d}\agy\bin")),
+    ]
+    .into_iter()
+    .flatten()
+    .collect::<Vec<_>>()
+    .join(";");
+    merge_paths(&[&inherited, &user, &machine, &extra])
+}
+
+/// Give a child the user's real PATH. Mirrors `NoWindow`: apply it to any
+/// `std::process::Command` that has to resolve an AGENT binary. A no-op off Windows, where
+/// the interactive login shell already re-derives PATH.
+pub trait UserPath {
+    fn user_path(&mut self) -> &mut Self;
+}
+
+impl UserPath for std::process::Command {
+    fn user_path(&mut self) -> &mut Self {
+        #[cfg(windows)]
+        {
+            // `Command`'s env map is case-insensitive on Windows, so this overrides an
+            // inherited `Path` rather than sitting beside it.
+            self.env("PATH", effective_path());
+        }
+        self
+    }
+}
+
+/// Windows: resolve each agent binary against the user's real PATH (see the section note
+/// above), trying each `PATHEXT` extension exactly as `cmd.exe` will at spawn time. This
+/// reads the filesystem directly instead of shelling out to `where` once per agent, so it
+/// cannot be defeated by a broken inherited environment — and a re-scan is instant.
 #[cfg(windows)]
 pub fn detect_agents() -> Vec<AgentInfo> {
+    let path = effective_path();
+    let pathext = std::env::var("PATHEXT").unwrap_or_else(|_| ".COM;.EXE;.BAT;.CMD".to_string());
     all_adapters()
         .iter()
         .map(|a| {
-            use crate::NoWindow;
             let bin = a.binary();
-            let stdout = std::process::Command::new("where")
-                .arg(bin)
-                .env_remove("npm_config_prefix")
-                .no_window()
-                .output()
-                .ok()
-                .filter(|o| o.status.success())
-                .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
-                .unwrap_or_default();
-            // `where` prints one match per line; the first is enough to mark it found.
-            let first = stdout.lines().next().unwrap_or("");
-            AgentInfo::from_probe(a.id(), bin, label_for(a.id()), first, a.install_command())
+            let found = resolve_in(&path, &pathext, bin, |p| p.is_file()).unwrap_or_default();
+            AgentInfo::from_probe(a.id(), bin, label_for(a.id()), &found, a.install_command())
         })
         .collect()
 }
@@ -1333,7 +1520,7 @@ pub fn detect_agents() -> Vec<AgentInfo> {
 }
 
 /// Extract the path the batched probe printed for `binary` ("" when not found).
-/// (Only the POSIX `detect_agents` uses this; Windows resolves per-binary via `where`.)
+/// (Only the POSIX `detect_agents` uses this; Windows resolves against the registry PATH.)
 #[cfg_attr(windows, allow(dead_code))]
 fn probe_path<'a>(stdout: &'a str, binary: &str) -> &'a str {
     stdout
@@ -1349,6 +1536,96 @@ fn probe_path<'a>(stdout: &'a str, binary: &str) -> &'a str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The directory every npm-installed agent CLI lands in — a USER PATH entry, and the
+    /// one a service-launched process never sees.
+    const NPM_DIR: &str = r"C:\Users\u\AppData\Roaming\npm";
+
+    #[test]
+    fn reg_query_path_value_survives_spaces_and_its_type_token() {
+        let out = "\r\nHKEY_CURRENT_USER\\Environment\r\n    Path    REG_EXPAND_SZ    C:\\Program Files\\Git\\cmd;C:\\a\r\n";
+        assert_eq!(
+            parse_reg_path(out).as_deref(),
+            Some(r"C:\Program Files\Git\cmd;C:\a")
+        );
+    }
+
+    #[test]
+    fn reg_query_without_a_path_value_is_none() {
+        assert_eq!(parse_reg_path("HKEY_CURRENT_USER\\Environment\r\n"), None);
+        // A different value must not be mistaken for Path.
+        assert_eq!(parse_reg_path("    TEMP    REG_SZ    C:\\tmp\r\n"), None);
+    }
+
+    #[test]
+    fn env_refs_expand_and_unknown_ones_survive_verbatim() {
+        let lookup = |k: &str| (k == "HOME").then(|| r"C:\Users\u".to_string());
+        assert_eq!(expand_env_refs(r"%HOME%\bin", lookup), r"C:\Users\u\bin");
+        // Blanking an unset variable would silently DELETE a directory from the list.
+        assert_eq!(expand_env_refs(r"%NOPE%\bin", lookup), r"%NOPE%\bin");
+        // An unpaired `%` is not a reference.
+        assert_eq!(expand_env_refs(r"C:\50%\bin", lookup), r"C:\50%\bin");
+    }
+
+    #[test]
+    fn merged_path_dedupes_case_insensitively_and_keeps_order() {
+        let merged = merge_paths(&[r"C:\Windows\System32;;C:\a", r"c:\windows\system32\;C:\b"]);
+        assert_eq!(merged, r"C:\Windows\System32;C:\a;C:\b");
+    }
+
+    #[test]
+    fn resolve_in_matches_cmd_exe_extension_and_directory_order() {
+        let exists = |p: &std::path::Path| {
+            matches!(
+                p.file_name().and_then(|s| s.to_str()),
+                Some("x.EXE") | Some("x.CMD")
+            )
+        };
+        // PATHEXT order wins within a directory...
+        let hit = resolve_in(r"C:\a", ".COM;.EXE;.CMD", "x", exists).unwrap();
+        assert!(hit.ends_with("x.EXE"), "{hit}");
+        // ...and directory order wins over it across directories.
+        let hit = resolve_in(r"C:\first;C:\a", ".EXE", "x", |p| {
+            exists(p) && p.parent().and_then(|s| s.to_str()) == Some(r"C:\a")
+        })
+        .unwrap();
+        assert!(hit.ends_with("x.EXE"), "{hit}");
+        // An extensionless file is NOT launchable by cmd.exe, so it is not a match.
+        assert_eq!(
+            resolve_in(r"C:\a", ".EXE", "y", |p| p
+                .file_name()
+                .and_then(|s| s.to_str())
+                == Some("y")),
+            None
+        );
+    }
+
+    /// The regression: after an MSI auto-update the app inherits msiexec's service
+    /// environment, whose PATH holds only the MACHINE entries. Probing THAT finds no agent
+    /// at all — which disabled every tile and the Create button in the New Session dialog,
+    /// and which "Re-scan PATH" could not fix. Rebuilding from the registry finds them.
+    #[test]
+    fn a_service_environment_path_misses_the_agents_the_registry_path_finds() {
+        // PATHEXT is upper case (`.CMD`) while the shim on disk is `claude.cmd`; Windows
+        // does not care, so neither does this stand-in for the filesystem.
+        let installed = |p: &std::path::Path| {
+            p.file_name()
+                .and_then(|s| s.to_str())
+                .is_some_and(|f| f.eq_ignore_ascii_case("claude.cmd"))
+                && p.parent().and_then(|s| s.to_str()) == Some(NPM_DIR)
+        };
+        let service_path = r"C:\WINDOWS\system32;C:\WINDOWS;C:\Program Files\nodejs\";
+        assert_eq!(
+            resolve_in(service_path, ".EXE;.CMD", "claude", installed),
+            None,
+            "the stripped environment is what the old probe trusted"
+        );
+
+        let repaired = merge_paths(&[service_path, NPM_DIR]);
+        let hit = resolve_in(&repaired, ".EXE;.CMD", "claude", installed)
+            .expect("the user's real PATH has the agent");
+        assert!(hit.to_ascii_lowercase().ends_with("claude.cmd"), "{hit}");
+    }
 
     #[test]
     fn account_env_redirects_claude_profile_root() {

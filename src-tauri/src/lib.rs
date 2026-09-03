@@ -1368,6 +1368,7 @@ fn heuristic_name(prompt: &str) -> String {
 /// Pipe an instruction to `claude -p --model haiku` and sanitize the title.
 /// Returns None on spawn failure / non-zero exit / empty output.
 fn claude_title(prompt: &str) -> Option<String> {
+    use crate::agent::UserPath;
     use std::io::Write;
     use std::process::{Command, Stdio};
 
@@ -1400,8 +1401,12 @@ fn claude_title(prompt: &str) -> Option<String> {
     };
     // See pty.rs: strip the package-manager-injected `npm_config_prefix` so nvm
     // initializes and `claude` is on PATH even when Conduit was launched via pnpm.
+    // `user_path` covers the Windows half of the same problem: cmd.exe has no rc file to
+    // re-derive PATH from, so it would otherwise trust whatever environment launched us —
+    // and an MSI auto-update launches us from a service, without the user's PATH.
     builder
         .env_remove("npm_config_prefix")
+        .user_path()
         .no_window()
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -1651,6 +1656,7 @@ fn mcp_apply(
     action: String,
     server: crate::agent::McpServer,
 ) -> Result<(), String> {
+    use crate::agent::UserPath;
     let adapter = crate::agent::adapter_for(agent);
     let cmd = match action.as_str() {
         "add" => adapter.mcp_add_command(&server),
@@ -1672,6 +1678,7 @@ fn mcp_apply(
         std::process::Command::new(shell)
             .args(["/C", &cmd])
             .env_remove("npm_config_prefix")
+            .user_path()
             .no_window()
             .output()
             .map_err(|e| format!("spawn {}: {e}", adapter.binary()))?
@@ -1682,6 +1689,7 @@ fn mcp_apply(
         std::process::Command::new(shell)
             .args(["-i", "-l", "-c", &cmd])
             .env_remove("npm_config_prefix")
+            .user_path()
             .no_window()
             .output()
             .map_err(|e| format!("spawn {}: {e}", adapter.binary()))?
@@ -1702,6 +1710,7 @@ fn mcp_apply(
 /// sign-in on first launch inside its session.
 #[tauri::command(async)]
 fn install_agent(agent: crate::agent::AgentId) -> Result<String, String> {
+    use crate::agent::UserPath;
     let adapter = crate::agent::adapter_for(agent);
     let cmd = adapter
         .install_command()
@@ -1710,6 +1719,7 @@ fn install_agent(agent: crate::agent::AgentId) -> Result<String, String> {
     let out = std::process::Command::new("powershell")
         .args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", &cmd])
         .env_remove("npm_config_prefix")
+        .user_path()
         .no_window()
         .output()
         .map_err(|e| format!("spawn installer: {e}"))?;
@@ -1719,6 +1729,7 @@ fn install_agent(agent: crate::agent::AgentId) -> Result<String, String> {
         std::process::Command::new(&shell)
             .args(["-i", "-l", "-c", &cmd])
             .env_remove("npm_config_prefix")
+            .user_path()
             .no_window()
             .output()
             .map_err(|e| format!("spawn installer: {e}"))?
