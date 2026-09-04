@@ -253,12 +253,49 @@ Both CI legs run it, so the `.cmd` arm is genuinely exercised.
 5. `curl -X POST http://127.0.0.1:<port>/open` with no token returns 403 and does
    nothing.
 
-A full GUI end-to-end harness (WebdriverIO plus `tauri-plugin-wdio-webdriver`) is
-explicitly **not** part of this feature. macOS support for it works by running a
-WebDriver server inside the app, which must never exist in a shipped binary — a strictly
-larger remote-control surface than the endpoint this design spends its effort hardening.
-If Conduit ever wants that harness it should be its own design, with its own decision
-about the cargo feature gating it.
+**Full GUI end-to-end, automated.** The manual list above is the fallback for a machine
+without the harness, not the plan of record. Conduit gains a WebdriverIO harness that
+drives the real built app and asserts what the user would see: the project row appears
+in the sidebar, the window takes focus, `--agent` adds exactly one session.
+
+- `@wdio/tauri-service` (devDependency) with the **embedded** provider, which is the
+  default on all three platforms and is what makes macOS possible at all — there is no
+  WKWebView driver, so the WebDriver server runs inside the app.
+- `tauri-plugin-wdio-webdriver` as a Rust dependency, plus `"wdio-webdriver:default"`
+  in `src-tauri/capabilities/default.json`.
+- Specs in `e2e/`, run with `pnpm test:e2e`, pointed at a locally built binary via
+  `tauri:options.application`.
+
+**The plugin must never be in a shipped binary, and `#[cfg(debug_assertions)]` is not
+sufficient here.** The vendor's setup guide registers the plugin under
+`debug_assertions`, which is off in `--release` — but the harness needs a *bundled* app
+to launch, and bundling goes through a release profile. Taking the vendor's line
+literally would leave the plugin either absent from the binary under test or present in
+one built the same way as a shipped one. So the gate is an explicit, off-by-default
+cargo feature:
+
+```toml
+[features]
+wdio = ["dep:tauri-plugin-wdio-webdriver"]
+```
+
+```rust
+#[cfg(feature = "wdio")]
+let builder = builder.plugin(tauri_plugin_wdio_webdriver::init());
+```
+
+An E2E build passes `--features wdio`; `release.yml` never does — its build args are
+`--target universal-apple-darwin` and `--bundles msi`, with no feature flags — so the
+shipped artifact cannot contain it. A test asserts the release workflow carries no
+`--features` argument, because "we simply won't pass the flag" is a convention, and a
+convention protecting a remote-control surface should be a check.
+
+**Where each layer runs.** Tier A is a plain `cargo test`, so `ci.yml`'s existing Rust
+matrix picks it up on both macOS and Windows with no workflow change, and
+`cargo clippy --all-targets` lints it. The GUI layer needs a full app build per run,
+which is minutes on the macOS universal target, so it gets its own `e2e.yml` on
+`workflow_dispatch` plus pushes to `main` rather than running on every PR. The gate that
+must never regress is the cheap one; the expensive one is a scheduled backstop.
 
 ## Release
 
