@@ -5421,6 +5421,27 @@ input[type="number"]:focus {
   border-color: var(--accent);
 }
 
+/* The `conduit` CLI row: copy on the left, one action button on the right, matching
+   the "Choose…" affordance above rather than inventing a third button style. */
+.cli-shim-field { flex-direction: column; align-items: stretch; gap: 8px; }
+.cli-shim-field > button {
+  align-self: flex-start;
+  font-size: 12px;
+  color: var(--text-bright);
+  background: var(--sidebar-bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 4px 12px;
+  cursor: pointer;
+}
+.cli-shim-field > button:hover { border-color: var(--accent); }
+.cli-shim-field code {
+  font-family: var(--mono-font);
+  background: color-mix(in srgb, var(--border) 40%, transparent);
+  border-radius: 4px;
+  padding: 1px 5px;
+}
+
 /* HQ row glyph — the chat counterpart of a session row's agent mark. */
 .root-chat-glyph { color: var(--text-mid); flex: none; }
 .root-chat-glyph.running { color: var(--accent); }

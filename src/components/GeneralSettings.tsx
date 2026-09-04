@@ -1,6 +1,15 @@
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
+import { invoke } from "@tauri-apps/api/core";
 import { useStore } from "../store";
+
+/** Mirrors `cli_shim::ShimStatus` (serde camelCase). */
+type ShimStatus = {
+  installed: boolean;
+  path: string | null;
+  dir: string | null;
+  onPath: boolean;
+};
 
 /** Settings → General: startup / session behavior toggles. */
 export function GeneralSettings() {
@@ -20,6 +29,24 @@ export function GeneralSettings() {
   const probeTmux = useStore((s) => s.probeTmux);
   const workspaceRoot = useStore((s) => s.workspaceRoot);
   const setWorkspaceRoot = useStore((s) => s.setWorkspaceRoot);
+
+  const [shim, setShim] = useState<ShimStatus | null>(null);
+  const [shimError, setShimError] = useState<string | null>(null);
+
+  useEffect(() => {
+    void invoke<ShimStatus>("cli_shim_status")
+      .then(setShim)
+      .catch(() => {});
+  }, []);
+
+  const runShim = async (cmd: "install_cli_shim" | "remove_cli_shim") => {
+    setShimError(null);
+    try {
+      setShim(await invoke<ShimStatus>(cmd));
+    } catch (e) {
+      setShimError(String(e));
+    }
+  };
 
   // Probe on first open rather than at app boot: it shells out, and nothing before
   // this panel needs the answer. `null` until it lands, which the copy below renders
@@ -160,6 +187,25 @@ export function GeneralSettings() {
             Choose…
           </button>
         </div>
+      </label>
+
+      <label className="dialog-toggle cli-shim-field">
+        <span>
+          The <code>conduit</code> command — open a project from your terminal the way{" "}
+          <code>code .</code> does. <code>conduit .</code> opens the current folder;{" "}
+          <code>conduit . --agent claude</code> also starts one new session in it. If
+          Conduit is not running, it launches first.
+          {shim?.installed && <em className="dialog-hint"> Installed at {shim.path}.</em>}
+          {shim?.installed && !shim.onPath && (
+            <em className="dialog-hint"> Add {shim.dir} to your PATH to use it.</em>
+          )}
+          {shimError && <em className="dialog-hint"> {shimError}</em>}
+        </span>
+        <button
+          onClick={() => void runShim(shim?.installed ? "remove_cli_shim" : "install_cli_shim")}
+        >
+          {shim?.installed ? "Remove" : "Install"}
+        </button>
       </label>
     </div>
   );
