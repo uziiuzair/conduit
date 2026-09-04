@@ -11,6 +11,9 @@ mod bridge;
 mod broker;
 mod claude_status;
 mod claude_usage;
+// `pub` so `tests/cli_open.rs` can drive the real handler with a real shim process.
+pub mod cli_open;
+pub mod cli_shim;
 mod clipboard;
 mod commandcode_config;
 mod commandcode_usage;
