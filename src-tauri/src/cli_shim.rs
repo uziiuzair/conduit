@@ -180,6 +180,10 @@ pub struct ShimStatus {
     pub on_path: bool,
 }
 
+/// Only the Unix install ladder needs this — on Windows the target is always under
+/// `%LOCALAPPDATA%`. Without the cfg it is dead code on the Windows leg, and clippy
+/// there runs with `-D warnings`.
+#[cfg(not(windows))]
 fn dir_writable(dir: &Path) -> bool {
     if !dir.is_dir() {
         return false;
@@ -254,7 +258,8 @@ pub fn install_in(dir: &Path) -> Result<(), String> {
             ));
         }
     }
-    fs::write(&file, shim_text()).map_err(|e| format!("could not write {}: {e}", file.display()))?;
+    fs::write(&file, shim_text())
+        .map_err(|e| format!("could not write {}: {e}", file.display()))?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -304,7 +309,10 @@ mod tests {
     fn sh_shim_resolves_the_data_dir_exactly_as_store_data_dir_does() {
         let s = shim_sh();
         assert!(s.contains("${CONDUIT_DATA_DIR_NAME:-ConduitTauri}"));
-        assert!(s.contains("Library/Application Support"), "macOS base missing");
+        assert!(
+            s.contains("Library/Application Support"),
+            "macOS base missing"
+        );
         assert!(s.contains("XDG_DATA_HOME"), "Linux base missing");
     }
 
@@ -339,7 +347,10 @@ mod tests {
             .find("CONDUIT_DATA_DIR_NAME")
             .expect("dev guard missing");
         let launch = cold.find("open -b").expect("bundle launch missing");
-        assert!(guard < launch, "the dev guard must precede the bundle launch");
+        assert!(
+            guard < launch,
+            "the dev guard must precede the bundle launch"
+        );
     }
 
     #[test]

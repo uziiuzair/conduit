@@ -710,6 +710,23 @@ fn add_project(path: String, store: State<Arc<Store>>) -> Project {
     store.add_project(path)
 }
 
+// ---- CLI launcher --------------------------------------------------------------
+
+#[tauri::command]
+fn cli_shim_status() -> cli_shim::ShimStatus {
+    cli_shim::status()
+}
+
+#[tauri::command]
+fn install_cli_shim() -> Result<cli_shim::ShimStatus, String> {
+    cli_shim::install()
+}
+
+#[tauri::command]
+fn remove_cli_shim() -> Result<cli_shim::ShimStatus, String> {
+    cli_shim::remove()
+}
+
 #[tauri::command]
 fn remove_project(id: String, store: State<Arc<Store>>, pty: State<Arc<PtyManager>>) {
     if let Some(p) = store.list().into_iter().find(|p| p.id == id) {
@@ -2062,6 +2079,9 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            cli_shim_status,
+            install_cli_shim,
+            remove_cli_shim,
             pty_spawn,
             pty_write,
             pty_resize,

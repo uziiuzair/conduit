@@ -94,7 +94,10 @@ fn secret_eq(a: &str, b: &str) -> bool {
     if a.len() != b.len() {
         return false;
     }
-    a.bytes().zip(b.bytes()).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
+    a.bytes()
+        .zip(b.bytes())
+        .fold(0u8, |acc, (x, y)| acc | (x ^ y))
+        == 0
 }
 
 /// Authenticate and parse one `/open` request. Pure -- no IO, no Tauri.
@@ -104,7 +107,10 @@ pub fn parse_open(
     expected: &str,
 ) -> Result<OpenRequest, Reject> {
     // Origin FIRST: a page must not be able to use this route as a token oracle.
-    if headers.iter().any(|(k, _)| k.eq_ignore_ascii_case("origin")) {
+    if headers
+        .iter()
+        .any(|(k, _)| k.eq_ignore_ascii_case("origin"))
+    {
         return Err(Reject::BrowserOrigin);
     }
     let supplied = headers
@@ -197,7 +203,10 @@ mod tests {
             Err(Reject::BadToken)
         );
         let h = hdrs(&[("X-Conduit-Token", "nope")]);
-        assert_eq!(parse_open(&h, r#"{"path":"/p"}"#, TOK), Err(Reject::BadToken));
+        assert_eq!(
+            parse_open(&h, r#"{"path":"/p"}"#, TOK),
+            Err(Reject::BadToken)
+        );
     }
 
     /// A browser cannot suppress Origin on a cross-origin request, and a shell client
@@ -231,7 +240,10 @@ mod tests {
     fn an_empty_expected_token_accepts_nothing() {
         // Defensive: if the boot-time write ever failed, the route must be shut, not open.
         let h = hdrs(&[("X-Conduit-Token", "")]);
-        assert_eq!(parse_open(&h, r#"{"path":"/p"}"#, ""), Err(Reject::BadToken));
+        assert_eq!(
+            parse_open(&h, r#"{"path":"/p"}"#, ""),
+            Err(Reject::BadToken)
+        );
     }
 
     #[test]
@@ -270,7 +282,10 @@ mod tests {
     }
 
     /// Serve exactly one request against a real socket, and report what the sink saw.
-    fn serve_one(port_out: &std::sync::mpsc::Sender<u16>, token: String) -> std::sync::mpsc::Receiver<OpenRequest> {
+    fn serve_one(
+        port_out: &std::sync::mpsc::Sender<u16>,
+        token: String,
+    ) -> std::sync::mpsc::Receiver<OpenRequest> {
         let (tx, rx) = std::sync::mpsc::channel();
         let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
         port_out
@@ -310,9 +325,7 @@ mod tests {
             .output()
             .unwrap();
         assert_eq!(String::from_utf8_lossy(&out.stdout), "200");
-        let got = rx
-            .recv_timeout(std::time::Duration::from_secs(5))
-            .unwrap();
+        let got = rx.recv_timeout(std::time::Duration::from_secs(5)).unwrap();
         assert_eq!(got.path, "/tmp/p");
         assert_eq!(got.agent.as_deref(), Some("claude"));
     }
