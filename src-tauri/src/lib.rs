@@ -11,6 +11,9 @@ mod bridge;
 mod broker;
 mod claude_status;
 mod claude_usage;
+// `pub` so `tests/cli_open.rs` can drive the real handler with a real shim process.
+pub mod cli_open;
+pub mod cli_shim;
 mod clipboard;
 mod commandcode_config;
 mod commandcode_usage;
@@ -705,6 +708,23 @@ fn load_projects(store: State<Arc<Store>>) -> Vec<Project> {
 #[tauri::command]
 fn add_project(path: String, store: State<Arc<Store>>) -> Project {
     store.add_project(path)
+}
+
+// ---- CLI launcher --------------------------------------------------------------
+
+#[tauri::command]
+fn cli_shim_status() -> cli_shim::ShimStatus {
+    cli_shim::status()
+}
+
+#[tauri::command]
+fn install_cli_shim() -> Result<cli_shim::ShimStatus, String> {
+    cli_shim::install()
+}
+
+#[tauri::command]
+fn remove_cli_shim() -> Result<cli_shim::ShimStatus, String> {
+    cli_shim::remove()
 }
 
 #[tauri::command]
@@ -1892,13 +1912,22 @@ fn reveal_path(path: String) -> Result<(), String> {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tauri::Builder::default()
+    let builder = tauri::Builder::default()
         .plugin(tauri_plugin_window_state::Builder::default().build())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
-        .plugin(tauri_plugin_clipboard_manager::init())
+        .plugin(tauri_plugin_clipboard_manager::init());
+
+    // The GUI end-to-end harness, and ONLY there. The gate is the feature rather than
+    // `debug_assertions` (which is what the vendor's guide uses) because the harness
+    // launches a BUNDLED app and bundling goes through a release profile — under
+    // debug_assertions the plugin would be missing from the very binary under test.
+    #[cfg(feature = "wdio")]
+    let builder = builder.plugin(tauri_plugin_wdio_webdriver::init());
+
+    builder
         .manage(Arc::new(PtyManager::new()))
         .manage(Arc::new(Store::new()))
         .manage(Arc::new(HookState::default()))
@@ -2059,6 +2088,9 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            cli_shim_status,
+            install_cli_shim,
+            remove_cli_shim,
             pty_spawn,
             pty_write,
             pty_resize,

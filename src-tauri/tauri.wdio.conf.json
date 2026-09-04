@@ -1,0 +1,9 @@
+{
+  "app": {
+    "withGlobalTauri": true
+  },
+  "bundle": {
+    "createUpdaterArtifacts": false,
+    "targets": ["app"]
+  }
+}

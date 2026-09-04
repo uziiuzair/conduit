@@ -60,6 +60,12 @@ This writes to `…/ConduitTauri-dev/state.json`, so dev and the installed app c
   xterm, a PTY, and the Tauri bridge, and a shallow render would assert nothing worth
   maintaining. Verify UI changes with `pnpm exec tsc --noEmit` / `pnpm build` **and by
   launching the app** — never claim a UI change "works" from a typecheck alone.
+- **There IS a GUI end-to-end harness, and it is not a PR gate.** `pnpm build:e2e &&
+  pnpm test:e2e` builds the app with `--features wdio` and drives the real window with
+  WebdriverIO (`wdio.conf.ts`, `e2e/`); `.github/workflows/e2e.yml` runs it on
+  `workflow_dispatch` and pushes to `main`, not on pull requests, because it costs a
+  full app build per run. It does not replace launching the app by hand for UI work —
+  it covers three specific CLI-launcher assertions. See "Where the `conduit` CLI lives".
 - **`src/store.seam.test.ts` guards the session-directory seam** — it fails if anything
   outside the sanctioned consumers references `workingDirOf`. If you add a consumer that
   genuinely needs intent rather than reality, add it to that test's allowlist with a
@@ -345,6 +351,42 @@ with `set -g mouse on`, which the WHEEL needs and the BUTTONS must not have.
 - Trade, accepted deliberately: a mouse-aware TUI run INSIDE the companion shell (vim
   `set mouse=a`) does not get the mouse there. Selection is the commoner need in a scratch
   shell; agent panes are untouched.
+
+## Where the `conduit` CLI lives
+
+`conduit .` opens a project the way `code .` does; `--agent <id>` also starts one new
+session. Three parts: `cli_open.rs` (the `/open` route), `cli_shim.rs` (the shim's text
+plus install/remove/status), and one listener in `App.tsx`.
+
+- **`/open` is the one route on the hook server that ACTS**, so it is authenticated
+  where `/hook` is explicitly trusted-as-display-data. Three layers: a per-boot 256-bit
+  token in `<dataDir>/cli-token` (0600, minted where the port is published), refusal of
+  any request carrying `Origin` — checked FIRST, so the route is not a token oracle —
+  and never answering a CORS preflight, which falls out of the loop's non-POST early
+  return. Do not add a route beside it that skips these.
+- **The handler takes a SINK, not an `AppHandle`.** That is the only reason
+  `src-tauri/tests/cli_open.rs` can run the real shim as a process against the real
+  handler over a real socket. Keep it that way.
+- **The shim is generated, not bundled** — the resource bundler does not reliably keep
+  the executable bit, and Windows needs different text. It resolves its data dir exactly
+  as `store::data_dir` does, and **refuses to cold-launch when `CONDUIT_DATA_DIR_NAME`
+  is set**: a dev build has no bundle, and launching the installed app there is the
+  `state.json` clobber. Install and remove both refuse to touch a `conduit` that lacks
+  `SHIM_MARKER`, so they can never destroy a user's own binary. The Windows installer
+  does NOT edit `PATH` — `setx` truncates a `PATH` over 1024 characters — it reports the
+  directory instead.
+- **`Store::add_project` does not dedupe by path**, so `matchProjectByPath`
+  (`src/cliOpen.ts`) is load-bearing rather than an optimization: without it every
+  `conduit .` on an open project adds a duplicate. Pure and standalone because `store.ts`
+  cannot be imported under the node-env vitest.
+- **The `wdio` cargo feature must never reach a release build.** It registers a
+  WebDriver server INSIDE the app. The gate is the feature, not `debug_assertions` (the
+  vendor's advice), because the harness launches a bundled app and bundling is a release
+  profile — under `debug_assertions` the plugin would be missing from the very binary
+  under test. `build.rs` generates `capabilities/wdio.json` only under the feature, since
+  a capability naming an absent plugin's permission fails codegen. Three tests in
+  `cli_shim.rs` pin all of it, including that `release.yml` passes no `--features`.
+- Design: `docs/superpowers/specs/2026-09-04-conduit-cli-launcher-design.md`.
 
 ## Where the unified session directory lives
 

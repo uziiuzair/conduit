@@ -1,0 +1,56 @@
+name: e2e
+
+# The GUI end-to-end layer. Deliberately NOT a PR gate: it needs a full app build per
+# run, which is minutes on the macOS target, and the check that must never regress is
+# the cheap one — `cargo test` in ci.yml already drives the real shim process against
+# the real /open handler on both platforms. This is the backstop for the half only a
+# real window can answer: the project row appearing, not appearing twice, and --agent
+# producing exactly one session.
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: e2e-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  gui:
+    # Same two shipping platforms as ci.yml's rust job, for the same reason.
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # Version comes from package.json "packageManager" — do not also set `version:`.
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      # --features wdio registers the embedded WebDriver plugin, and the config
+      # override turns on the global Tauri bridge the specs invoke through. NEITHER is
+      # ever passed by release.yml; cli_shim.rs has a test asserting that.
+      - name: Build the app under test
+        run: pnpm build:e2e
+
+      - name: Run the GUI end-to-end specs
+        run: pnpm test:e2e

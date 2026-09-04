@@ -19,7 +19,7 @@ use std::thread;
 use std::time::Duration;
 
 use serde_json::{json, Value};
-use tauri::{AppHandle, Emitter};
+use tauri::{AppHandle, Emitter, Manager};
 use tiny_http::{Method, Request, Response, Server};
 
 use crate::broker::{Broker, Decision, Presence};
@@ -84,6 +84,10 @@ pub fn start(
         // silently dark. See `write_endpoint_file`.
         write_endpoint_file(state.port.load(Ordering::SeqCst));
 
+        // Mint the CLI token in the same breath as publishing the port: a shim that can
+        // read one and not the other is a dead `conduit` until the next boot.
+        let cli_token = Arc::new(crate::cli_open::write_token_file());
+
         for mut request in server.incoming_requests() {
             if request.method() != &Method::Post {
                 let _ = request.respond(Response::from_string("ok"));
@@ -91,6 +95,27 @@ pub fn start(
             }
 
             let url = request.url().to_string();
+
+            // The `conduit` CLI launcher. Unlike every other route here this one ACTS,
+            // so it is authenticated (see cli_open::parse_open) rather than trusted.
+            // Note that the non-POST early return above answers OPTIONS with a bare 200
+            // and no CORS headers — which IS the preflight refusal the design relies on.
+            if url.starts_with("/open") {
+                let app = app.clone();
+                let token = cli_token.clone();
+                crate::cli_open::handle_open(request, &token, move |open| {
+                    // Show AND unminimize AND focus: on macOS an app whose window was
+                    // closed is still running, and emitting into a hidden window would
+                    // "succeed" while the user saw nothing happen.
+                    if let Some(w) = app.get_webview_window("main") {
+                        let _ = w.show();
+                        let _ = w.unminimize();
+                        let _ = w.set_focus();
+                    }
+                    let _ = app.emit("cli-open", &open);
+                });
+                continue;
+            }
 
             // Approval broker: blocking, handled on its own thread so a pending
             // approval never stalls the hook loop. The HTTP response IS the
@@ -1781,5 +1806,39 @@ mod tests {
         // is load-bearing for resume, not just for the status dot.
         assert!(cmd.contains("event=sessionstart"), "got {cmd}");
         assert!(cmd.contains("CONDUIT_SESSION_ID"), "got {cmd}");
+    }
+
+    /// The token must be minted in the same place the port is published, or a session
+    /// can see a port with no matching token and the CLI is dead until the next boot.
+    #[test]
+    fn boot_publishes_the_port_and_the_token_together() {
+        let src = include_str!("hooks.rs");
+        let endpoint = src
+            .find("write_endpoint_file(state.port")
+            .expect("endpoint publish missing");
+        let token = src
+            .find("cli_open::write_token_file")
+            .expect("token publish missing");
+        let loop_at = src
+            .find("for mut request in server.incoming_requests()")
+            .unwrap();
+        assert!(
+            token < loop_at,
+            "the token must exist before the first request is served"
+        );
+        assert!(endpoint < loop_at);
+    }
+
+    /// /open must be dispatched before the generic hook parsing, like /approve.
+    #[test]
+    fn open_route_is_dispatched_before_hook_parsing() {
+        let src = include_str!("hooks.rs");
+        let open = src
+            .find(r#"url.starts_with("/open")"#)
+            .expect("/open route missing");
+        let parse = src
+            .find("let (session, event) = parse_query(&url);")
+            .unwrap();
+        assert!(open < parse);
     }
 }

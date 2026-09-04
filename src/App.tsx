@@ -14,6 +14,7 @@ import {
   type AgyUsage,
 } from "./store";
 import { type AgentId } from "./agents";
+import { matchProjectByPath } from "./cliOpen";
 import { type ChatItem } from "./rootChat";
 import { holdsOffWorking, notificationStatus } from "./statusRules";
 import { type ThemePref } from "./themes";
@@ -480,6 +481,33 @@ export default function App() {
       const st = useStore.getState();
       const found = findSession(st.projects, payload.sessionId);
       if (found) st.selectSession(found.project.id, payload.sessionId);
+    });
+    return () => {
+      void un.then((f) => f());
+    };
+  }, []);
+
+  // The `conduit` CLI launcher. The Rust side has already focused the window; this
+  // owns what the app then shows.
+  useEffect(() => {
+    const un = listen<{ path: string; agent?: string | null }>("cli-open", ({ payload }) => {
+      void (async () => {
+        const st = useStore.getState();
+        let projectId = matchProjectByPath(st.projects, payload.path);
+        if (!projectId) {
+          // Store::add_project does not dedupe, which is what makes the match above
+          // load-bearing rather than an optimization.
+          await st.addProject(payload.path);
+          projectId = useStore.getState().selectedProjectId;
+        } else {
+          st.selectProject(projectId);
+        }
+        // `--agent` creates a session unconditionally and never resumes an existing
+        // one, so its effect never depends on `restoreSessionsOnOpen`.
+        if (projectId && payload.agent) {
+          await useStore.getState().addSession(projectId, { agent: payload.agent as AgentId });
+        }
+      })();
     });
     return () => {
       void un.then((f) => f());

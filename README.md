@@ -53,6 +53,9 @@ exactly as they do in a normal terminal.
   files, Markdown preview, and smart reload when an agent edits a file you have
   open. Manage files in the tree (create / rename / delete / drag to move), and
   Cmd-click file paths in any terminal to jump straight to the line.
+- **`conduit .` from your terminal** — open a project the way `code .` does, and
+  `conduit . --agent claude` also starts a session in it. Conduit launches first if it
+  isn't running. Install the command from Settings → General.
 - **Branch-lane git graph**, a **Changes** view, and a per-session plain terminal.
 - **Live status from agent hooks** — status dots (running / done / needs-you),
   a live to-dos list, and native notifications.
