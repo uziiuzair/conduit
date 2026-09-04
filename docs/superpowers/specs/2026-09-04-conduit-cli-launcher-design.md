@@ -213,9 +213,16 @@ then selects the new session. No new spawn path.
 
 ## Windows
 
-`conduit.cmd`, written to `%LOCALAPPDATA%\Conduit\bin`, with that directory appended to
-the user `PATH`. It uses the built-in `curl.exe`. Cold launch runs the installed
-executable directly.
+`conduit.cmd`, written to `%LOCALAPPDATA%\Conduit\bin`. It uses the built-in `curl.exe`.
+
+The installer does **not** edit the user's `PATH`. `setx` truncates any `PATH` longer
+than 1024 characters and silently drops the overflow, which is a data-loss bug in
+exchange for saving the user one instruction. Settings reports whether the directory is
+already on `PATH` and names it if not.
+
+Windows has no cold-launch arm in this version: `open -b` has no equivalent that is
+worth hand-rolling here, so the shim reports that Conduit is not running. The warm path
+— by far the common one, since the app is usually already open — is identical to macOS.
 
 Nothing here puts a prompt or a spaced path on a command line, so the `cmd.exe`
 re-parsing hazard documented for `pty.rs` does not apply — but the shim is a generated
