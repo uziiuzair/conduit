@@ -1,7 +1,7 @@
 {
   "name": "conduit",
   "private": true,
-  "version": "0.34.3",
+  "version": "0.35.0",
   "type": "module",
   "packageManager": "pnpm@10.33.0",
   "description": "A desktop app for running multiple real Claude Code terminals across projects, in one window.",
@@ -26,7 +26,9 @@
     "preview": "vite preview",
     "tauri": "tauri",
     "test": "vitest run",
-    "build:msi": "tauri build --bundles msi --config src-tauri/tauri.unsigned.conf.json"
+    "build:msi": "tauri build --bundles msi --config src-tauri/tauri.unsigned.conf.json",
+    "test:e2e": "wdio run wdio.conf.ts",
+    "build:e2e": "tauri build --debug --features wdio --config src-tauri/tauri.wdio.conf.json"
   },
   "dependencies": {
     "@tauri-apps/api": "^2",
@@ -46,10 +48,18 @@
   },
   "devDependencies": {
     "@tauri-apps/cli": "^2",
+    "@types/mocha": "^10.0.10",
     "@types/react": "^19.1.8",
     "@types/react-dom": "^19.1.6",
     "@vitejs/plugin-react": "^4.6.0",
+    "@wdio/cli": "^9.31.5",
+    "@wdio/local-runner": "^9.31.5",
+    "@wdio/mocha-framework": "^9.31.5",
+    "@wdio/spec-reporter": "^9.31.2",
+    "@wdio/tauri-service": "^1.3.0",
+    "expect-webdriverio": "^6.0.10",
     "happy-dom": "^20.10.6",
+    "tsx": "^4.23.13",
     "typescript": "~5.8.3",
     "vite": "^7.0.4",
     "vitest": "^4.1.9"

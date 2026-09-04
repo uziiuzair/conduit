@@ -1912,13 +1912,22 @@ fn reveal_path(path: String) -> Result<(), String> {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tauri::Builder::default()
+    let builder = tauri::Builder::default()
         .plugin(tauri_plugin_window_state::Builder::default().build())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
-        .plugin(tauri_plugin_clipboard_manager::init())
+        .plugin(tauri_plugin_clipboard_manager::init());
+
+    // The GUI end-to-end harness, and ONLY there. The gate is the feature rather than
+    // `debug_assertions` (which is what the vendor's guide uses) because the harness
+    // launches a BUNDLED app and bundling goes through a release profile — under
+    // debug_assertions the plugin would be missing from the very binary under test.
+    #[cfg(feature = "wdio")]
+    let builder = builder.plugin(tauri_plugin_wdio_webdriver::init());
+
+    builder
         .manage(Arc::new(PtyManager::new()))
         .manage(Arc::new(Store::new()))
         .manage(Arc::new(HookState::default()))

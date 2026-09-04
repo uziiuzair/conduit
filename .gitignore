@@ -52,3 +52,4 @@ lerna-debug.log*
 
 # Stray Windows redirect artifact (a `>NUL` in a shell that isn't cmd creates a literal file)
 NUL
+src-tauri/capabilities/wdio.json

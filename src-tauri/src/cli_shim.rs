@@ -449,4 +449,57 @@ mod tests {
         assert_eq!(s.path, None);
         fs::remove_dir_all(&dir).ok();
     }
+
+    /// The embedded WebDriver provider works by running a WebDriver server INSIDE the
+    /// app. That must never exist in a shipped binary, and "we simply will not pass the
+    /// flag" is a convention -- a convention guarding a remote-control surface should be
+    /// a check.
+    #[test]
+    fn the_release_workflow_never_enables_the_wdio_feature() {
+        let release = include_str!("../../.github/workflows/release.yml");
+        assert!(
+            !release.contains("--features"),
+            "release.yml must not pass any cargo feature; the wdio plugin would ship"
+        );
+        assert!(
+            !release.contains("wdio"),
+            "release.yml must not mention wdio (neither the feature nor its config override)"
+        );
+    }
+
+    /// And the gate must be the FEATURE, not `debug_assertions`: the harness launches a
+    /// bundled app, and bundling goes through a release profile where debug_assertions is
+    /// off -- the plugin would be missing from the very binary under test.
+    #[test]
+    fn the_wdio_plugin_is_gated_on_the_feature() {
+        let lib = include_str!("lib.rs");
+        assert!(
+            lib.contains("#[cfg(feature = \"wdio\")]"),
+            "feature gate missing"
+        );
+        assert!(
+            lib.contains("tauri_plugin_wdio_webdriver::init()"),
+            "plugin registration missing"
+        );
+        let cargo = include_str!("../Cargo.toml");
+        assert!(cargo.contains("[features]"), "features section missing");
+        assert!(cargo.contains("wdio = [\"dep:tauri-plugin-wdio-webdriver\"]"));
+        assert!(
+            cargo.contains("tauri-plugin-wdio-webdriver = { version"),
+            "the plugin must be an optional dependency"
+        );
+        assert!(cargo.contains("optional = true"));
+    }
+
+    /// The global Tauri bridge the harness needs must live in the override config only.
+    #[test]
+    fn the_global_tauri_bridge_is_not_in_the_shipped_config() {
+        let shipped = include_str!("../tauri.conf.json");
+        assert!(
+            !shipped.contains("withGlobalTauri"),
+            "withGlobalTauri belongs in tauri.wdio.conf.json, not the shipped config"
+        );
+        let override_cfg = include_str!("../tauri.wdio.conf.json");
+        assert!(override_cfg.contains("withGlobalTauri"));
+    }
 }

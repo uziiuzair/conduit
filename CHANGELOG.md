@@ -3,6 +3,15 @@
 All notable changes to Conduit are documented here. This project uses
 [semantic versioning](https://semver.org/).
 
+## 0.35.0 — 2026-09-04
+
+- **Added — the `conduit` command.** Open a project from your terminal the way `code .`
+  does: `conduit .` opens the current folder, and `conduit . --agent claude` also starts
+  one new session in it. If Conduit isn't running it launches first and then opens the
+  project. Install or remove the command from Settings → General; it goes to
+  `/usr/local/bin` when that's writable and `~/.local/bin` otherwise, and Settings tells
+  you if that folder isn't on your PATH.
+
 ## 0.34.3 — 2026-09-03
 
 - **Changed — A quieter tab strip.** A project used to announce itself three times on
