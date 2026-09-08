@@ -62,6 +62,8 @@ export interface CanvasState {
   zoom: number;
   /** Optional so every canvas persisted before notes existed still loads. */
   notes?: CanvasNote[];
+  /** Optional so every canvas persisted before sections existed still loads. */
+  sections?: CanvasSection[];
 }
 
 /** Card footprint in canvas units. A node is a real terminal, so this is sized to be
@@ -251,11 +253,12 @@ export function fit(
   viewportH: number,
   padding = 48,
 ): CanvasState {
-  // Notes count as content: a note placed off to one side is something the user put there
-  // on purpose, and a Fit that leaves it outside the viewport has not fitted anything.
+  // Notes and sections count as content too: something the user placed or drew on purpose,
+  // and a Fit that leaves it outside the viewport has not fitted anything.
   const boxes = [
     ...state.nodes.map((n) => ({ x: n.x, y: n.y, w: nodeW(n), h: nodeH(n) })),
     ...notesOf(state).map((n) => ({ x: n.x, y: n.y, w: n.w, h: n.h })),
+    ...sectionsOf(state).map((s) => ({ x: s.x, y: s.y, w: s.w, h: s.h })),
   ];
   if (boxes.length === 0 || viewportW <= 0 || viewportH <= 0) {
     return { ...state, pan: { x: padding, y: padding }, zoom: 1 };
@@ -396,3 +399,221 @@ export function removeNote(state: CanvasState, id: string): CanvasState {
   const kept = notes.filter((n) => n.id !== id);
   return kept.length === notes.length ? state : { ...state, notes: kept };
 }
+
+// ---- sections ----
+
+/**
+ * A titled container drawn behind its contents.
+ *
+ * Purely visual: it groups, and it moves what it holds. It does not broadcast, stop, spawn,
+ * or otherwise act on the sessions inside it — those would be a different feature with a
+ * different set of risks, and the whole point of this one is organising by hand.
+ *
+ * Membership is GEOMETRIC and computed on demand (`membersOf`), never stored. There is
+ * therefore no list to drift out of sync with position, and nesting is free.
+ */
+export interface CanvasSection {
+  /** Generated at creation; stable for the section's life and its React key. */
+  id: string;
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+  title: string;
+  /** Index into `SECTION_PALETTE`. Absent = neutral, which is what a fresh section is. */
+  color?: number;
+}
+
+export const SECTION_MIN_W = 240;
+export const SECTION_MIN_H = 180;
+
+/**
+ * Section tints. Deliberately its own short list rather than the project palette: a section
+ * is the user's own grouping, and borrowing project colours would make two unrelated
+ * meanings share a hue.
+ */
+export const SECTION_PALETTE: readonly string[] = [
+  "#6b7cff",
+  "#e0723f",
+  "#3fa66b",
+  "#c04f8a",
+  "#c9a227",
+  "#5aa9c9",
+];
+
+/** A canvas's sections, defaulting to none for state saved before sections existed. */
+export const sectionsOf = (state: CanvasState): CanvasSection[] => state.sections ?? [];
+
+export interface Box {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+}
+
+export const boxOfNode = (n: CanvasNode): Box => ({ x: n.x, y: n.y, w: nodeW(n), h: nodeH(n) });
+export const boxOfNote = (n: CanvasNote): Box => ({ x: n.x, y: n.y, w: n.w, h: n.h });
+export const boxOfSection = (s: CanvasSection): Box => ({ x: s.x, y: s.y, w: s.w, h: s.h });
+
+/** True when `inner` sits FULLY inside `outer`. Overlap is not membership: a card half in
+ *  and half out belongs to neither, which is the only reading that keeps a drag honest. */
+export function containsBox(outer: Box, inner: Box): boolean {
+  return (
+    inner.x >= outer.x &&
+    inner.y >= outer.y &&
+    inner.x + inner.w <= outer.x + outer.w &&
+    inner.y + inner.h <= outer.y + outer.h
+  );
+}
+
+export interface Members {
+  nodes: string[];
+  notes: string[];
+  sections: string[];
+}
+
+/** Everything geometrically inside a section. The section itself is never a member. */
+export function membersOf(state: CanvasState, sectionId: string): Members {
+  const self = sectionsOf(state).find((s) => s.id === sectionId);
+  if (!self) return { nodes: [], notes: [], sections: [] };
+  const outer = boxOfSection(self);
+  return {
+    nodes: state.nodes.filter((n) => containsBox(outer, boxOfNode(n))).map((n) => n.ref),
+    notes: notesOf(state)
+      .filter((n) => containsBox(outer, boxOfNote(n)))
+      .map((n) => n.id),
+    sections: sectionsOf(state)
+      .filter((s) => s.id !== sectionId && containsBox(outer, boxOfSection(s)))
+      .map((s) => s.id),
+  };
+}
+
+export function addSection(
+  state: CanvasState,
+  id: string,
+  x: number,
+  y: number,
+  w: number,
+  h: number,
+  title: string,
+): CanvasState {
+  const section: CanvasSection = {
+    id,
+    x,
+    y,
+    w: Math.max(SECTION_MIN_W, w),
+    h: Math.max(SECTION_MIN_H, h),
+    title,
+  };
+  return { ...state, sections: [...sectionsOf(state), section] };
+}
+
+/** Update one section in place, preserving array order. Same object back when unchanged. */
+function patchSection(
+  state: CanvasState,
+  id: string,
+  patch: (s: CanvasSection) => CanvasSection,
+): CanvasState {
+  const sections = sectionsOf(state);
+  const i = sections.findIndex((s) => s.id === id);
+  if (i === -1) return state;
+  const next = patch(sections[i]);
+  const cur = sections[i];
+  if (
+    next.x === cur.x &&
+    next.y === cur.y &&
+    next.w === cur.w &&
+    next.h === cur.h &&
+    next.title === cur.title &&
+    next.color === cur.color
+  ) {
+    return state;
+  }
+  const copy = [...sections];
+  copy[i] = next;
+  return { ...state, sections: copy };
+}
+
+/**
+ * Resize from the bottom-right. Contents are NOT moved — a resize changes what the section
+ * CONTAINS, which is what makes "draw a box around those three" work.
+ */
+export const resizeSection = (state: CanvasState, id: string, w: number, h: number): CanvasState =>
+  patchSection(state, id, (s) => ({
+    ...s,
+    w: Math.max(SECTION_MIN_W, w),
+    h: Math.max(SECTION_MIN_H, h),
+  }));
+
+export const setSectionTitle = (state: CanvasState, id: string, title: string): CanvasState =>
+  patchSection(state, id, (s) => ({ ...s, title }));
+
+/** `null` clears the colour back to neutral. Written as a delete so the field is absent
+ *  rather than `undefined` — persisted state round-trips through JSON, which keeps one and
+ *  drops the other, and absent is what a never-coloured section looks like. */
+export function setSectionColor(state: CanvasState, id: string, color: number | null): CanvasState {
+  return patchSection(state, id, (s) => {
+    if (color === null) {
+      const { color: _drop, ...rest } = s;
+      return rest;
+    }
+    return { ...s, color };
+  });
+}
+
+/** Remove the section. What was inside it stays on the plane — deleting a container must
+ *  never delete a running session. */
+export function removeSection(state: CanvasState, id: string): CanvasState {
+  const sections = sectionsOf(state);
+  const kept = sections.filter((s) => s.id !== id);
+  return kept.length === sections.length ? state : { ...state, sections: kept };
+}
+
+/**
+ * Translate an explicit set of things by the same delta — how a section drag moves its
+ * contents.
+ *
+ * The membership is passed IN rather than recomputed, because a drag must use the set
+ * captured when the gesture started: recomputing mid-drag would let items join and leave as
+ * the box swept over them, which reads as the section eating the board.
+ */
+export function translateMany(
+  state: CanvasState,
+  members: Members,
+  dx: number,
+  dy: number,
+): CanvasState {
+  if (dx === 0 && dy === 0) return state;
+  const nodeIds = new Set(members.nodes);
+  const noteIds = new Set(members.notes);
+  const sectionIds = new Set(members.sections);
+  return {
+    ...state,
+    // Index preserved throughout — see the file header.
+    nodes: state.nodes.map((n) => (nodeIds.has(n.ref) ? { ...n, x: n.x + dx, y: n.y + dy } : n)),
+    ...(state.notes === undefined
+      ? {}
+      : {
+          notes: notesOf(state).map((n) =>
+            noteIds.has(n.id) ? { ...n, x: n.x + dx, y: n.y + dy } : n,
+          ),
+        }),
+    ...(state.sections === undefined
+      ? {}
+      : {
+          sections: sectionsOf(state).map((s) =>
+            sectionIds.has(s.id) ? { ...s, x: s.x + dx, y: s.y + dy } : s,
+          ),
+        }),
+  };
+}
+
+/**
+ * Sections back to front: largest first, so a nested section paints over its parent.
+ *
+ * Derived, never stored. A stored z would mean either an order field to maintain or an
+ * array reorder — and reordering is forbidden here, because React reorders DOM to match
+ * list order and a reorder is a reparent, which kills a PTY.
+ */
+export const sectionsByZ = (state: CanvasState): CanvasSection[] =>
+  [...sectionsOf(state)].sort((a, b) => b.w * b.h - a.w * a.h);

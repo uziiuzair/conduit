@@ -8,10 +8,14 @@ import {
   MIN_NOTE_W,
   NOTE_H,
   NOTE_W,
+  SECTION_MIN_H,
+  SECTION_MIN_W,
   addNodeAt,
   addNote,
+  addSection,
   linkEndpoints,
   linkNote,
+  membersOf,
   migrateNotes,
   moveNote,
   nodeH,
@@ -20,10 +24,17 @@ import {
   pruneCanvas,
   removeNode,
   removeNote,
+  removeSection,
   resizeNode,
   resizeNote,
+  resizeSection,
+  sectionsByZ,
+  sectionsOf,
   setNoteText,
+  setSectionColor,
+  setSectionTitle,
   toCanvasPoint,
+  translateMany,
   MAX_ZOOM,
   MIN_ZOOM,
   clampZoom,
@@ -423,5 +434,110 @@ describe("misc", () => {
   it("scales a drag delta by zoom so the card tracks the cursor", () => {
     expect(toCanvasDelta(100, 50, 2)).toEqual({ dx: 50, dy: 25 });
     expect(toCanvasDelta(100, 50, 0.5)).toEqual({ dx: 200, dy: 100 });
+  });
+});
+
+describe("sections", () => {
+  const withSection = () => addSection(emptyCanvas(), "s1", 0, 0, 800, 600, "Auth");
+
+  it("adds a section with a title and no colour", () => {
+    const s = withSection();
+    expect(sectionsOf(s)).toHaveLength(1);
+    expect(sectionsOf(s)[0]).toMatchObject({ id: "s1", x: 0, y: 0, w: 800, h: 600, title: "Auth" });
+    expect(sectionsOf(s)[0].color).toBeUndefined();
+  });
+
+  it("contains only what fits fully inside its bounds", () => {
+    let s = withSection();
+    s = addNodeAt(s, "in", "p1", 10, 10); // default card 560x340 — fits
+    s = addNodeAt(s, "out", "p1", 900, 10); // outside entirely
+    const m = membersOf(s, "s1");
+    expect(m.nodes).toEqual(["in"]);
+  });
+
+  it("does not contain a node that merely overlaps the edge", () => {
+    let s = withSection();
+    s = addNodeAt(s, "edge", "p1", 700, 10); // 700 + 560 > 800
+    expect(membersOf(s, "s1").nodes).toEqual([]);
+  });
+
+  it("contains a nested section", () => {
+    let s = withSection();
+    s = addSection(s, "s2", 50, 50, 300, 300, "Inner");
+    expect(membersOf(s, "s1").sections).toEqual(["s2"]);
+    expect(membersOf(s, "s2").sections).toEqual([]);
+  });
+
+  it("never contains itself", () => {
+    expect(membersOf(withSection(), "s1").sections).toEqual([]);
+  });
+
+  it("moves its contents when translated, and keeps node array order", () => {
+    let s = withSection();
+    s = addNodeAt(s, "a", "p1", 10, 10);
+    s = addNodeAt(s, "b", "p1", 10, 400);
+    const m = membersOf(s, "s1");
+    const out = translateMany(s, { ...m, sections: [...m.sections, "s1"] }, 100, 50);
+    expect(out.nodes.map((n) => n.ref)).toEqual(["a", "b"]);
+    expect(out.nodes[0]).toMatchObject({ x: 110, y: 60 });
+    expect(sectionsOf(out)[0]).toMatchObject({ x: 100, y: 50 });
+  });
+
+  it("does NOT move contents when resized — a resize changes what it contains", () => {
+    let s = withSection();
+    s = addNodeAt(s, "a", "p1", 10, 10);
+    const out = resizeSection(s, "s1", 400, 300);
+    expect(out.nodes[0]).toMatchObject({ x: 10, y: 10 });
+    expect(sectionsOf(out)[0]).toMatchObject({ w: 400, h: 300 });
+  });
+
+  it("clamps a resize to the minimum", () => {
+    const out = resizeSection(withSection(), "s1", 10, 10);
+    expect(sectionsOf(out)[0].w).toBe(SECTION_MIN_W);
+    expect(sectionsOf(out)[0].h).toBe(SECTION_MIN_H);
+  });
+
+  it("removes a section without removing what was inside it", () => {
+    let s = withSection();
+    s = addNodeAt(s, "a", "p1", 10, 10);
+    const out = removeSection(s, "s1");
+    expect(sectionsOf(out)).toEqual([]);
+    expect(out.nodes).toHaveLength(1);
+  });
+
+  it("orders sections back-to-front by descending area, so a nested one paints over", () => {
+    let s = withSection();
+    s = addSection(s, "s2", 50, 50, 300, 300, "Inner");
+    expect(sectionsByZ(s).map((x) => x.id)).toEqual(["s1", "s2"]);
+  });
+
+  it("sets and clears a colour", () => {
+    let s = setSectionColor(withSection(), "s1", 2);
+    expect(sectionsOf(s)[0].color).toBe(2);
+    s = setSectionColor(s, "s1", null);
+    expect(sectionsOf(s)[0].color).toBeUndefined();
+  });
+
+  it("renames", () => {
+    expect(sectionsOf(setSectionTitle(withSection(), "s1", "Deploy"))[0].title).toBe("Deploy");
+  });
+
+  // Additive beyond the brief's given cases: the id is FOUND in every assertion below, so
+  // each takes patchSection's/removeSection's/translateMany's real compare branch rather
+  // than the trivial "id not found" early return — only that proves the no-op check itself
+  // works, matching this file's existing identity coverage for moveNode/patchNote.
+  it("returns the same object when a setter's new value equals the current one", () => {
+    const s = withSection();
+    expect(resizeSection(s, "s1", 800, 600)).toBe(s);
+    expect(setSectionTitle(s, "s1", "Auth")).toBe(s);
+    expect(setSectionColor(s, "s1", null)).toBe(s); // already uncoloured
+  });
+
+  it("returns the same object for an unknown id or a zero-delta translate", () => {
+    const s = withSection();
+    expect(resizeSection(s, "nope", 400, 300)).toBe(s);
+    expect(setSectionTitle(s, "nope", "x")).toBe(s);
+    expect(removeSection(s, "nope")).toBe(s);
+    expect(translateMany(s, membersOf(s, "s1"), 0, 0)).toBe(s);
   });
 });
