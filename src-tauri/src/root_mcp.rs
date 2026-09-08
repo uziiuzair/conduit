@@ -13,10 +13,8 @@
 //!
 //! Task 3 lands the transport (`dispatch_tool`, `handle_request`, `start`) on top of
 //! Task 2's declarative half, wired into `lib.rs`'s `setup` next to `fleet_mcp::start`.
-//! `write_mcp_config`/`port` still have no non-test caller here -- feeding the generated
-//! config into root chat's own `claude -p` invocation is later work, not this task's --
-//! so they keep a narrow, item-scoped `#[allow(dead_code)]` rather than the file-level
-//! blanket this file carried through Task 2.
+//! `write_mcp_config`/`port` are called by `root_chat::root_chat_send`, which resolves the
+//! generated config into root chat's own `claude -p` invocation on every spawn.
 //!
 //! `Ctx` and `handle_request` take an `EmitSink`, not an `AppHandle` -- same reasoning as
 //! `cli_open::handle_open`'s sink parameter (see its module doc). `start` is the only
@@ -48,10 +46,8 @@ const PEEK_BYTES: usize = 8192;
 /// `write_mcp_config` decline and root chat degrade to its Phase 2 tool set.
 static PORT: AtomicU16 = AtomicU16::new(0);
 
-/// No non-test caller yet: reading the bound port back out is for whatever wires the
-/// generated `--mcp-config` into root chat's own `claude -p` invocation, which is later
-/// work than this task.
-#[allow(dead_code)]
+/// The bound port, read by `root_chat::root_chat_send` to resolve the per-chat
+/// `--mcp-config` before every spawn.
 pub fn port() -> u16 {
     PORT.load(Ordering::SeqCst)
 }
@@ -70,9 +66,9 @@ pub fn mcp_config_json(port: u16, chat_id: &str) -> String {
 
 /// Write the per-chat mcp-config into Conduit's data dir; return its path.
 ///
-/// No non-test caller yet, same reason as `port` above -- root chat's own spawn does not
-/// pass `--mcp-config` yet.
-#[allow(dead_code)]
+/// `root_chat::root_chat_send` calls this before every spawn; a port of 0 (server never
+/// bound) means `None`, no `--mcp-config` flag, and the chat degrades to its Phase 2 tool
+/// set rather than a half-state that promises tools it cannot reach.
 pub fn write_mcp_config(port: u16, chat_id: &str) -> Option<String> {
     if port == 0 {
         return None;
