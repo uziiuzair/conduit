@@ -388,6 +388,47 @@ plus install/remove/status), and one listener in `App.tsx`.
   `cli_shim.rs` pin all of it, including that `release.yml` passes no `--features`.
 - Design: `docs/superpowers/specs/2026-09-04-conduit-cli-launcher-design.md`.
 
+## Where root chat's orchestration lives
+
+Root chat (HQ) reaches Conduit through a SECOND in-app MCP server, `root_mcp.rs`, on
+`/mcp?rootchat=<chat-id>` (`start` binds the first free port in 8496..=8516, clear of the
+hook server's 8423..=8443, the mobile bridge's 8455..=8475, and fleet's own 8475..=8495).
+It is deliberately not part of `fleet_mcp.rs`: every fleet tool is project-scoped by
+construction, root chat is global, and teaching one authorizer both shapes is what
+produced the earlier cross-project leak. The two surfaces share no `authorize()` — only
+the spawn path underneath.
+
+- **Dispatch never spawns.** `dispatch_work` records a `proposals.rs` entry and returns;
+  the human approves a card, and `approve_root_proposal` creates the session and emits
+  `fleet-spawn` for the frontend to mount (Rust cannot mint a terminal Channel — the same
+  wall `bridge.rs` hit). Dispatched sessions are ALWAYS `SessionRole::Worker`
+  (`lib.rs`'s `DISPATCH_ROLE` constant) — a Conductor would hand root chat fleet's whole
+  orchestration surface.
+- **A lost claim race rolls back its session.** `Proposals::resolve` is the only
+  check-and-set against a proposal (first responder wins), and `Store::add_session` has
+  no way to join that atomically — so `approve_root_proposal_inner` creates the session
+  *before* claiming, and if `resolve` reports the proposal was already answered (a phone
+  and a desktop approving at once), it deletes the session it just created rather than
+  leaving a live, untasked worker sitting in its own worktree that nothing ever spawned.
+- **`dispatch_status` sweeps before reading.** `dispatch_status_inner` and
+  `approve_root_proposal_inner` both call `Proposals::sweep` first — `get` alone never
+  expires anything, only `register`/`pending` do — so a proposal past `EXPIRY_SECS` can
+  neither be reported as pending nor approved late.
+- **`proposals.rs` is not `broker.rs`.** The broker hands its caller a receiver to block
+  on and forgets an answered entry (right for a 45 s approval hook). A proposal is
+  non-blocking, lives 24 h, and must stay readable after the answer so `dispatch_status`
+  can report it. The UI merges the two queues; the registries stay separate.
+- **The agent is resolved at APPROVE time, in TypeScript.** `routing.rs` owns the
+  preferences, `routing.ts`'s `pickTarget` owns which target has quota left — only the
+  frontend holds the live usage snapshot already in the store. The proposal therefore
+  stores the task KIND, never a resolved agent; `pendingDecisionRouting.ts` calls
+  `pickTarget` and hands the resolved agent id to `approve_root_proposal`.
+- **No root MCP server means no tools, not a half-state.** `write_mcp_config` returns
+  `None` when the port is 0, `build_command` omits `--mcp-config` entirely, and
+  `--strict-mcp-config` leaves the chat with exactly its Phase 2 surface rather than
+  believing it can dispatch when it can't.
+- Design: `docs/superpowers/specs/2026-09-08-root-chat-orchestrator-design.md`.
+
 ## Where the unified session directory lives
 
 Every panel (Files/Changes/Git, tab-strip path, Open in VS Code) and the right-panel
