@@ -558,15 +558,21 @@ mod tests {
     #[test]
     fn command_includes_the_mcp_config_when_the_root_server_is_up() {
         let d = tdirs();
-        let with = build_command(
-            "abc-123",
-            false,
-            "charter",
-            &d,
-            Some("/tmp/App Support/rootchat-mcp-abc.json"),
+        let path = "/tmp/App Support/rootchat-mcp-abc.json";
+        let with = build_command("abc-123", false, "charter", &d, Some(path));
+        // The path must arrive as ONE shell word: Conduit's data dir has a space on
+        // macOS ("Application Support"), so an unquoted interpolation would split into
+        // two words under `sh -c` and the flag would silently take a truncated argument.
+        // Comparing against `crate::pty::quote_arg`'s own output (rather than a hardcoded
+        // quote character) keeps this correct on both the sh/single-quote and the
+        // cmd.exe/double-quote platform, and still fails if `build_command` stops calling
+        // it: an unquoted `--mcp-config /tmp/App Support/...` does not contain the quoted
+        // substring below.
+        let quoted = crate::pty::quote_arg(path);
+        assert!(
+            with.contains(&format!("--mcp-config {quoted}")),
+            "expected the mcp-config path quoted as one shell word: {with}"
         );
-        assert!(with.contains("--mcp-config"), "{with}");
-        assert!(with.contains("rootchat-mcp-abc.json"));
         assert!(
             with.contains("--strict-mcp-config"),
             "strict mode must survive"
