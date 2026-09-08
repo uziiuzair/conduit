@@ -4,6 +4,7 @@ import { TERM_BASE_FONT } from "./Terminal";
 import { snapZoom } from "../terminalZoom";
 import {
   type Box,
+  type CanvasState,
   CARD_H,
   CARD_W,
   FOOTER_H,
@@ -46,6 +47,7 @@ import {
   translateMany,
   zoomAt,
 } from "../canvas";
+import { emptyHistory, pushHistory, redo, undo } from "../canvasHistory";
 import { meterLevel, meterTitle } from "../contextMeter";
 import { hasSessionDrag, readSessionDrag, resolveProjectColor } from "../layout";
 import { useCanvas } from "../hooks/useCanvas";
@@ -102,6 +104,18 @@ export function CanvasUnderlay({
   const sessionContext = useStore((s) => s.sessionContext);
   const autoProjectColors = useStore((s) => s.autoProjectColors);
   const { canvas, setCanvas } = useCanvas();
+
+  // Undo/redo. A ref, not state — history churns on every edit and none of it is ever
+  // rendered directly, only replayed back into `canvas` via setCanvas.
+  const historyRef = useRef(emptyHistory<CanvasState>());
+  /** Record the state as it was BEFORE a gesture or a discrete edit. Called at gesture
+   *  START (pointer-down of a move/resize, or immediately before a menu action's
+   *  setCanvas) and NEVER per pointer-move — that is what makes one drag one undo step.
+   *  pushHistory itself dedupes a snapshot identical to the last one recorded, so calling
+   *  this at the start of a gesture that turns out to be a no-op click costs nothing. */
+  const snapshot = useCallback(() => {
+    historyRef.current = pushHistory(historyRef.current, canvas);
+  }, [canvas]);
 
   // ref === null means panning the plane; mode distinguishes moving from resizing, since
   // both are pointer drags over the same element tree; kind says which array the id
@@ -191,6 +205,61 @@ export function CanvasUnderlay({
       window.removeEventListener("blur", onBlur);
     };
   }, []);
+
+  // Undo/redo/delete-selection. Bound to window, not the underlay element, so it fires
+  // regardless of which piece of chrome has focus — but two guards keep it from stealing a
+  // keystroke that belongs elsewhere, mirroring CanvasControls' own Escape handler above:
+  // a keystroke inside a live agent terminal belongs to that agent, and one landing in an
+  // editable field (a note's textarea, a section's rename input) is that field's own text,
+  // not a board command. The section rename input additionally stops propagation on every
+  // keydown itself (see CanvasSectionFrame), so it never reaches here at all; the check
+  // below is what protects the note textarea, which has no such handler of its own.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      const target = e.target as Element | null;
+      if (target?.closest?.(".term-host")) return;
+      if (target?.closest?.("textarea, input, [contenteditable='true']")) return;
+      const mod = e.metaKey || e.ctrlKey;
+      if (mod && !e.shiftKey && e.key.toLowerCase() === "z") {
+        e.preventDefault();
+        const step = undo(historyRef.current, canvas);
+        if (step) {
+          historyRef.current = step.history;
+          setCanvas(step.state);
+        }
+        return;
+      }
+      if (mod && e.shiftKey && e.key.toLowerCase() === "z") {
+        e.preventDefault();
+        const step = redo(historyRef.current, canvas);
+        if (step) {
+          historyRef.current = step.history;
+          setCanvas(step.state);
+        }
+        return;
+      }
+      if ((e.key === "Backspace" || e.key === "Delete") && selection.length > 0) {
+        e.preventDefault();
+        // This removes objects from the BOARD only — removeNode/removeNote/removeSection
+        // never touch a session's lifecycle. Ending a session stays behind the sidebar's
+        // own confirming path (see onDeleteSession in the context menu below); a keystroke
+        // must never reach it.
+        snapshot();
+        let next = canvas;
+        for (const s of selection) {
+          if (s.kind === "node") next = removeNode(next, s.id);
+          else if (s.kind === "note") next = removeNote(next, s.id);
+          else next = removeSection(next, s.id);
+        }
+        setCanvas(next);
+        // Selection referred to objects that may no longer exist — clear it rather than
+        // leave it pointing at deleted ids.
+        setSelection([]);
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [canvas, setCanvas, selection, snapshot]);
 
   // "Rename" in a section's context menu opens the SAME inline editor as a double-click on
   // its title chip, but that editor's state lives inside CanvasSectionFrame — a sibling of
@@ -365,7 +434,7 @@ export function CanvasUnderlay({
       // Drop where the cursor is, centred on it rather than corner-anchored — a card
       // whose top-left lands under the pointer appears to jump down and right.
       const p = toCanvasPoint(canvas, e.clientX - rect.left, e.clientY - rect.top);
-      // snapshot() arrives in Task 14 (undo); omitted here per the brief.
+      snapshot();
       setCanvas(
         addNodeAt(canvas, payload.sessionId, payload.projectId, p.x - CARD_W / 2, p.y - CARD_H / 2),
       );
@@ -378,7 +447,7 @@ export function CanvasUnderlay({
       host.removeEventListener("dragleave", onDragLeave, { capture: true });
       host.removeEventListener("drop", onDrop, { capture: true });
     };
-  }, [canvas, setCanvas]);
+  }, [canvas, setCanvas, snapshot]);
 
   // Fallback for a drag that ends without ever firing `dragleave` on the board — e.g.
   // cancelled with Esc while still hovering it. This is NOT a theoretical gap: this
@@ -488,6 +557,10 @@ export function CanvasUnderlay({
     (e.currentTarget as Element).setPointerCapture?.(e.pointerId);
     movedRef.current = false;
     dragStartRef.current = { x: e.clientX, y: e.clientY };
+    // A move or resize is about to mutate the canvas; a pan only moves the camera and must
+    // never create an undo step. Recorded once here, at gesture start, not per pointermove
+    // in onPointerMove below — that is what makes one drag one undo step.
+    if (mode !== "pan") snapshot();
     // Membership is captured ONCE, here, at gesture start — never recomputed on later
     // pointermoves. A resize is deliberately excluded: it changes what the section
     // contains rather than moving anything, so it has no members to capture.
@@ -582,6 +655,7 @@ export function CanvasUnderlay({
     const node = canvas.nodes.find((n) => n.ref === ref);
     if (!node) return;
     const id = crypto.randomUUID();
+    snapshot();
     setCanvas(linkNote(addNote(canvas, id, node.x, node.y + nodeH(node) + 16), id, ref));
     setMenu(null);
   };
@@ -590,18 +664,23 @@ export function CanvasUnderlay({
 
   const addNoteHere = () => {
     if (!menu) return;
+    snapshot();
     setCanvas(addNote(canvas, crypto.randomUUID(), menu.x, menu.y));
     setMenu(null);
   };
 
   const addSectionHere = () => {
     if (!menu) return;
+    snapshot();
     setCanvas(addSection(canvas, crypto.randomUUID(), menu.x, menu.y, 900, 640, "Section"));
     setMenu(null);
   };
 
   const setSectionColorHere = (color: number | null) => {
-    if (menu?.sectionId) setCanvas(setSectionColor(canvas, menu.sectionId, color));
+    if (menu?.sectionId) {
+      snapshot();
+      setCanvas(setSectionColor(canvas, menu.sectionId, color));
+    }
     setMenu(null);
   };
 
@@ -618,7 +697,10 @@ export function CanvasUnderlay({
   const deleteSectionHere = () => {
     // Removes the container only — see removeSection's own doc comment. What was inside
     // stays on the board, exactly like "Remove from board" does for a single card.
-    if (menu?.sectionId) setCanvas(removeSection(canvas, menu.sectionId));
+    if (menu?.sectionId) {
+      snapshot();
+      setCanvas(removeSection(canvas, menu.sectionId));
+    }
     setMenu(null);
   };
 
@@ -723,7 +805,10 @@ export function CanvasUnderlay({
               onPointerDown(e, section.id, "resize", "section");
             }}
             onContextMenu={(e) => openMenu(e, { sectionId: section.id })}
-            onRename={(title) => setCanvas(setSectionTitle(canvas, section.id, title))}
+            onRename={(title) => {
+              snapshot();
+              setCanvas(setSectionTitle(canvas, section.id, title));
+            }}
           />
         ))}
 
@@ -965,11 +1050,17 @@ export function CanvasUnderlay({
           onRenameSection={renameSectionHere}
           onDeleteSection={deleteSectionHere}
           onLinkNote={(ref) => {
-            if (menu.noteId) setCanvas(linkNote(canvas, menu.noteId, ref));
+            if (menu.noteId) {
+              snapshot();
+              setCanvas(linkNote(canvas, menu.noteId, ref));
+            }
             setMenu(null);
           }}
           onDeleteNote={() => {
-            if (menu.noteId) setCanvas(removeNote(canvas, menu.noteId));
+            if (menu.noteId) {
+              snapshot();
+              setCanvas(removeNote(canvas, menu.noteId));
+            }
             setMenu(null);
           }}
           onOpenSession={() => {
@@ -985,7 +1076,10 @@ export function CanvasUnderlay({
             setMenu(null);
             // Off the board only — the session itself is untouched and keeps running. See
             // removeNode's own doc comment; the destructive path below is the other thing.
-            if (ref) setCanvas(removeNode(canvas, ref));
+            if (ref) {
+              snapshot();
+              setCanvas(removeNode(canvas, ref));
+            }
           }}
           onDeleteSession={() => {
             const ref = menu.nodeRef;
