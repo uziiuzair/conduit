@@ -80,6 +80,17 @@ describe("edgePips", () => {
     expect(pip.angle).toBeLessThan(0); // atan2 with a negative dy
     expect(Math.cos(pip.angle)).toBeGreaterThan(0);
   });
+
+  it("keeps the pip inside the viewport when margin exceeds half a dimension", () => {
+    // 20x20 viewport, margin 15: cx-margin = -5, so an unclamped ray comparison picks
+    // the farther border and can place the pip outside the viewport entirely.
+    const tiny = { w: 20, h: 20 };
+    const [pip] = edgePips([{ ref: "a", x: 95, y: 0, w: 10, h: 10 }], camera, tiny, 15);
+    expect(pip.x).toBeGreaterThanOrEqual(0);
+    expect(pip.x).toBeLessThanOrEqual(tiny.w);
+    expect(pip.y).toBeGreaterThanOrEqual(0);
+    expect(pip.y).toBeLessThanOrEqual(tiny.h);
+  });
 });
 
 describe("cameraFor", () => {
@@ -97,8 +108,8 @@ describe("interpolateCamera", () => {
   const b = { pan: { x: 100, y: 200 }, zoom: 2 };
 
   it("returns the endpoints exactly", () => {
-    expect(interpolateCamera(a, b, 0)).toEqual(a);
-    expect(interpolateCamera(a, b, 1)).toEqual(b);
+    expect(interpolateCamera(a, b, 0)).toBe(a);
+    expect(interpolateCamera(a, b, 1)).toBe(b);
   });
 
   it("is monotonic in between", () => {
@@ -114,5 +125,11 @@ describe("easeInOutCubic", () => {
     expect(easeInOutCubic(0)).toBe(0);
     expect(easeInOutCubic(1)).toBe(1);
     expect(easeInOutCubic(0.5)).toBeCloseTo(0.5, 6);
+  });
+
+  it("uses the ease-in cubic on the first half, not just at t=0", () => {
+    // 4 * 0.25^3 = 0.0625 — distinguishes the real coefficient from any cubic that
+    // also happens to return 0 at t=0 (e.g. 3*t*t*t).
+    expect(easeInOutCubic(0.25)).toBeCloseTo(0.0625, 6);
   });
 });

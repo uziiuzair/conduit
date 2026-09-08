@@ -88,19 +88,23 @@ export function edgePips(
 ): Pip[] {
   const cx = viewport.w / 2;
   const cy = viewport.h / 2;
+  // A margin wider than half the viewport would invert the inset rectangle, making
+  // `cx - margin` negative — and then Math.min over signed scale factors picks the
+  // FARTHER border and places the pip outside the viewport entirely. Clamp so the
+  // inset can degenerate to the centre point but never turn inside out.
+  const m = Math.max(0, Math.min(margin, cx, cy));
   const pips: Pip[] = [];
   for (const b of boxes) {
     const sx = (b.x + b.w / 2) * camera.zoom + camera.pan.x;
     const sy = (b.y + b.h / 2) * camera.zoom + camera.pan.y;
-    const onScreen =
-      sx >= margin && sx <= viewport.w - margin && sy >= margin && sy <= viewport.h - margin;
+    const onScreen = sx >= m && sx <= viewport.w - m && sy >= m && sy <= viewport.h - m;
     if (onScreen) continue;
     const dx = sx - cx;
     const dy = sy - cy;
     if (dx === 0 && dy === 0) continue;
     // Scale the ray until it meets whichever border it reaches first.
-    const tx = dx === 0 ? Infinity : (cx - margin) / Math.abs(dx);
-    const ty = dy === 0 ? Infinity : (cy - margin) / Math.abs(dy);
+    const tx = dx === 0 ? Infinity : (cx - m) / Math.abs(dx);
+    const ty = dy === 0 ? Infinity : (cy - m) / Math.abs(dy);
     const t = Math.min(tx, ty);
     pips.push({ ref: b.ref, x: cx + dx * t, y: cy + dy * t, angle: Math.atan2(dy, dx) });
   }
