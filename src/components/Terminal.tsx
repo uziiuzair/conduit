@@ -722,6 +722,14 @@ export function TerminalView({
   // +/-1 drift from font-metric rounding -- which resizes the PTY and reflows the agent.
   // Hidden keep-alive terminals skip the fit (0x0 hazard) and pick the new size up through
   // the reveal-refit path.
+  //
+  // The immediate scheduleFit() below goes through fitInputsChanged() like every other fit
+  // path, so the gate's baseline never goes stale behind its back -- a fit that fires
+  // without updating lastFitRef is what makes a future caller wrongly think a base change
+  // is still pending and refit again for nothing. On the canvas canvasScale === undefined
+  // short-circuits first, so the gate is never even consulted there; a base-font change on
+  // a canvas terminal is still picked up one reveal later, which is correct -- a base
+  // change is a real metrics change and does deserve a fit, unlike a zoom.
   const fontZoom = useStore((s) => s.fontZoom);
   useEffect(() => {
     const term = termRef.current;
@@ -730,7 +738,7 @@ export function TerminalView({
     const size = canvasScale === undefined ? base : fontForZoom(canvasScale, base);
     if (term.options.fontSize === size) return;
     term.options.fontSize = size;
-    if (canvasScale === undefined && visibleRef.current) scheduleFit();
+    if (canvasScale === undefined && visibleRef.current && fitInputsChanged()) scheduleFit();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [fontZoom, canvasScale]);
 
