@@ -34,6 +34,7 @@ mod local_llm;
 mod menu;
 mod notify;
 mod plugins;
+mod proposals;
 mod pty;
 mod root_chat;
 mod routing;
