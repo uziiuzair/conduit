@@ -501,36 +501,28 @@ export function TerminalView({
     // for a zoom is exactly what must not happen: it renegotiates cols/rows with the PTY
     // and reflows the agent's output. The box and the font scale by the same factor, so
     // the grid is already correct; only a change in the LOGICAL size (the resize grip)
-    // is a real resize.
-    //
-    // `lastLogicalRef` holds the size we last FITTED at, not the last size observed. It
-    // must only move on a firing that actually fits — otherwise sub-pixel deltas that each
-    // fall under the threshold keep re-baselining against each other and never accumulate
-    // to a full pixel, so a slow drag can drift the box many pixels with no fit ever firing.
-    // Comparing against a fixed fit baseline instead means the drift is measured from a
-    // fixed point, so it still crosses 1px on the firing that matters.
+    // is a real resize — see `logicalSizeChanged`, which every fit path below asks.
     const ro = new ResizeObserver(() => {
       if (!visibleRef.current) return;
-      const el = innerRef.current;
-      if (el) {
-        const scale = canvasScaleRef.current ?? 1;
-        const w = el.clientWidth / scale;
-        const h = el.clientHeight / scale;
-        const last = lastLogicalRef.current;
-        if (last && Math.abs(last.w - w) < 1 && Math.abs(last.h - h) < 1) return;
-        lastLogicalRef.current = { w, h };
-      }
+      if (!logicalSizeChanged()) return;
       scheduleFit();
     });
     if (innerRef.current) ro.observe(innerRef.current);
 
     // Web fonts can settle after first paint, changing cell metrics — refit then.
+    //
+    // Deliberately NOT behind logicalSizeChanged(): this is a METRICS change, not a box change.
+    // The box is identical and the gate would skip, leaving the terminal on cols computed from
+    // the fallback font's cell width for the rest of its life. Fires once, at startup.
     void document.fonts?.ready.then(() => {
       if (visibleRef.current) scheduleFit();
     });
 
+    // Window resize (including fullscreen / Stage Manager) — same gate as the ResizeObserver
+    // above, and for the same reason: at a non-1 canvas zoom the box moves without the logical
+    // size moving, and refitting there is the PTY-reflow-on-zoom bug arriving another way.
     const onWinResize = () => {
-      if (visibleRef.current) scheduleFit();
+      if (visibleRef.current && logicalSizeChanged()) scheduleFit();
     };
     window.addEventListener("resize", onWinResize);
 
@@ -581,7 +573,7 @@ export function TerminalView({
 
   /**
    * Host size, in LOGICAL (unscaled) pixels, that we last FITTED at — not merely the last
-   * size observed. See the ResizeObserver below for why that distinction is load-bearing.
+   * size observed. See `logicalSizeChanged` for why that distinction is load-bearing.
    */
   const lastLogicalRef = useRef<{ w: number; h: number } | null>(null);
 
@@ -593,10 +585,16 @@ export function TerminalView({
     if (!term || !fit) return;
 
     requestAnimationFrame(() => {
-      try {
-        fit.fit();
-      } catch {
-        /* not measurable yet */
+      // Gated the same way as every other fit path: on the canvas `visible` toggles on
+      // every zoom step and every pan that scrolls a card in or out (viewport culling), so
+      // an unconditional fit() here would reflow a running agent on a reveal that never
+      // changed its logical size.
+      if (logicalSizeChanged()) {
+        try {
+          fit.fit();
+        } catch {
+          /* not measurable yet */
+        }
       }
       const cols = term.cols;
       const rows = term.rows;
@@ -727,6 +725,28 @@ export function TerminalView({
     if (canvasScale === undefined && visibleRef.current) scheduleFit();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [fontZoom, canvasScale]);
+
+  /**
+   * Has this host's LOGICAL (unscaled) size changed since the last fit?
+   *
+   * The one place that question is answered, because every `fit()` path has to ask it and a
+   * path that forgets silently resizes the PTY and reflows a running agent. On the canvas the
+   * host box is `logical x canvasScale`, so a ZOOM changes the box without changing anything
+   * the grid depends on -- the font scaled by the same factor, so cols/rows are already right.
+   *
+   * Updates the baseline when it answers true, so a caller that then fits stays in step.
+   */
+  function logicalSizeChanged(): boolean {
+    const el = innerRef.current;
+    if (!el) return true; // not measurable — fit, exactly as before this gate existed
+    const scale = canvasScaleRef.current || 1; // `||`, not `??`: a 0 scale would divide to Infinity
+    const w = el.clientWidth / scale;
+    const h = el.clientHeight / scale;
+    const last = lastLogicalRef.current;
+    if (last && Math.abs(last.w - w) < 1 && Math.abs(last.h - h) < 1) return false;
+    lastLogicalRef.current = { w, h };
+    return true;
+  }
 
   function scheduleFit() {
     if (disposedRef.current) return;
