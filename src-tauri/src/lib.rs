@@ -824,7 +824,10 @@ struct ApprovedDispatch {
 }
 
 /// Approve a proposal: create the session and hand back what the caller needs to tell the
-/// frontend to mount it.
+/// frontend to mount it. On success, exactly one session exists for this proposal and it
+/// is marked `Approved`; on failure (unknown/expired/already-answered), no session from
+/// this call survives -- a lost race against a concurrent approver is rolled back rather
+/// than left as an orphaned record (see the `remove_session` call below).
 ///
 /// `agent` is resolved by the CALLER (`src/routing.ts`'s `pickTarget`), because only the
 /// frontend holds the live usage snapshot that says which account still has quota -- the
@@ -869,13 +872,18 @@ fn approve_root_proposal_inner(
         session.model = Some(m);
     }
     // Claim the proposal BEFORE the caller emits, so a phone answering at the same moment
-    // loses the race cleanly instead of spawning a second session.
+    // never gets its own `fleet-spawn`. `resolve` can still lose that race even though we
+    // already created `session` above -- `Store::add_session` has no way to check-and-set
+    // atomically against `Proposals`. A lost race must not leave the loser's session
+    // sitting in the project forever (a live, untasked worker in its own worktree that
+    // nothing ever spawned), so roll it back before returning the error.
     if !proposals.resolve(
         id,
         proposals::Outcome::Approved {
             session_id: session.id.clone(),
         },
     ) {
+        store.remove_session(&project.id, &session.id);
         return Err("this proposal was already answered".into());
     }
     Ok(ApprovedDispatch {
@@ -2566,13 +2574,27 @@ mod tests {
         );
     }
 
+    /// Two approvers racing the same proposal must not both leave a session behind: the
+    /// loser's `resolve` fails after it already created a real, persisted `Worker` session
+    /// (`store.add_session` and `Proposals` can't be updated atomically together), and
+    /// without a rollback that session sits in `project.sessions` forever -- a live,
+    /// untasked worker in its own worktree that nothing ever spawned or told what to do.
+    ///
+    /// Asserts on COUNTS, not on which thread happened to win, so the test is
+    /// deterministic despite the concurrency: exactly one `Ok`, and exactly one session in
+    /// the project no matter how many threads raced. The session-count assertion is the
+    /// one that matters -- it fails both if the claim-before-emit guard is missing
+    /// (duplicate winners) and if the rollback is missing (an orphaned loser record).
     #[test]
-    fn deny_records_the_reason_and_leaves_no_session() {
-        let proposals = proposals::Proposals::default();
+    fn only_one_concurrent_approval_wins_and_no_orphan_session_survives() {
+        let dir = approve_test_dir("concurrent");
+        let store = Arc::new(Store::for_test(&dir));
+        let project = store.add_project("/repo".into());
+        let proposals = Arc::new(proposals::Proposals::default());
         let p = proposals
             .register(
                 "chat-1",
-                "proj-1",
+                &project.id,
                 "ship the thing",
                 None,
                 None,
@@ -2580,16 +2602,45 @@ mod tests {
                 1_700_000_000,
             )
             .unwrap();
-        proposals.resolve(
-            &p.id,
-            proposals::Outcome::Denied {
-                reason: Some("not now".into()),
-            },
-        );
-        match proposals.get(&p.id).unwrap().outcome {
-            proposals::Outcome::Denied { reason } => assert_eq!(reason.as_deref(), Some("not now")),
-            other => panic!("expected denied, got {other:?}"),
+
+        const RACERS: usize = 8;
+        let handles: Vec<_> = (0..RACERS)
+            .map(|_| {
+                let store = store.clone();
+                let proposals = proposals.clone();
+                let id = p.id.clone();
+                std::thread::spawn(move || {
+                    approve_root_proposal_inner(
+                        &store,
+                        &proposals,
+                        &id,
+                        "claude",
+                        None,
+                        1_700_000_100,
+                    )
+                })
+            })
+            .collect();
+        let results: Vec<Result<ApprovedDispatch, String>> =
+            handles.into_iter().map(|h| h.join().unwrap()).collect();
+
+        let ok_count = results.iter().filter(|r| r.is_ok()).count();
+        assert_eq!(ok_count, 1, "exactly one racer should win: {results:?}");
+        for err in results.iter().filter_map(|r| r.as_ref().err()) {
+            assert!(err.contains("already answered"), "{err}");
         }
+
+        let sessions = store
+            .list()
+            .into_iter()
+            .find(|x| x.id == project.id)
+            .unwrap()
+            .sessions;
+        assert_eq!(
+            sessions.len(),
+            1,
+            "a lost race must not leave an orphaned session record: {sessions:?}"
+        );
     }
 
     #[test]
