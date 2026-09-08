@@ -8,14 +8,18 @@ import {
   FOOTER_H,
   HEADER_H,
   LIVE_ZOOM_MIN,
+  type Members,
   NOTE_H,
   NOTE_HEAD_H,
   NOTE_W,
+  SECTION_PALETTE,
   addNodeAt,
   addNote,
+  addSection,
   fit,
   linkEndpoints,
   linkNote,
+  membersOf,
   moveNode,
   moveNote,
   nodeH,
@@ -23,17 +27,25 @@ import {
   notesOf,
   removeNode,
   removeNote,
+  removeSection,
   resizeNode,
   resizeNote,
+  resizeSection,
+  sectionsByZ,
+  sectionsOf,
   setNoteText,
+  setSectionColor,
+  setSectionTitle,
   toCanvasDelta,
   toCanvasPoint,
+  translateMany,
   zoomAt,
 } from "../canvas";
 import { meterLevel, meterTitle } from "../contextMeter";
 import { hasSessionDrag, readSessionDrag, resolveProjectColor } from "../layout";
 import { useCanvas } from "../hooks/useCanvas";
 import { AgentGlyph, glyphStateFor } from "./AgentGlyph";
+import { CanvasSectionFrame } from "./CanvasSection";
 import { deleteSession } from "./Sidebar";
 
 /**
@@ -84,14 +96,26 @@ export function CanvasUnderlay({
 
   // ref === null means panning the plane; mode distinguishes moving from resizing, since
   // both are pointer drags over the same element tree; kind says which array the id
-  // addresses — sessions and notes are separate lists (see canvas.ts).
+  // addresses — sessions, notes and sections are separate lists (see canvas.ts).
   const [drag, setDrag] = useState<{
     ref: string | null;
-    kind: "node" | "note";
+    kind: "node" | "note" | "section";
     mode: "pan" | "move" | "resize";
     lastX: number;
     lastY: number;
+    /** Captured at gesture start for a section move — recomputing per frame would let
+     *  items join and leave as the box swept over them, which reads as the section
+     *  eating the board. */
+    members?: Members;
   } | null>(null);
+
+  // "Rename" in a section's context menu opens the SAME inline editor as a double-click on
+  // its title chip, but that editor's state lives inside CanvasSectionFrame — a sibling of
+  // this menu. window.prompt() is unreliable in WKWebView (see ProfileBar in Sidebar.tsx),
+  // so this is a request, not the edit state itself: bumping the nonce for a target id is
+  // what tells that one frame to open its own editor.
+  const [renameTarget, setRenameTarget] = useState<string | null>(null);
+  const [renameNonce, setRenameNonce] = useState(0);
   const showTerminals = canvas.zoom >= LIVE_ZOOM_MIN;
 
   // Drop-affordance for a session dragged in from the sidebar. Read during `dragover` off
@@ -110,6 +134,8 @@ export function CanvasUnderlay({
     noteId?: string;
     /** Set when the click landed on a session card, which gets its own items. */
     nodeRef?: string;
+    /** Set when the click landed on a section's title chip, which gets its own items. */
+    sectionId?: string;
   } | null>(null);
 
   const fitToContent = useCallback(() => {
@@ -293,11 +319,19 @@ export function CanvasUnderlay({
     e: React.PointerEvent,
     ref: string | null,
     mode: "pan" | "move" | "resize",
-    kind: "node" | "note" = "node",
+    kind: "node" | "note" | "section" = "node",
   ) => {
     if (e.button !== 0) return;
     (e.currentTarget as Element).setPointerCapture?.(e.pointerId);
-    setDrag({ ref, kind, mode, lastX: e.clientX, lastY: e.clientY });
+    // Membership is captured ONCE, here, at gesture start — never recomputed on later
+    // pointermoves. A resize is deliberately excluded: it changes what the section
+    // contains rather than moving anything, so it has no members to capture.
+    let members: Members | undefined;
+    if (kind === "section" && mode === "move" && ref) {
+      const m = membersOf(canvas, ref);
+      members = { ...m, sections: [...m.sections, ref] };
+    }
+    setDrag({ ref, kind, mode, lastX: e.clientX, lastY: e.clientY, members });
   };
 
   const onPointerMove = (e: React.PointerEvent) => {
@@ -310,7 +344,18 @@ export function CanvasUnderlay({
     } else {
       // Move and resize are in CANVAS units, so the thing tracks the cursor at any zoom.
       const { dx, dy } = toCanvasDelta(dxScreen, dyScreen, canvas.zoom);
-      if (drag.kind === "note") {
+      if (drag.kind === "section") {
+        if (drag.mode === "resize") {
+          const section = sectionsOf(canvas).find((s) => s.id === drag.ref);
+          // Resize only changes what the section CONTAINS — contents are deliberately
+          // left where they are, which is what makes "draw a box around those three" work.
+          if (section) setCanvas(resizeSection(canvas, section.id, section.w + dx, section.h + dy));
+        } else if (drag.members) {
+          // The set captured at pointerdown, not a fresh membersOf() call — see the
+          // `members` field's own comment on why recomputing here would be wrong.
+          setCanvas(translateMany(canvas, drag.members, dx, dy));
+        }
+      } else if (drag.kind === "note") {
         const note = notesOf(canvas).find((n) => n.id === drag.ref);
         if (note) {
           setCanvas(
@@ -335,8 +380,11 @@ export function CanvasUnderlay({
 
   const endDrag = () => setDrag(null);
 
-  /** Right-click on the plane, a note, or a card — `on` says which. */
-  const openMenu = (e: React.MouseEvent, on: { noteId?: string; nodeRef?: string } = {}) => {
+  /** Right-click on the plane, a note, a card, or a section's title chip — `on` says which. */
+  const openMenu = (
+    e: React.MouseEvent,
+    on: { noteId?: string; nodeRef?: string; sectionId?: string } = {},
+  ) => {
     const el = viewportRef.current;
     if (!el) return;
     e.preventDefault();
@@ -360,6 +408,34 @@ export function CanvasUnderlay({
   const addNoteHere = () => {
     if (!menu) return;
     setCanvas(addNote(canvas, crypto.randomUUID(), menu.x, menu.y));
+    setMenu(null);
+  };
+
+  const addSectionHere = () => {
+    if (!menu) return;
+    setCanvas(addSection(canvas, crypto.randomUUID(), menu.x, menu.y, 900, 640, "Section"));
+    setMenu(null);
+  };
+
+  const setSectionColorHere = (color: number | null) => {
+    if (menu?.sectionId) setCanvas(setSectionColor(canvas, menu.sectionId, color));
+    setMenu(null);
+  };
+
+  /** Requests CanvasSectionFrame open its own inline editor — see `renameTarget`/
+   *  `renameNonce` above for why this is a request rather than the edit state itself. */
+  const renameSectionHere = () => {
+    if (menu?.sectionId) {
+      setRenameTarget(menu.sectionId);
+      setRenameNonce((n) => n + 1);
+    }
+    setMenu(null);
+  };
+
+  const deleteSectionHere = () => {
+    // Removes the container only — see removeSection's own doc comment. What was inside
+    // stays on the board, exactly like "Remove from board" does for a single card.
+    if (menu?.sectionId) setCanvas(removeSection(canvas, menu.sectionId));
     setMenu(null);
   };
 
@@ -424,9 +500,33 @@ export function CanvasUnderlay({
         className="canvas-plane"
         style={{ transform: `translate(${canvas.pan.x}px, ${canvas.pan.y}px) scale(${canvas.zoom})` }}
       >
-        {/* Tethers, drawn UNDER everything. Each runs centre to centre and is then clipped
-            for free by the boxes painting over it, so what remains is exactly the gap
-            between a note and the session it is about. */}
+        {/* Sections FIRST, so document order alone puts them behind everything else — no
+            z-index, no stored z. sectionsByZ orders by descending area so a nested section
+            paints over its parent; see that function's comment for why the order is
+            derived rather than stored. */}
+        {sectionsByZ(canvas).map((section) => (
+          <CanvasSectionFrame
+            key={section.id}
+            section={section}
+            selected={drag?.kind === "section" && drag.ref === section.id}
+            editRequest={renameTarget === section.id ? renameNonce : undefined}
+            onMovePointerDown={(e) => {
+              e.stopPropagation();
+              onPointerDown(e, section.id, "move", "section");
+            }}
+            onResizePointerDown={(e) => {
+              e.stopPropagation();
+              onPointerDown(e, section.id, "resize", "section");
+            }}
+            onContextMenu={(e) => openMenu(e, { sectionId: section.id })}
+            onRename={(title) => setCanvas(setSectionTitle(canvas, section.id, title))}
+          />
+        ))}
+
+        {/* Tethers, drawn under notes and cards (sections are further back still). Each
+            runs centre to centre and is then clipped for free by the boxes painting over
+            it, so what remains is exactly the gap between a note and the session it is
+            about. */}
         {tethers.length > 0 && (
           <svg className="canvas-links" aria-hidden>
             {tethers.map(({ note, node }) => {
@@ -608,7 +708,7 @@ export function CanvasUnderlay({
         })}
       </div>
 
-      {canvas.nodes.length === 0 && notesOf(canvas).length === 0 && (
+      {canvas.nodes.length === 0 && notesOf(canvas).length === 0 && sectionsOf(canvas).length === 0 && (
         <div className="canvas-empty">
           Empty canvas — drag a session in from the sidebar, or right-click to add a section.
         </div>
@@ -630,10 +730,19 @@ export function CanvasUnderlay({
           linkedRef={
             menu.noteId ? notesOf(canvas).find((n) => n.id === menu.noteId)?.linkedRef : undefined
           }
+          sectionColor={
+            menu.sectionId
+              ? (sectionsOf(canvas).find((s) => s.id === menu.sectionId)?.color ?? null)
+              : null
+          }
           canAddSession={selectedProjectId !== null}
           onClose={closeMenu}
           onAddSession={addSessionHere}
           onAddNote={addNoteHere}
+          onAddSectionHere={addSectionHere}
+          onSetSectionColor={setSectionColorHere}
+          onRenameSection={renameSectionHere}
+          onDeleteSection={deleteSectionHere}
           onLinkNote={(ref) => {
             if (menu.noteId) setCanvas(linkNote(canvas, menu.noteId, ref));
             setMenu(null);
@@ -676,10 +785,15 @@ function CanvasMenu({
   menu,
   sessions,
   linkedRef,
+  sectionColor,
   canAddSession,
   onClose,
   onAddSession,
   onAddNote,
+  onAddSectionHere,
+  onSetSectionColor,
+  onRenameSection,
+  onDeleteSection,
   onLinkNote,
   onDeleteNote,
   onOpenSession,
@@ -687,17 +801,25 @@ function CanvasMenu({
   onRemoveFromBoard,
   onDeleteSession,
 }: {
-  menu: { screenX: number; screenY: number; noteId?: string; nodeRef?: string };
+  menu: { screenX: number; screenY: number; noteId?: string; nodeRef?: string; sectionId?: string };
   /** Link targets, when the menu is a note's. */
   sessions: Array<{ id: string; name: string }>;
   /** The note's current link, so the list can mark it. */
   linkedRef?: string;
+  /** The section's current colour index, when the menu is a section's — null for neutral,
+   *  so the swatch row can mark which one is active. */
+  sectionColor: number | null;
   /** Whether a project is selected for "New session here" to create into. False disables
    *  the item instead of hiding it, so it stays a discoverable action. */
   canAddSession: boolean;
   onClose: () => void;
   onAddSession: () => void;
   onAddNote: () => void;
+  onAddSectionHere: () => void;
+  onSetSectionColor: (color: number | null) => void;
+  onRenameSection: () => void;
+  /** Removes the container only — everything inside stays on the board. */
+  onDeleteSection: () => void;
   onLinkNote: (ref: string | null) => void;
   onDeleteNote: () => void;
   onOpenSession: () => void;
@@ -801,6 +923,38 @@ function CanvasMenu({
               Delete session…
             </button>
           </>
+        ) : menu.sectionId ? (
+          <>
+            <div className="context-menu-label">Colour</div>
+            {/* A row, not PROJECT_PALETTE's hover-and-wait flyout: a section's palette is
+                six colours plus neutral, small enough to show at once. */}
+            <div className="canvas-menu-swatches">
+              <button
+                className={`canvas-swatch neutral ${sectionColor === null ? "sel" : ""}`}
+                title="Neutral"
+                onClick={() => onSetSectionColor(null)}
+              />
+              {SECTION_PALETTE.map((c, i) => (
+                <button
+                  key={c}
+                  className={`canvas-swatch ${sectionColor === i ? "sel" : ""}`}
+                  style={{ background: c }}
+                  title={`Colour ${i + 1}`}
+                  onClick={() => onSetSectionColor(i)}
+                />
+              ))}
+            </div>
+            <div className="context-menu-sep" />
+            <button onClick={onRenameSection}>Rename</button>
+            <div className="context-menu-sep" />
+            <button
+              className="danger"
+              onClick={onDeleteSection}
+              title="Removes the container. Everything inside stays on the board."
+            >
+              Delete section
+            </button>
+          </>
         ) : (
           <>
             <button
@@ -811,6 +965,7 @@ function CanvasMenu({
               New session here
             </button>
             <button onClick={onAddNote}>Add sticky note</button>
+            <button onClick={onAddSectionHere}>New section here</button>
           </>
         )}
       </div>

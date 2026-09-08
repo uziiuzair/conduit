@@ -581,6 +581,30 @@ button {
   vertical-align: -1px;
 }
 
+/* A section's colour picker: a ROW rather than PROJECT_PALETTE's flyout list above —
+   SECTION_PALETTE (canvas.ts) is six colours plus neutral, small enough to show at once
+   without a submenu's hover-and-wait. */
+.canvas-menu-swatches {
+  display: flex;
+  gap: 6px;
+  padding: 4px 9px 6px;
+}
+.canvas-swatch {
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  flex: none;
+  padding: 0;
+  cursor: pointer;
+  border: 2px solid transparent;
+}
+.canvas-swatch.neutral {
+  background: var(--border);
+}
+.canvas-swatch.sel {
+  border-color: var(--text-bright);
+}
+
 .add-bar {
   border-top: 1px solid var(--border);
 }
@@ -1057,6 +1081,23 @@ button {
 @keyframes canvas-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.35; } }
 @media (prefers-reduced-motion: reduce) {
   .canvas-dot.status-running { animation: none; }
+}
+
+/* Sections paint behind everything by document order — see sectionsByZ for why the order is
+   derived rather than stored. The title chip sits ABOVE the box so it stays grabbable when
+   the box is full of cards. */
+.canvas-section { position: absolute; border-radius: 10px; pointer-events: none; }
+.canvas-section-box { position: absolute; inset: 0; border-radius: 10px; border: 2px solid; }
+.canvas-section-title {
+  position: absolute; top: -26px; left: 0; pointer-events: auto; cursor: grab;
+  font-size: 12px; font-weight: 600; padding: 3px 10px; border-radius: 6px;
+  color: #fff; white-space: nowrap; max-width: 70%; overflow: hidden; text-overflow: ellipsis;
+}
+.canvas-section-title.editing { pointer-events: auto; border: none; outline: none; font: inherit; color: #fff; }
+.canvas-section.selected .canvas-section-box { box-shadow: 0 0 0 2px var(--accent); }
+.canvas-section-grip {
+  position: absolute; right: -6px; bottom: -6px; width: 14px; height: 14px;
+  pointer-events: auto; cursor: nwse-resize; border-radius: 3px; background: var(--border);
 }
 
 .canvas-empty {
