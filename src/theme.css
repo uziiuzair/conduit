@@ -827,7 +827,9 @@ button {
   z-index: 1;
   overflow: hidden;
   background: var(--panel-bg);
-  cursor: grab;
+  /* Plain drag marquees now (pan moved to space-drag / middle-drag), so the resting
+     cursor is a plain pointer rather than the "grab" hand that implied panning. */
+  cursor: default;
   /* A dot grid gives pan and zoom something to read against — without it, moving an
      empty region looks like nothing happened. */
   background-image: radial-gradient(circle, var(--border) 1px, transparent 1px);
@@ -835,6 +837,13 @@ button {
 }
 .canvas-underlay.panning { cursor: grabbing; }
 .canvas-underlay.drop-active { outline: 2px dashed var(--accent); outline-offset: -6px; }
+
+/* Rubber-band selection. Screen-space (see CanvasView's marquee div), so it never scales
+   with zoom or slides with pan the way plane content does. */
+.canvas-marquee {
+  position: absolute; border: 1px solid var(--accent); pointer-events: none;
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+}
 .canvas-plane { position: absolute; top: 0; left: 0; transform-origin: 0 0; }
 
 /* In canvas mode the stack is the pannable plane itself, so it shares the underlay's
@@ -885,6 +894,7 @@ button {
   box-shadow: 0 4px 14px rgba(0, 0, 0, 0.3);
   overflow: hidden;
 }
+.canvas-note.selected { box-shadow: 0 0 0 2px var(--accent); }
 
 /* Drag strip. Empty until the note is linked, at which point it names the session — the
    text itself stays the note's content. */
@@ -1002,6 +1012,7 @@ button {
 }
 .canvas-card.status-needsInput { border-color: var(--accent); }
 .canvas-card.status-running { border-color: color-mix(in srgb, var(--accent) 45%, var(--border)); }
+.canvas-card.selected { box-shadow: 0 0 0 2px var(--accent); }
 
 .canvas-card-head {
   display: flex; align-items: center; gap: 7px; flex: none;

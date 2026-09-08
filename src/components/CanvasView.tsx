@@ -3,6 +3,7 @@ import { useStore, type Session } from "../store";
 import { TERM_BASE_FONT } from "./Terminal";
 import { snapZoom } from "../terminalZoom";
 import {
+  type Box,
   CARD_H,
   CARD_W,
   FOOTER_H,
@@ -16,6 +17,10 @@ import {
   addNodeAt,
   addNote,
   addSection,
+  boxOfNode,
+  boxOfNote,
+  boxOfSection,
+  containsBox,
   fit,
   linkEndpoints,
   linkNote,
@@ -47,6 +52,10 @@ import { useCanvas } from "../hooks/useCanvas";
 import { AgentGlyph, glyphStateFor } from "./AgentGlyph";
 import { CanvasSectionFrame } from "./CanvasSection";
 import { deleteSession } from "./Sidebar";
+
+/** How far a pointer has to move before a gesture counts as a drag rather than a click —
+ *  shared by object-click-to-select and the marquee's own click/drag split. */
+const CLICK_DRAG_THRESHOLD_PX = 3;
 
 /**
  * The spatial view of the board: one node per curated session, each showing that session's
@@ -108,6 +117,72 @@ export function CanvasUnderlay({
      *  eating the board. */
     members?: Members;
   } | null>(null);
+
+  /** Ephemeral and never persisted — a selection is a thing you are doing, not a thing the
+   *  board is. Never written into CanvasState or localStorage. */
+  const [selection, setSelection] = useState<
+    Array<{ kind: "node" | "note" | "section"; id: string }>
+  >([]);
+  const isSelected = useCallback(
+    (kind: "node" | "note" | "section", id: string) =>
+      selection.some((s) => s.kind === kind && s.id === id),
+    [selection],
+  );
+  /** Click on an object selects it alone; shift-click toggles it in or out of the set. */
+  const selectObject = useCallback(
+    (kind: "node" | "note" | "section", id: string, additive: boolean) => {
+      setSelection((sel) => {
+        if (!additive) return [{ kind, id }];
+        const already = sel.some((s) => s.kind === kind && s.id === id);
+        return already ? sel.filter((s) => !(s.kind === kind && s.id === id)) : [...sel, { kind, id }];
+      });
+    },
+    [],
+  );
+
+  // Distinguishes a click from a drag: a move/resize/pan gesture that never crossed the
+  // threshold above is a click, and a click on an object selects it (see endDrag) while a
+  // drag does not also fire a spurious select of whatever it started on. Refs, not state —
+  // read once at gesture end, never rendered.
+  const movedRef = useRef(false);
+  const dragStartRef = useRef({ x: 0, y: 0 });
+
+  // Rubber-band selection. Screen-space, relative to the VIEWPORT element's own rect (never
+  // the host's — see the marquee-tracking effect below for why). null when no marquee is in
+  // progress. `additive` is captured at gesture start from the shift key, since a marquee
+  // adds to the existing selection rather than replacing it while held.
+  const [marquee, setMarquee] = useState<{
+    x0: number;
+    y0: number;
+    x1: number;
+    y1: number;
+    additive: boolean;
+  } | null>(null);
+  const marqueeRef = useRef(marquee);
+  marqueeRef.current = marquee;
+
+  // Space-drag pans, since plain-drag on empty plane now marquees (see the plane's own
+  // pointerdown handler and the marquee-tracking effect below). Tracked in a ref rather
+  // than state — it drives an imperative check inside a pointerdown handler, not a render.
+  // Ignored while the keystroke lands in an editable element (a note, a section's title
+  // editor) so ordinary typing of the space bar never arms panning.
+  const spaceHeldRef = useRef(false);
+  useEffect(() => {
+    const isEditable = (t: EventTarget | null) =>
+      !!(t as Element | null)?.closest?.("textarea, input, [contenteditable='true']");
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.code === "Space" && !isEditable(e.target)) spaceHeldRef.current = true;
+    };
+    const onKeyUp = (e: KeyboardEvent) => {
+      if (e.code === "Space") spaceHeldRef.current = false;
+    };
+    window.addEventListener("keydown", onKeyDown);
+    window.addEventListener("keyup", onKeyUp);
+    return () => {
+      window.removeEventListener("keydown", onKeyDown);
+      window.removeEventListener("keyup", onKeyUp);
+    };
+  }, []);
 
   // "Rename" in a section's context menu opens the SAME inline editor as a double-click on
   // its title chip, but that editor's state lives inside CanvasSectionFrame — a sibling of
@@ -315,14 +390,92 @@ export function CanvasUnderlay({
     };
   }, [dropActive]);
 
+  // Marquee drag-tracking: bound to the ancestor in the capture phase, exactly like the
+  // wheel and drag-and-drop handlers above and for the identical reason — `.term-stack` is
+  // a sibling painted above this element, so a plain listener bound to the underlay would
+  // lose the drag the instant it crossed a card's live terminal. A marquee that cannot be
+  // drawn across a card cannot select the things people most want to select. Reads/writes
+  // through refs (`marqueeRef`, `canvasRef`) rather than the closed-over `marquee`/`canvas`
+  // so the effect can bind once and stay correct across the whole gesture.
+  useEffect(() => {
+    const el = viewportRef.current;
+    const host = el?.parentElement ?? el;
+    if (!el || !host) return;
+    const onMove = (e: PointerEvent) => {
+      if (!marqueeRef.current) return;
+      const rect = el.getBoundingClientRect();
+      setMarquee((m) => (m ? { ...m, x1: e.clientX - rect.left, y1: e.clientY - rect.top } : m));
+    };
+    const onUp = () => {
+      const cur = marqueeRef.current;
+      if (!cur) return;
+      setMarquee(null);
+      const x0 = Math.min(cur.x0, cur.x1);
+      const y0 = Math.min(cur.y0, cur.y1);
+      const x1 = Math.max(cur.x0, cur.x1);
+      const y1 = Math.max(cur.y0, cur.y1);
+      if (x1 - x0 < CLICK_DRAG_THRESHOLD_PX && y1 - y0 < CLICK_DRAG_THRESHOLD_PX) {
+        // Never dragged far enough to be a marquee — a plain click on empty plane, which
+        // clears the selection. A shift-click has nothing to add or remove, so it leaves
+        // the existing selection alone rather than clearing it.
+        if (!cur.additive) setSelection([]);
+        return;
+      }
+      const c = canvasRef.current;
+      const p0 = toCanvasPoint(c, x0, y0);
+      const p1 = toCanvasPoint(c, x1, y1);
+      const box: Box = { x: p0.x, y: p0.y, w: p1.x - p0.x, h: p1.y - p0.y };
+      const hits: Array<{ kind: "node" | "note" | "section"; id: string }> = [
+        ...c.nodes
+          .filter((n) => containsBox(box, boxOfNode(n)))
+          .map((n) => ({ kind: "node" as const, id: n.ref })),
+        ...notesOf(c)
+          .filter((n) => containsBox(box, boxOfNote(n)))
+          .map((n) => ({ kind: "note" as const, id: n.id })),
+        ...sectionsOf(c)
+          .filter((s) => containsBox(box, boxOfSection(s)))
+          .map((s) => ({ kind: "section" as const, id: s.id })),
+      ];
+      setSelection((sel) => {
+        if (!cur.additive) return hits;
+        const merged = [...sel];
+        for (const h of hits) if (!merged.some((s) => s.kind === h.kind && s.id === h.id)) merged.push(h);
+        return merged;
+      });
+    };
+    host.addEventListener("pointermove", onMove, { capture: true });
+    host.addEventListener("pointerup", onUp, { capture: true });
+    host.addEventListener("pointercancel", onUp, { capture: true });
+    return () => {
+      host.removeEventListener("pointermove", onMove, { capture: true });
+      host.removeEventListener("pointerup", onUp, { capture: true });
+      host.removeEventListener("pointercancel", onUp, { capture: true });
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- intentionally mount-once: every
+    // value read inside comes through a ref (marqueeRef, canvasRef), so rebinding on canvas
+    // or selection churn would only add pointless listener thrash mid-gesture.
+  }, []);
+
   const onPointerDown = (
     e: React.PointerEvent,
     ref: string | null,
     mode: "pan" | "move" | "resize",
     kind: "node" | "note" | "section" = "node",
   ) => {
+    // Middle-drag always pans, regardless of what the caller asked for — a middle click
+    // must never start a move or a resize. This is the one case the button-0 guard below
+    // is relaxed for.
+    if (e.button === 1) {
+      (e.currentTarget as Element).setPointerCapture?.(e.pointerId);
+      movedRef.current = false;
+      dragStartRef.current = { x: e.clientX, y: e.clientY };
+      setDrag({ ref: null, kind: "node", mode: "pan", lastX: e.clientX, lastY: e.clientY });
+      return;
+    }
     if (e.button !== 0) return;
     (e.currentTarget as Element).setPointerCapture?.(e.pointerId);
+    movedRef.current = false;
+    dragStartRef.current = { x: e.clientX, y: e.clientY };
     // Membership is captured ONCE, here, at gesture start — never recomputed on later
     // pointermoves. A resize is deliberately excluded: it changes what the section
     // contains rather than moving anything, so it has no members to capture.
@@ -336,6 +489,12 @@ export function CanvasUnderlay({
 
   const onPointerMove = (e: React.PointerEvent) => {
     if (!drag) return;
+    if (
+      Math.abs(e.clientX - dragStartRef.current.x) > CLICK_DRAG_THRESHOLD_PX ||
+      Math.abs(e.clientY - dragStartRef.current.y) > CLICK_DRAG_THRESHOLD_PX
+    ) {
+      movedRef.current = true;
+    }
     const dxScreen = e.clientX - drag.lastX;
     const dyScreen = e.clientY - drag.lastY;
     if (drag.mode === "pan" || drag.ref === null) {
@@ -378,7 +537,19 @@ export function CanvasUnderlay({
     setDrag({ ...drag, lastX: e.clientX, lastY: e.clientY });
   };
 
-  const endDrag = () => setDrag(null);
+  // A plain click (no meaningful movement) selects the object the gesture started on;
+  // shift-click toggles it in or out of the set. Pan gestures (drag.ref === null, both
+  // space-drag and middle-drag) never select — see the plane's own pointerdown handler and
+  // the middle-button branch above for why a pan is the only mode that can have a null ref.
+  const endDrag = (e: React.PointerEvent) => {
+    if (drag && drag.ref !== null && !movedRef.current) {
+      selectObject(drag.kind, drag.ref, e.shiftKey);
+    }
+    setDrag(null);
+  };
+  // A cancelled gesture (pointercancel) is not a deliberate release — clear the drag
+  // without treating it as a click.
+  const cancelDrag = () => setDrag(null);
 
   /** Right-click on the plane, a note, a card, or a section's title chip — `on` says which. */
   const openMenu = (
@@ -484,12 +655,28 @@ export function CanvasUnderlay({
         dropActive ? "drop-active" : ""
       }`}
       onPointerDown={(e) => {
-        if (e.target === e.currentTarget || (e.target as Element).classList.contains("canvas-plane"))
+        if (
+          !(e.target === e.currentTarget || (e.target as Element).classList.contains("canvas-plane"))
+        )
+          return;
+        // Middle-drag and space-drag pan; plain left-drag on empty plane marquees instead
+        // (below) — see the brief's rationale for moving pan off plain-drag.
+        if (e.button === 1 || (e.button === 0 && spaceHeldRef.current)) {
           onPointerDown(e, null, "pan");
+          return;
+        }
+        if (e.button !== 0) return;
+        const el = viewportRef.current;
+        if (!el) return;
+        e.preventDefault();
+        const rect = el.getBoundingClientRect();
+        const x = e.clientX - rect.left;
+        const y = e.clientY - rect.top;
+        setMarquee({ x0: x, y0: y, x1: x, y1: y, additive: e.shiftKey });
       }}
       onPointerMove={onPointerMove}
       onPointerUp={endDrag}
-      onPointerCancel={endDrag}
+      onPointerCancel={cancelDrag}
       onContextMenu={(e) => openMenu(e)}
       // Session-drop handling (dragover/dragleave/drop) is bound imperatively to the
       // common ancestor in an effect below — see that effect's comment for why a JSX
@@ -508,7 +695,7 @@ export function CanvasUnderlay({
           <CanvasSectionFrame
             key={section.id}
             section={section}
-            selected={drag?.kind === "section" && drag.ref === section.id}
+            selected={isSelected("section", section.id)}
             editRequest={renameTarget === section.id ? renameNonce : undefined}
             onMovePointerDown={(e) => {
               e.stopPropagation();
@@ -541,7 +728,7 @@ export function CanvasUnderlay({
         {notesOf(canvas).map((note) => (
           <div
             key={note.id}
-            className="canvas-note"
+            className={`canvas-note ${isSelected("note", note.id) ? "selected" : ""}`}
             style={{ left: note.x, top: note.y, width: note.w, height: note.h }}
             onContextMenu={(e) => openMenu(e, { noteId: note.id })}
           >
@@ -616,7 +803,9 @@ export function CanvasUnderlay({
           return (
             <div
               key={node.ref}
-              className={`canvas-card status-${status} ${showTerminals ? "live" : "compact"}`}
+              className={`canvas-card status-${status} ${showTerminals ? "live" : "compact"} ${
+                isSelected("node", node.ref) ? "selected" : ""
+              }`}
               style={{ left: node.x, top: node.y, width: nodeW(node), height: nodeH(node) }}
               onContextMenu={(e) => openMenu(e, { nodeRef: node.ref })}
             >
@@ -708,9 +897,24 @@ export function CanvasUnderlay({
         })}
       </div>
 
+      {/* Screen-space, a sibling of `.canvas-plane` rather than a child of it — the plane
+          carries the pan/zoom transform and the marquee must not scale or slide with it. */}
+      {marquee && (
+        <div
+          className="canvas-marquee"
+          style={{
+            left: Math.min(marquee.x0, marquee.x1),
+            top: Math.min(marquee.y0, marquee.y1),
+            width: Math.abs(marquee.x1 - marquee.x0),
+            height: Math.abs(marquee.y1 - marquee.y0),
+          }}
+        />
+      )}
+
       {canvas.nodes.length === 0 && notesOf(canvas).length === 0 && sectionsOf(canvas).length === 0 && (
         <div className="canvas-empty">
-          Empty canvas — drag a session in from the sidebar, or right-click to add a section.
+          <div>Empty canvas — drag a session in from the sidebar, or right-click to add a section.</div>
+          <div>Drag to select · Space-drag or middle-drag to pan</div>
         </div>
       )}
 
