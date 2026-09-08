@@ -29,7 +29,7 @@ import {
 import { cleanupEdits } from "./trim";
 import { appendItem, type ChatItem, type RootChat } from "./rootChat";
 import { inProfile, type Profile } from "./profiles";
-import type { CanvasState } from "./canvas";
+import { type CanvasState, emptyCanvas, migrateNotes } from "./canvas";
 import type { ContinuityFeed } from "./continuityFeed";
 import type * as Monaco from "monaco-editor";
 import type { SettingsTab } from "./components/Settings";
@@ -275,10 +275,12 @@ export interface ContinuityView { presence: Presence[]; handoffs: CardHandoff[] 
 // every store type from one place.
 export type { ContinuityFeed, FeedDecision, FeedMessage } from "./continuityFeed";
 
-/** Center pane mode, per project: the terminal workspace, the task board, or the
- *  spatial canvas. Every mode is an OVERLAY over the still-mounted terminals — none of
- *  them may unmount or reparent a TerminalView. */
-export type CenterMode = "terminals" | "board" | "canvas";
+/** Center pane mode, per project: the terminal workspace or the task board. The spatial
+ *  canvas used to be a third mode here, per project; it is now the global board
+ *  (`canvas`/`canvasOpen` below), which is not a project's mode to be in — it can be open
+ *  regardless of which project (if any) is selected. Every mode is an OVERLAY over the
+ *  still-mounted terminals — none of them may unmount or reparent a TerminalView. */
+export type CenterMode = "terminals" | "board";
 
 export type SessionStatus = "idle" | "running" | "needsInput" | "done";
 export type TodoStatus = "pending" | "in_progress" | "completed";
@@ -658,11 +660,15 @@ function writeTerminalRenderer(v: TerminalRenderer): void {
   }
 }
 
-// Canvas view: card positions / pan / zoom per project. Same persisted-pref pattern as the
-// toggles above. A corrupt or hand-edited value falls back to an empty canvas rather than
-// throwing on load. Membership here is curated, not derived, so an empty canvas does not
-// repopulate itself — the fallback is a real loss of the user's arrangement, just a smaller
-// one than a load failure.
+// Canvas view: card positions / pan / zoom, now ONE global board rather than per project
+// (see CenterMode above). Same persisted-pref pattern as the toggles above. A corrupt or
+// hand-edited value falls back to an empty canvas rather than throwing on load. Membership
+// here is curated, not derived, so an empty canvas does not repopulate itself — the fallback
+// is a real loss of the user's arrangement, just a smaller one than a load failure.
+//
+// OLD per-project key, kept read-only: readCanvas() below folds it into the new global key
+// exactly once (migrateNotes), and the key itself is never deleted afterward, so a user who
+// hits a bad migration still has the original per-project data sitting untouched.
 const CANVASES_KEY = "conduit.canvases";
 function readCanvases(): Record<string, CanvasState> {
   try {
@@ -675,11 +681,55 @@ function readCanvases(): Record<string, CanvasState> {
     return {};
   }
 }
-function writeCanvases(v: Record<string, CanvasState>): void {
+
+const CANVAS_KEY = "conduit.canvas";
+const CANVAS_BAK_KEY = "conduit.canvas.bak";
+
+// Set by readCanvas() when the value under CANVAS_KEY was present but failed to parse.
+// Curated membership (Task 6) removed the auto-placer that used to make a corrupt canvas
+// self-heal, so a parse failure is now a real, unrecoverable loss of the user's arrangement
+// — and without this flag, the very next writeCanvas() (e.g. the first pan after opening the
+// board) would silently overwrite that unreadable-but-still-PRESENT string with a fresh
+// empty canvas, destroying even the chance of hand recovery or a future migration. The flag
+// is consumed (and cleared) by the first writeCanvas() call after the failed read, so the
+// backup is taken exactly once per failure rather than on every subsequent write.
+let lastReadFailed = false;
+
+function writeCanvas(v: CanvasState): void {
   try {
-    localStorage.setItem(CANVASES_KEY, JSON.stringify(v));
+    if (lastReadFailed) {
+      lastReadFailed = false;
+      const raw = localStorage.getItem(CANVAS_KEY);
+      if (raw) localStorage.setItem(CANVAS_BAK_KEY, raw);
+    }
+    localStorage.setItem(CANVAS_KEY, JSON.stringify(v));
   } catch {
-    /* quota — non-fatal */
+    /* quota or private mode — the board is a convenience, not data to lose sleep over */
+  }
+}
+
+function readCanvas(): CanvasState {
+  try {
+    const raw = localStorage.getItem(CANVAS_KEY);
+    if (raw) {
+      const parsed = JSON.parse(raw) as CanvasState;
+      // A node written before the board went global carries no project, and a session id
+      // alone does not locate one. Dropping it costs a placement on a per-machine file;
+      // keeping it would mean every consumer handling a node it cannot resolve.
+      return {
+        ...parsed,
+        nodes: (parsed.nodes ?? []).filter((n) => typeof n.projectId === "string"),
+      };
+    }
+    // First run after the board went global. Notes cross; node placements do not, because
+    // they were auto-generated. The OLD key is deliberately left in place rather than
+    // deleted, so nothing here is unrecoverable.
+    const migrated = migrateNotes(readCanvases());
+    writeCanvas(migrated);
+    return migrated;
+  } catch {
+    lastReadFailed = true;
+    return emptyCanvas();
   }
 }
 
@@ -1513,13 +1563,18 @@ interface AppState {
   setCenterMode: (projectId: string, mode: CenterMode) => void;
   toggleCenterMode: (projectId: string) => void;
 
-  // ---- Canvas view (per project) ----
-  /** Card positions, pan and zoom per project. Persisted to localStorage rather than to
-   *  the Rust-side ProjectLayout: these are per-machine view preferences (like sidebar
-   *  collapse), and keeping them out of persisted project state means a canvas layout
-   *  cannot corrupt a project. Migrating into ProjectLayout stays open — see the spec. */
-  canvases: Record<string, CanvasState>;
-  setCanvas: (projectId: string, next: CanvasState) => void;
+  // ---- Canvas view (global board) ----
+  /** The one global board. Cross-project, curated, per-machine. Persisted to localStorage
+   *  rather than to the Rust-side ProjectLayout: this is a per-machine view preference
+   *  (like sidebar collapse), and keeping it out of persisted project state means a canvas
+   *  layout cannot corrupt a project. Migrating into ProjectLayout stays open — see the
+   *  spec. */
+  canvas: CanvasState;
+  setGlobalCanvas: (next: CanvasState) => void;
+  /** Whether the board is showing. Workspace-level, deliberately NOT per project — the
+   *  board holds sessions from every project, so there is no project for it to belong to. */
+  canvasOpen: boolean;
+  setCanvasOpen: (open: boolean) => void;
   setBoard: (projectId: string, snapshot: BoardSnapshot) => void;
   setContinuity: (projectId: string, view: ContinuityView) => void;
   setContinuityFeed: (projectId: string, feed: ContinuityFeed) => void;
@@ -3434,18 +3489,19 @@ export const useStore = create<AppState>((set, get) => {
 
     // ---- Task board (Conductor board) ----
     centerMode: {},
-    canvases: readCanvases(),
+    canvas: readCanvas(),
+    canvasOpen: false,
     boards: {},
     continuity: {},
     continuityFeed: {},
     setCenterMode: (projectId, mode) =>
       set((s) => ({ centerMode: { ...s.centerMode, [projectId]: mode } })),
 
-    setCanvas: (projectId, next) =>
-      set((s) => {
-        const canvases = { ...s.canvases, [projectId]: next };
-        writeCanvases(canvases);
-        return { canvases };
+    setCanvasOpen: (open) => set({ canvasOpen: open }),
+    setGlobalCanvas: (next) =>
+      set(() => {
+        writeCanvas(next);
+        return { canvas: next };
       }),
     toggleCenterMode: (projectId) =>
       set((s) => {

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { useStore } from "../store";
+import { useStore, type Session } from "../store";
 import { TERM_BASE_FONT } from "./Terminal";
 import { snapZoom } from "../terminalZoom";
 import {
@@ -28,13 +28,13 @@ import {
 } from "../canvas";
 import { meterLevel, meterTitle } from "../contextMeter";
 import { resolveProjectColor } from "../layout";
-import { useProjectCanvas } from "../hooks/useProjectCanvas";
+import { useCanvas } from "../hooks/useCanvas";
 import { AgentGlyph, glyphStateFor } from "./AgentGlyph";
 import { deleteSession } from "./Sidebar";
 
 /**
- * The spatial view of a project: one node per session, each showing that session's REAL
- * live terminal.
+ * The spatial view of the board: one node per curated session, each showing that session's
+ * REAL live terminal — from any project, since the board is global rather than per project.
  *
  * The terminal is not cloned, mirrored, or re-attached. Every session's `TerminalView` is
  * already mounted for its whole life inside `.term-stack` and positioned purely by a
@@ -53,11 +53,9 @@ import { deleteSession } from "./Sidebar";
  * Design: docs/superpowers/specs/2026-08-10-project-canvas-view-viability.md
  */
 export function CanvasUnderlay({
-  projectId,
   viewportRef,
   onZoomActive,
 }: {
-  projectId: string;
   /** Owned by WorkspaceCenter and shared with the toolbar, which needs the viewport's
    *  size for Fit but is a sibling of this element rather than a child. */
   viewportRef: React.RefObject<HTMLDivElement | null>;
@@ -65,16 +63,20 @@ export function CanvasUnderlay({
    *  WorkspaceCenter hides the terminals for that window — see its `zooming`. */
   onZoomActive: (active: boolean) => void;
 }) {
-  const project = useStore((s) => s.projects.find((p) => p.id === projectId));
   const live = useStore((s) => s.live);
   const selectSession = useStore((s) => s.selectSession);
-  const setCenterMode = useStore((s) => s.setCenterMode);
+  const setCanvasOpen = useStore((s) => s.setCanvasOpen);
   const addSession = useStore((s) => s.addSession);
   const removeSession = useStore((s) => s.removeSession);
   const projects = useStore((s) => s.projects);
+  // "New session here" has to land somewhere -- the board itself spans every project, so
+  // this is the one place left that still means a single project: whichever one is
+  // selected in the sidebar right now. Null (nothing selected) disables the menu item
+  // rather than guessing a project for it.
+  const selectedProjectId = useStore((s) => s.selectedProjectId);
   const sessionContext = useStore((s) => s.sessionContext);
   const autoProjectColors = useStore((s) => s.autoProjectColors);
-  const { canvas, setCanvas } = useProjectCanvas(projectId);
+  const { canvas, setCanvas } = useCanvas();
 
   // ref === null means panning the plane; mode distinguishes moving from resizing, since
   // both are pointer drags over the same element tree; kind says which array the id
@@ -107,15 +109,23 @@ export function CanvasUnderlay({
     setCanvas(fit(canvas, el.clientWidth, el.clientHeight));
   }, [canvas, setCanvas]);
 
-  // Fit once per project so the canvas never opens on empty space with the cards
-  // off-screen. Only when there is no saved pan/zoom to respect.
-  const fittedRef = useRef<string | null>(null);
-  const hasStored = useStore((s) => Boolean(s.canvases[projectId]));
+  // Fit once so the board never opens on empty space with the cards off-screen. Only when
+  // there is no saved pan/zoom to respect -- there is now one board rather than one per
+  // project, so "no saved pan/zoom" is read directly off the plane instead of off a
+  // per-project record that no longer exists: pan/zoom still sitting at the untouched
+  // default is what a board nobody has ever panned or zoomed looks like, whether that is
+  // because it is brand new or because only its NOTES were migrated in (which carry their
+  // own x/y but never a pan/zoom -- see migrateNotes in canvas.ts).
+  const fittedRef = useRef(false);
   useLayoutEffect(() => {
-    if (fittedRef.current === projectId || hasStored) return;
-    fittedRef.current = projectId;
-    fitToContent();
-  }, [projectId, hasStored, fitToContent]);
+    if (fittedRef.current) return;
+    fittedRef.current = true;
+    const untouched = canvas.pan.x === 0 && canvas.pan.y === 0 && canvas.zoom === 1;
+    if (untouched) fitToContent();
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- intentionally one-shot: see
+    // fittedRef above. Re-running on every `canvas`/`fitToContent` change (both of which
+    // change on virtually every interaction) would re-fit on the user's own panning.
+  }, []);
 
   const settleRef = useRef<number | null>(null);
   // The wheel closure is rebuilt per render but its timeout is not; the ref is what the
@@ -261,7 +271,10 @@ export function CanvasUnderlay({
   };
 
   /**
-   * Create a session at the point the menu was opened.
+   * Create a session at the point the menu was opened, in the currently SELECTED project —
+   * the board itself has no project of its own for a brand new session to belong to. The
+   * menu item is disabled when nothing is selected (see CanvasMenu), so `menu` being open
+   * here implies `selectedProjectId` is set; the null check is defensive only.
    *
    * TRANSIENT: this used to also drop the new session's card at the click point, writing
    * the node directly rather than letting `reconcile` auto-place it. `reconcile` (and its
@@ -270,12 +283,17 @@ export function CanvasUnderlay({
    * Accepted rather than patched twice; do not add a workaround here.
    */
   const addSessionHere = () => {
-    if (!menu) return;
+    if (!menu || !selectedProjectId) return;
     setMenu(null);
-    void addSession(projectId);
+    void addSession(selectedProjectId);
   };
 
-  const byId = useMemo(() => new Map((project?.sessions ?? []).map((s) => [s.id, s])), [project]);
+  // Keyed across EVERY project, not one: a node's session may belong to any of them — the
+  // whole point of the global board.
+  const byId = useMemo(
+    () => new Map(projects.flatMap((p) => p.sessions.map((s): [string, Session] => [s.id, s]))),
+    [projects],
+  );
 
   // Note/card pairs to draw a tether between. A link whose session is gone is cleared by
   // pruneCanvas, so anything unresolvable here is a card that has not been placed yet.
@@ -388,7 +406,7 @@ export function CanvasUnderlay({
             status === "needsInput" && liveEntry?.updatedAt
               ? Date.now() - liveEntry.updatedAt
               : null;
-          const ownerProject = projects.find((p) => p.sessions.some((s) => s.id === node.ref));
+          const ownerProject = projects.find((p) => p.id === node.projectId);
           // resolveProjectColor is the ONE place precedence is decided: a user-chosen colour
           // beats the derived accent, which is used only while autoProjectColors is on, and
           // null falls through to each consumer's neutral CSS fallback. Never call
@@ -411,8 +429,8 @@ export function CanvasUnderlay({
                   onPointerDown(e, node.ref, "move");
                 }}
                 onDoubleClick={() => {
-                  selectSession(projectId, node.ref);
-                  setCenterMode(projectId, "terminals");
+                  selectSession(node.projectId, node.ref);
+                  setCanvasOpen(false);
                 }}
                 title="Drag to move · double-click to open in the pane view"
               >
@@ -493,17 +511,23 @@ export function CanvasUnderlay({
 
       {canvas.nodes.length === 0 && notesOf(canvas).length === 0 && (
         <div className="canvas-empty">
-          Nothing here yet — right-click to add a session or a note.
+          Empty board — drag a session in from the sidebar, or right-click to add a section.
         </div>
       )}
 
       {menu && (
         <CanvasMenu
           menu={menu}
-          sessions={project?.sessions ?? []}
+          // Link targets for a note: sessions already ON the board, not every session in
+          // every project — a note ties to something you can see and drag a tether to.
+          sessions={canvas.nodes
+            .map((n) => byId.get(n.ref))
+            .filter((s): s is Session => s !== undefined)
+            .map((s) => ({ id: s.id, name: s.name }))}
           linkedRef={
             menu.noteId ? notesOf(canvas).find((n) => n.id === menu.noteId)?.linkedRef : undefined
           }
+          canAddSession={selectedProjectId !== null}
           onClose={closeMenu}
           onAddSession={addSessionHere}
           onAddNote={addNoteHere}
@@ -516,18 +540,20 @@ export function CanvasUnderlay({
             setMenu(null);
           }}
           onOpenSession={() => {
-            if (!menu.nodeRef) return;
+            const node = menu.nodeRef ? canvas.nodes.find((n) => n.ref === menu.nodeRef) : undefined;
             setMenu(null);
-            selectSession(projectId, menu.nodeRef);
-            setCenterMode(projectId, "terminals");
+            if (!node) return;
+            selectSession(node.projectId, node.ref);
+            setCanvasOpen(false);
           }}
           onNoteAbout={() => menu.nodeRef && addNoteAbout(menu.nodeRef)}
           onDeleteSession={() => {
             const ref = menu.nodeRef;
+            const node = ref ? canvas.nodes.find((n) => n.ref === ref) : undefined;
             setMenu(null);
             // Reuses the sidebar's own delete, confirms and all — the confirms ARE the
             // safety here, and a thinner second path would drift away from them.
-            if (ref) void deleteSession(projects, projectId, ref, removeSession);
+            if (ref && node) void deleteSession(projects, node.projectId, ref, removeSession);
           }}
         />
       )}
@@ -540,6 +566,7 @@ function CanvasMenu({
   menu,
   sessions,
   linkedRef,
+  canAddSession,
   onClose,
   onAddSession,
   onAddNote,
@@ -554,6 +581,9 @@ function CanvasMenu({
   sessions: Array<{ id: string; name: string }>;
   /** The note's current link, so the list can mark it. */
   linkedRef?: string;
+  /** Whether a project is selected for "New session here" to create into. False disables
+   *  the item instead of hiding it, so it stays a discoverable action. */
+  canAddSession: boolean;
   onClose: () => void;
   onAddSession: () => void;
   onAddNote: () => void;
@@ -647,7 +677,13 @@ function CanvasMenu({
           </>
         ) : (
           <>
-            <button onClick={onAddSession}>New session here</button>
+            <button
+              onClick={onAddSession}
+              disabled={!canAddSession}
+              title={canAddSession ? undefined : "Select a project first"}
+            >
+              New session here
+            </button>
             <button onClick={onAddNote}>Add sticky note</button>
           </>
         )}
@@ -662,21 +698,16 @@ function CanvasMenu({
  * top of the first row of nodes; the header was already always-visible, so it hosts these.
  */
 export function CanvasControls({
-  projectId,
   viewportRef,
 }: {
-  projectId: string;
   viewportRef: React.RefObject<HTMLDivElement | null>;
 }) {
-  const { canvas, setCanvas } = useProjectCanvas(projectId);
-  const setCenterMode = useStore((s) => s.setCenterMode);
+  const { canvas, setCanvas } = useCanvas();
+  const setCanvasOpen = useStore((s) => s.setCanvasOpen);
   const isLive = canvas.zoom >= LIVE_ZOOM_MIN;
-  // The visible way out is the header's Canvas toggle, which flips to "Hide canvas" while
-  // the canvas is open. This is only the keyboard route to the same action.
-  const exitCanvas = useCallback(
-    () => setCenterMode(projectId, "terminals"),
-    [projectId, setCenterMode],
-  );
+  // The visible way out is the header's Board toggle, which flips to "Hide board" while
+  // the board is open. This is only the keyboard route to the same action.
+  const exitCanvas = useCallback(() => setCanvasOpen(false), [setCanvasOpen]);
 
   // Escape leaves the canvas — but ONLY when the keystroke did not land somewhere that
   // owns it. Escape inside a live agent session is how you interrupt it, and stealing that

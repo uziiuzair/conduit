@@ -156,6 +156,15 @@ export default function App() {
         e.preventDefault();
         st.toggleCenterMode(st.selectedProjectId);
       }
+      // ⇧⌘C: toggle the global canvas board. Unlike ⇧⌘B above, this needs no selected
+      // project — the board is global — and no native menu accelerator claims
+      // CmdOrCtrl+Shift+C (verified against src-tauri/src/menu.rs).
+      if (e.shiftKey && (e.metaKey || e.ctrlKey) && !e.altKey && e.key.toLowerCase() === "c") {
+        e.preventDefault();
+        const s = useStore.getState();
+        s.setCanvasOpen(!s.canvasOpen);
+        return;
+      }
     };
     window.addEventListener("keydown", onKey, true);
     return () => window.removeEventListener("keydown", onKey, true);
