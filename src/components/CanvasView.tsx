@@ -519,7 +519,11 @@ export function CanvasUnderlay({
         <CanvasMenu
           menu={menu}
           // Link targets for a note: sessions already ON the board, not every session in
-          // every project — a note ties to something you can see and drag a tether to.
+          // every project. A link draws a tether to a NODE's position, and a session with
+          // no node has no endpoint — offering it here would let a note point at a session
+          // pruneCanvas would treat as dangling the moment anything re-pruned it (the same
+          // state stripLink exists to clean up after the fact). Narrowing the picker makes
+          // the invalid choice unofferable up front instead of merely unrepresentable later.
           sessions={canvas.nodes
             .map((n) => byId.get(n.ref))
             .filter((s): s is Session => s !== undefined)

@@ -696,12 +696,22 @@ const CANVAS_BAK_KEY = "conduit.canvas.bak";
 let lastReadFailed = false;
 
 function writeCanvas(v: CanvasState): void {
-  try {
-    if (lastReadFailed) {
-      lastReadFailed = false;
+  if (lastReadFailed) {
+    lastReadFailed = false;
+    // Deliberately its OWN try/catch, isolated from the real write below. This is the
+    // data-preservation path -- a backup mechanism that can suppress the write it exists to
+    // protect (e.g. a quota error thrown while writing the .bak copy) would be worse than no
+    // backup at all. Isolating it means a failure here is silently skipped -- the corrupt
+    // value is left exactly where it was, still recoverable by hand -- while the caller's
+    // actual write always gets a chance to run.
+    try {
       const raw = localStorage.getItem(CANVAS_KEY);
       if (raw) localStorage.setItem(CANVAS_BAK_KEY, raw);
+    } catch {
+      /* backup is best-effort; see comment above */
     }
+  }
+  try {
     localStorage.setItem(CANVAS_KEY, JSON.stringify(v));
   } catch {
     /* quota or private mode — the board is a convenience, not data to lose sleep over */
