@@ -37,6 +37,7 @@ mod plugins;
 mod proposals;
 mod pty;
 mod root_chat;
+mod root_mcp;
 mod routing;
 mod scrollback;
 mod search;
