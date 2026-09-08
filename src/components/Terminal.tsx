@@ -1,4 +1,4 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useLayoutEffect, useRef } from "react";
 import { Terminal as Xterm, type ILink, type IDisposable } from "@xterm/xterm";
 import {
   cellFromPoint,
@@ -14,6 +14,7 @@ import { invoke, Channel } from "@tauri-apps/api/core";
 import { currentTerminalTheme, registerTerminal } from "../themes";
 import { useStore, type SessionRole } from "../store";
 import { SessionChat } from "./SessionChat";
+import { fontForZoom } from "../terminalZoom";
 
 function b64ToBytes(b64: string): Uint8Array {
   const bin = atob(b64);
@@ -63,6 +64,15 @@ interface Props {
   onFocusGroup?: () => void;
   /** Positioning applied to the host (e.g. left/width % for the active group's slot). */
   style?: React.CSSProperties;
+  /**
+   * Canvas zoom, when this terminal is being placed by the canvas.
+   *
+   * Undefined everywhere else, which is what keeps pane mode byte-for-byte unchanged.
+   * The canvas sizes the host box in SCREEN pixels (`logical × canvasScale`) and carries
+   * no `scale()` transform, so the glyphs must be rasterized at `base × canvasScale` or
+   * they would be the wrong size rather than merely soft.
+   */
+  canvasScale?: number;
 }
 
 /**
@@ -85,6 +95,7 @@ export function TerminalView({
   focusOnReveal = true,
   onFocusGroup,
   style,
+  canvasScale,
 }: Props) {
   // Feature switch AND per-session state: the toggle only exists when the preference is
   // on, and only covers the sessions the user actually opened it for.
@@ -485,8 +496,23 @@ export function TerminalView({
     fitRef.current = fit;
 
     // Re-fit when the host area changes size (window resize, panel toggles).
+    //
+    // On the canvas the box is `logical × zoom`, so a ZOOM changes it too — and refitting
+    // for a zoom is exactly what must not happen: it renegotiates cols/rows with the PTY
+    // and reflows the agent's output. The box and the font scale by the same factor, so
+    // the grid is already correct; only a change in the LOGICAL size (the resize grip)
+    // is a real resize.
     const ro = new ResizeObserver(() => {
       if (!visibleRef.current) return;
+      const el = innerRef.current;
+      if (el) {
+        const scale = canvasScaleRef.current ?? 1;
+        const w = el.clientWidth / scale;
+        const h = el.clientHeight / scale;
+        const last = lastLogicalRef.current;
+        lastLogicalRef.current = { w, h };
+        if (last && Math.abs(last.w - w) < 1 && Math.abs(last.h - h) < 1) return;
+      }
       scheduleFit();
     });
     if (innerRef.current) ro.observe(innerRef.current);
@@ -538,6 +564,17 @@ export function TerminalView({
 
   // Track latest `visible` for the ResizeObserver closure.
   const visibleRef = useRef(visible);
+
+  // Read by the ResizeObserver closure, which is created once. A layout effect so the ref
+  // is current before the browser can deliver a resize for the box this scale just changed.
+  const canvasScaleRef = useRef(canvasScale);
+  useLayoutEffect(() => {
+    canvasScaleRef.current = canvasScale;
+  }, [canvasScale]);
+
+  /** Last host size in LOGICAL (unscaled) pixels, so a zoom-driven resize is recognisable. */
+  const lastLogicalRef = useRef<{ w: number; h: number } | null>(null);
+
   useEffect(() => {
     visibleRef.current = visible;
     if (!visible) return;
@@ -659,20 +696,27 @@ export function TerminalView({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [stopped]);
 
-  // App-wide font zoom (View menu). Setting options.fontSize changes cell metrics
-  // WITHOUT firing the ResizeObserver (the host box is unchanged), so cols/rows must
-  // be renegotiated with the PTY explicitly. Hidden keep-alive terminals skip the fit
-  // (0×0 hazard) and pick the new size up through the reveal-refit path.
+  // App-wide font zoom (View menu) and canvas zoom, which reach the terminal the same way:
+  // by changing the rasterized glyph size rather than by scaling a finished bitmap.
+  //
+  // Outside the canvas, setting options.fontSize changes cell metrics WITHOUT firing the
+  // ResizeObserver (the host box is unchanged), so cols/rows must be renegotiated with the
+  // PTY explicitly. ON the canvas the opposite holds and the fit must be skipped: the box
+  // already scaled by the same factor, so the grid is right, and refitting would only add
+  // +/-1 drift from font-metric rounding -- which resizes the PTY and reflows the agent.
+  // Hidden keep-alive terminals skip the fit (0x0 hazard) and pick the new size up through
+  // the reveal-refit path.
   const fontZoom = useStore((s) => s.fontZoom);
   useEffect(() => {
     const term = termRef.current;
     if (!term) return;
-    const size = TERM_BASE_FONT + fontZoom;
+    const base = TERM_BASE_FONT + fontZoom;
+    const size = canvasScale === undefined ? base : fontForZoom(canvasScale, base);
     if (term.options.fontSize === size) return;
     term.options.fontSize = size;
-    if (visibleRef.current) scheduleFit();
+    if (canvasScale === undefined && visibleRef.current) scheduleFit();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [fontZoom]);
+  }, [fontZoom, canvasScale]);
 
   function scheduleFit() {
     if (disposedRef.current) return;
