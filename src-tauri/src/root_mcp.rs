@@ -12,27 +12,21 @@
 //! client falls back to POST, and `initialize` is idempotent (claude sends it twice).
 //!
 //! **Not wired to a caller yet, deliberately.** This is Task 2 of the root-chat
-//! orchestrator plan: `dispatch_tool` and `start` (the server loop) are Task 3, so several
-//! of the imports below (transport + fleet/pty/proposals plumbing) have no caller in this
-//! file yet. `#[allow(dead_code, unused_imports)]` is scoped to this file rather than left
-//! as bare warnings, so it reads as an explicit "not yet" rather than an oversight (same
-//! convention as `usage_tally.rs` and Task 1's `proposals.rs`).
+//! orchestrator plan: `dispatch_tool` and `start` (the server loop) are Task 3, so this
+//! file has no non-test caller yet. `#[allow(dead_code)]` is scoped to this file rather
+//! than left as a bare warning, so it reads as an explicit "not yet" rather than an
+//! oversight (same convention as `usage_tally.rs` and Task 1's `proposals.rs`). Task 3
+//! adds the transport (`tiny_http`, `tauri::AppHandle`) and dispatch (`FleetState`,
+//! `PtyManager`, `Proposals`) imports this file does not need yet; import them there,
+//! next to the code that uses them, rather than here ahead of time.
 //!
 //! Design: docs/superpowers/specs/2026-09-08-root-chat-orchestrator-design.md
-#![allow(dead_code, unused_imports)]
+#![allow(dead_code)]
 
-use std::io::Read;
 use std::sync::atomic::{AtomicU16, Ordering};
-use std::sync::Arc;
-use std::thread;
 
 use serde_json::{json, Value};
-use tauri::{AppHandle, Emitter};
-use tiny_http::{Header, Method, Request, Response, Server};
 
-use crate::fleet::FleetState;
-use crate::proposals::{Outcome, Proposals};
-use crate::pty::PtyManager;
 use crate::store::{Session, Store};
 
 /// How many bytes of recent output `session_peek` returns.
@@ -281,5 +275,80 @@ mod tests {
             .unwrap();
         store.set_trust_settings(crate::store::TrustSettings { private_mode: true });
         assert!(peek_allowed(&store, &s));
+    }
+
+    // The two tests below pin the `&&`, not just the two extremes: marking a session
+    // sensitive sets `silo` without necessarily raising `clearance` (and vice versa), so
+    // each half of the guard must independently block under private mode. A `||` in place
+    // of the `&&` would pass both `peek_is_refused_for_a_siloed_session_only_under_private_mode`
+    // and `a_public_session_stays_peekable_under_private_mode` above -- neither exercises a
+    // session where exactly one of the two conditions is true.
+
+    #[test]
+    fn a_siloed_public_session_is_still_refused_under_private_mode() {
+        let dir = temp_dir("peek_siloed_public");
+        let store = Store::for_test(&dir);
+        let p = store.add_project("/repo".into());
+        let s = store
+            .add_session(
+                &p.id,
+                "Worker".into(),
+                false,
+                crate::agent::AgentId::Claude,
+                crate::store::SessionRole::Worker,
+            )
+            .unwrap();
+        // Silo set, clearance left at its default (Public) -- exactly what "mark sensitive"
+        // does when the user doesn't also raise the clearance.
+        store.set_session_trust(
+            &s.id,
+            SessionTrust {
+                clearance: Clearance::Public,
+                silo: true,
+                ..Default::default()
+            },
+        );
+        let siloed = store
+            .list()
+            .into_iter()
+            .flat_map(|p| p.sessions)
+            .find(|x| x.id == s.id)
+            .unwrap();
+        store.set_trust_settings(crate::store::TrustSettings { private_mode: true });
+        assert!(!peek_allowed(&store, &siloed));
+    }
+
+    #[test]
+    fn a_non_siloed_confidential_session_is_still_refused_under_private_mode() {
+        let dir = temp_dir("peek_confidential_unsiloed");
+        let store = Store::for_test(&dir);
+        let p = store.add_project("/repo".into());
+        let s = store
+            .add_session(
+                &p.id,
+                "Worker".into(),
+                false,
+                crate::agent::AgentId::Claude,
+                crate::store::SessionRole::Worker,
+            )
+            .unwrap();
+        // Clearance raised, silo left false -- not the asymmetric-silo case at all, but
+        // still above Public and so still not root chat's to read.
+        store.set_session_trust(
+            &s.id,
+            SessionTrust {
+                clearance: Clearance::Confidential,
+                silo: false,
+                ..Default::default()
+            },
+        );
+        let confidential = store
+            .list()
+            .into_iter()
+            .flat_map(|p| p.sessions)
+            .find(|x| x.id == s.id)
+            .unwrap();
+        store.set_trust_settings(crate::store::TrustSettings { private_mode: true });
+        assert!(!peek_allowed(&store, &confidential));
     }
 }
