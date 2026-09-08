@@ -5464,6 +5464,7 @@ input[type="number"]:focus {
 }
 .decision-meta { font-size: 11.5px; color: var(--text-mid); margin-bottom: 10px; }
 .decision-warn { color: var(--amber); }
+.decision-route-note { margin-top: 4px; }
 .decision-actions { display: flex; gap: 8px; justify-content: flex-end; }
 .decision-actions button { padding: 5px 12px; border-radius: 7px; font-size: 12px; }
 .decision-actions .primary { background: var(--accent); color: var(--panel-bg); }

@@ -1,7 +1,7 @@
 import { useMemo } from "react";
 import { useStore } from "../store";
 import { summarize } from "../rootProposals";
-import { pickTarget, type TaskKind } from "../routing";
+import { decisionRoute } from "../pendingDecisionRouting";
 import { agyRow, availabilityFrom, claudeRow, commandCodeRow } from "../usageRows";
 
 /** Cards for work root chat wants to start. Rendered at the app root so an approval is
@@ -28,28 +28,20 @@ export function PendingDecisions() {
       ]),
     [detected, claudeUsage, agyMap, commandCodeUsage],
   );
+  const threshold = useMemo(
+    () => Math.max(0, Math.min(1, lowThresholdPct / 100)),
+    [lowThresholdPct],
+  );
 
   if (decisions.length === 0) return null;
 
   return (
     <div className="decision-stack">
       {decisions.map((d) => {
-        // The chat may have named an agent; otherwise routing picks one HERE, because
-        // only the frontend knows which accounts still have quota.
-        const kind = (d.kind ?? "implementation") as TaskKind;
-        const decision = routes
-          ? pickTarget(
-              routes.effective[kind],
-              availability,
-              Math.max(0, Math.min(1, lowThresholdPct / 100)),
-            )
-          : null;
-        const routed = d.agent
-          ? { agent: d.agent, model: d.model ?? undefined }
-          : decision?.target
-            ? { agent: decision.target.agent, model: decision.target.model }
-            : null;
-        const agent = routed?.agent ?? null;
+        // `decisionRoute` is the one place that decides whether "Start it" is enabled —
+        // a chat-named agent gets the same installed/quota test a routed one does, it
+        // just has no fallback behind it, so unusable there means disabled, not warned.
+        const route = decisionRoute(d, routes, availability, threshold);
         return (
           <div className="decision-card" key={d.id}>
             <div className="decision-head">
@@ -57,23 +49,31 @@ export function PendingDecisions() {
             </div>
             <div className="decision-task">{summarize(d.task, 220)}</div>
             <div className="decision-meta">
-              {agent ? (
+              {route.agent ? (
                 <>
-                  as <strong>{agent}</strong>
-                  {d.agent ? " (chosen by the chat)" : " (by your routing)"}
+                  as <strong>{route.agent}</strong>
+                  {route.source === "chat" ? " (chosen by the chat)" : " (by your routing)"}
                 </>
+              ) : route.unusableNamed ? (
+                <span className="decision-warn">
+                  The chat asked for <strong>{route.unusableNamed.agent}</strong>, but{" "}
+                  {route.unusableNamed.why}.
+                </span>
               ) : (
                 <span className="decision-warn">
                   No agent available for this kind of work — install one or free up quota.
                 </span>
+              )}
+              {route.warning && (
+                <div className="decision-warn decision-route-note">{route.warning}</div>
               )}
             </div>
             <div className="decision-actions">
               <button onClick={() => void deny(d.id)}>Not now</button>
               <button
                 className="primary"
-                disabled={!agent}
-                onClick={() => void approve(d.id, agent!, routed?.model)}
+                disabled={!route.agent}
+                onClick={() => void approve(d.id, route.agent!, route.model)}
               >
                 Start it
               </button>
