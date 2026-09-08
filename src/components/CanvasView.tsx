@@ -459,15 +459,13 @@ export function CanvasUnderlay({
                       {activity}
                     </div>
                   )}
+                  {/* Context % deliberately lives only in the footer (below), which is
+                      present in both live and compact modes -- one location at every zoom,
+                      rather than a number that appears and vanishes as you zoom. */}
                   <div className="canvas-card-row dim">
                     <span className="canvas-card-project" style={{ color: projColor ?? undefined }}>
                       {ownerProject?.name ?? "—"}
                     </span>
-                    {sessionContext[node.ref] && (
-                      <span className={`canvas-ctx ${meterLevel(sessionContext[node.ref].fraction)}`}>
-                        {Math.round(sessionContext[node.ref].fraction * 100)}%
-                      </span>
-                    )}
                   </div>
                 </div>
               )}
