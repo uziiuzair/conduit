@@ -2486,6 +2486,70 @@ mod tests {
         }
     }
 
+    /// `AgentId`'s `Deserialize` is deliberately LENIENT -- an unknown persisted value
+    /// degrades to Claude rather than costing the whole `state.json` (see
+    /// `store::PersistedEnum`). Reading the approve-time agent that way turned a
+    /// chat-invented id into a silent Claude spawn under a card that promised something
+    /// else, so this path must read it STRICTLY instead.
+    #[test]
+    fn approving_with_an_agent_this_build_cannot_spawn_is_refused_not_defaulted_to_claude() {
+        let dir = approve_test_dir("bogus_agent");
+        let store = Store::for_test(&dir);
+        let project = store.add_project("/repo".into());
+        let proposals = proposals::Proposals::default();
+        let p = proposals
+            .register(
+                "chat-1",
+                &project.id,
+                "ship the thing",
+                None,
+                Some("gpt5-turbo".into()),
+                None,
+                1_700_000_000,
+            )
+            .unwrap();
+
+        let err = approve_root_proposal_inner(
+            &store,
+            &proposals,
+            &p.id,
+            "gpt5-turbo",
+            None,
+            1_700_000_100,
+        )
+        .unwrap_err();
+        assert!(err.contains("unknown agent gpt5-turbo"), "{err}");
+        // Nothing was created, and the proposal is still answerable with a real agent.
+        assert!(store.list()[0].sessions.is_empty());
+        assert!(matches!(
+            proposals.get(&p.id).unwrap().outcome,
+            proposals::Outcome::Pending
+        ));
+        // Every real agent id still approves.
+        for a in [
+            "claude",
+            "codex",
+            "gemini",
+            "opencode",
+            "antigravity",
+            "commandcode",
+        ] {
+            assert!(
+                <crate::agent::AgentId as store::PersistedEnum>::from_wire(a).is_some(),
+                "{a} must stay approvable"
+            );
+        }
+        assert!(approve_root_proposal_inner(
+            &store,
+            &proposals,
+            &p.id,
+            "codex",
+            None,
+            1_700_000_100
+        )
+        .is_ok());
+    }
+
     /// The defect Task 3's review caught: `Proposals::get` alone never sweeps expiry --
     /// only `register`/`pending` do. Reading a proposal's outcome straight off `get` would
     /// see it still `Pending` days after `EXPIRY_SECS` closed, and approving it would
