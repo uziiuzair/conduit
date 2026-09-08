@@ -1088,6 +1088,14 @@ button {
    the box is full of cards. */
 .canvas-section { position: absolute; border-radius: 10px; pointer-events: none; }
 .canvas-section-box { position: absolute; inset: 0; border-radius: 10px; border: 2px solid; }
+/* Deliberately above the box, matching Figma, rather than inside it -- inside, it would
+   compete for space with whatever the section holds. The trade: .term-stack is a sibling
+   painted above .canvas-underlay, and each visible .term-host takes pointer-events back
+   (see .term-stack.canvas-mode .term-host.visible), so a card overlapping this strip
+   covers the chip and makes it undraggable there. Known and accepted, not an oversight --
+   and not rare: a 560px card against a chip spanning up to 70% of even the default 900px
+   section width means a card sitting just above a section, or one left outside after a
+   resize, will typically cover it. */
 .canvas-section-title {
   position: absolute; top: -26px; left: 0; pointer-events: auto; cursor: grab;
   font-size: 12px; font-weight: 600; padding: 3px 10px; border-radius: 6px;
