@@ -36,4 +36,17 @@ describe("canvasHistory", () => {
     const h = pushHistory(pushHistory(emptyHistory<object>(), s), s);
     expect(h.past).toHaveLength(1);
   });
+
+  it("returns states in order across a multi-step undo and redo", () => {
+    let h = pushHistory(pushHistory(emptyHistory<string>(), "a"), "b");
+    const back1 = undo(h, "c")!;      // past [a,b] -> [a], future [c]
+    const back2 = undo(back1.history, back1.state)!; // past [a] -> [], future [b,c]
+    expect(back1.state).toBe("b");
+    expect(back2.state).toBe("a");
+
+    const fwd1 = redo(back2.history, back2.state)!;
+    const fwd2 = redo(fwd1.history, fwd1.state)!;
+    expect(fwd1.state).toBe("b");
+    expect(fwd2.state).toBe("c");
+  });
 });
