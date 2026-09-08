@@ -164,6 +164,9 @@ export function WorkspaceCenter({
   const groupIndexOfRef = (ref: string): number =>
     layout ? layout.groups.findIndex((g) => g.tabs.some((t) => t.ref === ref)) : -1;
 
+  // Replaced by real gesture state in the next task.
+  const zooming = false;
+
   // Placement for a session terminal of any project. Terminals are a permanent flat
   // stack (keep-alive); only CSS position/visibility changes. display:none when its
   // project isn't active or the session isn't open as a tab.
@@ -178,10 +181,14 @@ export function WorkspaceCenter({
     if (canvasMode && ownerProjectId !== projectId) {
       return { visible: false, inActiveGroup: false, style: { display: "none" } as React.CSSProperties };
     }
-    // Canvas mode positions the SAME mounted terminals by absolute canvas coordinates
-    // instead of group percentages. This is the whole trick behind live terminals in
-    // canvas nodes: one mounted set, two CSS expressions of it. The pan/zoom transform
-    // is applied to .term-stack as a whole, so these coordinates stay in canvas units.
+    // Canvas mode positions the SAME mounted terminals by absolute coordinates instead of
+    // group percentages. This is the whole trick behind live terminals in canvas nodes:
+    // one mounted set, two CSS expressions of it.
+    //
+    // The coordinates are SCREEN pixels, not canvas units. The stack carries only
+    // translate(pan) -- no scale() -- because scaling a terminal scales a rasterized glyph
+    // atlas, which is the blur. Each host is therefore sized `logical x zoom` and its
+    // glyphs are rasterized at `base x zoom` by TerminalView's canvasScale.
     //
     // `right`/`bottom` are cleared explicitly because .term-host is `inset: 0`, and
     // leaving them at 0 would fight the width/height set here.
@@ -190,21 +197,22 @@ export function WorkspaceCenter({
       if (!node) {
         return { visible: false, inActiveGroup: false, style: { display: "none" } as React.CSSProperties };
       }
+      const z = canvas.zoom;
       return {
-        // Hidden below the legibility threshold — the card renders a summary instead.
-        // Hidden is CSS-only, so the PTY and the xterm are untouched either way.
-        visible: canvas.zoom >= LIVE_ZOOM_MIN,
+        // Hidden below the legibility threshold, and during a zoom gesture -- the card
+        // renders instead. Hidden is CSS-only, so the PTY and the xterm are untouched.
+        visible: z >= LIVE_ZOOM_MIN && !zooming,
         inActiveGroup: false, // never steal the keyboard just because a node scrolled by
         style: {
-          left: node.x,
-          top: node.y + HEADER_H,
-          width: nodeW(node),
-          // Stops above the footer strip so the resize grip stays reachable — the
+          left: node.x * z,
+          top: (node.y + HEADER_H) * z,
+          width: nodeW(node) * z,
+          // Stops above the footer strip so the resize grip stays reachable -- the
           // terminal paints above the card frame and would otherwise cover it.
-          height: nodeH(node) - HEADER_H - FOOTER_H,
+          height: (nodeH(node) - HEADER_H - FOOTER_H) * z,
           right: "auto",
           bottom: "auto",
-          padding: "6px 8px",
+          padding: `${6 * z}px ${8 * z}px`,
         } as React.CSSProperties,
       };
     }
@@ -375,7 +383,11 @@ export function WorkspaceCenter({
           style={
             canvasMode
               ? {
-                  transform: `translate(${canvas.pan.x}px, ${canvas.pan.y}px) scale(${canvas.zoom})`,
+                  // translate ONLY. The children are already sized and placed in screen
+                  // pixels by placeSession; a scale() here is what resampled the glyph
+                  // atlas and made zoomed text soft. The underlay keeps its scale(), being
+                  // vector content that a transform renders crisply.
+                  transform: `translate(${canvas.pan.x}px, ${canvas.pan.y}px)`,
                   transformOrigin: "0 0",
                 }
               : undefined
@@ -401,6 +413,7 @@ export function WorkspaceCenter({
                 }
                 role={session.role}
                 stopped={session.stopped ?? false}
+                canvasScale={canvasMode ? canvas.zoom : undefined}
                 visible={pl.visible}
                 focusOnReveal={pl.inActiveGroup}
                 // Clicking into the terminal body activates its group, like the editor
