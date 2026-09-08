@@ -2086,7 +2086,7 @@ pub fn run() {
                 store.clone(),
                 pty.clone(),
                 fleet.clone(),
-                proposals.clone(),
+                proposals,
             );
 
             fleet_mcp::start(app.handle().clone(), store, pty, fleet, board, tasks);

@@ -18,6 +18,13 @@
 //! so they keep a narrow, item-scoped `#[allow(dead_code)]` rather than the file-level
 //! blanket this file carried through Task 2.
 //!
+//! `Ctx` and `handle_request` take an `EmitSink`, not an `AppHandle` -- same reasoning as
+//! `cli_open::handle_open`'s sink parameter (see its module doc). `start` is the only
+//! place a real `AppHandle` exists; it closes over one to build the sink and everything
+//! downstream is plain data, which is what lets the tests below drive `dispatch_tool` and
+//! `handle_request` directly (including over a real `tiny_http` socket) instead of only
+//! the leaf helpers.
+//!
 //! Design: docs/superpowers/specs/2026-09-08-root-chat-orchestrator-design.md
 
 use std::io::Read;
@@ -123,7 +130,7 @@ pub fn tool_specs() -> Vec<Value> {
         }),
         json!({
             "name": "chats_list",
-            "description": "The other HQ (root) chats: id, title, last activity. Use before chat_read to find the conversation you need.",
+            "description": "The other HQ (root) chats: id, title, created time. Use before chat_read to find the conversation you need.",
             "inputSchema": { "type": "object", "properties": {} }
         }),
         json!({
@@ -131,7 +138,7 @@ pub fn tool_specs() -> Vec<Value> {
             "description": "Read another HQ chat's conversation, oldest first. This is how you pull context from a discussion that happened in a different chat.",
             "inputSchema": { "type": "object", "properties": {
                 "chatId": { "type": "string" },
-                "limit": { "type": "number", "description": "Most recent N items (default 100)." }
+                "limit": { "type": "integer", "description": "Most recent N items (default 100)." }
             }, "required": ["chatId"] }
         }),
         json!({
@@ -163,9 +170,15 @@ pub fn tool_specs() -> Vec<Value> {
     ]
 }
 
+/// What a tool handler uses to notify the frontend of an event, decoupled from
+/// `AppHandle` so `dispatch_tool`/`handle_request` are callable from a unit test without
+/// Tauri or a real window. `start` is the only place a real `AppHandle` is available; it
+/// closes over one and calls `app.emit`.
+type EmitSink = Arc<dyn Fn(&str, Value) + Send + Sync>;
+
 /// Everything a tool handler needs, resolved per request.
 struct Ctx {
-    app: AppHandle,
+    emit: EmitSink,
     store: Arc<Store>,
     pty: Arc<PtyManager>,
     fleet: Arc<FleetState>,
@@ -181,8 +194,12 @@ fn query_param(url: &str, key: &str) -> Option<String> {
     })
 }
 
-/// The identity gate: the caller must name a root chat this app actually has. A project
-/// session cannot reach these tools even if it learns the port.
+/// The identity gate: the caller must name a root chat this app actually has. Same shape
+/// and same strength as `fleet_mcp`'s `?conductor=<id>` -- a soft scoping check, not a
+/// hard security boundary: the id lives in `state.json`, readable by any agent session
+/// running as the user, same as a conductor id. What it actually stops is an accidental
+/// or wrong-shaped caller (a browser, a stray client, a copy-pasted URL) from reaching
+/// the tool surface at all, not a co-resident process deliberately impersonating a chat.
 fn known_chat(store: &Store, chat_id: &str) -> Result<(), String> {
     if chat_id.is_empty() {
         return Err("missing rootchat id".into());
@@ -241,11 +258,15 @@ fn dispatch_work_inner(
     .to_string())
 }
 
-fn dispatch_status_inner(proposals: &Proposals, args: &Value) -> Result<String, String> {
+fn dispatch_status_inner(proposals: &Proposals, args: &Value, now: u64) -> Result<String, String> {
     let id = args
         .get("id")
         .and_then(|v| v.as_str())
         .ok_or("missing id")?;
+    // `get` alone never expires anything -- only `register`/`pending` sweep. Without this,
+    // a proposal answered by nobody stays "pending" forever and (worse) stays approvable
+    // past the window `EXPIRY_SECS` exists to close.
+    proposals.sweep(now);
     let p = proposals.get(id).ok_or("unknown proposal id")?;
     let body = match p.outcome {
         Outcome::Pending => json!({ "status": "pending" }),
@@ -276,6 +297,7 @@ fn dispatch_tool(name: &str, args: &Value, ctx: &Ctx) -> Result<String, String> 
                         "project": p.name,
                         "projectId": p.id,
                         "agent": s.agent,
+                        "role": s.role,
                         "status": st.status,
                         "activity": st.activity,
                         "branch": s.branch,
@@ -344,7 +366,7 @@ fn dispatch_tool(name: &str, args: &Value, ctx: &Ctx) -> Result<String, String> 
                         .find(|x| x.id == p.project_id)
                         .map(|x| x.name)
                         .unwrap_or_default();
-                    let _ = ctx.app.emit(
+                    (ctx.emit)(
                         "pending-decision",
                         json!({
                             "id": p.id,
@@ -362,7 +384,7 @@ fn dispatch_tool(name: &str, args: &Value, ctx: &Ctx) -> Result<String, String> 
             }
             Ok(out)
         }
-        "dispatch_status" => dispatch_status_inner(&ctx.proposals, args),
+        "dispatch_status" => dispatch_status_inner(&ctx.proposals, args, now_secs()),
         "chat_fork" => {
             let title = args
                 .get("title")
@@ -374,7 +396,7 @@ fn dispatch_tool(name: &str, args: &Value, ctx: &Ctx) -> Result<String, String> 
             let seed = args.get("seed").and_then(|v| v.as_str()).unwrap_or("");
             // The desktop reconciles its sidebar from this event; without it the new chat
             // only appears on the next reload.
-            let _ = ctx.app.emit(
+            (ctx.emit)(
                 "root-chat-created",
                 json!({ "id": chat.id, "title": title, "seed": seed }),
             );
@@ -399,6 +421,11 @@ pub fn start(
     fleet: Arc<FleetState>,
     proposals: Arc<Proposals>,
 ) {
+    // The one place a real `AppHandle` exists; everything downstream gets a sink instead
+    // (see the module doc and `EmitSink`).
+    let emit: EmitSink = Arc::new(move |event, payload| {
+        let _ = app.emit(event, payload);
+    });
     thread::spawn(move || {
         let mut server: Option<Server> = None;
         for candidate in 8496u16..=8516 {
@@ -413,19 +440,19 @@ pub fn start(
             return;
         };
         for request in server.incoming_requests() {
-            let app = app.clone();
+            let emit = emit.clone();
             let store = store.clone();
             let pty = pty.clone();
             let fleet = fleet.clone();
             let proposals = proposals.clone();
-            thread::spawn(move || handle_request(request, app, store, pty, fleet, proposals));
+            thread::spawn(move || handle_request(request, emit, store, pty, fleet, proposals));
         }
     });
 }
 
 fn handle_request(
     mut request: Request,
-    app: AppHandle,
+    emit: EmitSink,
     store: Arc<Store>,
     pty: Arc<PtyManager>,
     fleet: Arc<FleetState>,
@@ -491,7 +518,7 @@ fn handle_request(
             let name = params.get("name").and_then(|v| v.as_str()).unwrap_or("");
             let args = params.get("arguments").cloned().unwrap_or(json!({}));
             let ctx = Ctx {
-                app,
+                emit,
                 store,
                 pty,
                 fleet,
@@ -520,6 +547,7 @@ fn handle_request(
 mod tests {
     use super::*;
     use crate::store::{Clearance, SessionTrust, Store};
+    use std::sync::Mutex;
 
     fn temp_dir(tag: &str) -> std::path::PathBuf {
         let dir =
@@ -758,9 +786,10 @@ mod tests {
         assert_eq!(v["status"], "awaiting-approval");
         let id = v["id"].as_str().unwrap().to_string();
 
-        let status: Value =
-            serde_json::from_str(&dispatch_status_inner(&proposals, &json!({ "id": id })).unwrap())
-                .unwrap();
+        let status: Value = serde_json::from_str(
+            &dispatch_status_inner(&proposals, &json!({ "id": id }), 1_700_000_000).unwrap(),
+        )
+        .unwrap();
         assert_eq!(status["status"], "pending");
 
         proposals.resolve(
@@ -769,11 +798,54 @@ mod tests {
                 session_id: "s-1".into(),
             },
         );
-        let status: Value =
-            serde_json::from_str(&dispatch_status_inner(&proposals, &json!({ "id": id })).unwrap())
-                .unwrap();
+        let status: Value = serde_json::from_str(
+            &dispatch_status_inner(&proposals, &json!({ "id": id }), 1_700_000_000).unwrap(),
+        )
+        .unwrap();
         assert_eq!(status["status"], "approved");
         assert_eq!(status["sessionId"], "s-1");
+    }
+
+    /// `Proposals::get` alone never expires anything -- only `register`/`pending` sweep.
+    /// Before this fix, `dispatch_status_inner` read straight off `get`, so a proposal
+    /// nobody ever answered stayed "pending" forever, `Outcome::Expired` was unreachable
+    /// from this path, and (worse) `resolve` still accepted an approval on a card whose
+    /// window had long closed.
+    #[test]
+    fn dispatch_status_reports_expired_past_the_window_and_refuses_a_late_approval() {
+        let dir = temp_dir("dispatch_expired");
+        let store = Arc::new(Store::for_test(&dir));
+        let project = store.add_project("/repo".into());
+        let chat = store.add_root_chat();
+        let proposals = Arc::new(Proposals::default());
+
+        let out = dispatch_work_inner(
+            &store,
+            &proposals,
+            &chat.id,
+            &json!({ "projectId": project.id, "task": "x" }),
+            1_700_000_000,
+        )
+        .unwrap();
+        let id = serde_json::from_str::<Value>(&out).unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        let later = 1_700_000_000 + crate::proposals::EXPIRY_SECS + 1;
+        let status: Value = serde_json::from_str(
+            &dispatch_status_inner(&proposals, &json!({ "id": id }), later).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(status["status"], "expired");
+
+        // The read above is what marks it -- a resolve attempted after must still fail.
+        assert!(!proposals.resolve(
+            &id,
+            Outcome::Approved {
+                session_id: "too-late".into()
+            }
+        ));
     }
 
     #[test]
@@ -791,5 +863,172 @@ mod tests {
         )
         .unwrap_err();
         assert!(err.contains("unknown project"), "{err}");
+    }
+
+    // ---- dispatch_tool / handle_request: previously untested (Ctx held an AppHandle,
+    // unreachable from a unit test). An EmitSink makes both reachable directly.
+
+    type EmitLog = Arc<Mutex<Vec<(String, Value)>>>;
+
+    /// A sink that records every event it was asked to emit, so a test can assert on the
+    /// payload instead of just "it didn't error".
+    fn capturing_sink() -> (EmitSink, EmitLog) {
+        let log: EmitLog = Arc::new(Mutex::new(Vec::new()));
+        let log2 = log.clone();
+        let emit: EmitSink = Arc::new(move |event: &str, payload: Value| {
+            log2.lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push((event.to_string(), payload));
+        });
+        (emit, log)
+    }
+
+    #[test]
+    fn dispatch_tool_session_peek_refuses_a_siloed_session_under_private_mode() {
+        let dir = temp_dir("dispatch_peek_denied");
+        let store = Arc::new(Store::for_test(&dir));
+        let p = store.add_project("/repo".into());
+        let s = store
+            .add_session(
+                &p.id,
+                "Worker".into(),
+                false,
+                crate::agent::AgentId::Claude,
+                crate::store::SessionRole::Worker,
+            )
+            .unwrap();
+        store.set_session_trust(
+            &s.id,
+            SessionTrust {
+                silo: true,
+                ..Default::default()
+            },
+        );
+        store.set_trust_settings(crate::store::TrustSettings { private_mode: true });
+
+        let (emit, _log) = capturing_sink();
+        let ctx = Ctx {
+            emit,
+            store: store.clone(),
+            pty: Arc::new(PtyManager::new()),
+            fleet: Arc::new(FleetState::default()),
+            proposals: Arc::new(Proposals::default()),
+            chat_id: "chat-1".into(),
+        };
+        let err = dispatch_tool("session_peek", &json!({ "sessionId": s.id }), &ctx).unwrap_err();
+        assert!(err.contains("access-denied"), "{err}");
+    }
+
+    #[test]
+    fn dispatch_work_emits_a_pending_decision_the_frontend_can_render() {
+        let dir = temp_dir("dispatch_emits");
+        let store = Arc::new(Store::for_test(&dir));
+        let project = store.add_project("/repo".into());
+        let chat = store.add_root_chat();
+        let (emit, log) = capturing_sink();
+        let ctx = Ctx {
+            emit,
+            store: store.clone(),
+            pty: Arc::new(PtyManager::new()),
+            fleet: Arc::new(FleetState::default()),
+            proposals: Arc::new(Proposals::default()),
+            chat_id: chat.id.clone(),
+        };
+
+        let out = dispatch_tool(
+            "dispatch_work",
+            &json!({ "projectId": project.id, "task": "add rate limiting" }),
+            &ctx,
+        )
+        .unwrap();
+        let id = serde_json::from_str::<Value>(&out).unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        let events = log.lock().unwrap();
+        assert_eq!(events.len(), 1, "{events:?}");
+        let (name, payload) = &events[0];
+        assert_eq!(name, "pending-decision");
+        assert_eq!(payload["id"], id);
+        assert_eq!(payload["chatId"], chat.id);
+        assert_eq!(payload["projectId"], project.id);
+        assert_eq!(payload["projectName"], project.name);
+        assert_eq!(payload["task"], "add rate limiting");
+    }
+
+    /// Serve `handle_request` on a real socket -- the only way to exercise the identity
+    /// gate's ordering (it must run before dispatch but not before the handshake) rather
+    /// than testing `known_chat` in isolation, which cannot see where in the request path
+    /// it is actually called.
+    fn serve_for_test(
+        store: Arc<Store>,
+        pty: Arc<PtyManager>,
+        fleet: Arc<FleetState>,
+        proposals: Arc<Proposals>,
+        emit: EmitSink,
+    ) -> u16 {
+        let server = Server::http("127.0.0.1:0").unwrap();
+        let port = server.server_addr().to_ip().unwrap().port();
+        thread::spawn(move || {
+            for request in server.incoming_requests() {
+                handle_request(
+                    request,
+                    emit.clone(),
+                    store.clone(),
+                    pty.clone(),
+                    fleet.clone(),
+                    proposals.clone(),
+                );
+            }
+        });
+        port
+    }
+
+    fn post(port: u16, query: &str, body: &str) -> Value {
+        let url = format!("http://127.0.0.1:{port}/mcp{query}");
+        let out = std::process::Command::new("curl")
+            .args(["-s", "-X", "POST", "--data", body, &url])
+            .output()
+            .unwrap();
+        serde_json::from_slice(&out.stdout).unwrap_or(Value::Null)
+    }
+
+    #[test]
+    fn handle_request_lets_initialize_through_but_refuses_the_rest_for_an_unknown_chat() {
+        let dir = temp_dir("handle_request_gate");
+        let store = Arc::new(Store::for_test(&dir));
+        // Deliberately no root chat registered -- "unknown-chat" is a stranger.
+        let (emit, _log) = capturing_sink();
+        let port = serve_for_test(
+            store,
+            Arc::new(PtyManager::new()),
+            Arc::new(FleetState::default()),
+            Arc::new(Proposals::default()),
+            emit,
+        );
+        let q = "?rootchat=unknown-chat";
+
+        let init = post(
+            port,
+            q,
+            r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}"#,
+        );
+        assert!(init.get("error").is_none(), "{init}");
+        assert_eq!(init["result"]["serverInfo"]["name"], "conduit-root");
+
+        let list = post(
+            port,
+            q,
+            r#"{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}"#,
+        );
+        assert_eq!(list["error"]["code"], -32001, "{list}");
+
+        let call = post(
+            port,
+            q,
+            r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"sessions_list","arguments":{}}}"#,
+        );
+        assert_eq!(call["error"]["code"], -32001, "{call}");
     }
 }
