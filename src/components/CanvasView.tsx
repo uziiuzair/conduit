@@ -27,6 +27,7 @@ import {
   zoomAt,
 } from "../canvas";
 import { meterLevel, meterTitle } from "../contextMeter";
+import { resolveProjectColor } from "../layout";
 import { useProjectCanvas } from "../hooks/useProjectCanvas";
 import { AgentGlyph, glyphStateFor } from "./AgentGlyph";
 import { deleteSession } from "./Sidebar";
@@ -72,6 +73,7 @@ export function CanvasUnderlay({
   const removeSession = useStore((s) => s.removeSession);
   const projects = useStore((s) => s.projects);
   const sessionContext = useStore((s) => s.sessionContext);
+  const autoProjectColors = useStore((s) => s.autoProjectColors);
   const { canvas, setCanvas } = useProjectCanvas(projectId);
 
   // ref === null means panning the plane; mode distinguishes moving from resizing, since
@@ -392,6 +394,22 @@ export function CanvasUnderlay({
           const session = byId.get(node.ref);
           if (!session) return null;
           const status = live[node.ref]?.status ?? "idle";
+          const liveEntry = live[node.ref];
+          const activity = liveEntry?.activity;
+          // How long this session has been waiting on a human. Only meaningful while it IS
+          // waiting -- `updatedAt` is when the status was last asserted, whatever it is.
+          const waitedMs =
+            status === "needsInput" && liveEntry?.updatedAt
+              ? Date.now() - liveEntry.updatedAt
+              : null;
+          const ownerProject = projects.find((p) => p.sessions.some((s) => s.id === node.ref));
+          // resolveProjectColor is the ONE place precedence is decided: a user-chosen colour
+          // beats the derived accent, which is used only while autoProjectColors is on, and
+          // null falls through to each consumer's neutral CSS fallback. Never call
+          // projectAccent directly or the sidebar and the board disagree.
+          const projColor = ownerProject
+            ? resolveProjectColor(ownerProject.id, ownerProject.color, autoProjectColors)
+            : null;
           return (
             <div
               key={node.ref}
@@ -423,9 +441,34 @@ export function CanvasUnderlay({
               {/* The live terminal is painted here by .term-stack, which sits above this
                   underlay. When zoomed out past the threshold there is no terminal, so the
                   body shows the summary instead of an empty hole. */}
+              {/* The card IS the view below the legibility floor and during zoom gestures,
+                  so it carries what the terminal would have told you. All DOM text, hence
+                  crisp at any zoom -- which is the point of hiding the raster at all. */}
               {!showTerminals && (
-                <div className="canvas-card-body">
-                  <span className="canvas-card-status">{statusLabel(status)}</span>
+                <div className="canvas-card-body rich">
+                  <div className="canvas-card-row">
+                    <span className={`canvas-card-status ${status}`}>{statusLabel(status)}</span>
+                    {waitedMs !== null && (
+                      <span className="canvas-card-waited" title="Waiting for you">
+                        {formatWaited(waitedMs)}
+                      </span>
+                    )}
+                  </div>
+                  {activity && (
+                    <div className="canvas-card-activity" title={activity}>
+                      {activity}
+                    </div>
+                  )}
+                  <div className="canvas-card-row dim">
+                    <span className="canvas-card-project" style={{ color: projColor ?? undefined }}>
+                      {ownerProject?.name ?? "—"}
+                    </span>
+                    {sessionContext[node.ref] && (
+                      <span className={`canvas-ctx ${meterLevel(sessionContext[node.ref].fraction)}`}>
+                        {Math.round(sessionContext[node.ref].fraction * 100)}%
+                      </span>
+                    )}
+                  </div>
                 </div>
               )}
 
@@ -729,4 +772,13 @@ function statusLabel(status: string): string {
     default:
       return "Idle";
   }
+}
+
+/** Coarse "how long" for a card: minutes up to an hour, then hours. Never seconds — a
+ *  card is read at a glance and a ticking number is noise. */
+function formatWaited(ms: number): string {
+  const min = Math.floor(ms / 60_000);
+  if (min < 1) return "just now";
+  if (min < 60) return `${min}m`;
+  return `${Math.floor(min / 60)}h ${min % 60}m`;
 }
