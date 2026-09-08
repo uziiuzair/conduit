@@ -337,7 +337,18 @@ export function CanvasUnderlay({
         // behaviour rather than being swallowed by a preventDefault it never asked for.
         if (!hasSessionDrag(e.dataTransfer)) return;
         e.preventDefault();
-        e.dataTransfer.dropEffect = "copy";
+        // MUST match the sidebar row's effectAllowed ("move", shared with the sidebar->pane
+        // drag). The browser computes the drag operation as the intersection of the
+        // source's effectAllowed and the target's dropEffect; "move" does not admit "copy",
+        // so setting "copy" here would make WebKit resolve the operation to "none" and the
+        // `drop` event would never fire — silently, no console warning. The session is not
+        // literally leaving the sidebar (it stays listed there), but the sidebar is a
+        // directory of every session, not a container this drag removes it from, so "move"
+        // is also the honest read of what dropping onto the board does. Do not change this
+        // back to "copy" — change the sidebar's effectAllowed instead if a future consumer
+        // genuinely needs a copy semantic, and only after checking every existing drag it
+        // is shared with.
+        e.dataTransfer.dropEffect = "move";
         if (!dropActive) setDropActive(true);
       }}
       onDragLeave={(e) => {
