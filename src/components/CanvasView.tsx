@@ -205,6 +205,90 @@ export function CanvasUnderlay({
     return () => host.removeEventListener("wheel", onWheel, { capture: true });
   }, [canvas, setCanvas, onZoomActive]);
 
+  // Dropping a session from the sidebar onto the board. Bound to the same PARENT as the
+  // wheel handler above, in the same capture phase, for the identical reason: the
+  // terminal stack is a SIBLING painted above the underlay, and a card's terminal takes
+  // pointer events once visible (`.term-host.visible`), so a drag over the body of an
+  // already-placed card never reaches a listener on the underlay itself — it would bubble
+  // straight past it to `.workspace`'s own (unrelated) pane-drop handler. Capturing at the
+  // common ancestor sees both the open canvas and every card's terminal.
+  useEffect(() => {
+    const el = viewportRef.current;
+    const host = el?.parentElement ?? el;
+    if (!el || !host) return;
+    const onDragOver = (e: DragEvent) => {
+      // Only claim drags we actually accept — an unrelated drag (a file, browser text
+      // selection, another app's drop source) must fall through to default browser
+      // behaviour rather than being swallowed by a preventDefault it never asked for.
+      if (!hasSessionDrag(e.dataTransfer)) return;
+      e.preventDefault();
+      // MUST match the sidebar row's effectAllowed ("move", shared with the sidebar->pane
+      // drag). The browser computes the drag operation as the intersection of the
+      // source's effectAllowed and the target's dropEffect; "move" does not admit "copy",
+      // so setting "copy" here would make WebKit resolve the operation to "none" and the
+      // `drop` event would never fire — silently, no console warning. The session is not
+      // literally leaving the sidebar (it stays listed there), but the sidebar is a
+      // directory of every session, not a container this drag removes it from, so "move"
+      // is also the honest read of what dropping onto the board does. Do not change this
+      // back to "copy" — change the sidebar's effectAllowed instead if a future consumer
+      // genuinely needs a copy semantic, and only after checking every existing drag it
+      // is shared with.
+      e.dataTransfer!.dropEffect = "move";
+      setDropActive((prev) => (prev ? prev : true));
+    };
+    const onDragLeave = (e: DragEvent) => {
+      // Against HOST, not `el` — a card's terminal lives in the sibling `.term-stack`, so
+      // checking against the underlay alone would read every card as "outside the board"
+      // and flicker the outline off on every pass over one. Checking against the common
+      // ancestor is what keeps "still over the board" true while the cursor is over a
+      // card's live terminal.
+      if (!host.contains(e.relatedTarget as Node | null)) setDropActive(false);
+    };
+    const onDrop = (e: DragEvent) => {
+      setDropActive(false);
+      const payload = readSessionDrag(e.dataTransfer);
+      if (!payload) return;
+      e.preventDefault();
+      // Against EL (the viewport/underlay element), not `host` — `host` is the wider
+      // ancestor shared with the terminal stack, and its rect is offset from the
+      // underlay's own origin that `toCanvasPoint` expects.
+      const rect = el.getBoundingClientRect();
+      // Drop where the cursor is, centred on it rather than corner-anchored — a card
+      // whose top-left lands under the pointer appears to jump down and right.
+      const p = toCanvasPoint(canvas, e.clientX - rect.left, e.clientY - rect.top);
+      // snapshot() arrives in Task 14 (undo); omitted here per the brief.
+      setCanvas(
+        addNodeAt(canvas, payload.sessionId, payload.projectId, p.x - CARD_W / 2, p.y - CARD_H / 2),
+      );
+    };
+    host.addEventListener("dragover", onDragOver, { capture: true });
+    host.addEventListener("dragleave", onDragLeave, { capture: true });
+    host.addEventListener("drop", onDrop, { capture: true });
+    return () => {
+      host.removeEventListener("dragover", onDragOver, { capture: true });
+      host.removeEventListener("dragleave", onDragLeave, { capture: true });
+      host.removeEventListener("drop", onDrop, { capture: true });
+    };
+  }, [canvas, setCanvas]);
+
+  // Fallback for a drag that ends without ever firing `dragleave` on the board — e.g.
+  // cancelled with Esc while still hovering it. This is NOT a theoretical gap: this
+  // exact drag payload already needed this exact fallback once, in WorkspaceCenter's
+  // sidebar-to-pane overlay, whose comment on `sidebarDragging` records that a
+  // Esc-cancelled drag over that overlay fires no `dragleave` at all. `dragend` always
+  // fires on the drag SOURCE regardless of how the drag ended, so listen globally rather
+  // than trust a `dragleave` that may never come. Mirrors that effect exactly.
+  useEffect(() => {
+    if (!dropActive) return;
+    const clear = () => setDropActive(false);
+    window.addEventListener("dragend", clear);
+    window.addEventListener("drop", clear);
+    return () => {
+      window.removeEventListener("dragend", clear);
+      window.removeEventListener("drop", clear);
+    };
+  }, [dropActive]);
+
   const onPointerDown = (
     e: React.PointerEvent,
     ref: string | null,
@@ -331,47 +415,10 @@ export function CanvasUnderlay({
       onPointerUp={endDrag}
       onPointerCancel={endDrag}
       onContextMenu={(e) => openMenu(e)}
-      onDragOver={(e) => {
-        // Only claim drags we actually accept — an unrelated drag (a file, browser text
-        // selection, another app's drop source) must fall through to default browser
-        // behaviour rather than being swallowed by a preventDefault it never asked for.
-        if (!hasSessionDrag(e.dataTransfer)) return;
-        e.preventDefault();
-        // MUST match the sidebar row's effectAllowed ("move", shared with the sidebar->pane
-        // drag). The browser computes the drag operation as the intersection of the
-        // source's effectAllowed and the target's dropEffect; "move" does not admit "copy",
-        // so setting "copy" here would make WebKit resolve the operation to "none" and the
-        // `drop` event would never fire — silently, no console warning. The session is not
-        // literally leaving the sidebar (it stays listed there), but the sidebar is a
-        // directory of every session, not a container this drag removes it from, so "move"
-        // is also the honest read of what dropping onto the board does. Do not change this
-        // back to "copy" — change the sidebar's effectAllowed instead if a future consumer
-        // genuinely needs a copy semantic, and only after checking every existing drag it
-        // is shared with.
-        e.dataTransfer.dropEffect = "move";
-        if (!dropActive) setDropActive(true);
-      }}
-      onDragLeave={(e) => {
-        // Only clear on actually LEAVING the underlay, not on crossing into a child (a
-        // card, a note) — the same contains-check WorkspaceCenter's pane overlay uses,
-        // for the same reason: without it the outline flickers off and on as the cursor
-        // passes over every card between here and the drop point.
-        if (!e.currentTarget.contains(e.relatedTarget as Node | null)) setDropActive(false);
-      }}
-      onDrop={(e) => {
-        setDropActive(false);
-        const payload = readSessionDrag(e.dataTransfer);
-        if (!payload) return;
-        e.preventDefault();
-        const rect = e.currentTarget.getBoundingClientRect();
-        // Drop where the cursor is, centred on it rather than corner-anchored — a card
-        // whose top-left lands under the pointer appears to jump down and right.
-        const p = toCanvasPoint(canvas, e.clientX - rect.left, e.clientY - rect.top);
-        // snapshot() arrives in Task 14 (undo); omitted here per the brief.
-        setCanvas(
-          addNodeAt(canvas, payload.sessionId, payload.projectId, p.x - CARD_W / 2, p.y - CARD_H / 2),
-        );
-      }}
+      // Session-drop handling (dragover/dragleave/drop) is bound imperatively to the
+      // common ancestor in an effect below — see that effect's comment for why a JSX
+      // prop here would miss every drag over an already-placed card. Only the
+      // drop-active class (above) stays driven from here.
     >
       <div
         className="canvas-plane"
