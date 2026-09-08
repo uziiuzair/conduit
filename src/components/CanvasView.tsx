@@ -4,7 +4,6 @@ import { TERM_BASE_FONT } from "./Terminal";
 import { snapZoom } from "../terminalZoom";
 import {
   type Box,
-  type CanvasState,
   CARD_H,
   CARD_W,
   FOOTER_H,
@@ -47,7 +46,6 @@ import {
   translateMany,
   zoomAt,
 } from "../canvas";
-import { emptyHistory, pushHistory, redo, undo } from "../canvasHistory";
 import { meterLevel, meterTitle } from "../contextMeter";
 import { hasSessionDrag, readSessionDrag, resolveProjectColor } from "../layout";
 import { useCanvas } from "../hooks/useCanvas";
@@ -103,19 +101,12 @@ export function CanvasUnderlay({
   const selectedProjectId = useStore((s) => s.selectedProjectId);
   const sessionContext = useStore((s) => s.sessionContext);
   const autoProjectColors = useStore((s) => s.autoProjectColors);
-  const { canvas, setCanvas } = useCanvas();
-
-  // Undo/redo. A ref, not state — history churns on every edit and none of it is ever
-  // rendered directly, only replayed back into `canvas` via setCanvas.
-  const historyRef = useRef(emptyHistory<CanvasState>());
-  /** Record the state as it was BEFORE a gesture or a discrete edit. Called at gesture
-   *  START (pointer-down of a move/resize, or immediately before a menu action's
-   *  setCanvas) and NEVER per pointer-move — that is what makes one drag one undo step.
-   *  pushHistory itself dedupes a snapshot identical to the last one recorded, so calling
-   *  this at the start of a gesture that turns out to be a no-op click costs nothing. */
-  const snapshot = useCallback(() => {
-    historyRef.current = pushHistory(historyRef.current, canvas);
-  }, [canvas]);
+  // canvas/setCanvas/snapshot/undo/redo all come from useCanvas — the ONE seam every board
+  // edit flows through, which is what lets CanvasControls (a sibling component, its own
+  // call to this same hook below) share the same undo/redo timeline without either
+  // component knowing the other exists. See that hook's own comment on why the history is
+  // module-scoped rather than kept here as a ref.
+  const { canvas, setCanvas, snapshot, undo, redo } = useCanvas();
 
   // ref === null means panning the plane; mode distinguishes moving from resizing, since
   // both are pointer drags over the same element tree; kind says which array the id
@@ -222,20 +213,12 @@ export function CanvasUnderlay({
       const mod = e.metaKey || e.ctrlKey;
       if (mod && !e.shiftKey && e.key.toLowerCase() === "z") {
         e.preventDefault();
-        const step = undo(historyRef.current, canvas);
-        if (step) {
-          historyRef.current = step.history;
-          setCanvas(step.state);
-        }
+        undo();
         return;
       }
       if (mod && e.shiftKey && e.key.toLowerCase() === "z") {
         e.preventDefault();
-        const step = redo(historyRef.current, canvas);
-        if (step) {
-          historyRef.current = step.history;
-          setCanvas(step.state);
-        }
+        redo();
         return;
       }
       if ((e.key === "Backspace" || e.key === "Delete") && selection.length > 0) {
@@ -259,7 +242,7 @@ export function CanvasUnderlay({
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [canvas, setCanvas, selection, snapshot]);
+  }, [canvas, setCanvas, selection, snapshot, undo, redo]);
 
   // "Rename" in a section's context menu opens the SAME inline editor as a double-click on
   // its title chip, but that editor's state lives inside CanvasSectionFrame — a sibling of
@@ -1298,7 +1281,10 @@ export function CanvasControls({
 }: {
   viewportRef: React.RefObject<HTMLDivElement | null>;
 }) {
-  const { canvas, setCanvas } = useCanvas();
+  // snapshot shared with CanvasUnderlay via the ONE module-scoped history useCanvas owns —
+  // this is exactly the seam that makes "+ Note" below undoable without either component
+  // knowing the other exists.
+  const { canvas, setCanvas, snapshot } = useCanvas();
   const setCanvasOpen = useStore((s) => s.setCanvasOpen);
   const isLive = canvas.zoom >= LIVE_ZOOM_MIN;
   // The visible way out is the header's Canvas toggle, which flips to "Hide canvas" while
@@ -1345,6 +1331,7 @@ export function CanvasControls({
           const el = viewportRef.current;
           if (!el) return;
           const c = toCanvasPoint(canvas, el.clientWidth / 2, el.clientHeight / 2);
+          snapshot();
           setCanvas(addNote(canvas, crypto.randomUUID(), c.x - NOTE_W / 2, c.y - NOTE_H / 2));
         }}
         title="Add a sticky note in the middle of the view"
