@@ -176,11 +176,19 @@ export function CanvasUnderlay({
     const onKeyUp = (e: KeyboardEvent) => {
       if (e.code === "Space") spaceHeldRef.current = false;
     };
+    // Space held, then focus leaves the webview entirely (Cmd-Tab away, released outside
+    // the window) — no keyup ever reaches us, and without this the ref would stick `true`
+    // forever, silently panning every later plain drag instead of marqueeing.
+    const onBlur = () => {
+      spaceHeldRef.current = false;
+    };
     window.addEventListener("keydown", onKeyDown);
     window.addEventListener("keyup", onKeyUp);
+    window.addEventListener("blur", onBlur);
     return () => {
       window.removeEventListener("keydown", onKeyDown);
       window.removeEventListener("keyup", onKeyUp);
+      window.removeEventListener("blur", onBlur);
     };
   }, []);
 
@@ -466,6 +474,10 @@ export function CanvasUnderlay({
     // must never start a move or a resize. This is the one case the button-0 guard below
     // is relaxed for.
     if (e.button === 1) {
+      // Chromium (WebView2 on Windows, and Chrome-based dev tooling) fires its own
+      // middle-click autoscroll on this same press; left alone it fights the pan with its
+      // own scroll cursor.
+      e.preventDefault();
       (e.currentTarget as Element).setPointerCapture?.(e.pointerId);
       movedRef.current = false;
       dragStartRef.current = { x: e.clientX, y: e.clientY };
@@ -669,6 +681,11 @@ export function CanvasUnderlay({
         const el = viewportRef.current;
         if (!el) return;
         e.preventDefault();
+        // Every other gesture in this file captures the pointer at its start — the marquee
+        // is Pointer Events too and needs the same guarantee: without it, a release outside
+        // the window never reaches the capture-phase pointerup listener below, `marquee` is
+        // never cleared, and the rectangle stays painted until another marquee starts.
+        (e.currentTarget as Element).setPointerCapture?.(e.pointerId);
         const rect = el.getBoundingClientRect();
         const x = e.clientX - rect.left;
         const y = e.clientY - rect.top;

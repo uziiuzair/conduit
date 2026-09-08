@@ -894,7 +894,9 @@ button {
   box-shadow: 0 4px 14px rgba(0, 0, 0, 0.3);
   overflow: hidden;
 }
-.canvas-note.selected { box-shadow: 0 0 0 2px var(--accent); }
+/* Composed with the base drop-shadow above, not a replacement for it — a selected note
+   would otherwise visibly lose its depth. */
+.canvas-note.selected { box-shadow: 0 0 0 2px var(--accent), 0 4px 14px rgba(0, 0, 0, 0.3); }
 
 /* Drag strip. Empty until the note is linked, at which point it names the session — the
    text itself stays the note's content. */
@@ -1012,7 +1014,9 @@ button {
 }
 .canvas-card.status-needsInput { border-color: var(--accent); }
 .canvas-card.status-running { border-color: color-mix(in srgb, var(--accent) 45%, var(--border)); }
-.canvas-card.selected { box-shadow: 0 0 0 2px var(--accent); }
+/* Composed with the base drop-shadow above, not a replacement for it — a selected card
+   would otherwise visibly lose its depth. */
+.canvas-card.selected { box-shadow: 0 0 0 2px var(--accent), 0 6px 20px rgba(0, 0, 0, 0.35); }
 
 .canvas-card-head {
   display: flex; align-items: center; gap: 7px; flex: none;
