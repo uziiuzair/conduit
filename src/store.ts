@@ -28,6 +28,7 @@ import {
 } from "./layout";
 import { cleanupEdits } from "./trim";
 import { appendItem, type ChatItem, type RootChat } from "./rootChat";
+import { addDecision, removeDecision, type PendingDecision } from "./rootProposals";
 import { inProfile, type Profile } from "./profiles";
 import type { CanvasState } from "./canvas";
 import type { ContinuityFeed } from "./continuityFeed";
@@ -1170,6 +1171,13 @@ interface AppState {
   rootChatDone: (chatId: string) => void;
   rootChatFailed: (chatId: string, message: string) => void;
 
+  /** Work root chat proposed, waiting on your approval. Runtime-only; Rust owns it. */
+  pendingDecisions: PendingDecision[];
+  loadPendingDecisions: () => Promise<void>;
+  decisionArrived: (d: PendingDecision) => void;
+  approveDecision: (id: string, agent: string, model?: string) => Promise<void>;
+  denyDecision: (id: string) => Promise<void>;
+
   // ---- panel collapse + Settings dialog (native menu-driven, App-level) ----
   /** Persisted. When true (default), opening/switching to a project eagerly spawns and
    *  resumes all its sessions instead of waiting for a click. */
@@ -1596,6 +1604,7 @@ export const useStore = create<AppState>((set, get) => {
     rootChatRunning: {},
     workspaceRoot: readWorkspaceRoot(),
     editingRootChatId: null,
+    pendingDecisions: [],
     restoreSessionsOnOpen: readRestoreSessionsOnOpen(),
     openBehavior: readOpenBehavior(),
     terminalRenderer: readTerminalRenderer(),
@@ -2413,6 +2422,35 @@ export const useStore = create<AppState>((set, get) => {
         },
         rootChatRunning: { ...st.rootChatRunning, [chatId]: false },
       })),
+
+    loadPendingDecisions: async () => {
+      const list = await invoke<PendingDecision[]>("list_pending_decisions").catch(
+        () => [] as PendingDecision[],
+      );
+      set({ pendingDecisions: list });
+    },
+
+    decisionArrived: (d) =>
+      set((st) => ({ pendingDecisions: addDecision(st.pendingDecisions, d) })),
+
+    approveDecision: async (id, agent, model) => {
+      // Optimistic: the card goes as soon as you answer. A failure re-adds it below.
+      const before = get().pendingDecisions.find((x) => x.id === id);
+      set((st) => ({ pendingDecisions: removeDecision(st.pendingDecisions, id) }));
+      try {
+        await invoke("approve_root_proposal", { id, agent, model: model ?? null });
+      } catch (e) {
+        if (before) {
+          set((st) => ({ pendingDecisions: addDecision(st.pendingDecisions, before) }));
+        }
+        get().pushToast(`Could not start that work: ${String(e)}`, "error");
+      }
+    },
+
+    denyDecision: async (id) => {
+      set((st) => ({ pendingDecisions: removeDecision(st.pendingDecisions, id) }));
+      await invoke("deny_root_proposal", { id, reason: null }).catch(() => {});
+    },
 
     // Every workspace-focus action below also clears selectedRootChatId: the HQ chat
     // is a CSS layer OVER the (still-mounted) terminal workspace, so any action that

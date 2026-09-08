@@ -16,6 +16,7 @@ import {
 import { type AgentId } from "./agents";
 import { matchProjectByPath } from "./cliOpen";
 import { type ChatItem } from "./rootChat";
+import { type PendingDecision } from "./rootProposals";
 import { holdsOffWorking, notificationStatus } from "./statusRules";
 import { type ThemePref } from "./themes";
 import { useClaudeAmbient } from "./hooks/useClaudeAmbient";
@@ -30,6 +31,7 @@ import { Onboarding } from "./components/Onboarding";
 import { UpdateNotice } from "./components/UpdateNotice";
 import { TmuxNotice } from "./components/TmuxNotice";
 import { Toasts } from "./components/Toasts";
+import { PendingDecisions } from "./components/PendingDecisions";
 import { Settings } from "./components/Settings";
 import { QuickOpen } from "./components/QuickOpen";
 import { SearchPalette } from "./components/SearchPalette";
@@ -273,6 +275,38 @@ export default function App() {
       void unItem.then((f) => f());
       void unDone.then((f) => f());
       void unErr.then((f) => f());
+    };
+  }, []);
+
+  // Work root chat proposed. Also loaded once on mount so a proposal made while the
+  // window was closed is not lost.
+  useEffect(() => {
+    void useStore.getState().loadPendingDecisions();
+    // Global routing table, so a card can name the agent it would use. The new-session
+    // dialog loads this per project; the card stack is app-level, so it needs the
+    // global one.
+    void useStore.getState().loadRouting(null);
+    const unPending = listen<PendingDecision>("pending-decision", ({ payload }) => {
+      useStore.getState().decisionArrived(payload);
+    });
+    const unCreated = listen<{ id: string; title: string; seed: string }>(
+      "root-chat-created",
+      ({ payload }) => {
+        // The `chat_fork` MCP tool tells the model its seed was "seeded" as the new
+        // chat's first message — so it must actually be sent, or the model is told
+        // work happened that never did. `loadRootChats` first so the chat this send
+        // targets is in the store (Rust already created it before emitting this event).
+        void useStore
+          .getState()
+          .loadRootChats()
+          .then(() => {
+            if (payload.seed) void useStore.getState().sendRootChat(payload.id, payload.seed);
+          });
+      },
+    );
+    return () => {
+      void unPending.then((f) => f());
+      void unCreated.then((f) => f());
     };
   }, []);
 
@@ -673,6 +707,7 @@ export default function App() {
       <UpdateNotice />
       <TmuxNotice />
       <Toasts />
+      <PendingDecisions />
       {showSettings && (
         <Settings onClose={() => setShowSettings(false)} initialTab={settingsTab} />
       )}
