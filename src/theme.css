@@ -813,7 +813,11 @@ button {
 .canvas-plane { position: absolute; top: 0; left: 0; transform-origin: 0 0; }
 
 /* In canvas mode the stack is the pannable plane itself, so it shares the underlay's
-   transform. z-index puts it above the frames.
+   TRANSLATE -- but never its scale. The underlay is DOM and SVG, which a transform
+   renders as vectors; the stack holds rasterized glyph atlases, which a transform would
+   resample into blur. So the stack translates only and its children are sized in the
+   plane's own pixels by placeSession (WorkspaceCenter.tsx). z-index puts it above the
+   frames.
 
    pointer-events is the load-bearing line. .term-stack is full-bleed (inset: 0), so
    sitting above the underlay it would hit-test the ENTIRE canvas -- transparent is still
