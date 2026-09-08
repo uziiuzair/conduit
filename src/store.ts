@@ -659,9 +659,10 @@ function writeTerminalRenderer(v: TerminalRenderer): void {
 }
 
 // Canvas view: card positions / pan / zoom per project. Same persisted-pref pattern as the
-// toggles above. A corrupt or hand-edited value falls back to "no saved canvas", which
-// `reconcile` then repopulates by auto-placing every session — a canvas that lays itself
-// out again is a much better failure than one that throws on load.
+// toggles above. A corrupt or hand-edited value falls back to an empty canvas rather than
+// throwing on load. Membership here is curated, not derived, so an empty canvas does not
+// repopulate itself — the fallback is a real loss of the user's arrangement, just a smaller
+// one than a load failure.
 const CANVASES_KEY = "conduit.canvases";
 function readCanvases(): Record<string, CanvasState> {
   try {
