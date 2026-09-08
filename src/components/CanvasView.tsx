@@ -511,7 +511,7 @@ export function CanvasUnderlay({
 
       {canvas.nodes.length === 0 && notesOf(canvas).length === 0 && (
         <div className="canvas-empty">
-          Empty board — drag a session in from the sidebar, or right-click to add a section.
+          Empty canvas — drag a session in from the sidebar, or right-click to add a section.
         </div>
       )}
 
@@ -705,8 +705,8 @@ export function CanvasControls({
   const { canvas, setCanvas } = useCanvas();
   const setCanvasOpen = useStore((s) => s.setCanvasOpen);
   const isLive = canvas.zoom >= LIVE_ZOOM_MIN;
-  // The visible way out is the header's Board toggle, which flips to "Hide board" while
-  // the board is open. This is only the keyboard route to the same action.
+  // The visible way out is the header's Canvas toggle, which flips to "Hide canvas" while
+  // the canvas is open. This is only the keyboard route to the same action.
   const exitCanvas = useCallback(() => setCanvasOpen(false), [setCanvasOpen]);
 
   // Escape leaves the canvas — but ONLY when the keystroke did not land somewhere that

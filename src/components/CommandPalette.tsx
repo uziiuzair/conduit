@@ -113,7 +113,7 @@ function buildCommands(close: () => void): Command[] {
       section: "View",
     });
   }
-  // The canvas is the one global board (⇧⌘C) — not project-scoped like the task board
+  // The canvas is the one global surface (⇧⌘C) — not project-scoped like the task board
   // above, so this offers regardless of whether a project is selected.
   act(
     "view-canvas",
