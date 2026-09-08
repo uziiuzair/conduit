@@ -79,6 +79,15 @@ describe("addNodeAt / removeNode", () => {
     expect(s.nodes[0].x).toBe(0);
   });
 
+  it("preserves insertion order across multiple additions", () => {
+    // Load-bearing per the file header: the renderer keys nodes by session id in array
+    // order, and React reorders DOM to match — a reorder is a reparent that kills the PTY.
+    let s = addNodeAt(emptyCanvas(), "a", "p1", 0, 0);
+    s = addNodeAt(s, "b", "p1", 100, 0);
+    s = addNodeAt(s, "c", "p1", 200, 0);
+    expect(s.nodes.map((n) => n.ref)).toEqual(["a", "b", "c"]);
+  });
+
   it("removes a node without touching notes", () => {
     let s = addNodeAt(emptyCanvas(), "a", "p1", 0, 0);
     s = addNote(s, "n1", 10, 10);
@@ -171,9 +180,13 @@ describe("resizeNode", () => {
 
   it("survives a pruneCanvas call", () => {
     // Resizing then pruning must not reset the size — pruneCanvas spreads the node array,
-    // so this is really a guard against a future rewrite that rebuilds nodes.
-    const s0 = resizeNode(addNodeAt(emptyCanvas(), "a", "p1", 0, 0), "a", 800, 600);
-    const s1 = pruneCanvas(addNodeAt(s0, "b", "p1", 100, 0), new Set(["a", "b"]));
+    // so this is really a guard against a future rewrite that rebuilds nodes. "c" is left
+    // out of the live set so a real rebuild happens, not the identity fast path.
+    let s0 = resizeNode(addNodeAt(emptyCanvas(), "a", "p1", 0, 0), "a", 800, 600);
+    s0 = addNodeAt(s0, "b", "p1", 100, 0);
+    s0 = addNodeAt(s0, "c", "p1", 200, 0);
+    const s1 = pruneCanvas(s0, new Set(["a", "b"]));
+    expect(s1.nodes.map((n) => n.ref)).toEqual(["a", "b"]);
     const a = s1.nodes.find((n) => n.ref === "a")!;
     expect([nodeW(a), nodeH(a)]).toEqual([800, 600]);
   });
@@ -356,9 +369,18 @@ describe("note links", () => {
   });
 
   it("still prunes a canvas that has no notes at all", () => {
-    const s: CanvasState = { ...emptyCanvas(), nodes: [node("s1", "p1", 0, 0)] };
-    expect(pruneCanvas(s, new Set(["s1"]))).toBe(s);
-    expect(s.notes).toBeUndefined();
+    // Two nodes and a live set with only one of them forces a real rebuild — the identity
+    // fast path would let `out.notes` pass by never having been touched at all.
+    const s: CanvasState = {
+      ...emptyCanvas(),
+      nodes: [node("s1", "p1", 0, 0), node("s2", "p1", 100, 0)],
+    };
+    const out = pruneCanvas(s, new Set(["s1"]));
+    expect(out.nodes.map((n) => n.ref)).toEqual(["s1"]);
+    // Absent, not undefined-by-key: a rebuilt canvas with no notes must not grow a `notes`
+    // key, since persisted state round-trips through JSON and an absent key is what marks
+    // a canvas that predates notes.
+    expect(out.notes).toBeUndefined();
   });
 });
 
