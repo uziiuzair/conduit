@@ -199,19 +199,17 @@ pub fn root_chat_stop(chat_id: String, state: State<Arc<RootChatState>>) {
     }
 }
 
-/// Replay a chat's history from its transcript on disk — the same parser the live
-/// stream uses, so reopen renders exactly what streaming rendered. Missing transcript
-/// (fresh chat, deleted store) degrades to empty, per the transcript-consumer rule.
-#[tauri::command]
-pub fn root_chat_history(chat_id: String, store: State<Arc<crate::store::Store>>) -> Vec<Value> {
-    let projects = match store.root_chat_config_dir(&chat_id) {
+/// Parse a chat's transcript into renderable items. Shared by the `root_chat_history`
+/// command and root_mcp's `chat_read`, so the two can never drift.
+pub fn history_items(store: &crate::store::Store, chat_id: &str) -> Vec<Value> {
+    let projects = match store.root_chat_config_dir(chat_id) {
         Some(cfg) if !cfg.is_empty() => PathBuf::from(cfg).join("projects"),
         _ => match crate::pty::claude_projects_dir() {
             Some(d) => d,
             None => return Vec::new(),
         },
     };
-    let Some(path) = crate::pty::transcript_path(&chat_id, &projects) else {
+    let Some(path) = crate::pty::transcript_path(chat_id, &projects) else {
         return Vec::new();
     };
     let Ok(f) = std::fs::File::open(&path) else {
@@ -222,6 +220,14 @@ pub fn root_chat_history(chat_id: String, store: State<Arc<crate::store::Store>>
         .map_while(Result::ok)
         .flat_map(|l| crate::transcript::parse_line(&l))
         .collect()
+}
+
+/// Replay a chat's history from its transcript on disk — the same parser the live
+/// stream uses, so reopen renders exactly what streaming rendered. Missing transcript
+/// (fresh chat, deleted store) degrades to empty, per the transcript-consumer rule.
+#[tauri::command]
+pub fn root_chat_history(chat_id: String, store: State<Arc<crate::store::Store>>) -> Vec<Value> {
+    history_items(&store, &chat_id)
 }
 
 /// What one stream-json stdout line means to the chat.

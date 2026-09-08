@@ -9,12 +9,12 @@
 //!
 //! `now` is always a parameter -- never a clock read -- so expiry is testable.
 //!
-//! **Not wired to a caller yet, deliberately.** This is Task 1 of the root-chat
-//! orchestrator plan: nothing outside the test module constructs a `Proposals` or calls
-//! its methods until the MCP tool and Tauri commands land in later tasks. `#[allow(dead_code)]`
-//! is scoped to this file (same convention as `usage_tally.rs`) rather than left as a bare
-//! warning, so it reads as an explicit "not yet" rather than an oversight.
-#![allow(dead_code)]
+//! Task 3's `root_mcp::dispatch_work_inner`/`dispatch_status_inner` are this module's
+//! first non-test callers (`register` via `dispatch_work`, `get` via `dispatch_status`).
+//! `pending` and `resolve` still have none: the human-facing approval flow that reads the
+//! queue and answers it is Task 4's job, so they keep a narrow, item-scoped
+//! `#[allow(dead_code)]` rather than the file-level blanket this module carried through
+//! Task 1.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
@@ -30,8 +30,17 @@ pub const EXPIRY_SECS: u64 = 86_400;
 #[derive(Clone, Debug, PartialEq)]
 pub enum Outcome {
     Pending,
-    Approved { session_id: String },
-    Denied { reason: Option<String> },
+    // Constructed by whatever calls `resolve` with a human answer -- the approve/deny
+    // commands are Task 4's job, not yet landed, so these two read as never-constructed
+    // outside tests. Same reasoning as `resolve`'s own item-scoped allow above.
+    #[allow(dead_code)]
+    Approved {
+        session_id: String,
+    },
+    #[allow(dead_code)]
+    Denied {
+        reason: Option<String>,
+    },
     Expired,
 }
 
@@ -107,6 +116,10 @@ impl Proposals {
 
     /// Still-actionable proposals. Sweeps first, so reading the queue is also what
     /// retires anything past the window.
+    ///
+    /// No non-test caller yet -- the pending-decisions UI panel that lists these is
+    /// Task 4's job.
+    #[allow(dead_code)]
     pub fn pending(&self, now: u64) -> Vec<Proposal> {
         self.sweep(now);
         self.inner
@@ -120,6 +133,9 @@ impl Proposals {
 
     /// Record an answer. Returns false if the proposal is unknown or already answered --
     /// first responder wins, so a desktop card and a phone racing cannot double-spawn.
+    ///
+    /// No non-test caller yet -- the approve/deny commands that call this are Task 4's job.
+    #[allow(dead_code)]
     pub fn resolve(&self, id: &str, outcome: Outcome) -> bool {
         let mut list = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         match list.iter_mut().find(|p| p.id == id) {
@@ -217,6 +233,18 @@ mod tests {
                 session_id: "s-1".into()
             }
         ));
+    }
+
+    /// The existing test above checks `EXPIRY_SECS - 1` (still pending) and
+    /// `EXPIRY_SECS + 1` (expired), but never the exact boundary -- so a `>` -> `>=`
+    /// regression in `sweep` would pass unnoticed. At exactly `now - created_at ==
+    /// EXPIRY_SECS`, the current `>` semantics keep the proposal pending.
+    #[test]
+    fn pending_is_still_pending_at_exactly_the_expiry_boundary() {
+        let p = Proposals::default();
+        let a = reg(&p, "chat-1", T0);
+        assert_eq!(p.pending(T0 + EXPIRY_SECS).len(), 1);
+        assert!(matches!(p.get(&a.id).unwrap().outcome, Outcome::Pending));
     }
 
     #[test]

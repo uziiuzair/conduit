@@ -1943,6 +1943,7 @@ pub fn run() {
         .manage(Arc::new(hookbus::HookBus::default()))
         .manage(Arc::new(broker::Broker::default()))
         .manage(Arc::new(broker::Presence::default()))
+        .manage(Arc::new(proposals::Proposals::default()))
         .manage(DirtyGuard::default())
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
@@ -2078,6 +2079,15 @@ pub fn run() {
                     }
                 });
             }
+
+            let proposals = app.state::<Arc<proposals::Proposals>>().inner().clone();
+            root_mcp::start(
+                app.handle().clone(),
+                store.clone(),
+                pty.clone(),
+                fleet.clone(),
+                proposals.clone(),
+            );
 
             fleet_mcp::start(app.handle().clone(), store, pty, fleet, board, tasks);
 

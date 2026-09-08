@@ -11,22 +11,27 @@
 //! replies) on its own `tiny_http` thread; the optional SSE GET is answered 405 so the
 //! client falls back to POST, and `initialize` is idempotent (claude sends it twice).
 //!
-//! **Not wired to a caller yet, deliberately.** This is Task 2 of the root-chat
-//! orchestrator plan: `dispatch_tool` and `start` (the server loop) are Task 3, so this
-//! file has no non-test caller yet. `#[allow(dead_code)]` is scoped to this file rather
-//! than left as a bare warning, so it reads as an explicit "not yet" rather than an
-//! oversight (same convention as `usage_tally.rs` and Task 1's `proposals.rs`). Task 3
-//! adds the transport (`tiny_http`, `tauri::AppHandle`) and dispatch (`FleetState`,
-//! `PtyManager`, `Proposals`) imports this file does not need yet; import them there,
-//! next to the code that uses them, rather than here ahead of time.
+//! Task 3 lands the transport (`dispatch_tool`, `handle_request`, `start`) on top of
+//! Task 2's declarative half, wired into `lib.rs`'s `setup` next to `fleet_mcp::start`.
+//! `write_mcp_config`/`port` still have no non-test caller here -- feeding the generated
+//! config into root chat's own `claude -p` invocation is later work, not this task's --
+//! so they keep a narrow, item-scoped `#[allow(dead_code)]` rather than the file-level
+//! blanket this file carried through Task 2.
 //!
 //! Design: docs/superpowers/specs/2026-09-08-root-chat-orchestrator-design.md
-#![allow(dead_code)]
 
+use std::io::Read;
 use std::sync::atomic::{AtomicU16, Ordering};
+use std::sync::Arc;
+use std::thread;
 
 use serde_json::{json, Value};
+use tauri::{AppHandle, Emitter};
+use tiny_http::{Header, Method, Request, Response, Server};
 
+use crate::fleet::FleetState;
+use crate::proposals::{Outcome, Proposals};
+use crate::pty::PtyManager;
 use crate::store::{Session, Store};
 
 /// How many bytes of recent output `session_peek` returns.
@@ -36,6 +41,10 @@ const PEEK_BYTES: usize = 8192;
 /// `write_mcp_config` decline and root chat degrade to its Phase 2 tool set.
 static PORT: AtomicU16 = AtomicU16::new(0);
 
+/// No non-test caller yet: reading the bound port back out is for whatever wires the
+/// generated `--mcp-config` into root chat's own `claude -p` invocation, which is later
+/// work than this task.
+#[allow(dead_code)]
 pub fn port() -> u16 {
     PORT.load(Ordering::SeqCst)
 }
@@ -53,6 +62,10 @@ pub fn mcp_config_json(port: u16, chat_id: &str) -> String {
 }
 
 /// Write the per-chat mcp-config into Conduit's data dir; return its path.
+///
+/// No non-test caller yet, same reason as `port` above -- root chat's own spawn does not
+/// pass `--mcp-config` yet.
+#[allow(dead_code)]
 pub fn write_mcp_config(port: u16, chat_id: &str) -> Option<String> {
     if port == 0 {
         return None;
@@ -148,6 +161,359 @@ pub fn tool_specs() -> Vec<Value> {
             }, "required": ["title"] }
         }),
     ]
+}
+
+/// Everything a tool handler needs, resolved per request.
+struct Ctx {
+    app: AppHandle,
+    store: Arc<Store>,
+    pty: Arc<PtyManager>,
+    fleet: Arc<FleetState>,
+    proposals: Arc<Proposals>,
+    chat_id: String,
+}
+
+fn query_param(url: &str, key: &str) -> Option<String> {
+    let (_, qs) = url.split_once('?')?;
+    qs.split('&').find_map(|pair| {
+        let (k, v) = pair.split_once('=')?;
+        (k == key).then(|| v.to_string())
+    })
+}
+
+/// The identity gate: the caller must name a root chat this app actually has. A project
+/// session cannot reach these tools even if it learns the port.
+fn known_chat(store: &Store, chat_id: &str) -> Result<(), String> {
+    if chat_id.is_empty() {
+        return Err("missing rootchat id".into());
+    }
+    store
+        .list_root_chats()
+        .iter()
+        .any(|c| c.id == chat_id)
+        .then_some(())
+        .ok_or_else(|| "not-a-root-chat".to_string())
+}
+
+fn now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// Split out of `dispatch_tool` so the recording rules are testable without a server or
+/// an AppHandle. Returns the JSON the tool answers with.
+fn dispatch_work_inner(
+    store: &Store,
+    proposals: &Proposals,
+    chat_id: &str,
+    args: &Value,
+    now: u64,
+) -> Result<String, String> {
+    let project_id = args
+        .get("projectId")
+        .and_then(|v| v.as_str())
+        .ok_or("missing projectId")?;
+    let task = args
+        .get("task")
+        .and_then(|v| v.as_str())
+        .filter(|t| !t.trim().is_empty())
+        .ok_or("missing task")?;
+    if !store.list().iter().any(|p| p.id == project_id) {
+        return Err(format!("unknown project {project_id}"));
+    }
+    let str_arg = |k: &str| args.get(k).and_then(|v| v.as_str()).map(|s| s.to_string());
+    let p = proposals.register(
+        chat_id,
+        project_id,
+        task,
+        str_arg("kind"),
+        str_arg("agent"),
+        str_arg("model"),
+        now,
+    )?;
+    Ok(json!({
+        "status": "awaiting-approval",
+        "id": p.id,
+        "note": "The user must approve this before anything starts. Check dispatch_status later; do not assume it ran."
+    })
+    .to_string())
+}
+
+fn dispatch_status_inner(proposals: &Proposals, args: &Value) -> Result<String, String> {
+    let id = args
+        .get("id")
+        .and_then(|v| v.as_str())
+        .ok_or("missing id")?;
+    let p = proposals.get(id).ok_or("unknown proposal id")?;
+    let body = match p.outcome {
+        Outcome::Pending => json!({ "status": "pending" }),
+        Outcome::Approved { session_id } => {
+            json!({ "status": "approved", "sessionId": session_id })
+        }
+        Outcome::Denied { reason } => json!({ "status": "denied", "reason": reason }),
+        Outcome::Expired => json!({ "status": "expired" }),
+    };
+    Ok(body.to_string())
+}
+
+fn dispatch_tool(name: &str, args: &Value, ctx: &Ctx) -> Result<String, String> {
+    match name {
+        "sessions_list" => {
+            let only = args.get("projectId").and_then(|v| v.as_str());
+            let status = ctx.fleet.snapshot();
+            let mut out: Vec<Value> = Vec::new();
+            for p in ctx.store.list() {
+                if only.is_some_and(|id| id != p.id) {
+                    continue;
+                }
+                for s in &p.sessions {
+                    let st = status.get(&s.id).cloned().unwrap_or_default();
+                    out.push(json!({
+                        "id": s.id,
+                        "name": s.name,
+                        "project": p.name,
+                        "projectId": p.id,
+                        "agent": s.agent,
+                        "status": st.status,
+                        "activity": st.activity,
+                        "branch": s.branch,
+                        "hibernated": s.stopped,
+                        "sensitive": !peek_allowed(&ctx.store, s),
+                    }));
+                }
+            }
+            Ok(json!(out).to_string())
+        }
+        "session_peek" => {
+            let id = args
+                .get("sessionId")
+                .and_then(|v| v.as_str())
+                .ok_or("missing sessionId")?;
+            let session = ctx
+                .store
+                .list()
+                .into_iter()
+                .flat_map(|p| p.sessions)
+                .find(|s| s.id == id)
+                .ok_or("unknown session")?;
+            if !peek_allowed(&ctx.store, &session) {
+                return Err("access-denied: the user marked this session sensitive".into());
+            }
+            ctx.pty
+                .recent_output(id, PEEK_BYTES)
+                .ok_or_else(|| "session is not running".to_string())
+        }
+        "chats_list" => {
+            let me = ctx.chat_id.clone();
+            let list: Vec<Value> = ctx
+                .store
+                .list_root_chats()
+                .into_iter()
+                .filter(|c| c.id != me)
+                .map(|c| json!({ "id": c.id, "title": c.title, "createdAt": c.created_at }))
+                .collect();
+            Ok(json!(list).to_string())
+        }
+        "chat_read" => {
+            let id = args
+                .get("chatId")
+                .and_then(|v| v.as_str())
+                .ok_or("missing chatId")?;
+            if !ctx.store.list_root_chats().iter().any(|c| c.id == id) {
+                return Err("unknown chat id".into());
+            }
+            let limit = args.get("limit").and_then(|v| v.as_u64()).unwrap_or(100) as usize;
+            let items = crate::root_chat::history_items(&ctx.store, id);
+            let start = items.len().saturating_sub(limit);
+            Ok(json!(&items[start..]).to_string())
+        }
+        "dispatch_work" => {
+            let out =
+                dispatch_work_inner(&ctx.store, &ctx.proposals, &ctx.chat_id, args, now_secs())?;
+            // Tell the UI a card is waiting. Payload is self-contained so the card can
+            // render without re-reading the chat.
+            let parsed: Value = serde_json::from_str(&out).unwrap_or(Value::Null);
+            if let Some(id) = parsed.get("id").and_then(|v| v.as_str()) {
+                if let Some(p) = ctx.proposals.get(id) {
+                    let project_name = ctx
+                        .store
+                        .list()
+                        .into_iter()
+                        .find(|x| x.id == p.project_id)
+                        .map(|x| x.name)
+                        .unwrap_or_default();
+                    let _ = ctx.app.emit(
+                        "pending-decision",
+                        json!({
+                            "id": p.id,
+                            "chatId": p.chat_id,
+                            "projectId": p.project_id,
+                            "projectName": project_name,
+                            "task": p.task,
+                            "kind": p.kind,
+                            "agent": p.agent,
+                            "model": p.model,
+                            "createdAt": p.created_at,
+                        }),
+                    );
+                }
+            }
+            Ok(out)
+        }
+        "dispatch_status" => dispatch_status_inner(&ctx.proposals, args),
+        "chat_fork" => {
+            let title = args
+                .get("title")
+                .and_then(|v| v.as_str())
+                .filter(|t| !t.trim().is_empty())
+                .ok_or("missing title")?;
+            let chat = ctx.store.add_root_chat();
+            ctx.store.rename_root_chat(&chat.id, title);
+            let seed = args.get("seed").and_then(|v| v.as_str()).unwrap_or("");
+            // The desktop reconciles its sidebar from this event; without it the new chat
+            // only appears on the next reload.
+            let _ = ctx.app.emit(
+                "root-chat-created",
+                json!({ "id": chat.id, "title": title, "seed": seed }),
+            );
+            Ok(json!({ "id": chat.id, "title": title, "seeded": !seed.is_empty() }).to_string())
+        }
+        other => Err(format!("unknown tool: {other}")),
+    }
+}
+
+fn json_response(body: String) -> Response<std::io::Cursor<Vec<u8>>> {
+    let header: Header = "Content-Type: application/json".parse().unwrap();
+    Response::from_string(body).with_header(header)
+}
+
+/// Boot the root MCP server on the first free port in 8496..=8516 (clear of the hook
+/// server's 8423..=8443, the mobile bridge's 8455..=8475 and the fleet server's
+/// 8475..=8495).
+pub fn start(
+    app: AppHandle,
+    store: Arc<Store>,
+    pty: Arc<PtyManager>,
+    fleet: Arc<FleetState>,
+    proposals: Arc<Proposals>,
+) {
+    thread::spawn(move || {
+        let mut server: Option<Server> = None;
+        for candidate in 8496u16..=8516 {
+            if let Ok(s) = Server::http(("127.0.0.1", candidate)) {
+                PORT.store(candidate, Ordering::SeqCst);
+                server = Some(s);
+                break;
+            }
+        }
+        let Some(server) = server else {
+            eprintln!("conduit: no free root MCP port in 8496..=8516");
+            return;
+        };
+        for request in server.incoming_requests() {
+            let app = app.clone();
+            let store = store.clone();
+            let pty = pty.clone();
+            let fleet = fleet.clone();
+            let proposals = proposals.clone();
+            thread::spawn(move || handle_request(request, app, store, pty, fleet, proposals));
+        }
+    });
+}
+
+fn handle_request(
+    mut request: Request,
+    app: AppHandle,
+    store: Arc<Store>,
+    pty: Arc<PtyManager>,
+    fleet: Arc<FleetState>,
+    proposals: Arc<Proposals>,
+) {
+    // claude opens an optional SSE stream via GET; we never push, so 405 makes it fall
+    // back to POST (same as fleet_mcp).
+    if request.method() != &Method::Post {
+        let allow: Header = "Allow: POST".parse().unwrap();
+        let _ = request.respond(
+            Response::from_string("")
+                .with_status_code(405u16)
+                .with_header(allow),
+        );
+        return;
+    }
+
+    let url = request.url().to_string();
+    let chat_id = query_param(&url, "rootchat").unwrap_or_default();
+
+    let mut body = String::new();
+    let _ = request
+        .as_reader()
+        .take(1024 * 1024)
+        .read_to_string(&mut body);
+    let msg: Value = serde_json::from_str(&body).unwrap_or(Value::Null);
+    let id = msg.get("id").cloned();
+    let method = msg.get("method").and_then(|m| m.as_str()).unwrap_or("");
+
+    if method.starts_with("notifications/") {
+        let _ = request.respond(Response::from_string("").with_status_code(202u16));
+        return;
+    }
+
+    // The identity gate runs before anything but the handshake, so a stranger learns
+    // nothing about what tools exist.
+    if method != "initialize" {
+        if let Err(e) = known_chat(&store, &chat_id) {
+            let _ = request.respond(json_response(error_envelope(id, -32001, &e)));
+            return;
+        }
+    }
+
+    let reply = match method {
+        "initialize" => {
+            let ver = msg
+                .get("params")
+                .and_then(|p| p.get("protocolVersion"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("2024-11-05");
+            result_envelope(
+                id,
+                json!({
+                    "protocolVersion": ver,
+                    "capabilities": { "tools": {} },
+                    "serverInfo": { "name": "conduit-root", "version": env!("CARGO_PKG_VERSION") },
+                }),
+            )
+        }
+        "tools/list" => result_envelope(id, json!({ "tools": tool_specs() })),
+        "tools/call" => {
+            let params = msg.get("params").cloned().unwrap_or(Value::Null);
+            let name = params.get("name").and_then(|v| v.as_str()).unwrap_or("");
+            let args = params.get("arguments").cloned().unwrap_or(json!({}));
+            let ctx = Ctx {
+                app,
+                store,
+                pty,
+                fleet,
+                proposals,
+                chat_id,
+            };
+            match dispatch_tool(name, &args, &ctx) {
+                Ok(text) => result_envelope(
+                    id,
+                    json!({ "content": [{ "type": "text", "text": text }], "isError": false }),
+                ),
+                Err(e) => result_envelope(
+                    id,
+                    json!({ "content": [{ "type": "text", "text": e }], "isError": true }),
+                ),
+            }
+        }
+        "" => error_envelope(id, -32600, "invalid request"),
+        other => error_envelope(id, -32601, &format!("method not found: {other}")),
+    };
+
+    let _ = request.respond(json_response(reply));
 }
 
 #[cfg(test)]
@@ -350,5 +716,80 @@ mod tests {
             .unwrap();
         store.set_trust_settings(crate::store::TrustSettings { private_mode: true });
         assert!(!peek_allowed(&store, &confidential));
+    }
+
+    #[test]
+    fn query_param_extracts_the_chat_id() {
+        assert_eq!(
+            query_param("/mcp?rootchat=abc-123", "rootchat").as_deref(),
+            Some("abc-123")
+        );
+        assert_eq!(query_param("/mcp", "rootchat"), None);
+        assert_eq!(query_param("/mcp?other=1", "rootchat"), None);
+    }
+
+    #[test]
+    fn an_unknown_chat_id_is_refused_before_any_tool_runs() {
+        let dir = temp_dir("identity");
+        let store = Store::for_test(&dir);
+        // No root chats exist, so any caller id is a stranger.
+        assert!(known_chat(&store, "nope").is_err());
+        let chat = store.add_root_chat();
+        assert!(known_chat(&store, &chat.id).is_ok());
+    }
+
+    #[test]
+    fn dispatch_work_records_a_proposal_and_reports_its_status() {
+        let dir = temp_dir("dispatch");
+        let store = Arc::new(Store::for_test(&dir));
+        let project = store.add_project("/repo".into());
+        let chat = store.add_root_chat();
+        let proposals = Arc::new(Proposals::default());
+
+        let out = dispatch_work_inner(
+            &store,
+            &proposals,
+            &chat.id,
+            &json!({ "projectId": project.id, "task": "add rate limiting", "kind": "implementation" }),
+            1_700_000_000,
+        )
+        .expect("records");
+        let v: Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["status"], "awaiting-approval");
+        let id = v["id"].as_str().unwrap().to_string();
+
+        let status: Value =
+            serde_json::from_str(&dispatch_status_inner(&proposals, &json!({ "id": id })).unwrap())
+                .unwrap();
+        assert_eq!(status["status"], "pending");
+
+        proposals.resolve(
+            &id,
+            Outcome::Approved {
+                session_id: "s-1".into(),
+            },
+        );
+        let status: Value =
+            serde_json::from_str(&dispatch_status_inner(&proposals, &json!({ "id": id })).unwrap())
+                .unwrap();
+        assert_eq!(status["status"], "approved");
+        assert_eq!(status["sessionId"], "s-1");
+    }
+
+    #[test]
+    fn dispatch_work_refuses_an_unknown_project() {
+        let dir = temp_dir("dispatch_bad");
+        let store = Arc::new(Store::for_test(&dir));
+        let chat = store.add_root_chat();
+        let proposals = Arc::new(Proposals::default());
+        let err = dispatch_work_inner(
+            &store,
+            &proposals,
+            &chat.id,
+            &json!({ "projectId": "ghost", "task": "x" }),
+            1_700_000_000,
+        )
+        .unwrap_err();
+        assert!(err.contains("unknown project"), "{err}");
     }
 }
