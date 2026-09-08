@@ -3,12 +3,15 @@ import { useStore, type Session } from "../store";
 import { TERM_BASE_FONT } from "./Terminal";
 import { snapZoom } from "../terminalZoom";
 import {
+  CARD_H,
+  CARD_W,
   FOOTER_H,
   HEADER_H,
   LIVE_ZOOM_MIN,
   NOTE_H,
   NOTE_HEAD_H,
   NOTE_W,
+  addNodeAt,
   addNote,
   fit,
   linkEndpoints,
@@ -18,6 +21,7 @@ import {
   nodeH,
   nodeW,
   notesOf,
+  removeNode,
   removeNote,
   resizeNode,
   resizeNote,
@@ -27,7 +31,7 @@ import {
   zoomAt,
 } from "../canvas";
 import { meterLevel, meterTitle } from "../contextMeter";
-import { resolveProjectColor } from "../layout";
+import { hasSessionDrag, readSessionDrag, resolveProjectColor } from "../layout";
 import { useCanvas } from "../hooks/useCanvas";
 import { AgentGlyph, glyphStateFor } from "./AgentGlyph";
 import { deleteSession } from "./Sidebar";
@@ -89,6 +93,11 @@ export function CanvasUnderlay({
     lastY: number;
   } | null>(null);
   const showTerminals = canvas.zoom >= LIVE_ZOOM_MIN;
+
+  // Drop-affordance for a session dragged in from the sidebar. Read during `dragover` off
+  // the MIME type alone — `dataTransfer.getData` is blocked until drop, only `types` is
+  // readable — so this is the earliest point the outline can render.
+  const [dropActive, setDropActive] = useState(false);
 
   // Right-click menu. Holds the click in BOTH coordinate systems: screen for placing the
   // menu itself, canvas for placing whatever it creates.
@@ -311,7 +320,9 @@ export function CanvasUnderlay({
   return (
     <div
       ref={viewportRef}
-      className={`canvas-underlay ${drag?.ref === null ? "panning" : ""}`}
+      className={`canvas-underlay ${drag?.ref === null ? "panning" : ""} ${
+        dropActive ? "drop-active" : ""
+      }`}
       onPointerDown={(e) => {
         if (e.target === e.currentTarget || (e.target as Element).classList.contains("canvas-plane"))
           onPointerDown(e, null, "pan");
@@ -320,6 +331,36 @@ export function CanvasUnderlay({
       onPointerUp={endDrag}
       onPointerCancel={endDrag}
       onContextMenu={(e) => openMenu(e)}
+      onDragOver={(e) => {
+        // Only claim drags we actually accept — an unrelated drag (a file, browser text
+        // selection, another app's drop source) must fall through to default browser
+        // behaviour rather than being swallowed by a preventDefault it never asked for.
+        if (!hasSessionDrag(e.dataTransfer)) return;
+        e.preventDefault();
+        e.dataTransfer.dropEffect = "copy";
+        if (!dropActive) setDropActive(true);
+      }}
+      onDragLeave={(e) => {
+        // Only clear on actually LEAVING the underlay, not on crossing into a child (a
+        // card, a note) — the same contains-check WorkspaceCenter's pane overlay uses,
+        // for the same reason: without it the outline flickers off and on as the cursor
+        // passes over every card between here and the drop point.
+        if (!e.currentTarget.contains(e.relatedTarget as Node | null)) setDropActive(false);
+      }}
+      onDrop={(e) => {
+        setDropActive(false);
+        const payload = readSessionDrag(e.dataTransfer);
+        if (!payload) return;
+        e.preventDefault();
+        const rect = e.currentTarget.getBoundingClientRect();
+        // Drop where the cursor is, centred on it rather than corner-anchored — a card
+        // whose top-left lands under the pointer appears to jump down and right.
+        const p = toCanvasPoint(canvas, e.clientX - rect.left, e.clientY - rect.top);
+        // snapshot() arrives in Task 14 (undo); omitted here per the brief.
+        setCanvas(
+          addNodeAt(canvas, payload.sessionId, payload.projectId, p.x - CARD_W / 2, p.y - CARD_H / 2),
+        );
+      }}
     >
       <div
         className="canvas-plane"
@@ -551,6 +592,13 @@ export function CanvasUnderlay({
             setCanvasOpen(false);
           }}
           onNoteAbout={() => menu.nodeRef && addNoteAbout(menu.nodeRef)}
+          onRemoveFromBoard={() => {
+            const ref = menu.nodeRef;
+            setMenu(null);
+            // Off the board only — the session itself is untouched and keeps running. See
+            // removeNode's own doc comment; the destructive path below is the other thing.
+            if (ref) setCanvas(removeNode(canvas, ref));
+          }}
           onDeleteSession={() => {
             const ref = menu.nodeRef;
             const node = ref ? canvas.nodes.find((n) => n.ref === ref) : undefined;
@@ -578,6 +626,7 @@ function CanvasMenu({
   onDeleteNote,
   onOpenSession,
   onNoteAbout,
+  onRemoveFromBoard,
   onDeleteSession,
 }: {
   menu: { screenX: number; screenY: number; noteId?: string; nodeRef?: string };
@@ -595,6 +644,9 @@ function CanvasMenu({
   onDeleteNote: () => void;
   onOpenSession: () => void;
   onNoteAbout: () => void;
+  /** Off the board only — the session keeps running. Distinct from onDeleteSession, which
+   *  ends it; both live in this same menu, so the wording has to carry the difference. */
+  onRemoveFromBoard: () => void;
   onDeleteSession: () => void;
 }) {
   const ref = useRef<HTMLDivElement>(null);
@@ -675,7 +727,19 @@ function CanvasMenu({
             <button onClick={onOpenSession}>Open in panes</button>
             <button onClick={onNoteAbout}>Add a note about this</button>
             <div className="context-menu-sep" />
-            <button className="danger" onClick={onDeleteSession}>
+            {/* Two ways off this card, and they must not be confusable: this one only
+                takes the card off the board, the danger item below ends the session. */}
+            <button
+              onClick={onRemoveFromBoard}
+              title="Takes the card off the board. The session keeps running."
+            >
+              Remove from board
+            </button>
+            <button
+              className="danger"
+              onClick={onDeleteSession}
+              title="Ends the session behind a confirmation. The card and the sidebar entry are both gone."
+            >
               Delete session…
             </button>
           </>

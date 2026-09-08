@@ -810,6 +810,7 @@ button {
   background-size: 24px 24px;
 }
 .canvas-underlay.panning { cursor: grabbing; }
+.canvas-underlay.drop-active { outline: 2px dashed var(--accent); outline-offset: -6px; }
 .canvas-plane { position: absolute; top: 0; left: 0; transform-origin: 0 0; }
 
 /* In canvas mode the stack is the pannable plane itself, so it shares the underlay's
