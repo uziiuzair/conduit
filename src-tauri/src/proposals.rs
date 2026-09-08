@@ -11,10 +11,8 @@
 //!
 //! Task 3's `root_mcp::dispatch_work_inner`/`dispatch_status_inner` are this module's
 //! first non-test callers (`register` via `dispatch_work`, `get` via `dispatch_status`).
-//! `pending` and `resolve` still have none: the human-facing approval flow that reads the
-//! queue and answers it is Task 4's job, so they keep a narrow, item-scoped
-//! `#[allow(dead_code)]` rather than the file-level blanket this module carried through
-//! Task 1.
+//! Task 4's `lib.rs` commands (`list_pending_decisions`, `approve_root_proposal`,
+//! `deny_root_proposal`) are what call `pending` and `resolve`.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
@@ -30,17 +28,10 @@ pub const EXPIRY_SECS: u64 = 86_400;
 #[derive(Clone, Debug, PartialEq)]
 pub enum Outcome {
     Pending,
-    // Constructed by whatever calls `resolve` with a human answer -- the approve/deny
-    // commands are Task 4's job, not yet landed, so these two read as never-constructed
-    // outside tests. Same reasoning as `resolve`'s own item-scoped allow above.
-    #[allow(dead_code)]
-    Approved {
-        session_id: String,
-    },
-    #[allow(dead_code)]
-    Denied {
-        reason: Option<String>,
-    },
+    // Constructed by `lib.rs`'s `approve_root_proposal`/`deny_root_proposal` (Task 4) with
+    // the human's answer.
+    Approved { session_id: String },
+    Denied { reason: Option<String> },
     Expired,
 }
 
@@ -117,9 +108,8 @@ impl Proposals {
     /// Still-actionable proposals. Sweeps first, so reading the queue is also what
     /// retires anything past the window.
     ///
-    /// No non-test caller yet -- the pending-decisions UI panel that lists these is
-    /// Task 4's job.
-    #[allow(dead_code)]
+    /// Called by `lib.rs`'s `list_pending_decisions` (Task 4), the pending-decisions UI
+    /// panel's data source.
     pub fn pending(&self, now: u64) -> Vec<Proposal> {
         self.sweep(now);
         self.inner
@@ -134,8 +124,7 @@ impl Proposals {
     /// Record an answer. Returns false if the proposal is unknown or already answered --
     /// first responder wins, so a desktop card and a phone racing cannot double-spawn.
     ///
-    /// No non-test caller yet -- the approve/deny commands that call this are Task 4's job.
-    #[allow(dead_code)]
+    /// Called by `lib.rs`'s `approve_root_proposal`/`deny_root_proposal` (Task 4).
     pub fn resolve(&self, id: &str, outcome: Outcome) -> bool {
         let mut list = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         match list.iter_mut().find(|p| p.id == id) {

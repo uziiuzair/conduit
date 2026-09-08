@@ -767,6 +767,152 @@ fn remove_root_chat(id: String, store: State<Arc<Store>>) {
     }
 }
 
+// ---- Root chat dispatch proposals ----------------------------------------------
+
+/// Root chat dispatches WORKERS, never Conductors: a Conductor would carry fleet's full
+/// orchestration surface, which is exactly the boundary root chat is held to.
+const DISPATCH_ROLE: SessionRole = SessionRole::Worker;
+
+fn proposal_json(store: &Store, p: &proposals::Proposal) -> serde_json::Value {
+    let project_name = store
+        .list()
+        .into_iter()
+        .find(|x| x.id == p.project_id)
+        .map(|x| x.name)
+        .unwrap_or_default();
+    serde_json::json!({
+        "id": p.id,
+        "chatId": p.chat_id,
+        "projectId": p.project_id,
+        "projectName": project_name,
+        "task": p.task,
+        "kind": p.kind,
+        "agent": p.agent,
+        "model": p.model,
+        "createdAt": p.created_at,
+    })
+}
+
+fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+#[tauri::command]
+fn list_pending_decisions(
+    store: State<Arc<Store>>,
+    proposals: State<Arc<proposals::Proposals>>,
+) -> Vec<serde_json::Value> {
+    proposals
+        .pending(unix_now())
+        .iter()
+        .map(|p| proposal_json(&store, p))
+        .collect()
+}
+
+/// What approving a proposal hands back: enough for the caller to build the `fleet-spawn`
+/// event the frontend mounts. Split out of the `approve_root_proposal` command so the
+/// sweep-before-trust and resolve-before-emit ordering is testable without a Tauri
+/// `AppHandle` -- same shape as `root_mcp.rs`'s `dispatch_work_inner`.
+#[derive(Debug)]
+struct ApprovedDispatch {
+    project_id: String,
+    session: Session,
+    task: String,
+}
+
+/// Approve a proposal: create the session and hand back what the caller needs to tell the
+/// frontend to mount it.
+///
+/// `agent` is resolved by the CALLER (`src/routing.ts`'s `pickTarget`), because only the
+/// frontend holds the live usage snapshot that says which account still has quota -- the
+/// same split CLAUDE.md pins between `routing.rs` and `routing.ts`.
+fn approve_root_proposal_inner(
+    store: &Store,
+    proposals: &proposals::Proposals,
+    id: &str,
+    agent: &str,
+    model: Option<String>,
+    now: u64,
+) -> Result<ApprovedDispatch, String> {
+    // `Proposals::get` alone never expires anything -- only `register`/`pending` sweep.
+    // Without this, approving a card nobody answered for a day would happily spawn work
+    // from a proposal that `EXPIRY_SECS` exists to have already retired.
+    proposals.sweep(now);
+    let p = proposals.get(id).ok_or("unknown proposal")?;
+    if p.outcome != proposals::Outcome::Pending {
+        return Err("this proposal was already answered".into());
+    }
+    let agent_id: crate::agent::AgentId = serde_json::from_value(serde_json::json!(agent))
+        .map_err(|_| format!("unknown agent {agent}"))?;
+    let project = store
+        .list()
+        .into_iter()
+        .find(|x| x.id == p.project_id)
+        .ok_or("unknown project")?;
+    let mut session = store
+        .add_session(
+            &project.id,
+            "Dispatched".to_string(),
+            true,
+            agent_id,
+            DISPATCH_ROLE,
+        )
+        .ok_or("could not create session")?;
+    if let Some(m) = model.filter(|m| !m.is_empty()) {
+        store.set_session_model(&session.id, Some(m.clone()));
+        // Keep the in-hand copy in sync: it is what gets emitted in `fleet-spawn` below,
+        // and the frontend mounts straight off that payload rather than re-reading the
+        // store -- a stale `model: None` there would silently spawn without the pin.
+        session.model = Some(m);
+    }
+    // Claim the proposal BEFORE the caller emits, so a phone answering at the same moment
+    // loses the race cleanly instead of spawning a second session.
+    if !proposals.resolve(
+        id,
+        proposals::Outcome::Approved {
+            session_id: session.id.clone(),
+        },
+    ) {
+        return Err("this proposal was already answered".into());
+    }
+    Ok(ApprovedDispatch {
+        project_id: project.id,
+        session,
+        task: p.task,
+    })
+}
+
+#[tauri::command]
+fn approve_root_proposal(
+    app: tauri::AppHandle,
+    id: String,
+    agent: String,
+    model: Option<String>,
+    store: State<Arc<Store>>,
+    proposals: State<Arc<proposals::Proposals>>,
+) -> Result<String, String> {
+    let out = approve_root_proposal_inner(&store, &proposals, &id, &agent, model, unix_now())?;
+    // Rust cannot mint a terminal Channel, so the frontend completes the spawn -- the same
+    // path bridge.rs's `spawn_reply` uses.
+    let _ = app.emit(
+        "fleet-spawn",
+        serde_json::json!({ "projectId": out.project_id, "session": out.session, "task": out.task }),
+    );
+    Ok(out.session.id)
+}
+
+#[tauri::command]
+fn deny_root_proposal(
+    id: String,
+    reason: Option<String>,
+    proposals: State<Arc<proposals::Proposals>>,
+) {
+    proposals.resolve(&id, proposals::Outcome::Denied { reason });
+}
+
 #[tauri::command]
 fn set_project_color(id: String, color: Option<String>, store: State<Arc<Store>>) -> bool {
     store.set_project_color(&id, color)
@@ -2124,6 +2270,9 @@ pub fn run() {
             add_root_chat,
             rename_root_chat,
             remove_root_chat,
+            list_pending_decisions,
+            approve_root_proposal,
+            deny_root_proposal,
             list_profiles,
             add_profile,
             remove_profile,
@@ -2287,5 +2436,188 @@ mod tests {
     #[test]
     fn idle_targets_empty_project_stops_nothing() {
         assert!(idle_stop_targets(&[], &id_set(&[]), &id_set(&[])).is_empty());
+    }
+
+    /// The invariant that keeps root chat from escalating: a dispatched session is a
+    /// WORKER. A Conductor would hold fleet's whole orchestration surface, which root
+    /// chat is deliberately not given.
+    #[test]
+    fn dispatched_sessions_are_always_workers() {
+        assert_eq!(DISPATCH_ROLE, store::SessionRole::Worker);
+    }
+
+    fn approve_test_dir(tag: &str) -> std::path::PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("conduit_lib_approve_{tag}_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn approving_a_pending_proposal_creates_a_worker_session_and_resolves_it() {
+        let dir = approve_test_dir("happy");
+        let store = Store::for_test(&dir);
+        let project = store.add_project("/repo".into());
+        let proposals = proposals::Proposals::default();
+        let p = proposals
+            .register(
+                "chat-1",
+                &project.id,
+                "ship the thing",
+                None,
+                None,
+                None,
+                1_700_000_000,
+            )
+            .unwrap();
+
+        let out = approve_root_proposal_inner(
+            &store,
+            &proposals,
+            &p.id,
+            "claude",
+            Some("opus".to_string()),
+            1_700_000_100,
+        )
+        .expect("approves");
+        assert_eq!(out.project_id, project.id);
+        assert_eq!(out.session.role, SessionRole::Worker);
+        assert_eq!(out.session.model.as_deref(), Some("opus"));
+        assert_eq!(out.task, "ship the thing");
+
+        match proposals.get(&p.id).unwrap().outcome {
+            proposals::Outcome::Approved { session_id } => {
+                assert_eq!(session_id, out.session.id)
+            }
+            other => panic!("expected approved, got {other:?}"),
+        }
+    }
+
+    /// The defect Task 3's review caught: `Proposals::get` alone never sweeps expiry --
+    /// only `register`/`pending` do. Reading a proposal's outcome straight off `get` would
+    /// see it still `Pending` days after `EXPIRY_SECS` closed, and approving it would
+    /// happily spawn work from a stale card. `approve_root_proposal_inner` must sweep
+    /// before it trusts the outcome.
+    #[test]
+    fn approving_an_expired_proposal_is_refused_and_creates_no_session() {
+        let dir = approve_test_dir("expired");
+        let store = Store::for_test(&dir);
+        let project = store.add_project("/repo".into());
+        let proposals = proposals::Proposals::default();
+        let p = proposals
+            .register(
+                "chat-1",
+                &project.id,
+                "ship the thing",
+                None,
+                None,
+                None,
+                1_700_000_000,
+            )
+            .unwrap();
+
+        let later = 1_700_000_000 + proposals::EXPIRY_SECS + 1;
+        let err = approve_root_proposal_inner(&store, &proposals, &p.id, "claude", None, later)
+            .unwrap_err();
+        assert!(err.contains("already answered"), "{err}");
+
+        // No session was created for the expired proposal.
+        assert!(store.list()[0].sessions.is_empty());
+        // The sweep inside approve is what marked it -- not left dangling as "pending".
+        assert!(matches!(
+            proposals.get(&p.id).unwrap().outcome,
+            proposals::Outcome::Expired
+        ));
+        // And a second attempt (e.g. a stale UI retry) is refused the same way, not by
+        // panicking on an already-resolved proposal.
+        let err2 = approve_root_proposal_inner(&store, &proposals, &p.id, "claude", None, later)
+            .unwrap_err();
+        assert!(err2.contains("already answered"), "{err2}");
+    }
+
+    #[test]
+    fn approve_refuses_a_proposal_already_resolved_by_someone_else() {
+        let dir = approve_test_dir("race");
+        let store = Store::for_test(&dir);
+        let project = store.add_project("/repo".into());
+        let proposals = proposals::Proposals::default();
+        let p = proposals
+            .register(
+                "chat-1",
+                &project.id,
+                "ship the thing",
+                None,
+                None,
+                None,
+                1_700_000_000,
+            )
+            .unwrap();
+        // A denial (e.g. from a phone) landed first.
+        proposals.resolve(&p.id, proposals::Outcome::Denied { reason: None });
+
+        let err =
+            approve_root_proposal_inner(&store, &proposals, &p.id, "claude", None, 1_700_000_100)
+                .unwrap_err();
+        assert!(err.contains("already answered"), "{err}");
+        assert!(
+            store.list()[0].sessions.is_empty(),
+            "a proposal someone else already answered must not spawn a session"
+        );
+    }
+
+    #[test]
+    fn deny_records_the_reason_and_leaves_no_session() {
+        let proposals = proposals::Proposals::default();
+        let p = proposals
+            .register(
+                "chat-1",
+                "proj-1",
+                "ship the thing",
+                None,
+                None,
+                None,
+                1_700_000_000,
+            )
+            .unwrap();
+        proposals.resolve(
+            &p.id,
+            proposals::Outcome::Denied {
+                reason: Some("not now".into()),
+            },
+        );
+        match proposals.get(&p.id).unwrap().outcome {
+            proposals::Outcome::Denied { reason } => assert_eq!(reason.as_deref(), Some("not now")),
+            other => panic!("expected denied, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn list_pending_decisions_reports_the_project_name() {
+        let dir = approve_test_dir("pending_list");
+        let store = Store::for_test(&dir);
+        let project = store.add_project("/repo".into());
+        let proposals = proposals::Proposals::default();
+        proposals
+            .register(
+                "chat-1",
+                &project.id,
+                "ship the thing",
+                Some("implementation".into()),
+                None,
+                None,
+                1_700_000_000,
+            )
+            .unwrap();
+
+        let rows: Vec<serde_json::Value> = proposals
+            .pending(1_700_000_100)
+            .iter()
+            .map(|p| proposal_json(&store, p))
+            .collect();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0]["projectId"], project.id);
+        assert_eq!(rows[0]["projectName"], project.name);
+        assert_eq!(rows[0]["kind"], "implementation");
     }
 }
