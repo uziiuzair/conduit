@@ -613,8 +613,10 @@ export function TerminalView({
       // terminal is behind the chat pane, so focusing it would put the caret somewhere
       // invisible and swallow the next thing typed.
       if (focusOnReveal && !chatOpenRef.current) term.focus();
-      // Late fallback: catches a fit whose inputs settled after the first frame. The
-      // reason this exists at all, traced against
+      // Late fallback: catches a fit whose inputs settle AFTER the first frame -- the
+      // gate must be evaluated INSIDE the timeout callback, not before it, or it would
+      // just re-read the same DOM/store state the immediate fit above already saw and
+      // could never answer differently. The reason this exists at all, traced against
       // docs/superpowers/specs/2026-07-07-editor-polish-tier2-design.md §6: the View-menu
       // font zoom skips fitting a HIDDEN terminal (see that effect's own comment), so a
       // zoom applied while this pane was backgrounded leaves cols/rows stale until reveal
@@ -622,7 +624,9 @@ export function TerminalView({
       // as the fit above, and for the same reason: a canvas zoom changes neither the box
       // nor the base font, so it still never fires here, but a base-font change made while
       // hidden does and must still be corrected on reveal.
-      if (fitInputsChanged()) scheduleFit();
+      window.setTimeout(() => {
+        if (fitInputsChanged()) scheduleFit();
+      }, 120);
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [visible, dirReady, stopped]);
