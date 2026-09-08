@@ -501,18 +501,19 @@ export function TerminalView({
     // for a zoom is exactly what must not happen: it renegotiates cols/rows with the PTY
     // and reflows the agent's output. The box and the font scale by the same factor, so
     // the grid is already correct; only a change in the LOGICAL size (the resize grip)
-    // is a real resize — see `logicalSizeChanged`, which every fit path below asks.
+    // is a real resize — see `fitInputsChanged`, which every fit path below asks.
     const ro = new ResizeObserver(() => {
       if (!visibleRef.current) return;
-      if (!logicalSizeChanged()) return;
+      if (!fitInputsChanged()) return;
       scheduleFit();
     });
     if (innerRef.current) ro.observe(innerRef.current);
 
     // Web fonts can settle after first paint, changing cell metrics — refit then.
     //
-    // Deliberately NOT behind logicalSizeChanged(): this is a METRICS change, not a box change.
-    // The box is identical and the gate would skip, leaving the terminal on cols computed from
+    // Deliberately NOT behind fitInputsChanged(): this is a font-FAMILY metrics change (the
+    // fallback face swapping for the real one), not a box or base-font-size change, so the
+    // gate cannot see it and would wrongly skip, leaving the terminal on cols computed from
     // the fallback font's cell width for the rest of its life. Fires once, at startup.
     void document.fonts?.ready.then(() => {
       if (visibleRef.current) scheduleFit();
@@ -522,7 +523,7 @@ export function TerminalView({
     // above, and for the same reason: at a non-1 canvas zoom the box moves without the logical
     // size moving, and refitting there is the PTY-reflow-on-zoom bug arriving another way.
     const onWinResize = () => {
-      if (visibleRef.current && logicalSizeChanged()) scheduleFit();
+      if (visibleRef.current && fitInputsChanged()) scheduleFit();
     };
     window.addEventListener("resize", onWinResize);
 
@@ -571,11 +572,10 @@ export function TerminalView({
     canvasScaleRef.current = canvasScale;
   }, [canvasScale]);
 
-  /**
-   * Host size, in LOGICAL (unscaled) pixels, that we last FITTED at — not merely the last
-   * size observed. See `logicalSizeChanged` for why that distinction is load-bearing.
-   */
-  const lastLogicalRef = useRef<{ w: number; h: number } | null>(null);
+  /** The logical size AND base font size this terminal last fitted at. Both, because a fit's
+   *  result depends on the box and the cell metrics, and only one of the two things that
+   *  change `options.fontSize` should cause a refit — see fitInputsChanged. */
+  const lastFitRef = useRef<{ w: number; h: number; base: number } | null>(null);
 
   useEffect(() => {
     visibleRef.current = visible;
@@ -588,8 +588,8 @@ export function TerminalView({
       // Gated the same way as every other fit path: on the canvas `visible` toggles on
       // every zoom step and every pan that scrolls a card in or out (viewport culling), so
       // an unconditional fit() here would reflow a running agent on a reveal that never
-      // changed its logical size.
-      if (logicalSizeChanged()) {
+      // changed its logical size or base font.
+      if (fitInputsChanged()) {
         try {
           fit.fit();
         } catch {
@@ -613,8 +613,16 @@ export function TerminalView({
       // terminal is behind the chat pane, so focusing it would put the caret somewhere
       // invisible and swallow the next thing typed.
       if (focusOnReveal && !chatOpenRef.current) term.focus();
-      // Late fallback: catch layout/font settling after the first frame.
-      window.setTimeout(() => scheduleFit(), 120);
+      // Late fallback: catches a fit whose inputs settled after the first frame. The
+      // reason this exists at all, traced against
+      // docs/superpowers/specs/2026-07-07-editor-polish-tier2-design.md §6: the View-menu
+      // font zoom skips fitting a HIDDEN terminal (see that effect's own comment), so a
+      // zoom applied while this pane was backgrounded leaves cols/rows stale until reveal
+      // -- this is "the existing reveal-refit path" that design doc names. Gated the same
+      // as the fit above, and for the same reason: a canvas zoom changes neither the box
+      // nor the base font, so it still never fires here, but a base-font change made while
+      // hidden does and must still be corrected on reveal.
+      if (fitInputsChanged()) scheduleFit();
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [visible, dirReady, stopped]);
@@ -727,24 +735,31 @@ export function TerminalView({
   }, [fontZoom, canvasScale]);
 
   /**
-   * Has this host's LOGICAL (unscaled) size changed since the last fit?
+   * Would a fit be answering a real change?
    *
-   * The one place that question is answered, because every `fit()` path has to ask it and a
-   * path that forgets silently resizes the PTY and reflows a running agent. On the canvas the
-   * host box is `logical x canvasScale`, so a ZOOM changes the box without changing anything
-   * the grid depends on -- the font scaled by the same factor, so cols/rows are already right.
+   * Two inputs decide a fit's outcome: the host's LOGICAL (unscaled) box, and the cell
+   * metrics, which follow the BASE font size. A canvas zoom moves neither — it scales the box
+   * and the effective font by the same factor, so cols/rows are already correct and refitting
+   * would only add +/-1 drift that resizes the PTY and reflows the agent. A resize grip moves
+   * the box; a View-menu font zoom moves the base. Both of those are real.
+   *
+   * Baselining the EFFECTIVE font here instead of the base would fire on every canvas zoom,
+   * which is exactly the reflow this gate exists to prevent.
    *
    * Updates the baseline when it answers true, so a caller that then fits stays in step.
    */
-  function logicalSizeChanged(): boolean {
+  function fitInputsChanged(): boolean {
     const el = innerRef.current;
     if (!el) return true; // not measurable — fit, exactly as before this gate existed
     const scale = canvasScaleRef.current || 1; // `||`, not `??`: a 0 scale would divide to Infinity
     const w = el.clientWidth / scale;
     const h = el.clientHeight / scale;
-    const last = lastLogicalRef.current;
-    if (last && Math.abs(last.w - w) < 1 && Math.abs(last.h - h) < 1) return false;
-    lastLogicalRef.current = { w, h };
+    const base = TERM_BASE_FONT + useStore.getState().fontZoom;
+    const last = lastFitRef.current;
+    if (last && last.base === base && Math.abs(last.w - w) < 1 && Math.abs(last.h - h) < 1) {
+      return false;
+    }
+    lastFitRef.current = { w, h, base };
     return true;
   }
 
