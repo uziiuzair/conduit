@@ -1,6 +1,6 @@
 import { useEffect, useMemo } from "react";
 import { useStore } from "../store";
-import { type CanvasState, emptyCanvas, reconcile } from "../canvas";
+import { type CanvasState, emptyCanvas, pruneCanvas } from "../canvas";
 
 /**
  * The canvas for one project: stored state reconciled against the sessions that exist
@@ -22,7 +22,7 @@ export function useProjectCanvas(projectId: string | null): {
   const sessionIds = useMemo(() => (project?.sessions ?? []).map((s) => s.id), [project]);
 
   const canvas = useMemo(
-    () => reconcile(stored ?? emptyCanvas(), sessionIds),
+    () => pruneCanvas(stored ?? emptyCanvas(), new Set(sessionIds)),
     [stored, sessionIds],
   );
 

@@ -10,6 +10,15 @@
 export interface CanvasNode {
   /** Session id. Also the React key — stable for the node's whole life. */
   ref: string;
+  /**
+   * The project owning this session.
+   *
+   * REQUIRED, which is the opposite of `WsTab.projectId` for borrowed tabs — and correctly
+   * so. A tab lives in a project's layout, so absence can mean "the host"; a global board
+   * has no host for absence to mean, and a session id alone does not locate its project
+   * without scanning every one of them.
+   */
+  projectId: string;
   x: number;
   y: number;
   /** Per-node size. Absent = the default card size, which is what every node created
@@ -66,10 +75,6 @@ export const HEADER_H = 30;
  *  the header: the terminal paints ABOVE the card frame, so any affordance that has to stay
  *  clickable — here the resize grip — needs a band the terminal does not cover. */
 export const FOOTER_H = 18;
-const GAP = 36;
-/** Cards per row when auto-placing. Keeps a fresh project readable rather than a long line. */
-const COLS = 3;
-
 /** Floor on a resize. Small enough to tuck a node away, large enough that the terminal
  *  inside still has usable columns rather than becoming a one-word-per-line ribbon. */
 export const MIN_CARD_W = 320;
@@ -100,47 +105,57 @@ export const emptyCanvas = (): CanvasState => ({ nodes: [], pan: { x: 0, y: 0 },
 export const clampZoom = (z: number): number => Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, z));
 
 /**
- * Reconcile a stored canvas against the project's live sessions: drop nodes whose session
- * is gone, and place any session that has no node yet.
+ * Drop nodes whose session no longer exists, and strip links to sessions that are gone.
  *
- * New nodes are appended, never inserted, and existing nodes keep their array position.
- * That ordering guarantee is load-bearing for the same reason as the note at the top of
- * this file.
+ * The pruning half of what `reconcile` used to do. The PLACING half is deliberately absent:
+ * membership on this board is curated, and a session existing is not a reason for it to be
+ * on screen — that is what makes a position mean something.
  *
- * Auto-placement fills the first free grid slot rather than the slot at the node's index,
- * so deleting a session in the middle does not shuffle everything after it on top of a
- * card the user placed by hand.
+ * Returns the SAME object when nothing changed, which the store's write-back guard relies
+ * on to avoid an infinite render loop.
  */
-export function reconcile(state: CanvasState, sessionIds: string[]): CanvasState {
-  const live = new Set(sessionIds);
-  const kept = state.nodes.filter((n) => live.has(n.ref));
-  const known = new Set(kept.map((n) => n.ref));
-  const taken = new Set(kept.map((n) => slotKey(n)));
-
-  const added: CanvasNode[] = [];
-  for (const ref of sessionIds) {
-    if (known.has(ref)) continue;
-    const { x, y } = firstFreeSlot(taken);
-    taken.add(`${x},${y}`);
-    added.push({ ref, x, y });
-  }
-
-  // A note whose linked session is gone keeps the note and loses only the link. The note
-  // is the user's writing and is never ours to delete; the link is a pointer to something
-  // that no longer exists, and leaving it would draw a tether to nowhere.
+export function pruneCanvas(state: CanvasState, liveSessionIds: Set<string>): CanvasState {
+  const kept = state.nodes.filter((n) => liveSessionIds.has(n.ref));
   const notes = notesOf(state);
-  const dangling = notes.some((n) => n.linkedRef !== undefined && !live.has(n.linkedRef));
+  // A note whose linked session is gone keeps the note and loses only the link. The note is
+  // the user's writing and is never ours to delete; the link points at nothing, and leaving
+  // it would draw a tether to nowhere.
+  const dangling = notes.some((n) => n.linkedRef !== undefined && !liveSessionIds.has(n.linkedRef));
+  if (kept.length === state.nodes.length && !dangling) return state;
   const nextNotes = dangling
     ? notes.map((n) =>
-        n.linkedRef !== undefined && !live.has(n.linkedRef) ? stripLink(n) : n,
+        n.linkedRef !== undefined && !liveSessionIds.has(n.linkedRef) ? stripLink(n) : n,
       )
     : notes;
-
   return {
     ...state,
-    nodes: [...kept, ...added],
+    nodes: kept,
     ...(state.notes === undefined && !dangling ? {} : { notes: nextNotes }),
   };
+}
+
+/**
+ * Put a session on the board at (x, y).
+ *
+ * Idempotent: a session already present keeps its existing position, so a second drop is
+ * harmless rather than a teleport. New nodes are APPENDED and existing ones keep their
+ * array index — see the file header for why that ordering is load-bearing.
+ */
+export function addNodeAt(
+  state: CanvasState,
+  ref: string,
+  projectId: string,
+  x: number,
+  y: number,
+): CanvasState {
+  if (state.nodes.some((n) => n.ref === ref)) return state;
+  return { ...state, nodes: [...state.nodes, { ref, projectId, x, y }] };
+}
+
+/** Take a session off the board. The session itself is untouched and keeps running. */
+export function removeNode(state: CanvasState, ref: string): CanvasState {
+  const kept = state.nodes.filter((n) => n.ref !== ref);
+  return kept.length === state.nodes.length ? state : { ...state, nodes: kept };
 }
 
 /** A copy of `note` with no link. Written as a delete so the field is absent, not
@@ -151,19 +166,33 @@ function stripLink(note: CanvasNote): CanvasNote {
   return rest;
 }
 
-/** The grid slot a hand-placed node happens to occupy, so auto-placement avoids it. */
-function slotKey(n: CanvasNode): string {
-  const col = Math.round(n.x / (CARD_W + GAP));
-  const row = Math.round(n.y / (CARD_H + GAP));
-  return `${col * (CARD_W + GAP)},${row * (CARD_H + GAP)}`;
-}
+/** Vertical spacing between one project's migrated notes and the next project's. */
+const MIGRATE_ROW_H = 1000;
 
-function firstFreeSlot(taken: Set<string>): { x: number; y: number } {
-  for (let i = 0; ; i++) {
-    const x = (i % COLS) * (CARD_W + GAP);
-    const y = Math.floor(i / COLS) * (CARD_H + GAP);
-    if (!taken.has(`${x},${y}`)) return { x, y };
-  }
+/**
+ * Fold the old per-project canvases into the one global board.
+ *
+ * Only NOTES cross. The node placements were produced by the auto-placer this design
+ * removes, and stacking several projects' coordinate spaces onto one plane would pile cards
+ * on top of each other — whereas a note is the user's writing, and `stripLink`'s comment
+ * already records that it is never ours to delete.
+ *
+ * Links are dropped: the linked session may not be on the new board at all, and a tether to
+ * nothing is worse than no tether.
+ */
+export function migrateNotes(old: Record<string, CanvasState>): CanvasState {
+  const notes: CanvasNote[] = [];
+  const seen = new Set<string>();
+  Object.keys(old)
+    .sort()
+    .forEach((projectId, row) => {
+      for (const n of notesOf(old[projectId])) {
+        if (seen.has(n.id)) continue;
+        seen.add(n.id);
+        notes.push({ ...stripLink(n), y: n.y + row * MIGRATE_ROW_H });
+      }
+    });
+  return { ...emptyCanvas(), ...(notes.length ? { notes } : {}) };
 }
 
 /** Move one node. Returns the same object when nothing changed, so React can skip. */

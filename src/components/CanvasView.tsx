@@ -261,38 +261,24 @@ export function CanvasUnderlay({
   };
 
   /**
-   * Create a session and put its card where the click was.
+   * Create a session at the point the menu was opened.
    *
-   * The card is written into the canvas directly rather than letting `reconcile`
-   * auto-place it: auto-placement fills the first free grid slot, which is the right
-   * answer for a session that arrived from somewhere else and the wrong one for a session
-   * the user asked for at a specific spot. `reconcile` then sees the node already exists
-   * and leaves it alone.
+   * TRANSIENT: this used to also drop the new session's card at the click point, writing
+   * the node directly rather than letting `reconcile` auto-place it. `reconcile` (and its
+   * auto-placement) is gone as of this change — membership is curated now — and explicit
+   * placement has not landed yet, so a session created here gets no card until that lands.
+   * Accepted rather than patched twice; do not add a workaround here.
    */
   const addSessionHere = () => {
     if (!menu) return;
-    const { x, y } = menu;
     setMenu(null);
-    const before = new Set((project?.sessions ?? []).map((s) => s.id));
-    void (async () => {
-      await addSession(projectId);
-      const st = useStore.getState();
-      const fresh = (st.projects.find((p) => p.id === projectId)?.sessions ?? []).find(
-        (s) => !before.has(s.id),
-      );
-      if (!fresh) return;
-      // Re-read rather than closing over `canvas`: the await let the store move on, and
-      // the session that was just created is itself one of the changes.
-      const cur = st.canvases[projectId];
-      if (!cur || cur.nodes.some((n) => n.ref === fresh.id)) return;
-      setCanvas({ ...cur, nodes: [...cur.nodes, { ref: fresh.id, x, y }] });
-    })();
+    void addSession(projectId);
   };
 
   const byId = useMemo(() => new Map((project?.sessions ?? []).map((s) => [s.id, s])), [project]);
 
   // Note/card pairs to draw a tether between. A link whose session is gone is cleared by
-  // reconcile, so anything unresolvable here is a card that has not been placed yet.
+  // pruneCanvas, so anything unresolvable here is a card that has not been placed yet.
   const tethers = useMemo(
     () =>
       notesOf(canvas)
@@ -388,7 +374,7 @@ export function CanvasUnderlay({
           </div>
         ))}
 
-        {/* Keyed by session id, in `canvas.nodes` order, which reconcile() and moveNode()
+        {/* Keyed by session id, in `canvas.nodes` order, which pruneCanvas() and moveNode()
             both preserve. Never sort this list. */}
         {canvas.nodes.map((node) => {
           const session = byId.get(node.ref);
