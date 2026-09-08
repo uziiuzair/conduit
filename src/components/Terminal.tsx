@@ -502,6 +502,13 @@ export function TerminalView({
     // and reflows the agent's output. The box and the font scale by the same factor, so
     // the grid is already correct; only a change in the LOGICAL size (the resize grip)
     // is a real resize.
+    //
+    // `lastLogicalRef` holds the size we last FITTED at, not the last size observed. It
+    // must only move on a firing that actually fits — otherwise sub-pixel deltas that each
+    // fall under the threshold keep re-baselining against each other and never accumulate
+    // to a full pixel, so a slow drag can drift the box many pixels with no fit ever firing.
+    // Comparing against a fixed fit baseline instead means the drift is measured from a
+    // fixed point, so it still crosses 1px on the firing that matters.
     const ro = new ResizeObserver(() => {
       if (!visibleRef.current) return;
       const el = innerRef.current;
@@ -510,8 +517,8 @@ export function TerminalView({
         const w = el.clientWidth / scale;
         const h = el.clientHeight / scale;
         const last = lastLogicalRef.current;
-        lastLogicalRef.current = { w, h };
         if (last && Math.abs(last.w - w) < 1 && Math.abs(last.h - h) < 1) return;
+        lastLogicalRef.current = { w, h };
       }
       scheduleFit();
     });
@@ -572,7 +579,10 @@ export function TerminalView({
     canvasScaleRef.current = canvasScale;
   }, [canvasScale]);
 
-  /** Last host size in LOGICAL (unscaled) pixels, so a zoom-driven resize is recognisable. */
+  /**
+   * Host size, in LOGICAL (unscaled) pixels, that we last FITTED at — not merely the last
+   * size observed. See the ResizeObserver below for why that distinction is load-bearing.
+   */
   const lastLogicalRef = useRef<{ w: number; h: number } | null>(null);
 
   useEffect(() => {
