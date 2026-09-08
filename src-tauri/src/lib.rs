@@ -773,26 +773,6 @@ fn remove_root_chat(id: String, store: State<Arc<Store>>) {
 /// orchestration surface, which is exactly the boundary root chat is held to.
 const DISPATCH_ROLE: SessionRole = SessionRole::Worker;
 
-fn proposal_json(store: &Store, p: &proposals::Proposal) -> serde_json::Value {
-    let project_name = store
-        .list()
-        .into_iter()
-        .find(|x| x.id == p.project_id)
-        .map(|x| x.name)
-        .unwrap_or_default();
-    serde_json::json!({
-        "id": p.id,
-        "chatId": p.chat_id,
-        "projectId": p.project_id,
-        "projectName": project_name,
-        "task": p.task,
-        "kind": p.kind,
-        "agent": p.agent,
-        "model": p.model,
-        "createdAt": p.created_at,
-    })
-}
-
 fn unix_now() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -808,7 +788,7 @@ fn list_pending_decisions(
     proposals
         .pending(unix_now())
         .iter()
-        .map(|p| proposal_json(&store, p))
+        .map(|p| proposals::proposal_json(&store, p))
         .collect()
 }
 
@@ -848,8 +828,12 @@ fn approve_root_proposal_inner(
     if p.outcome != proposals::Outcome::Pending {
         return Err("this proposal was already answered".into());
     }
-    let agent_id: crate::agent::AgentId = serde_json::from_value(serde_json::json!(agent))
-        .map_err(|_| format!("unknown agent {agent}"))?;
+    // STRICT, not `serde_json::from_value`: `AgentId`'s Deserialize is deliberately
+    // lenient (an unknown persisted value degrades to Claude rather than costing the
+    // whole `state.json`), so reading the id that way would turn a chat-invented agent
+    // into a silent Claude spawn under a card that promised something else.
+    let agent_id = <crate::agent::AgentId as store::PersistedEnum>::from_wire(agent)
+        .ok_or_else(|| format!("unknown agent {agent}"))?;
     let project = store
         .list()
         .into_iter()
@@ -2664,7 +2648,7 @@ mod tests {
         let rows: Vec<serde_json::Value> = proposals
             .pending(1_700_000_100)
             .iter()
-            .map(|p| proposal_json(&store, p))
+            .map(|p| proposals::proposal_json(&store, p))
             .collect();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0]["projectId"], project.id);

@@ -26,6 +26,31 @@ export function removeDecision(list: PendingDecision[], id: string): PendingDeci
   return list.filter((x) => x.id !== id);
 }
 
+/** Where the app must go once a card is approved, and what to tell the user.
+ *
+ * Approving is the only step that starts real work, and until it navigated, it started
+ * nothing: `Terminal.tsx`'s eager spawn is gated on `projectId === selectedProjectId`,
+ * and root chat is global, so the approved project is routinely NOT the selected one.
+ * "Start it" then looked inert, and because `pendingPrompts` is runtime-only, quitting
+ * before opening that project left the session alive with its brief gone — it would
+ * later spawn with no task at all.
+ *
+ * The project is the CARD's, never whatever happens to be selected; that is the whole
+ * point, and it is why this is a named rule with a test rather than a line in the store.
+ * Navigating away from the chat is deliberate: approving is an explicit user action, so
+ * following it to the work is coherent — the toast says which project, because the jump
+ * is otherwise unexplained.
+ */
+export function approvalFocus(d: Pick<PendingDecision, "projectId" | "projectName">): {
+  projectId: string;
+  toast: string;
+} {
+  return {
+    projectId: d.projectId,
+    toast: `Started work in ${d.projectName}.`,
+  };
+}
+
 /** One-line card title: the brief, clipped on a word boundary. */
 export function summarize(task: string, max = 80): string {
   const flat = task.replace(/\s+/g, " ").trim();

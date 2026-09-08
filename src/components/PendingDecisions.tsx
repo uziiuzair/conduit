@@ -10,7 +10,7 @@ export function PendingDecisions() {
   const decisions = useStore((s) => s.pendingDecisions);
   const approve = useStore((s) => s.approveDecision);
   const deny = useStore((s) => s.denyDecision);
-  const routes = useStore((s) => s.routes);
+  const decisionRoutes = useStore((s) => s.decisionRoutes);
   const detected = useStore((s) => s.agents);
   const claudeUsage = useStore((s) => s.claudeUsage);
   const agyMap = useStore((s) => s.agyUsageByAccount);
@@ -41,7 +41,9 @@ export function PendingDecisions() {
         // `decisionRoute` is the one place that decides whether "Start it" is enabled —
         // a chat-named agent gets the same installed/quota test a routed one does, it
         // just has no fallback behind it, so unusable there means disabled, not warned.
-        const route = decisionRoute(d, routes, availability, threshold);
+        // It is handed the whole by-project map, not one table: picking the card's own
+        // project is part of the rule, and part of what the test pins.
+        const route = decisionRoute(d, decisionRoutes, availability, threshold);
         return (
           <div className="decision-card" key={d.id}>
             <div className="decision-head">
@@ -59,6 +61,9 @@ export function PendingDecisions() {
                   The chat asked for <strong>{route.unusableNamed.agent}</strong>, but{" "}
                   {route.unusableNamed.why}.
                 </span>
+              ) : route.routesPending ? (
+                // Not a verdict yet: this project's routing table is still in flight.
+                <span>Resolving your routing preferences…</span>
               ) : (
                 <span className="decision-warn">
                   No agent available for this kind of work — install one or free up quota.

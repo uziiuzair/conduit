@@ -28,7 +28,13 @@ import {
 } from "./layout";
 import { cleanupEdits } from "./trim";
 import { appendItem, type ChatItem, type RootChat } from "./rootChat";
-import { addDecision, removeDecision, type PendingDecision } from "./rootProposals";
+import {
+  addDecision,
+  approvalFocus,
+  removeDecision,
+  type PendingDecision,
+} from "./rootProposals";
+import { projectsNeedingRoutes, type RoutesByProject } from "./pendingDecisionRouting";
 import { inProfile, type Profile } from "./profiles";
 import type { CanvasState } from "./canvas";
 import type { ContinuityFeed } from "./continuityFeed";
@@ -1177,6 +1183,12 @@ interface AppState {
   decisionArrived: (d: PendingDecision) => void;
   approveDecision: (id: string, agent: string, model?: string) => Promise<void>;
   denyDecision: (id: string) => Promise<void>;
+  /** Routing tables for the projects that have a card open, keyed by project id.
+   *  Deliberately NOT the shared `routes` slot: root chat is global, so a card's project
+   *  is usually not the one the new-session dialog or the routing panel last loaded, and
+   *  a project-level override must still apply to its own card. */
+  decisionRoutes: RoutesByProject;
+  loadDecisionRouting: (projectId: string) => Promise<void>;
 
   // ---- panel collapse + Settings dialog (native menu-driven, App-level) ----
   /** Persisted. When true (default), opening/switching to a project eagerly spawns and
@@ -1605,6 +1617,7 @@ export const useStore = create<AppState>((set, get) => {
     workspaceRoot: readWorkspaceRoot(),
     editingRootChatId: null,
     pendingDecisions: [],
+    decisionRoutes: {},
     restoreSessionsOnOpen: readRestoreSessionsOnOpen(),
     openBehavior: readOpenBehavior(),
     terminalRenderer: readTerminalRenderer(),
@@ -2428,10 +2441,27 @@ export const useStore = create<AppState>((set, get) => {
         () => [] as PendingDecision[],
       );
       set({ pendingDecisions: list });
+      for (const p of projectsNeedingRoutes(list, get().decisionRoutes)) {
+        void get().loadDecisionRouting(p);
+      }
     },
 
-    decisionArrived: (d) =>
-      set((st) => ({ pendingDecisions: addDecision(st.pendingDecisions, d) })),
+    decisionArrived: (d) => {
+      set((st) => ({ pendingDecisions: addDecision(st.pendingDecisions, d) }));
+      // Fetch this card's OWN project's chains. Cheap and idempotent: one call per
+      // project that has a card, not one per card.
+      if (!(d.projectId in get().decisionRoutes)) void get().loadDecisionRouting(d.projectId);
+    },
+
+    loadDecisionRouting: async (projectId) => {
+      try {
+        const routes = await invoke<RoutesView>("agent_routes", { projectId });
+        set((st) => ({ decisionRoutes: { ...st.decisionRoutes, [projectId]: routes } }));
+      } catch {
+        /* fail-open: the card keeps saying it is still resolving rather than claiming
+           there is no agent for this work. */
+      }
+    },
 
     approveDecision: async (id, agent, model) => {
       // Optimistic: the card goes as soon as you answer. A failure re-adds it below.
@@ -2439,6 +2469,16 @@ export const useStore = create<AppState>((set, get) => {
       set((st) => ({ pendingDecisions: removeDecision(st.pendingDecisions, id) }));
       try {
         await invoke("approve_root_proposal", { id, agent, model: model ?? null });
+        // Go to the work. Without this the approved project is usually not the selected
+        // one, so nothing spawns and "Start it" reads as inert — see `approvalFocus`.
+        // The session's own tab is opened by `mergeSpawnedSession` off the `fleet-spawn`
+        // event; opening it here would race `repairLayout`, which prunes a tab whose
+        // session is not in the store yet.
+        if (before) {
+          const focus = approvalFocus(before);
+          set({ selectedProjectId: focus.projectId, selectedRootChatId: null });
+          get().pushToast(focus.toast);
+        }
       } catch (e) {
         if (before) {
           set((st) => ({ pendingDecisions: addDecision(st.pendingDecisions, before) }));

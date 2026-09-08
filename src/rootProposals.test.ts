@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   addDecision,
+  approvalFocus,
   removeDecision,
   summarize,
   type PendingDecision,
@@ -31,6 +32,20 @@ describe("removeDecision", () => {
     const list = addDecision(addDecision([], d("a")), d("b"));
     expect(removeDecision(list, "a").map((x) => x.id)).toEqual(["b"]);
     expect(removeDecision(list, "ghost")).toHaveLength(2);
+  });
+});
+
+describe("approvalFocus", () => {
+  it("focuses the CARD's project, whatever is selected", () => {
+    // Root chat is global, so the approved project is routinely not the selected one —
+    // and `Terminal.tsx`'s eager spawn is gated on `projectId === selectedProjectId`, so
+    // approving without moving there started nothing at all.
+    const card = { ...d("dp-1"), projectId: "p-other", projectName: "billing" };
+    expect(approvalFocus(card).projectId).toBe("p-other");
+  });
+
+  it("names the project in the toast, because the approval navigates", () => {
+    expect(approvalFocus(d("dp-1")).toast).toContain("conduit");
   });
 });
 

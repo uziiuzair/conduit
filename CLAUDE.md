@@ -423,10 +423,49 @@ the spawn path underneath.
   frontend holds the live usage snapshot already in the store. The proposal therefore
   stores the task KIND, never a resolved agent; `pendingDecisionRouting.ts` calls
   `pickTarget` and hands the resolved agent id to `approve_root_proposal`.
-- **No root MCP server means no tools, not a half-state.** `write_mcp_config` returns
-  `None` when the port is 0, `build_command` omits `--mcp-config` entirely, and
-  `--strict-mcp-config` leaves the chat with exactly its Phase 2 surface rather than
-  believing it can dispatch when it can't.
+- **A card is routed by ITS OWN project.** `decisionRoute` takes the whole
+  `decisionRoutes` map (project id → `RoutesView`, filled per card by
+  `loadDecisionRouting`) and looks up `d.projectId`. It must NEVER read the shared
+  `routes` slot: that slot is globals-only when loaded with `null` (so a project-level
+  override silently never applied) and it is also written by `NewSessionDialog` and
+  `RoutingPanel` (so a card for project Y was routed by whichever project was opened
+  last). An unloaded project yields `routesPending`, not "no agent available" — the two
+  are both disabled, but only one is a verdict.
+- **Approving navigates to the work.** `approveDecision` applies
+  `rootProposals.ts`'s `approvalFocus` — select the CARD's project, drop the chat layer,
+  toast which project. Root chat is global, so the approved project is routinely not the
+  selected one, and `Terminal.tsx`'s eager spawn is gated on
+  `projectId === selectedProjectId`: without the jump "Start it" starts nothing, and since
+  `pendingPrompts` is runtime-only, quitting before opening that project loses the brief
+  and the session later spawns with no task. The session's own tab is opened by
+  `mergeSpawnedSession` off `fleet-spawn`, not here — opening it here would race
+  `repairLayout`, which prunes a tab whose session is not in the store yet.
+- **A model-invented id must never render as a promise.** `dispatch_work` refuses a `kind`
+  outside `routing::task_kinds()` and an `agent` outside `agent::all_adapters()`, and
+  `decisionRoute` re-checks the agent against `AGENTS`. All three are needed: `pickTarget`
+  treats an agent absent from the availability map as USABLE, so an unchecked id produced
+  an ENABLED "as gpt5-turbo (chosen by the chat)" button, and `AgentId`'s deliberately
+  lenient `Deserialize` then spawned Claude under it — hence `approve_root_proposal_inner`
+  reads the id through `PersistedEnum::from_wire` (strict), never `from_value`.
+- **The `pending-decision` payload has ONE builder**, `proposals::proposal_json`, used by
+  both producers — `root_mcp`'s live emit and `lib.rs`'s `list_pending_decisions` catch-up
+  fetch. Hand-built twice they drifted silently: a live card missing `kind` routes as
+  "implementation" and one missing `agent` drops the chat's explicit choice, while the same
+  card after a reload carries both. A test pins all nine fields *and* the key count.
+- **`chat_fork` is capped per chat per minute** (`MAX_FORKS_PER_MINUTE_PER_CHAT`, via
+  `fleet::rate_limited`). A fork is itself a root chat, so `known_chat` admits it and it
+  gets the whole tool surface *including `chat_fork`*, and a seeded fork is auto-sent by
+  `App.tsx` — one real `claude -p` child per fork. The charter's "fork sparingly" is advice,
+  not a bound.
+- **No root MCP server means no tools, not a half-state — and a server means ALLOWED
+  tools.** `write_mcp_config` returns `None` when the port is 0, `build_command` omits
+  `--mcp-config` entirely, and `--strict-mcp-config` leaves the chat with exactly its
+  Phase 2 surface. When there IS a config, `build_command` must also widen
+  `--allowedTools` by `root_mcp::TOOL_NAMESPACE` (`mcp__conduit-root`): under `-p` an MCP
+  tool absent from the allow list is DENIED before the server is reached, and the result
+  carries `permission_denials`. It appeared to work only on machines whose
+  `~/.claude/settings.json` sets `"defaultMode": "auto"` — a per-user setting Conduit does
+  not control, and a chat pinned to another account reads a different settings tree.
 - Design: `docs/superpowers/specs/2026-09-08-root-chat-orchestrator-design.md`.
 
 ## Where the unified session directory lives

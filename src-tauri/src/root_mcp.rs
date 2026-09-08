@@ -25,22 +25,89 @@
 //!
 //! Design: docs/superpowers/specs/2026-09-08-root-chat-orchestrator-design.md
 
+use std::collections::{HashMap, VecDeque};
 use std::io::Read;
 use std::sync::atomic::{AtomicU16, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock, Mutex};
 use std::thread;
+use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 use tauri::{AppHandle, Emitter};
 use tiny_http::{Header, Method, Request, Response, Server};
 
 use crate::fleet::FleetState;
-use crate::proposals::{Outcome, Proposals};
+use crate::proposals::{proposal_json, Outcome, Proposals};
 use crate::pty::PtyManager;
 use crate::store::{Session, Store};
 
 /// How many bytes of recent output `session_peek` returns.
 const PEEK_BYTES: usize = 8192;
+
+/// The name the generated `--mcp-config` registers this server under. Claude Code
+/// namespaces a server's tools as `mcp__<name>__<tool>`, so this string is also half of
+/// the `--allowedTools` entry root chat needs; `TOOL_NAMESPACE` is the other half.
+pub const SERVER_NAME: &str = "conduit-root";
+
+/// What `root_chat::build_command` must add to `--allowedTools` whenever it passes
+/// `--mcp-config`. Under Claude Code's default permission mode a `-p` run DENIES any MCP
+/// tool that is not on the allow list -- the server is never reached at all and the
+/// result carries `permission_denials`. Naming the SERVER (no `__<tool>` suffix) allows
+/// all seven at once, so a new tool cannot ship unreachable.
+pub const TOOL_NAMESPACE: &str = "mcp__conduit-root";
+
+/// Forks one chat may create in the trailing minute. Every fork is itself a root chat, so
+/// it is admitted by `known_chat` and handed its own `--mcp-config` -- including
+/// `chat_fork`. Nothing else bounds that: `dispatch_work` has `MAX_PENDING_PER_CHAT` and
+/// fleet has `under_cap` + `spawn_rate_ok`, but a seeded fork auto-sends, which spawns a
+/// real `claude -p` child. Same mechanism and same reasoning as
+/// `fleet::MAX_SPAWNS_PER_MINUTE_PER_CONDUCTOR`: bound the single-turn fan-out burst.
+pub const MAX_FORKS_PER_MINUTE_PER_CHAT: usize = 2;
+
+/// Rolling fork window per chat id. A module static rather than another `Ctx` field
+/// because it is pure rate state with no owner: `start` would only be threading it
+/// through to here. `fork_rate_ok_with` keeps the limit and window injectable so the test
+/// does not sleep for a minute.
+static FORK_TIMESTAMPS: LazyLock<Mutex<HashMap<String, VecDeque<Instant>>>> =
+    LazyLock::new(Default::default);
+
+fn fork_rate_ok(chat_id: &str) -> bool {
+    fork_rate_ok_with(
+        chat_id,
+        MAX_FORKS_PER_MINUTE_PER_CHAT,
+        Duration::from_secs(60),
+    )
+}
+
+fn fork_rate_ok_with(chat_id: &str, max: usize, window: Duration) -> bool {
+    crate::fleet::rate_limited(&FORK_TIMESTAMPS, chat_id, max, window)
+}
+
+/// The wire form of every routable task kind (`TaskKind` serializes lowercase). One list
+/// feeds both `dispatch_work`'s schema enum and its validation, so the two cannot drift:
+/// the schema is advisory to the model, and only the check refuses a bogus value.
+fn task_kind_ids() -> Vec<String> {
+    crate::routing::task_kinds()
+        .into_iter()
+        .filter_map(|k| {
+            serde_json::to_value(k.id)
+                .ok()
+                .and_then(|v| v.as_str().map(str::to_string))
+        })
+        .collect()
+}
+
+/// The wire form of every agent id Conduit can actually spawn.
+fn agent_ids() -> Vec<String> {
+    crate::agent::all_adapters()
+        .iter()
+        .filter_map(|a| {
+            serde_json::to_value(a.id())
+                .ok()
+                .and_then(|v| v.as_str().map(str::to_string))
+        })
+        .collect()
+}
 
 /// The live port, published once the server binds. 0 = not up, which makes
 /// `write_mcp_config` decline and root chat degrade to its Phase 2 tool set.
@@ -55,7 +122,7 @@ pub fn port() -> u16 {
 pub fn mcp_config_json(port: u16, chat_id: &str) -> String {
     json!({
         "mcpServers": {
-            "conduit-root": {
+            SERVER_NAME: {
                 "type": "http",
                 "url": format!("http://127.0.0.1:{port}/mcp?rootchat={chat_id}")
             }
@@ -86,7 +153,12 @@ pub(crate) fn peek_allowed(store: &Store, session: &Session) -> bool {
     if !store.is_private_mode() {
         return true;
     }
-    !session.silo && session.clearance == crate::store::Clearance::Public
+    // A default `Session` IS the cloud caller root chat is: `Clearance::Public`, and an id
+    // no real session shares so the self-read arm never fires. Delegating rather than
+    // open-coding the two conditions means a third one added to the read policy applies
+    // here automatically -- this is a security gate, so drift is the failure mode that
+    // matters.
+    crate::store::can_read(&Session::default(), session)
 }
 
 pub fn result_envelope(id: Option<Value>, result: Value) -> String {
@@ -101,14 +173,7 @@ pub fn error_envelope(id: Option<Value>, code: i64, msg: &str) -> String {
 pub fn tool_specs() -> Vec<Value> {
     // Derived from the routing table so a sixth task kind cannot ship unreachable.
     // `TaskKindInfo.id` is the `TaskKind` enum; serde renders it lowercase.
-    let kinds: Vec<String> = crate::routing::task_kinds()
-        .into_iter()
-        .filter_map(|k| {
-            serde_json::to_value(k.id)
-                .ok()
-                .and_then(|v| v.as_str().map(str::to_string))
-        })
-        .collect();
+    let kinds = task_kind_ids();
     vec![
         json!({
             "name": "sessions_list",
@@ -237,12 +302,39 @@ fn dispatch_work_inner(
         return Err(format!("unknown project {project_id}"));
     }
     let str_arg = |k: &str| args.get(k).and_then(|v| v.as_str()).map(|s| s.to_string());
+    // The schema's `enum` is advisory -- a model may send anything. An unrecognized kind
+    // leaves `routes.effective[kind]` undefined on the frontend, so the card renders
+    // permanently disabled with a misleading "no agent available" and the chat is never
+    // told why. Refusing here is the recoverable error §6 asks for.
+    let kind = str_arg("kind");
+    if let Some(k) = &kind {
+        let known = task_kind_ids();
+        if !known.contains(k) {
+            return Err(format!(
+                "unknown kind {k}; expected one of {}",
+                known.join(", ")
+            ));
+        }
+    }
+    // Same reasoning, one step worse: an agent id this build does not know is rendered to
+    // the USER as a promise ("as gpt5-turbo (chosen by the chat)"), and `AgentId`'s
+    // lenient Deserialize would turn it into Claude at approve time -- the card asserting
+    // one agent while a different one spawns.
+    let agent = str_arg("agent");
+    if let Some(a) = &agent {
+        if <crate::agent::AgentId as crate::store::PersistedEnum>::from_wire(a).is_none() {
+            return Err(format!(
+                "unknown agent {a}; expected one of {}",
+                agent_ids().join(", ")
+            ));
+        }
+    }
     let p = proposals.register(
         chat_id,
         project_id,
         task,
-        str_arg("kind"),
-        str_arg("agent"),
+        kind,
+        agent,
         str_arg("model"),
         now,
     )?;
@@ -279,6 +371,15 @@ fn dispatch_tool(name: &str, args: &Value, ctx: &Ctx) -> Result<String, String> 
     match name {
         "sessions_list" => {
             let only = args.get("projectId").and_then(|v| v.as_str());
+            // An id that matches nothing must not answer `[]`: to the model that reads as
+            // "nothing is running there", which is a wrong answer rather than a failed
+            // one. Spec §6 wants an error string the chat can recover from -- the same
+            // shape `dispatch_work` already uses.
+            if let Some(id) = only {
+                if !ctx.store.list().iter().any(|p| p.id == id) {
+                    return Err(format!("unknown project {id}"));
+                }
+            }
             let status = ctx.fleet.snapshot();
             let mut out: Vec<Value> = Vec::new();
             for p in ctx.store.list() {
@@ -355,27 +456,11 @@ fn dispatch_tool(name: &str, args: &Value, ctx: &Ctx) -> Result<String, String> 
             let parsed: Value = serde_json::from_str(&out).unwrap_or(Value::Null);
             if let Some(id) = parsed.get("id").and_then(|v| v.as_str()) {
                 if let Some(p) = ctx.proposals.get(id) {
-                    let project_name = ctx
-                        .store
-                        .list()
-                        .into_iter()
-                        .find(|x| x.id == p.project_id)
-                        .map(|x| x.name)
-                        .unwrap_or_default();
-                    (ctx.emit)(
-                        "pending-decision",
-                        json!({
-                            "id": p.id,
-                            "chatId": p.chat_id,
-                            "projectId": p.project_id,
-                            "projectName": project_name,
-                            "task": p.task,
-                            "kind": p.kind,
-                            "agent": p.agent,
-                            "model": p.model,
-                            "createdAt": p.created_at,
-                        }),
-                    );
+                    // ONE builder with `lib.rs`'s catch-up fetch (`list_pending_decisions`).
+                    // Hand-built twice, the two drifted silently: a live card missing `kind`
+                    // routes as "implementation" and one missing `agent` loses the chat's
+                    // explicit choice, while the same card after a reload carries both.
+                    (ctx.emit)("pending-decision", proposal_json(&ctx.store, &p));
                 }
             }
             Ok(out)
@@ -387,6 +472,15 @@ fn dispatch_tool(name: &str, args: &Value, ctx: &Ctx) -> Result<String, String> 
                 .and_then(|v| v.as_str())
                 .filter(|t| !t.trim().is_empty())
                 .ok_or("missing title")?;
+            // A fork is self-replicating: the new chat is a root chat, so it gets the same
+            // tool surface including `chat_fork`, and a seeded one auto-sends -- a real
+            // `claude -p` child per fork. The charter's "fork sparingly" is advice, not a
+            // bound.
+            if !fork_rate_ok(&ctx.chat_id) {
+                return Err(format!(
+                    "fork rate limit: at most {MAX_FORKS_PER_MINUTE_PER_CHAT} new chats per minute from one chat. Continue in this chat, or wait and try again."
+                ));
+            }
             let chat = ctx.store.add_root_chat();
             ctx.store.rename_root_chat(&chat.id, title);
             let seed = args.get("seed").and_then(|v| v.as_str()).unwrap_or("");
@@ -560,6 +654,20 @@ mod tests {
         let url = v["mcpServers"]["conduit-root"]["url"].as_str().unwrap();
         assert_eq!(url, "http://127.0.0.1:8496/mcp?rootchat=chat-1");
         assert_eq!(v["mcpServers"]["conduit-root"]["type"], "http");
+    }
+
+    /// `build_command` puts `TOOL_NAMESPACE` on `--allowedTools` while `mcp_config_json`
+    /// registers the server under `SERVER_NAME`, and Claude derives one from the other
+    /// (`mcp__<server>__<tool>`). Renaming the server without the namespace would allow a
+    /// name nothing serves -- every call denied, with a config that still looks right.
+    #[test]
+    fn the_allowed_tools_namespace_is_the_registered_server_name() {
+        assert_eq!(TOOL_NAMESPACE, format!("mcp__{SERVER_NAME}"));
+        let v: Value = serde_json::from_str(&mcp_config_json(8496, "chat-1")).unwrap();
+        assert!(
+            v["mcpServers"].get(SERVER_NAME).is_some(),
+            "the config must register the server the allow list names: {v}"
+        );
     }
 
     #[test]
@@ -844,6 +952,83 @@ mod tests {
         ));
     }
 
+    /// The schema's `enum` is advisory -- nothing stops a model sending another string.
+    /// A bogus kind used to be recorded verbatim, leaving `routes.effective[kind]`
+    /// undefined so the card rendered permanently disabled ("no agent available") while
+    /// the chat was told the proposal was awaiting approval.
+    #[test]
+    fn dispatch_work_refuses_a_kind_outside_the_routing_table() {
+        let dir = temp_dir("dispatch_bad_kind");
+        let store = Arc::new(Store::for_test(&dir));
+        let project = store.add_project("/repo".into());
+        let chat = store.add_root_chat();
+        let proposals = Arc::new(Proposals::default());
+        let err = dispatch_work_inner(
+            &store,
+            &proposals,
+            &chat.id,
+            &json!({ "projectId": project.id, "task": "x", "kind": "refactoring" }),
+            1_700_000_000,
+        )
+        .unwrap_err();
+        assert!(err.contains("unknown kind refactoring"), "{err}");
+        // …and the error names the kinds that DO work, so the model can retry.
+        assert!(err.contains("implementation"), "{err}");
+        // Every real kind still records.
+        for k in task_kind_ids() {
+            assert!(
+                dispatch_work_inner(
+                    &store,
+                    &proposals,
+                    &chat.id,
+                    &json!({ "projectId": project.id, "task": "x", "kind": k }),
+                    1_700_000_000,
+                )
+                .is_ok(),
+                "{k} is routable and must be accepted"
+            );
+        }
+    }
+
+    /// An agent id the chat invented reached the card as an enabled "Start it" button
+    /// labelled "as gpt5-turbo (chosen by the chat)", and `AgentId`'s lenient Deserialize
+    /// turned it into Claude at approve time -- the card asserting one agent while a
+    /// different one spawned. Refuse it at the door so the model gets a recoverable error.
+    #[test]
+    fn dispatch_work_refuses_an_agent_this_build_cannot_spawn() {
+        let dir = temp_dir("dispatch_bad_agent");
+        let store = Arc::new(Store::for_test(&dir));
+        let project = store.add_project("/repo".into());
+        let chat = store.add_root_chat();
+        let proposals = Arc::new(Proposals::default());
+        let err = dispatch_work_inner(
+            &store,
+            &proposals,
+            &chat.id,
+            &json!({ "projectId": project.id, "task": "x", "agent": "gpt5-turbo" }),
+            1_700_000_000,
+        )
+        .unwrap_err();
+        assert!(err.contains("unknown agent gpt5-turbo"), "{err}");
+        assert!(
+            err.contains("claude"),
+            "the error must list what works: {err}"
+        );
+        for a in agent_ids() {
+            assert!(
+                dispatch_work_inner(
+                    &store,
+                    &proposals,
+                    &chat.id,
+                    &json!({ "projectId": project.id, "task": "x", "agent": a }),
+                    1_700_000_000,
+                )
+                .is_ok(),
+                "{a} is a real agent and must be accepted"
+            );
+        }
+    }
+
     #[test]
     fn dispatch_work_refuses_an_unknown_project() {
         let dir = temp_dir("dispatch_bad");
@@ -933,7 +1118,13 @@ mod tests {
 
         let out = dispatch_tool(
             "dispatch_work",
-            &json!({ "projectId": project.id, "task": "add rate limiting" }),
+            &json!({
+                "projectId": project.id,
+                "task": "add rate limiting",
+                "kind": "review",
+                "agent": "codex",
+                "model": "o3",
+            }),
             &ctx,
         )
         .unwrap();
@@ -946,11 +1137,127 @@ mod tests {
         assert_eq!(events.len(), 1, "{events:?}");
         let (name, payload) = &events[0];
         assert_eq!(name, "pending-decision");
+        // ALL NINE keys, not the five this used to check. The routing fields were the
+        // unpinned ones and they are the load-bearing ones: deleting `kind` silently
+        // routes the card as "implementation" and deleting `agent` drops the chat's
+        // explicit choice, while `list_pending_decisions` still carries both -- so the
+        // live card and the same card after a reload would disagree.
         assert_eq!(payload["id"], id);
         assert_eq!(payload["chatId"], chat.id);
         assert_eq!(payload["projectId"], project.id);
         assert_eq!(payload["projectName"], project.name);
         assert_eq!(payload["task"], "add rate limiting");
+        assert_eq!(payload["kind"], "review");
+        assert_eq!(payload["agent"], "codex");
+        assert_eq!(payload["model"], "o3");
+        assert_eq!(
+            payload["createdAt"],
+            json!(ctx.proposals.get(&id).unwrap().created_at)
+        );
+        // Pins the COUNT too, so dropping one key while adding another cannot pass.
+        assert_eq!(payload.as_object().map(|o| o.len()), Some(9), "{payload}");
+    }
+
+    /// The live emit and `lib.rs`'s catch-up fetch must be the same object: a card that
+    /// renders one way live and another way after a reload is the drift this shares one
+    /// builder to prevent.
+    #[test]
+    fn the_live_emit_is_byte_for_byte_the_catch_up_payload() {
+        let dir = temp_dir("dispatch_same_payload");
+        let store = Arc::new(Store::for_test(&dir));
+        let project = store.add_project("/repo".into());
+        let chat = store.add_root_chat();
+        let (emit, log) = capturing_sink();
+        let proposals = Arc::new(Proposals::default());
+        let ctx = Ctx {
+            emit,
+            store: store.clone(),
+            pty: Arc::new(PtyManager::new()),
+            fleet: Arc::new(FleetState::default()),
+            proposals: proposals.clone(),
+            chat_id: chat.id.clone(),
+        };
+        dispatch_tool(
+            "dispatch_work",
+            &json!({ "projectId": project.id, "task": "t", "kind": "planning", "agent": "gemini" }),
+            &ctx,
+        )
+        .unwrap();
+        let live = log.lock().unwrap()[0].1.clone();
+        let catch_up = proposal_json(&store, &proposals.pending(1_700_000_000)[0]);
+        assert_eq!(live, catch_up);
+    }
+
+    #[test]
+    fn sessions_list_refuses_an_unknown_project_instead_of_answering_empty() {
+        let dir = temp_dir("sessions_list_bad_project");
+        let store = Arc::new(Store::for_test(&dir));
+        store.add_project("/repo".into());
+        let (emit, _log) = capturing_sink();
+        let ctx = Ctx {
+            emit,
+            store: store.clone(),
+            pty: Arc::new(PtyManager::new()),
+            fleet: Arc::new(FleetState::default()),
+            proposals: Arc::new(Proposals::default()),
+            chat_id: "chat-1".into(),
+        };
+        // `[]` would read to the model as "nothing is running in that project" — a wrong
+        // answer rather than a failed one.
+        let err =
+            dispatch_tool("sessions_list", &json!({ "projectId": "ghost" }), &ctx).unwrap_err();
+        assert!(err.contains("unknown project ghost"), "{err}");
+        // No filter still lists everything, and a real id still works.
+        assert!(dispatch_tool("sessions_list", &json!({}), &ctx).is_ok());
+        let real = store.list()[0].id.clone();
+        assert!(dispatch_tool("sessions_list", &json!({ "projectId": real }), &ctx).is_ok());
+    }
+
+    /// Every fork is itself a root chat with the full tool surface (including
+    /// `chat_fork`), and a seeded one is auto-sent — a real `claude -p` child per fork.
+    /// `dispatch_work` has `MAX_PENDING_PER_CHAT` and fleet has `spawn_rate_ok`; this had
+    /// only the charter's "fork sparingly", which is advice, not a bound.
+    #[test]
+    fn chat_fork_is_capped_per_chat_per_minute() {
+        let dir = temp_dir("chat_fork_cap");
+        let store = Arc::new(Store::for_test(&dir));
+        let chat = store.add_root_chat();
+        let (emit, log) = capturing_sink();
+        let ctx = Ctx {
+            emit,
+            store: store.clone(),
+            pty: Arc::new(PtyManager::new()),
+            fleet: Arc::new(FleetState::default()),
+            proposals: Arc::new(Proposals::default()),
+            chat_id: chat.id.clone(),
+        };
+        for i in 0..MAX_FORKS_PER_MINUTE_PER_CHAT {
+            assert!(
+                dispatch_tool("chat_fork", &json!({ "title": format!("t{i}") }), &ctx).is_ok(),
+                "fork {i} is within the cap"
+            );
+        }
+        let err =
+            dispatch_tool("chat_fork", &json!({ "title": "one too many" }), &ctx).unwrap_err();
+        assert!(err.contains("fork rate limit"), "{err}");
+        // A refused fork must not half-happen: no chat created, no event emitted.
+        assert_eq!(
+            store.list_root_chats().len(),
+            1 + MAX_FORKS_PER_MINUTE_PER_CHAT
+        );
+        assert_eq!(log.lock().unwrap().len(), MAX_FORKS_PER_MINUTE_PER_CHAT);
+    }
+
+    #[test]
+    fn the_fork_budget_is_per_chat_and_rolls_off() {
+        // Distinct keys from every other test's chat ids: the window is a module static.
+        assert!(fork_rate_ok_with("fork-a", 1, Duration::from_millis(40)));
+        assert!(!fork_rate_ok_with("fork-a", 1, Duration::from_millis(40)));
+        // A different chat has its own budget…
+        assert!(fork_rate_ok_with("fork-b", 1, Duration::from_millis(40)));
+        // …and the window rolls off rather than latching.
+        std::thread::sleep(Duration::from_millis(60));
+        assert!(fork_rate_ok_with("fork-a", 1, Duration::from_millis(40)));
     }
 
     /// Serve `handle_request` on a real socket -- the only way to exercise the identity

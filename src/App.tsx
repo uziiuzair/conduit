@@ -281,11 +281,12 @@ export default function App() {
   // Work root chat proposed. Also loaded once on mount so a proposal made while the
   // window was closed is not lost.
   useEffect(() => {
+    // Each card's routing table is fetched for the CARD's OWN project by
+    // `loadPendingDecisions`/`decisionArrived` (see `decisionRoutes`). It must NOT come
+    // from the shared `routes` slot: that is globals-only when loaded with `null`, and it
+    // is also written by the new-session dialog and the routing panel, so a card for
+    // project Y would be routed by whichever project was opened last.
     void useStore.getState().loadPendingDecisions();
-    // Global routing table, so a card can name the agent it would use. The new-session
-    // dialog loads this per project; the card stack is app-level, so it needs the
-    // global one.
-    void useStore.getState().loadRouting(null);
     const unPending = listen<PendingDecision>("pending-decision", ({ payload }) => {
       useStore.getState().decisionArrived(payload);
     });

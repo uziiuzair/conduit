@@ -52,6 +52,35 @@ pub struct Proposal {
     pub outcome: Outcome,
 }
 
+/// The `pending-decision` payload, in ONE place.
+///
+/// Two producers hand the frontend this object -- `root_mcp`'s live emit when
+/// `dispatch_work` records, and `lib.rs`'s `list_pending_decisions` catch-up fetch on
+/// mount -- and the card must render identically from either. Built by hand twice they
+/// drifted: a live card missing `kind` routes as "implementation" and one missing `agent`
+/// silently drops the chat's explicit choice, while the same card after a reload carries
+/// both. It lives here rather than in either caller because neither producer owns the
+/// other.
+pub fn proposal_json(store: &crate::store::Store, p: &Proposal) -> serde_json::Value {
+    let project_name = store
+        .list()
+        .into_iter()
+        .find(|x| x.id == p.project_id)
+        .map(|x| x.name)
+        .unwrap_or_default();
+    serde_json::json!({
+        "id": p.id,
+        "chatId": p.chat_id,
+        "projectId": p.project_id,
+        "projectName": project_name,
+        "task": p.task,
+        "kind": p.kind,
+        "agent": p.agent,
+        "model": p.model,
+        "createdAt": p.created_at,
+    })
+}
+
 #[derive(Default)]
 pub struct Proposals {
     inner: Mutex<Vec<Proposal>>,

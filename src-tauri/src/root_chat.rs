@@ -395,12 +395,26 @@ pub fn build_command(
     let sys = crate::pty::quote_arg(charter);
     let scratch = dirs.scratch.to_string_lossy();
     let memory = dirs.memory.to_string_lossy();
+    // The orchestration tools must be ALLOWED, not merely configured. `-p` auto-denies
+    // anything unallowed, and that includes MCP tools: with `--mcp-config` alone the
+    // seven tools appear in the chat's tool list, every call is refused before the server
+    // is reached, and the result carries `permission_denials`. (It looked like it worked
+    // on machines whose `~/.claude/settings.json` sets `"defaultMode": "auto"` — a
+    // per-user setting Conduit does not control, and a chat pinned to another account
+    // reads a different settings tree.) Naming the SERVER allows all seven, so an eighth
+    // tool cannot ship unreachable. Gated on the same condition as the flag: with no
+    // server there is nothing to allow, and the chat keeps exactly its Phase 2 surface.
+    let root_tools = if mcp_config.is_some() {
+        format!(",{}", crate::root_mcp::TOOL_NAMESPACE)
+    } else {
+        String::new()
+    };
     // Allow: read tools, the GitHub CLI, and writes scoped to the two Conduit-owned
     // dirs. Generic Bash/Write/Edit are NOT denied — they are simply unallowed, which
     // `-p` auto-denies; a blanket deny would override the scoped allows (deny wins).
     let allow = crate::pty::quote_arg(&format!(
         "Read,Glob,Grep,WebSearch,WebFetch,Bash(gh:*),\
-         Write({scratch}/**),Edit({scratch}/**),Write({memory}/**),Edit({memory}/**)"
+         Write({scratch}/**),Edit({scratch}/**),Write({memory}/**),Edit({memory}/**){root_tools}"
     ));
     // Deny the dangerous gh tail: `gh api` is arbitrary REST (a DELETE smuggles past
     // any prefix matcher), and auth/secrets/repo-deletion have no PM use.
@@ -577,9 +591,20 @@ mod tests {
             with.contains("--strict-mcp-config"),
             "strict mode must survive"
         );
-        // No server: no flag, and the chat degrades to its Phase 2 tool set.
+        // Configuring the server is not enough: `-p` auto-denies any MCP tool absent from
+        // --allowedTools, so without this the seven tools are listed, every call is
+        // refused before the server is reached, and the run reports permission_denials.
+        assert!(
+            with.contains(crate::root_mcp::TOOL_NAMESPACE),
+            "the root MCP namespace must be on the allow list, or every tool call is denied: {with}"
+        );
+        // No server: no flag, no namespace, and the chat degrades to its Phase 2 tool set.
         let without = build_command("abc-123", false, "charter", &d, None);
         assert!(!without.contains("--mcp-config"));
+        assert!(
+            !without.contains("mcp__"),
+            "no server means nothing to allow: {without}"
+        );
         assert!(without.contains("--strict-mcp-config"));
     }
 
