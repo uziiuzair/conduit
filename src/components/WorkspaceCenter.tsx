@@ -35,6 +35,10 @@ type PaneZone = "left" | "center" | "right";
 
 const MIN_WEIGHT = 0.14;
 
+/** How far outside the viewport a node still counts as live, in screen pixels. Generous, so
+ *  scrolling a node into frame does not flash a card first. */
+const CULL_MARGIN = 400;
+
 /** Left/width percentages per group, derived from weights — no DOM measurement. */
 function geometry(weights: number[]): { left: number; width: number }[] {
   const sum = weights.reduce((a, b) => a + b, 0) || 1;
@@ -164,8 +168,11 @@ export function WorkspaceCenter({
   const groupIndexOfRef = (ref: string): number =>
     layout ? layout.groups.findIndex((g) => g.tabs.some((t) => t.ref === ref)) : -1;
 
-  // Replaced by real gesture state in the next task.
-  const zooming = false;
+  // True while a pinch/wheel-zoom is in flight. Terminals hide for its duration: a dozen
+  // GPU-composited surfaces re-rasterizing every frame is the jank, and hiding them makes
+  // the gesture a pure chrome transform. Set from CanvasUnderlay, which owns the wheel
+  // listener, and cleared by it on settle.
+  const [zooming, setZooming] = useState(false);
 
   // Placement for a session terminal of any project. Terminals are a permanent flat
   // stack (keep-alive); only CSS position/visibility changes. display:none when its
@@ -198,10 +205,23 @@ export function WorkspaceCenter({
         return { visible: false, inActiveGroup: false, style: { display: "none" } as React.CSSProperties };
       }
       const z = canvas.zoom;
+      // The stack carries translate(pan), so a node's screen position is its scaled
+      // coordinate plus the pan. No viewport yet (first paint) counts as on-screen -- a
+      // terminal that never went live would never spawn its PTY.
+      const vp = canvasViewportRef.current;
+      const sx = node.x * z + canvas.pan.x;
+      const sy = node.y * z + canvas.pan.y;
+      const onScreen =
+        !vp ||
+        (sx + nodeW(node) * z > -CULL_MARGIN &&
+          sx < vp.clientWidth + CULL_MARGIN &&
+          sy + nodeH(node) * z > -CULL_MARGIN &&
+          sy < vp.clientHeight + CULL_MARGIN);
       return {
-        // Hidden below the legibility threshold, and during a zoom gesture -- the card
-        // renders instead. Hidden is CSS-only, so the PTY and the xterm are untouched.
-        visible: z >= LIVE_ZOOM_MIN && !zooming,
+        // Hidden below the legibility threshold, during a zoom gesture, or far enough
+        // off-screen to be culled -- the card renders instead in every case. Hidden is
+        // CSS-only, so the PTY and the xterm are untouched.
+        visible: z >= LIVE_ZOOM_MIN && !zooming && onScreen,
         inActiveGroup: false, // never steal the keyboard just because a node scrolled by
         style: {
           left: node.x * z,
@@ -375,7 +395,11 @@ export function WorkspaceCenter({
         {/* Underlay FIRST so the terminal stack paints above it — the card frames are
             chrome around live terminals, not a replacement for them. */}
         {projectId && canvasMode && (
-          <CanvasUnderlay projectId={projectId} viewportRef={canvasViewportRef} />
+          <CanvasUnderlay
+            projectId={projectId}
+            viewportRef={canvasViewportRef}
+            onZoomActive={setZooming}
+          />
         )}
 
         <div

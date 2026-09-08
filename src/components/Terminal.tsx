@@ -25,7 +25,7 @@ function b64ToBytes(b64: string): Uint8Array {
 
 // Base terminal font size; the View-menu zoom offsets it (editors scale from their own
 // 12px base in CodeEditorPane — the two surfaces deliberately keep their 1px gap).
-const TERM_BASE_FONT = 13;
+export const TERM_BASE_FONT = 13;
 
 interface Props {
   sessionId: string;
@@ -585,6 +585,15 @@ export function TerminalView({
     if (!term || !fit) return;
 
     requestAnimationFrame(() => {
+      // The font-zoom effect skips a hidden terminal (see its own guard) so as not to
+      // rebuild an atlas nobody is looking at. Apply that pending size now, BEFORE the fit
+      // gate below reads the base font -- otherwise a fit that does run here would compute
+      // cols/rows from the stale cell metrics this pane still had while backgrounded.
+      const base = TERM_BASE_FONT + useStore.getState().fontZoom;
+      const wanted =
+        canvasScaleRef.current === undefined ? base : fontForZoom(canvasScaleRef.current, base);
+      if (term.options.fontSize !== wanted) term.options.fontSize = wanted;
+
       // Gated the same way as every other fit path: on the canvas `visible` toggles on
       // every zoom step and every pan that scrolls a card in or out (viewport culling), so
       // an unconditional fit() here would reflow a running agent on a reveal that never
@@ -595,6 +604,13 @@ export function TerminalView({
         } catch {
           /* not measurable yet */
         }
+      }
+      // A pane that was hidden mid-frame can come back showing a stale composite -- the
+      // same failure a re-attach has. Cheap, and only on the transition to visible.
+      try {
+        term.refresh(0, term.rows - 1);
+      } catch {
+        /* not measurable yet */
       }
       const cols = term.cols;
       const rows = term.rows;
@@ -741,6 +757,10 @@ export function TerminalView({
     const base = TERM_BASE_FONT + fontZoom;
     const size = canvasScale === undefined ? base : fontForZoom(canvasScale, base);
     if (term.options.fontSize === size) return;
+    // A hidden terminal picks the size up on reveal (below). Setting it here would rebuild
+    // the glyph atlas for a pane nobody is looking at, which is exactly the cost the
+    // canvas's culling exists to avoid.
+    if (!visibleRef.current) return;
     term.options.fontSize = size;
     if (canvasScale === undefined && visibleRef.current && fitInputsChanged()) scheduleFit();
     // eslint-disable-next-line react-hooks/exhaustive-deps

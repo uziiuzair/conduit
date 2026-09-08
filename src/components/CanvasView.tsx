@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useStore } from "../store";
+import { TERM_BASE_FONT } from "./Terminal";
+import { snapZoom } from "../terminalZoom";
 import {
   FOOTER_H,
   HEADER_H,
@@ -52,11 +54,15 @@ import { deleteSession } from "./Sidebar";
 export function CanvasUnderlay({
   projectId,
   viewportRef,
+  onZoomActive,
 }: {
   projectId: string;
   /** Owned by WorkspaceCenter and shared with the toolbar, which needs the viewport's
    *  size for Fit but is a sibling of this element rather than a child. */
   viewportRef: React.RefObject<HTMLDivElement | null>;
+  /** Raised true while a zoom gesture is in flight, false ~120ms after it settles.
+   *  WorkspaceCenter hides the terminals for that window — see its `zooming`. */
+  onZoomActive: (active: boolean) => void;
 }) {
   const project = useStore((s) => s.projects.find((p) => p.id === projectId));
   const live = useStore((s) => s.live);
@@ -109,6 +115,25 @@ export function CanvasUnderlay({
     fitToContent();
   }, [projectId, hasStored, fitToContent]);
 
+  const settleRef = useRef<number | null>(null);
+  // The wheel closure is rebuilt per render but its timeout is not; the ref is what the
+  // settle reads so it snaps the LATEST zoom rather than the one the gesture started at.
+  const canvasRef = useRef(canvas);
+  canvasRef.current = canvas;
+  useEffect(
+    () => () => {
+      // Unmounting mid-gesture (Escape / "Hide canvas" within the settle window) must still
+      // clear WorkspaceCenter's `zooming` -- a bare clearTimeout would leave it stuck true
+      // forever, since nothing else ever calls onZoomActive(false) again until another full
+      // zoom gesture completes, and canvas terminals would render as cards on next entry.
+      if (settleRef.current) {
+        window.clearTimeout(settleRef.current);
+        onZoomActive(false);
+      }
+    },
+    [onZoomActive],
+  );
+
   // Wheel: pan by default, zoom with ctrl/cmd — which is also what a trackpad pinch
   // sends. Non-passive so preventDefault actually stops the page rubber-banding.
   //
@@ -127,9 +152,28 @@ export function CanvasUnderlay({
       const rect = el.getBoundingClientRect();
       if (e.ctrlKey || e.metaKey) {
         e.preventDefault();
+        onZoomActive(true);
         setCanvas(
           zoomAt(canvas, Math.exp(-e.deltaY / 200), e.clientX - rect.left, e.clientY - rect.top),
         );
+        if (settleRef.current) window.clearTimeout(settleRef.current);
+        // Settle: snap to a rung so the glyphs rasterize at an integer size, then let the
+        // terminals back. Read through the ref because this closure is one gesture old by
+        // the time it fires.
+        settleRef.current = window.setTimeout(() => {
+          const cur = canvasRef.current;
+          const snapped = snapZoom(cur.zoom, TERM_BASE_FONT + useStore.getState().fontZoom);
+          if (snapped !== cur.zoom) {
+            // Snap about the viewport centre, so settling does not slide the plane.
+            const el2 = viewportRef.current;
+            setCanvas(
+              el2
+                ? zoomAt(cur, snapped / cur.zoom, el2.clientWidth / 2, el2.clientHeight / 2)
+                : { ...cur, zoom: snapped },
+            );
+          }
+          onZoomActive(false);
+        }, 120);
         return;
       }
       if ((e.target as Element | null)?.closest?.(".term-host")) return; // terminal scrollback
@@ -138,7 +182,7 @@ export function CanvasUnderlay({
     };
     host.addEventListener("wheel", onWheel, { passive: false, capture: true });
     return () => host.removeEventListener("wheel", onWheel, { capture: true });
-  }, [canvas, setCanvas]);
+  }, [canvas, setCanvas, onZoomActive]);
 
   const onPointerDown = (
     e: React.PointerEvent,
