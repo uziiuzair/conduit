@@ -47,6 +47,7 @@ import {
   zoomAt,
 } from "../canvas";
 import { meterLevel, meterTitle } from "../contextMeter";
+import { blocksGlobalShortcut, isEditableTarget, isInTerminal } from "../keyboardGuards";
 import { hasSessionDrag, readSessionDrag, resolveProjectColor } from "../layout";
 import { useCanvas } from "../hooks/useCanvas";
 import { AgentGlyph, glyphStateFor } from "./AgentGlyph";
@@ -173,10 +174,8 @@ export function CanvasUnderlay({
   // editor) so ordinary typing of the space bar never arms panning.
   const spaceHeldRef = useRef(false);
   useEffect(() => {
-    const isEditable = (t: EventTarget | null) =>
-      !!(t as Element | null)?.closest?.("textarea, input, [contenteditable='true']");
     const onKeyDown = (e: KeyboardEvent) => {
-      if (e.code === "Space" && !isEditable(e.target)) spaceHeldRef.current = true;
+      if (e.code === "Space" && !blocksGlobalShortcut(e.target)) spaceHeldRef.current = true;
     };
     const onKeyUp = (e: KeyboardEvent) => {
       if (e.code === "Space") spaceHeldRef.current = false;
@@ -207,9 +206,7 @@ export function CanvasUnderlay({
   // below is what protects the note textarea, which has no such handler of its own.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      const target = e.target as Element | null;
-      if (target?.closest?.(".term-host")) return;
-      if (target?.closest?.("textarea, input, [contenteditable='true']")) return;
+      if (blocksGlobalShortcut(e.target)) return;
       const mod = e.metaKey || e.ctrlKey;
       if (mod && !e.shiftKey && e.key.toLowerCase() === "z") {
         e.preventDefault();
@@ -1329,10 +1326,9 @@ export function CanvasControls({
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.key !== "Escape") return;
-      const target = e.target as Element | null;
-      if (target?.closest?.(".term-host")) return;
-      if (target?.closest?.("textarea, input, [contenteditable='true']")) {
-        (target as HTMLElement).blur?.();
+      if (isInTerminal(e.target)) return;
+      if (isEditableTarget(e.target)) {
+        (e.target as HTMLElement).blur?.();
         return;
       }
       exitCanvas();

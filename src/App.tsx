@@ -15,6 +15,7 @@ import {
 } from "./store";
 import { type AgentId } from "./agents";
 import { matchProjectByPath } from "./cliOpen";
+import { blocksGlobalShortcut } from "./keyboardGuards";
 import { type ChatItem } from "./rootChat";
 import { holdsOffWorking, notificationStatus } from "./statusRules";
 import { type ThemePref } from "./themes";
@@ -158,8 +159,13 @@ export default function App() {
       }
       // ⇧⌘C: toggle the global canvas. Unlike ⇧⌘B above, this needs no selected project —
       // the canvas is global — and no native menu accelerator claims CmdOrCtrl+Shift+C
-      // (verified against src-tauri/src/menu.rs).
+      // (verified against src-tauri/src/menu.rs). On Windows/Linux, Ctrl+Shift+C is ALSO
+      // Terminal.tsx's own copy shortcut — this listener runs in the capture phase, so
+      // without the guard below it would flip the view out from under a copy that xterm
+      // still goes on to perform. Bail the same way the other three window-level canvas
+      // key listeners do (see keyboardGuards.ts).
       if (e.shiftKey && (e.metaKey || e.ctrlKey) && !e.altKey && e.key.toLowerCase() === "c") {
+        if (blocksGlobalShortcut(e.target)) return;
         e.preventDefault();
         const s = useStore.getState();
         s.setCanvasOpen(!s.canvasOpen);
