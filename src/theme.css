@@ -1135,6 +1135,11 @@ button {
    (.term-stack.canvas-mode, z-index 2). The rail is a cross-project QUEUE filtered to
    "waiting on you" -- not a second sidebar, which is a project-grouped tree of everything. */
 .canvas-rail {
+  /* This 240px is the ONE declaration of the rail's width -- CanvasRail.tsx measures it
+     back off the rendered element (getBoundingClientRect) rather than repeating the number,
+     so the geometry it feeds to edgePips/cameraFor (the visible board = viewport minus this
+     width) can never drift out of sync with what is actually painted here. Change this
+     value freely; nothing else needs to change with it. */
   position: absolute; top: var(--tabstrip-h); right: 0; bottom: 0; width: 240px; z-index: 4;
   background: var(--panel-bg); border-left: 1px solid var(--border);
   display: flex; flex-direction: column; overflow-y: auto;
@@ -1162,9 +1167,12 @@ button {
 .canvas-rail-waited { margin-left: auto; flex: none; font-size: 11px; color: var(--amber); }
 
 /* Screen-space, positioned to match .canvas-underlay's own box exactly so a pip's (x, y)
-   -- computed against the viewport's clientWidth/clientHeight -- lands where that geometry
-   says. Above .term-stack.canvas-mode (z-index 2): the one thing on the board that must
-   outrank a terminal, since a pip's whole job is being seen. */
+   -- computed against `boardViewport` (CanvasRail.tsx): the viewport's clientWidth/Height
+   narrowed by the rail's own measured width -- lands where that geometry says. A card
+   sitting behind the opaque rail is therefore correctly OFF screen and gets a pip pinned
+   at the rail's left edge pointing at it, rather than being silently exempted from the
+   whole reason pips exist. Above .term-stack.canvas-mode (z-index 2): the one thing on the
+   board that must outrank a terminal, since a pip's whole job is being seen. */
 .canvas-pip-layer {
   position: absolute; top: var(--tabstrip-h); left: 0; right: 0; bottom: 0;
   z-index: 5; pointer-events: none;

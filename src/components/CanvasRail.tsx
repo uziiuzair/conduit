@@ -17,6 +17,7 @@ import {
   type AttentionSource,
   type Camera,
   type PipBox,
+  type Viewport,
 } from "../canvasAttention";
 
 /** How often the queue re-reads the clock, so a wait time keeps climbing without a
@@ -93,6 +94,49 @@ export function CanvasRail({
     [projectById, autoProjectColors],
   );
 
+  // ---- The board's own VISIBLE region: the viewport's rect minus the rail's own
+  // footprint. Both are measured off the real DOM (ResizeObserver), never a hardcoded
+  // number duplicated between here and theme.css's `.canvas-rail` rule — so the two can
+  // never drift apart. This is the fix for a real bug: a card sitting behind the opaque
+  // rail counts as "on screen" against the raw viewport rect, so it got no edge pip even
+  // though the user cannot see it — exactly the failure pips exist to prevent, reintroduced
+  // by the rail itself. Feeding this narrowed rect to BOTH edgePips (so a hidden card is
+  // correctly treated as off-screen and gets a pip pinned at the rail's left edge,
+  // pointing at it) and cameraFor (so a fly-to centres the target in the space the user can
+  // actually see, not the raw DOM rect half of which the rail covers) is the whole fix —
+  // deliberately NOT insetting `.canvas-underlay` itself, which would drag `.term-stack`
+  // and every absolutely-positioned terminal into a coordinate change they do not need. ----
+  const railRef = useRef<HTMLDivElement>(null);
+  const [viewportSize, setViewportSize] = useState({ w: 0, h: 0 });
+  const [railWidth, setRailWidth] = useState(0);
+  useLayoutEffect(() => {
+    const el = viewportRef.current;
+    if (!el) return;
+    const update = () => setViewportSize({ w: el.clientWidth, h: el.clientHeight });
+    update();
+    const ro = new ResizeObserver(update);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [viewportRef]);
+  useLayoutEffect(() => {
+    const el = railRef.current;
+    if (!el) return;
+    const update = () => setRailWidth(el.getBoundingClientRect().width);
+    update();
+    const ro = new ResizeObserver(update);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
+  const boardViewport = useMemo<Viewport>(
+    () => ({ w: Math.max(0, viewportSize.w - railWidth), h: viewportSize.h }),
+    [viewportSize, railWidth],
+  );
+  // Read at animation-frame / click time rather than closed over — flyToBox is memoized
+  // independent of viewport size, exactly like canvasRef below is independent of canvas
+  // content, so a resize mid-flight doesn't recreate the in-flight callback.
+  const boardViewportRef = useRef(boardViewport);
+  boardViewportRef.current = boardViewport;
+
   // ---- Fly-to camera: pan+zoom animated over FLY_MS, cancelled by a second call or by
   // unmount. `canvasRef` mirrors the latest canvas on every render, mirroring the same
   // pattern CanvasUnderlay uses for its own zoom-settle timeout — read at animation-frame
@@ -109,7 +153,10 @@ export function CanvasRail({
       const from: Camera = { pan: canvasRef.current.pan, zoom: canvasRef.current.zoom };
       const to = cameraFor(
         { ref: "", ...box },
-        { w: el.clientWidth, h: el.clientHeight },
+        // Narrowed by the rail's own width (see boardViewport above) — centring against
+        // the raw DOM rect would land the target half under the rail instead of in the
+        // middle of the space the user can actually see.
+        boardViewportRef.current,
         // Land on a font-size rung so the terminal is crisp the instant the flight ends —
         // arriving between rungs would land the user on a soft terminal.
         snapZoom(Math.max(canvasRef.current.zoom, LIVE_ZOOM_MIN), TERM_BASE_FONT + fontZoom),
@@ -164,10 +211,13 @@ export function CanvasRail({
       // useCanvas' own doc comment on `snapshot`.
       snapshot();
       const next = addNodeAt(cur, ref, projectId, x, y);
-      // Keep the ref in sync ahead of this component's next render: `setCanvas` below
-      // updates the store synchronously, but React's re-render (which would otherwise
-      // refresh `canvasRef.current`) has not happened yet, and flyTo below needs to find
-      // the just-added node immediately rather than race that render.
+      // DELIBERATE, not a stray leftover: `setCanvas` below writes the store
+      // SYNCHRONOUSLY, but this component's own re-render — the thing that would
+      // otherwise refresh `canvasRef.current` from the new `canvas` prop of `useCanvas()`
+      // — has not happened yet. `flyTo` immediately below reads `canvasRef.current` to
+      // find the node it should fly to; without this line it would still see the PREVIOUS
+      // render's canvas and silently no-op (no node found yet), racing this component's
+      // own render instead of waiting for it. Writing the ref by hand here closes that gap.
       canvasRef.current = next;
       setCanvas(next);
       flyTo(ref);
@@ -176,20 +226,8 @@ export function CanvasRail({
   );
 
   // ---- Edge pips: markers on the viewport border for queued sessions that ARE on the
-  // board but currently off screen. Tracked via ResizeObserver (not just clientWidth/Height
-  // read inline) so a plain window resize — no pan or zoom change — still repositions them
-  // against the viewport's own rect. ----
-  const [viewportSize, setViewportSize] = useState({ w: 0, h: 0 });
-  useLayoutEffect(() => {
-    const el = viewportRef.current;
-    if (!el) return;
-    const update = () => setViewportSize({ w: el.clientWidth, h: el.clientHeight });
-    update();
-    const ro = new ResizeObserver(update);
-    ro.observe(el);
-    return () => ro.disconnect();
-  }, [viewportRef]);
-
+  // board but currently off screen (against `boardViewport`, not the raw DOM rect — see
+  // that constant's own comment for why). ----
   const pipBoxes = useMemo<PipBox[]>(
     () =>
       queue
@@ -199,16 +237,16 @@ export function CanvasRail({
     [queue, canvas.nodes],
   );
   const pips = useMemo(() => {
-    if (viewportSize.w === 0 && viewportSize.h === 0) return [];
-    return edgePips(pipBoxes, { pan: canvas.pan, zoom: canvas.zoom }, viewportSize);
-  }, [pipBoxes, canvas.pan, canvas.zoom, viewportSize]);
+    if (boardViewport.w === 0 && boardViewport.h === 0) return [];
+    return edgePips(pipBoxes, { pan: canvas.pan, zoom: canvas.zoom }, boardViewport);
+  }, [pipBoxes, canvas.pan, canvas.zoom, boardViewport]);
 
   const rowTitle = (session: { name: string } | undefined, item: AttentionItem): string =>
     `${session?.name ?? "Session"} — waiting ${formatWaited(item.waitedMs)}`;
 
   return (
     <>
-      <div className="canvas-rail" aria-label="Sessions waiting on you">
+      <div ref={railRef} className="canvas-rail" aria-label="Sessions waiting on you">
         <div className="canvas-rail-head">Needs you</div>
         {queue.length === 0 ? (
           <div className="canvas-rail-empty">Nothing is waiting on you.</div>
@@ -246,10 +284,11 @@ export function CanvasRail({
       </div>
 
       {/* Screen-space overlay, positioned to match .canvas-underlay's own box exactly (see
-          theme.css) so a pip's (x, y) — computed against the viewport's clientWidth/Height —
-          lands at the same place on screen that geometry describes. Sits ABOVE
-          .term-stack.canvas-mode (z-index 2), the one thing on the board that must outrank
-          a terminal, since a pip's whole job is being seen. */}
+          theme.css) so a pip's (x, y) — computed against `boardViewport`, itself measured
+          off the SAME element's clientWidth/clientHeight — lands at the same place on
+          screen that geometry describes. Sits ABOVE .term-stack.canvas-mode (z-index 2),
+          the one thing on the board that must outrank a terminal, since a pip's whole job
+          is being seen. */}
       <div className="canvas-pip-layer">
         {pips.map((pip) => {
           const item = queueByRef.get(pip.ref);
