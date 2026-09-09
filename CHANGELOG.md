@@ -3,6 +3,29 @@
 All notable changes to Conduit are documented here. This project uses
 [semantic versioning](https://semver.org/).
 
+## 0.36.0 — 2026-09-09
+
+- **Added — One global orchestration board.** The canvas is now a single board spanning
+  every project, built by hand: drag sessions onto it from the sidebar and arrange them
+  where the layout actually means something. The old per-project canvas, which placed
+  every session in a grid automatically, is gone — the board starts empty and holds only
+  what you put on it.
+- **Added — Sections.** Draw a titled, coloured box around a group of sessions and drag it
+  to move everything inside at once. Sections can nest.
+- **Added — Selection and undo.** Click or rubber-band select one or many cards, move them
+  together, and undo/redo with Cmd/Ctrl+Z.
+- **Added — An attention rail and edge markers.** A rail lists every session waiting on you
+  across every project, sorted by how long it's been waiting, and markers along the board's
+  edge point at waiting sessions that are currently off screen. Click either to fly the
+  camera straight to it.
+- **Fixed — Terminals are sharp at every zoom.** Zoomed text used to be a scaled bitmap —
+  soft when magnified, rough when reduced. Terminals now redraw natively at the zoomed
+  size instead of being stretched, and zooming a running agent no longer rewraps its
+  output.
+- **Changed — Zoomed-out cards say more.** A card too small to read as text now shows the
+  session's live status, how long it's been waiting, its project, and its context use,
+  instead of just a name.
+
 ## 0.35.0 — 2026-09-04
 
 - **Added — the `conduit` command.** Open a project from your terminal the way `code .`

@@ -194,8 +194,10 @@ layout's panes.
 - **The terminals were already all mounted.** `WorkspaceCenter`'s `allSessions` flat-maps
   every project's sessions into one permanent keep-alive stack and moves them with CSS
   alone, so this needed no remounting -- only dropping `placeSession`'s ownership gate in
-  pane mode. CANVAS mode keeps the gate: a canvas is reconciled from its own project's
-  sessions, so a borrowed one has no node.
+  pane mode. Canvas mode never regains that gate either, now that the board is global (see
+  "Where the orchestration board lives" below): membership is the node list, which spans
+  every project by design, so a borrowed tab and a canvas node answer "whose is this"
+  the same way.
 - **Differentiation is all-or-nothing per layout.** `isMixedLayout` decides; when true
   EVERY tab is badged, not just the visitors, because badging only the foreign ones makes
   "no badge" mean "the host", which is the knowledge the badge exists to supply. When
@@ -222,6 +224,75 @@ layout's panes.
 - Design: `docs/superpowers/specs/2026-08-23-cross-project-panes-design.md`, which also
   records why this ships BORROWED TABS rather than the single global `workspaceLayout` the
   July spike proposed, and which of that spike's risks do and do not apply.
+
+## Where the orchestration board lives
+
+The canvas used to be per-project and auto-placed every live session in a grid, so
+position carried no information. It is now one global board across every project, and
+membership is curated by hand: it starts empty, and a session arrives only by being
+dragged in from the sidebar.
+
+- **`pruneCanvas` only prunes.** It drops a node whose session is gone; it never adds one
+  for a session that exists. That asymmetry is the whole feature — a session existing is
+  not a reason for it to be on screen, which is what makes a position on the board mean
+  something instead of being wherever the last auto-layout put it.
+- **`CanvasNode.projectId` is required** — the opposite of `WsTab.projectId`, which is
+  absent for a tab in its own project's layout and present only when borrowed. A layout
+  always has a host project for absence to mean; a global board has none, and a session id
+  alone does not locate its project without scanning every one of them. Don't make this
+  field optional to "match" the borrowed-tab convention — the two are answering different
+  questions.
+- **Z-order is derived, never stored.** `sectionsByZ` sorts sections back-to-front by area
+  (largest first, so a nested section paints over its parent) and cards paint in plain
+  document order after them. There is no z field to maintain and must never be one:
+  reordering an array reorders the DOM nodes React renders from it, React reorders DOM to
+  match list order, and a reorder is a reparent — which kills the PTY under it (the
+  keep-alive rule at the top of this file). If a future "bring to front" needs stored order,
+  it has to be a *separate* sort key read only for paint order, never the array itself.
+- **The stack carries `translate()` only; the underlay keeps `scale()`.** `.canvas-underlay`
+  is DOM and SVG, which a `transform: scale()` renders as vectors — cheap and always crisp.
+  `.term-stack` holds real terminals, which under a CSS scale would resample a rasterized
+  glyph atlas into blur. So canvas terminals are placed in **screen pixels**
+  (`node.x * zoom + pan.x`, in `WorkspaceCenter.placeSession`) and rasterize natively via
+  `fontForZoom` (`src/terminalZoom.ts`), which quantizes zoom to a ladder of integer font
+  sizes — a fractional font size gives a fractional cell width whose rounding error
+  accumulates visibly across a row. **A terminal must never be refit for a zoom change** —
+  only a real change in the logical box or the base font may call `fit()`
+  (`fitInputsChanged` in `Terminal.tsx` gates every fit path on this, including the
+  font-zoom effect's own). Refitting on zoom is what used to rewrap a running agent's
+  output every frame of a pinch gesture; the gate is what stops it. Below the legibility
+  floor (`LIVE_ZOOM_MIN`) terminals drop to cards instead — DOM, crisp at any scale, no
+  rasterizer needed — and return crisp on settle once the zoom rung is chosen.
+- **`.canvas-underlay` and `.term-stack` are siblings, not ancestor/descendant** — the
+  stack paints above at a higher z-index, and each *visible* terminal takes
+  `pointer-events` back individually so its own content is interactive. This means a
+  listener bound to the underlay never sees a pointer or drag that is currently over a
+  placed card's terminal body — it bubbles straight past the underlay to whatever the next
+  real ancestor's handler is. **This hazard bit the build five separate times**: the
+  wheel handler (pan/zoom), the sidebar-to-board drop handler, marquee selection
+  drag-tracking, and — worst, because there's no capture-phase workaround for CSS
+  stacking — the attention rail and edge pips, which cannot paint above a terminal at all
+  if mounted inside `.canvas-underlay`'s own stacking context, no matter what z-index they
+  declare (`CanvasRail.tsx`'s own doc comment calls this out by count). The fix is always
+  the same shape: bind at the common ancestor (capture phase, for input) or mount as a
+  sibling *after* `.term-stack` in `WorkspaceCenter` (for paint). Don't add a new
+  interactive or visible layer as a JSX prop on `.canvas-underlay` or a child of it —
+  check whether it needs to win against a terminal first.
+- **Section membership is geometric and captured once, at drag start** (`membersOf` in
+  `onPointerDown`), never recomputed on `pointermove`. Recomputing mid-drag would mean a
+  card could fall out of (or into) a moving section as it crosses the boundary, so
+  "drag a section" would sometimes not drag everything the user saw inside it when they
+  grabbed it. A resize is deliberately excluded from capture — it changes what the section
+  contains rather than moving anything, so it has no members to move.
+- **Canvas state lives in `localStorage`, not `state.json`, on purpose.** `state.json` is
+  the Rust-owned store, and an unparseable value there is an empty `Store` — which the
+  startup orphan sweep (see "Where session persistence's safety net lives") reads as
+  every live tmux session being orphaned, and kills them all. A corrupt canvas blob must
+  never be able to do that to a running fleet, so it stays in its own key
+  (`conduit.canvas`), read defensively (`readCanvas` falls back to `emptyCanvas()` on a
+  parse failure, and takes a one-time `.bak` snapshot of the unreadable value on the next
+  write rather than silently overwriting it).
+- Design: `docs/superpowers/specs/2026-09-08-canvas-orchestration-board-design.md`.
 
 ## Where the usage meter's semantics live
 
