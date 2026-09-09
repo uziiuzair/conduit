@@ -244,6 +244,28 @@ export function CanvasRail({
   const rowTitle = (session: { name: string } | undefined, item: AttentionItem): string =>
     `${session?.name ?? "Session"} — waiting ${formatWaited(item.waitedMs)}`;
 
+  /** A pip has no text of its own — the arrow is purely graphical — so its accessible name
+   *  has to say both what it is pointing at AND that the thing is off screen, which a
+   *  sighted user infers from the marker sitting on the viewport border but a screen
+   *  reader user cannot. */
+  const pipLabel = (session: { name: string } | undefined, item: AttentionItem | undefined): string =>
+    `${session?.name ?? "Session"} is off screen — waiting ${formatWaited(item?.waitedMs ?? 0)}`;
+
+  /** Rail rows and pips are both semantically buttons (activating one flies the camera),
+   *  not text — a `<div onClick>` with no role/tabIndex/key handling is an incomplete
+   *  button, unreachable and unactivatable from the keyboard. Shared by both so Enter/Space
+   *  behave identically everywhere in this file. */
+  const onKeyActivate = (handler: () => void) => (e: React.KeyboardEvent) => {
+    if (e.key === "Enter") {
+      handler();
+    } else if (e.key === " " || e.key === "Spacebar") {
+      // Space's default is scrolling the page; a button activating with Space must not
+      // also scroll out from under the user.
+      e.preventDefault();
+      handler();
+    }
+  };
+
   return (
     <>
       <div ref={railRef} className="canvas-rail" aria-label="Sessions waiting on you">
@@ -260,7 +282,10 @@ export function CanvasRail({
                 key={q.ref}
                 className="canvas-rail-row"
                 title={rowTitle(session, q)}
+                role="button"
+                tabIndex={0}
                 onClick={() => goTo(q.ref, q.projectId)}
+                onKeyDown={onKeyActivate(() => goTo(q.ref, q.projectId))}
               >
                 {session && (
                   <AgentGlyph
@@ -305,7 +330,11 @@ export function CanvasRail({
                 transform: `translate(-50%, -50%) rotate(${pip.angle}rad)`,
               }}
               title={item ? rowTitle(session, item) : session?.name}
+              role="button"
+              tabIndex={0}
+              aria-label={pipLabel(session, item)}
               onClick={() => flyTo(pip.ref)}
+              onKeyDown={onKeyActivate(() => flyTo(pip.ref))}
             >
               <span
                 className="canvas-pip-arrow"
