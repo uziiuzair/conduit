@@ -15,7 +15,7 @@ import {
 } from "./store";
 import { type AgentId } from "./agents";
 import { matchProjectByPath } from "./cliOpen";
-import { blocksGlobalShortcut } from "./keyboardGuards";
+import { isEditableTarget, isInTerminal } from "./keyboardGuards";
 import { type ChatItem } from "./rootChat";
 import { holdsOffWorking, notificationStatus } from "./statusRules";
 import { type ThemePref } from "./themes";
@@ -164,13 +164,24 @@ export default function App() {
       }
       // ⇧⌘C: toggle the global canvas. Unlike ⇧⌘B above, this needs no selected project —
       // the canvas is global — and no native menu accelerator claims CmdOrCtrl+Shift+C
-      // (verified against src-tauri/src/menu.rs). On Windows/Linux, Ctrl+Shift+C is ALSO
-      // Terminal.tsx's own copy shortcut — this listener runs in the capture phase, so
-      // without the guard below it would flip the view out from under a copy that xterm
-      // still goes on to perform. Bail the same way the other three window-level canvas
-      // key listeners do (see keyboardGuards.ts).
+      // (verified against src-tauri/src/menu.rs).
+      //
+      // On Windows/Linux, Ctrl+Shift+C is ALSO Terminal.tsx's own copy shortcut, and this
+      // listener runs in the capture phase -- so a blanket `.term-host` guard (as the
+      // other three window-level canvas key listeners use) blocked the toggle from firing
+      // at ALL while any terminal was focused, on every platform. A focused agent terminal
+      // is the app's DEFAULT state (a pane pulls focus on reveal), so that made the
+      // shortcut printed in the button's own tooltip mostly inert, and worse, left no
+      // keyboard way out of the canvas at all from a focused card (Escape is correctly
+      // still blocked in a terminal, since it interrupts the agent). The real collision is
+      // narrower than a blanket guard: only Ctrl+Shift+C-as-copy, and only on
+      // Windows/Linux (see the `!e.shiftKey` added to Terminal.tsx's macCopy, which closes
+      // the equivalent mac overlap at the source instead). An editable field (a note's
+      // textarea, a section's rename input) still blocks unconditionally on every
+      // platform, same as the other three listeners.
       if (e.shiftKey && (e.metaKey || e.ctrlKey) && !e.altKey && e.key.toLowerCase() === "c") {
-        if (blocksGlobalShortcut(e.target)) return;
+        const isMac = /Mac|iPhone|iPod|iPad/i.test(navigator.platform || navigator.userAgent);
+        if (isInTerminal(e.target) ? !isMac : isEditableTarget(e.target)) return;
         e.preventDefault();
         const s = useStore.getState();
         s.setCanvasOpen(!s.canvasOpen);

@@ -354,7 +354,11 @@ export function TerminalView({
       const k = e.key.toLowerCase();
       // Copy
       if (k === "c" && !e.altKey) {
-        const macCopy = isMac && e.metaKey && !e.ctrlKey;
+        // !e.shiftKey: Cmd+C is the only mac copy binding -- nobody copies with
+        // Cmd+Shift+C -- so excluding it here costs nothing and closes the one remaining
+        // overlap with the canvas toggle (Cmd/Ctrl+Shift+C), which on mac now relies on
+        // this NOT firing rather than on a blanket terminal guard (see App.tsx).
+        const macCopy = isMac && e.metaKey && !e.ctrlKey && !e.shiftKey;
         const winCopyShift = !isMac && e.ctrlKey && e.shiftKey;
         const winCopySmart = !isMac && e.ctrlKey && !e.shiftKey && term.hasSelection();
         if (macCopy || winCopyShift || winCopySmart) {
