@@ -562,7 +562,11 @@ export function WorkspaceCenter({
 
         {nothingVisible && <EmptyState />}
 
-        {projectId && centerMode === "board" && (
+        {/* Gated on !canvasMode too: the canvas is global and the task board is
+            per-project, so nothing else keeps them mutually exclusive. Without this, ⇧⌘B
+            then ⇧⌘C left the board's body rendered with the canvas toolbar above it and
+            the attention rail/edge pips floating over a plane the user cannot see. */}
+        {projectId && centerMode === "board" && !canvasMode && (
           <div className="board-overlay">
             <BoardView projectId={projectId} />
           </div>
