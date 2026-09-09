@@ -156,6 +156,11 @@ export default function App() {
         if (!st.selectedProjectId) return;
         e.preventDefault();
         st.toggleCenterMode(st.selectedProjectId);
+        // The canvas is a global flag independent of this project's centerMode (see the
+        // tab-click handler in WorkspaceCenter.tsx, which does the same) -- closing it
+        // here is what makes the board and the canvas mutually exclusive in BOTH
+        // directions, not just the direction the board overlay's own render gate covers.
+        st.setCanvasOpen(false);
       }
       // ⇧⌘C: toggle the global canvas. Unlike ⇧⌘B above, this needs no selected project —
       // the canvas is global — and no native menu accelerator claims CmdOrCtrl+Shift+C

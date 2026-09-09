@@ -805,9 +805,14 @@ function GroupTabStrip({
           type="button"
           className={`header-btn board-tab ${centerMode === "board" ? "active" : ""}`}
           title="Task board (⇧⌘B)"
-          onClick={() =>
-            setCenterMode(projectId, centerMode === "board" ? "terminals" : "board")
-          }
+          onClick={() => {
+            setCenterMode(projectId, centerMode === "board" ? "terminals" : "board");
+            // The canvas is a global flag independent of this project's centerMode (see
+            // the tab-click handler above) -- closing it here is what makes the board and
+            // the canvas mutually exclusive in BOTH directions, not just the direction the
+            // board overlay's own render gate covers.
+            setCanvasOpen(false);
+          }}
         >
           <span className="board-tab-dot" />
           <span>Board</span>
