@@ -388,6 +388,86 @@ plus install/remove/status), and one listener in `App.tsx`.
   `cli_shim.rs` pin all of it, including that `release.yml` passes no `--features`.
 - Design: `docs/superpowers/specs/2026-09-04-conduit-cli-launcher-design.md`.
 
+## Where root chat's orchestration lives
+
+Root chat (HQ) reaches Conduit through a SECOND in-app MCP server, `root_mcp.rs`, on
+`/mcp?rootchat=<chat-id>` (`start` binds the first free port in 8496..=8516, clear of the
+hook server's 8423..=8443, the mobile bridge's 8455..=8475, and fleet's own 8475..=8495).
+It is deliberately not part of `fleet_mcp.rs`: every fleet tool is project-scoped by
+construction, root chat is global, and teaching one authorizer both shapes is what
+produced the earlier cross-project leak. The two surfaces share no `authorize()` — only
+the spawn path underneath.
+
+- **Dispatch never spawns.** `dispatch_work` records a `proposals.rs` entry and returns;
+  the human approves a card, and `approve_root_proposal` creates the session and emits
+  `fleet-spawn` for the frontend to mount (Rust cannot mint a terminal Channel — the same
+  wall `bridge.rs` hit). Dispatched sessions are ALWAYS `SessionRole::Worker`
+  (`lib.rs`'s `DISPATCH_ROLE` constant) — a Conductor would hand root chat fleet's whole
+  orchestration surface.
+- **A lost claim race rolls back its session.** `Proposals::resolve` is the only
+  check-and-set against a proposal (first responder wins), and `Store::add_session` has
+  no way to join that atomically — so `approve_root_proposal_inner` creates the session
+  *before* claiming, and if `resolve` reports the proposal was already answered (a phone
+  and a desktop approving at once), it deletes the session it just created rather than
+  leaving a live, untasked worker sitting in its own worktree that nothing ever spawned.
+- **`dispatch_status` sweeps before reading.** `dispatch_status_inner` and
+  `approve_root_proposal_inner` both call `Proposals::sweep` first — `get` alone never
+  expires anything, only `register`/`pending` do — so a proposal past `EXPIRY_SECS` can
+  neither be reported as pending nor approved late.
+- **`proposals.rs` is not `broker.rs`.** The broker hands its caller a receiver to block
+  on and forgets an answered entry (right for a 45 s approval hook). A proposal is
+  non-blocking, lives 24 h, and must stay readable after the answer so `dispatch_status`
+  can report it. The UI merges the two queues; the registries stay separate.
+- **The agent is resolved at APPROVE time, in TypeScript.** `routing.rs` owns the
+  preferences, `routing.ts`'s `pickTarget` owns which target has quota left — only the
+  frontend holds the live usage snapshot already in the store. The proposal therefore
+  stores the task KIND, never a resolved agent; `pendingDecisionRouting.ts` calls
+  `pickTarget` and hands the resolved agent id to `approve_root_proposal`.
+- **A card is routed by ITS OWN project.** `decisionRoute` takes the whole
+  `decisionRoutes` map (project id → `RoutesView`, filled per card by
+  `loadDecisionRouting`) and looks up `d.projectId`. It must NEVER read the shared
+  `routes` slot: that slot is globals-only when loaded with `null` (so a project-level
+  override silently never applied) and it is also written by `NewSessionDialog` and
+  `RoutingPanel` (so a card for project Y was routed by whichever project was opened
+  last). An unloaded project yields `routesPending`, not "no agent available" — the two
+  are both disabled, but only one is a verdict.
+- **Approving navigates to the work.** `approveDecision` applies
+  `rootProposals.ts`'s `approvalFocus` — select the CARD's project, drop the chat layer,
+  toast which project. Root chat is global, so the approved project is routinely not the
+  selected one, and `Terminal.tsx`'s eager spawn is gated on
+  `projectId === selectedProjectId`: without the jump "Start it" starts nothing, and since
+  `pendingPrompts` is runtime-only, quitting before opening that project loses the brief
+  and the session later spawns with no task. The session's own tab is opened by
+  `mergeSpawnedSession` off `fleet-spawn`, not here — opening it here would race
+  `repairLayout`, which prunes a tab whose session is not in the store yet.
+- **A model-invented id must never render as a promise.** `dispatch_work` refuses a `kind`
+  outside `routing::task_kinds()` and an `agent` outside `agent::all_adapters()`, and
+  `decisionRoute` re-checks the agent against `AGENTS`. All three are needed: `pickTarget`
+  treats an agent absent from the availability map as USABLE, so an unchecked id produced
+  an ENABLED "as gpt5-turbo (chosen by the chat)" button, and `AgentId`'s deliberately
+  lenient `Deserialize` then spawned Claude under it — hence `approve_root_proposal_inner`
+  reads the id through `PersistedEnum::from_wire` (strict), never `from_value`.
+- **The `pending-decision` payload has ONE builder**, `proposals::proposal_json`, used by
+  both producers — `root_mcp`'s live emit and `lib.rs`'s `list_pending_decisions` catch-up
+  fetch. Hand-built twice they drifted silently: a live card missing `kind` routes as
+  "implementation" and one missing `agent` drops the chat's explicit choice, while the same
+  card after a reload carries both. A test pins all nine fields *and* the key count.
+- **`chat_fork` is capped per chat per minute** (`MAX_FORKS_PER_MINUTE_PER_CHAT`, via
+  `fleet::rate_limited`). A fork is itself a root chat, so `known_chat` admits it and it
+  gets the whole tool surface *including `chat_fork`*, and a seeded fork is auto-sent by
+  `App.tsx` — one real `claude -p` child per fork. The charter's "fork sparingly" is advice,
+  not a bound.
+- **No root MCP server means no tools, not a half-state — and a server means ALLOWED
+  tools.** `write_mcp_config` returns `None` when the port is 0, `build_command` omits
+  `--mcp-config` entirely, and `--strict-mcp-config` leaves the chat with exactly its
+  Phase 2 surface. When there IS a config, `build_command` must also widen
+  `--allowedTools` by `root_mcp::TOOL_NAMESPACE` (`mcp__conduit-root`): under `-p` an MCP
+  tool absent from the allow list is DENIED before the server is reached, and the result
+  carries `permission_denials`. It appeared to work only on machines whose
+  `~/.claude/settings.json` sets `"defaultMode": "auto"` — a per-user setting Conduit does
+  not control, and a chat pinned to another account reads a different settings tree.
+- Design: `docs/superpowers/specs/2026-09-08-root-chat-orchestrator-design.md`.
+
 ## Where the unified session directory lives
 
 Every panel (Files/Changes/Git, tab-strip path, Open in VS Code) and the right-panel

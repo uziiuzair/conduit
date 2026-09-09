@@ -86,8 +86,15 @@ pub fn root_chat_send(
     let _ = std::fs::create_dir_all(&dirs.memory);
     let memory_index =
         cap_index(&std::fs::read_to_string(dirs.memory.join("MEMORY.md")).unwrap_or_default());
-    let charter = build_charter(&cwd.to_string_lossy(), &roster, &dirs, &memory_index);
-    let cmd = build_command(&chat_id, resume, &charter, &dirs);
+    let mcp_config = crate::root_mcp::write_mcp_config(crate::root_mcp::port(), &chat_id);
+    let charter = build_charter(
+        &cwd.to_string_lossy(),
+        &roster,
+        &dirs,
+        &memory_index,
+        mcp_config.is_some(),
+    );
+    let cmd = build_command(&chat_id, resume, &charter, &dirs, mcp_config.as_deref());
 
     // Interactive login shell for PATH parity with the titler / pty.rs (GUI-launched
     // apps get the bare Finder PATH; nvm/Homebrew claude would be missing otherwise).
@@ -199,19 +206,17 @@ pub fn root_chat_stop(chat_id: String, state: State<Arc<RootChatState>>) {
     }
 }
 
-/// Replay a chat's history from its transcript on disk — the same parser the live
-/// stream uses, so reopen renders exactly what streaming rendered. Missing transcript
-/// (fresh chat, deleted store) degrades to empty, per the transcript-consumer rule.
-#[tauri::command]
-pub fn root_chat_history(chat_id: String, store: State<Arc<crate::store::Store>>) -> Vec<Value> {
-    let projects = match store.root_chat_config_dir(&chat_id) {
+/// Parse a chat's transcript into renderable items. Shared by the `root_chat_history`
+/// command and root_mcp's `chat_read`, so the two can never drift.
+pub fn history_items(store: &crate::store::Store, chat_id: &str) -> Vec<Value> {
+    let projects = match store.root_chat_config_dir(chat_id) {
         Some(cfg) if !cfg.is_empty() => PathBuf::from(cfg).join("projects"),
         _ => match crate::pty::claude_projects_dir() {
             Some(d) => d,
             None => return Vec::new(),
         },
     };
-    let Some(path) = crate::pty::transcript_path(&chat_id, &projects) else {
+    let Some(path) = crate::pty::transcript_path(chat_id, &projects) else {
         return Vec::new();
     };
     let Ok(f) = std::fs::File::open(&path) else {
@@ -222,6 +227,14 @@ pub fn root_chat_history(chat_id: String, store: State<Arc<crate::store::Store>>
         .map_while(Result::ok)
         .flat_map(|l| crate::transcript::parse_line(&l))
         .collect()
+}
+
+/// Replay a chat's history from its transcript on disk — the same parser the live
+/// stream uses, so reopen renders exactly what streaming rendered. Missing transcript
+/// (fresh chat, deleted store) degrades to empty, per the transcript-consumer rule.
+#[tauri::command]
+pub fn root_chat_history(chat_id: String, store: State<Arc<crate::store::Store>>) -> Vec<Value> {
+    history_items(&store, &chat_id)
 }
 
 /// What one stream-json stdout line means to the chat.
@@ -300,13 +313,18 @@ pub fn cap_index(s: &str) -> String {
 }
 
 /// The per-spawn system prompt: role, GitHub powers, scratchpad, shared memory (index
-/// injected inline), workspace root, and the registered-project roster — rebuilt every
-/// message, so none of it is ever stale.
+/// injected inline), orchestration tools (only when `has_tools`), workspace root, and the
+/// registered-project roster — rebuilt every message, so none of it is ever stale.
+///
+/// `has_tools` must track whether the spawn actually carries `--mcp-config` (i.e.
+/// `root_mcp::write_mcp_config` returned `Some`) — the charter must never promise tools
+/// the process cannot reach.
 pub fn build_charter(
     workspace_root: &str,
     projects: &[(String, String)],
     dirs: &Dirs,
     memory_index: &str,
+    has_tools: bool,
 ) -> String {
     let roster = if projects.is_empty() {
         "(none registered yet)".to_string()
@@ -323,6 +341,18 @@ pub fn build_charter(
         "(empty — no memories yet)"
     } else {
         memory_index
+    };
+    let orchestration = if has_tools {
+        "\n\nOrchestration: you can see and act across the whole workspace. \
+         `sessions_list` and `session_peek` show what every agent session is doing; \
+         `chats_list` and `chat_read` let you pull context out of your other HQ chats; \
+         `chat_fork` starts a new HQ chat for a distinct topic. To get work built, call \
+         `dispatch_work` with the project and a brief written for an engineer with no \
+         context — this does NOT start anything: the user sees a card and approves it, \
+         and you learn the outcome later from `dispatch_status`. Never claim work has \
+         started until dispatch_status says approved.\n"
+    } else {
+        ""
     };
     format!(
         "You are Conduit's root chat: a project-management and ideation partner for the \
@@ -343,25 +373,48 @@ pub fn build_charter(
          `MEMORY.md` there is the index — one line per fact file. To remember something \
          durable, write one focused markdown file per fact and add or refresh its index \
          line; update or delete entries that turn out stale. The current index:\n\
-         {index}\n\n\
+         {index}\n\
+         {orchestration}\n\n\
          Workspace root: {workspace_root}\n\n\
          Registered Conduit projects:\n{roster}"
     )
 }
 
 /// The full shell command for one message. `resume` = a transcript for this chat id
-/// already exists (decided by the caller via `pty::transcript_exists`).
-pub fn build_command(chat_id: &str, resume: bool, charter: &str, dirs: &Dirs) -> String {
+/// already exists (decided by the caller via `pty::transcript_exists`). `mcp_config` is
+/// the path to the per-chat `--mcp-config` file (`root_mcp::write_mcp_config`), or `None`
+/// when the root MCP server never bound a port.
+pub fn build_command(
+    chat_id: &str,
+    resume: bool,
+    charter: &str,
+    dirs: &Dirs,
+    mcp_config: Option<&str>,
+) -> String {
     let id = crate::pty::quote_arg(chat_id);
     let sys = crate::pty::quote_arg(charter);
     let scratch = dirs.scratch.to_string_lossy();
     let memory = dirs.memory.to_string_lossy();
+    // The orchestration tools must be ALLOWED, not merely configured. `-p` auto-denies
+    // anything unallowed, and that includes MCP tools: with `--mcp-config` alone the
+    // seven tools appear in the chat's tool list, every call is refused before the server
+    // is reached, and the result carries `permission_denials`. (It looked like it worked
+    // on machines whose `~/.claude/settings.json` sets `"defaultMode": "auto"` — a
+    // per-user setting Conduit does not control, and a chat pinned to another account
+    // reads a different settings tree.) Naming the SERVER allows all seven, so an eighth
+    // tool cannot ship unreachable. Gated on the same condition as the flag: with no
+    // server there is nothing to allow, and the chat keeps exactly its Phase 2 surface.
+    let root_tools = if mcp_config.is_some() {
+        format!(",{}", crate::root_mcp::TOOL_NAMESPACE)
+    } else {
+        String::new()
+    };
     // Allow: read tools, the GitHub CLI, and writes scoped to the two Conduit-owned
     // dirs. Generic Bash/Write/Edit are NOT denied — they are simply unallowed, which
     // `-p` auto-denies; a blanket deny would override the scoped allows (deny wins).
     let allow = crate::pty::quote_arg(&format!(
         "Read,Glob,Grep,WebSearch,WebFetch,Bash(gh:*),\
-         Write({scratch}/**),Edit({scratch}/**),Write({memory}/**),Edit({memory}/**)"
+         Write({scratch}/**),Edit({scratch}/**),Write({memory}/**),Edit({memory}/**){root_tools}"
     ));
     // Deny the dangerous gh tail: `gh api` is arbitrary REST (a DELETE smuggles past
     // any prefix matcher), and auth/secrets/repo-deletion have no PM use.
@@ -374,11 +427,18 @@ pub fn build_command(chat_id: &str, resume: bool, charter: &str, dirs: &Dirs) ->
     } else {
         format!("--session-id {id}")
     };
+    // Orchestration tools ride a --mcp-config file naming the root MCP server. When the
+    // server did not boot there is no flag at all, so --strict-mcp-config leaves the chat
+    // with exactly its Phase 2 surface rather than a half-state that believes it can
+    // dispatch.
+    let mcp = mcp_config
+        .map(|p| format!(" --mcp-config {}", crate::pty::quote_arg(p)))
+        .unwrap_or_default();
     format!(
         "claude -p --output-format stream-json --verbose \
          --allowedTools {allow} \
          --disallowedTools {deny} \
-         --add-dir {add} \
+         --add-dir {add}{mcp} \
          --strict-mcp-config \
          --append-system-prompt {sys} {mode}"
     )
@@ -460,6 +520,7 @@ mod tests {
             &[("conduit".into(), "/Users/u/ooozzy/conduit".into())],
             &d,
             "- [Release cadence](cadence.md) — weekly",
+            false,
         );
         assert!(c.contains("/Users/u/ooozzy"));
         assert!(c.contains("- conduit: /Users/u/ooozzy/conduit"));
@@ -477,22 +538,74 @@ mod tests {
             c.contains("never modify project files"),
             "write boundary must be stated: {c}"
         );
-        let empty = build_charter("/Users/u", &[], &d, "");
+        let empty = build_charter("/Users/u", &[], &d, "", false);
         assert!(empty.contains("(none registered yet)"));
         assert!(empty.contains("(empty — no memories yet)"));
     }
 
     #[test]
+    fn charter_explains_the_orchestration_tools_only_when_they_exist() {
+        let d = tdirs();
+        let with = build_charter("/w", &[], &d, "", true);
+        assert!(with.contains("dispatch_work"));
+        assert!(
+            with.contains("approve"),
+            "the charter must say the user approves: {with}"
+        );
+        let without = build_charter("/w", &[], &d, "", false);
+        assert!(!without.contains("dispatch_work"));
+    }
+
+    #[test]
     fn command_pins_session_id_first_then_resumes() {
         let d = tdirs();
-        let fresh = build_command("abc-123", false, "charter text", &d);
+        let fresh = build_command("abc-123", false, "charter text", &d, None);
         assert!(fresh.contains("--session-id"), "{fresh}");
         assert!(fresh.contains("--output-format stream-json"));
         assert!(fresh.contains("--strict-mcp-config"));
         assert!(fresh.contains("--append-system-prompt"));
-        let resumed = build_command("abc-123", true, "charter text", &d);
+        let resumed = build_command("abc-123", true, "charter text", &d, None);
         assert!(resumed.contains("--resume"));
         assert!(!resumed.contains("--session-id"));
+    }
+
+    #[test]
+    fn command_includes_the_mcp_config_when_the_root_server_is_up() {
+        let d = tdirs();
+        let path = "/tmp/App Support/rootchat-mcp-abc.json";
+        let with = build_command("abc-123", false, "charter", &d, Some(path));
+        // The path must arrive as ONE shell word: Conduit's data dir has a space on
+        // macOS ("Application Support"), so an unquoted interpolation would split into
+        // two words under `sh -c` and the flag would silently take a truncated argument.
+        // Comparing against `crate::pty::quote_arg`'s own output (rather than a hardcoded
+        // quote character) keeps this correct on both the sh/single-quote and the
+        // cmd.exe/double-quote platform, and still fails if `build_command` stops calling
+        // it: an unquoted `--mcp-config /tmp/App Support/...` does not contain the quoted
+        // substring below.
+        let quoted = crate::pty::quote_arg(path);
+        assert!(
+            with.contains(&format!("--mcp-config {quoted}")),
+            "expected the mcp-config path quoted as one shell word: {with}"
+        );
+        assert!(
+            with.contains("--strict-mcp-config"),
+            "strict mode must survive"
+        );
+        // Configuring the server is not enough: `-p` auto-denies any MCP tool absent from
+        // --allowedTools, so without this the seven tools are listed, every call is
+        // refused before the server is reached, and the run reports permission_denials.
+        assert!(
+            with.contains(crate::root_mcp::TOOL_NAMESPACE),
+            "the root MCP namespace must be on the allow list, or every tool call is denied: {with}"
+        );
+        // No server: no flag, no namespace, and the chat degrades to its Phase 2 tool set.
+        let without = build_command("abc-123", false, "charter", &d, None);
+        assert!(!without.contains("--mcp-config"));
+        assert!(
+            !without.contains("mcp__"),
+            "no server means nothing to allow: {without}"
+        );
+        assert!(without.contains("--strict-mcp-config"));
     }
 
     #[test]
@@ -500,7 +613,7 @@ mod tests {
         let d = tdirs();
         let s = d.scratch.to_string_lossy();
         let m = d.memory.to_string_lossy();
-        let cmd = build_command("abc-123", false, "charter text", &d);
+        let cmd = build_command("abc-123", false, "charter text", &d, None);
         // Allow: read tools + gh + writes scoped to the two Conduit-owned dirs.
         assert!(
             cmd.contains("Read,Glob,Grep,WebSearch,WebFetch,Bash(gh:*)"),

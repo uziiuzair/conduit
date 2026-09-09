@@ -89,3 +89,42 @@ describe("session-directory seam", () => {
     expect(stale).toEqual([]);
   });
 });
+
+/**
+ * The root-chat approval seam.
+ *
+ * `store.ts` cannot be imported here — it touches `localStorage` and the Tauri bridge at
+ * module scope, which is why `startup.ts`, `usageRows.ts` and `pendingDecisionRouting.ts`
+ * exist as store-free modules at all. So the RULES live in pure modules with their own
+ * unit tests, and this asserts the store actually applies them. Both of these were live
+ * bugs, and both are invisible to a typecheck: the code compiles perfectly while doing
+ * the wrong thing.
+ */
+describe("root-chat approval seam", () => {
+  const storeSrc = () => readFileSync("src/store.ts", "utf8");
+
+  it("navigates to the approved card's project", () => {
+    // Without this, approving in a project that is not the selected one starts NOTHING —
+    // `Terminal.tsx`'s eager spawn is gated on `projectId === selectedProjectId` — and
+    // because `pendingPrompts` is runtime-only, quitting first loses the brief entirely.
+    const body = storeSrc().split("approveDecision: async")[1]?.split("denyDecision:")[0] ?? "";
+    expect(
+      body.includes("approvalFocus("),
+      "approveDecision must apply `approvalFocus` (rootProposals.ts) so the work it just " +
+        "created actually starts — see the root-chat orchestration section of CLAUDE.md.",
+    ).toBe(true);
+    expect(body).toContain("selectedProjectId");
+  });
+
+  it("routes decision cards per project, not off the shared `routes` slot", () => {
+    // `routes` is one slot, also written by NewSessionDialog and RoutingPanel. A card read
+    // from it is routed by whichever project was loaded last, and by globals only when the
+    // app-level load passed `null` — so a project-level override never applied to a card.
+    const card = readFileSync("src/components/PendingDecisions.tsx", "utf8");
+    expect(
+      /useStore\(\(s\) => s\.routes\)/.test(card),
+      "PendingDecisions must read `decisionRoutes` (keyed by project id), not `routes`.",
+    ).toBe(false);
+    expect(card).toContain("decisionRoutes");
+  });
+});

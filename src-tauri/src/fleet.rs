@@ -398,9 +398,10 @@ pub struct FleetState {
 
 /// Shared rolling-window rate-limit check: has `key` been used fewer than `max` times in
 /// the trailing `window`? Records the attempt when allowed (so callers don't need a
-/// separate "record" step). Backs both the mailbox note-rate limit (SPEC-F) and the
-/// spawn-rate limit (SPEC-H) -- same mechanism, different backing maps and keys.
-fn rate_limited(
+/// separate "record" step). Backs the mailbox note-rate limit (SPEC-F), the spawn-rate
+/// limit (SPEC-H) and `root_mcp`'s per-chat fork cap -- same mechanism, different backing
+/// maps and keys.
+pub(crate) fn rate_limited(
     timestamps: &Mutex<HashMap<String, VecDeque<Instant>>>,
     key: &str,
     max: usize,
