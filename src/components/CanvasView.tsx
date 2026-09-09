@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { useStore, type Session } from "../store";
 import { TERM_BASE_FONT } from "./Terminal";
 import { snapZoom } from "../terminalZoom";
@@ -1198,7 +1199,17 @@ function CanvasMenu({
     return () => window.removeEventListener("keydown", onKey, true);
   }, [onClose]);
 
-  return (
+  // Portalled to document.body rather than rendered in place. This menu (and its backdrop)
+  // is opened from inside .canvas-underlay, which is `position: absolute` and therefore its
+  // own stacking context — a descendant's z-index is resolved only AGAINST THAT CONTEXT'S
+  // OTHER CHILDREN, never against the document as a whole. `.term-stack` is a SIBLING of the
+  // underlay painted above it (z-index 2 vs 1), so no z-index set from inside the underlay
+  // could ever win against it, and `position: fixed` does not escape a stacking context
+  // either — it only escapes normal document FLOW. Portalling to `document.body` is what
+  // makes the existing `.context-menu`/`.canvas-menu-backdrop` z-indexes (1000/999, unchanged
+  // here) mean what they say again. See CLAUDE.md's "Where the orchestration board lives"
+  // for the five earlier instances of this exact hazard.
+  return createPortal(
     <>
       {/* A real backdrop rather than a window listener. Anything can swallow a pointer
           event before it reaches window — xterm does, for selection — and a menu that
@@ -1310,7 +1321,8 @@ function CanvasMenu({
           </>
         )}
       </div>
-    </>
+    </>,
+    document.body,
   );
 }
 
