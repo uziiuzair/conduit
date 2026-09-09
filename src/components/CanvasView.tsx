@@ -276,7 +276,11 @@ export function CanvasUnderlay({
   const fitToContent = useCallback(() => {
     const el = viewportRef.current;
     if (!el) return;
-    setCanvas(fit(canvas, el.clientWidth, el.clientHeight));
+    // fit() returns an arbitrary zoom; snapping it to a font-ladder rung is what keeps the
+    // host box (logical x zoom) agreeing with the size the glyphs actually rasterize at —
+    // between rungs they disagree by up to ~4.5%, a visible gap or a clipped column.
+    const f = fit(canvas, el.clientWidth, el.clientHeight);
+    setCanvas({ ...f, zoom: snapZoom(f.zoom, TERM_BASE_FONT + useStore.getState().fontZoom) });
   }, [canvas, setCanvas]);
 
   // Fit once so the board never opens on empty space with the cards off-screen. Only when
@@ -1369,7 +1373,11 @@ export function CanvasControls({
         className="canvas-btn"
         onClick={() => {
           const el = viewportRef.current;
-          if (el) setCanvas(fit(canvas, el.clientWidth, el.clientHeight));
+          if (!el) return;
+          // Snap to a font-ladder rung — see fitToContent's own comment for why an
+          // unsnapped fit() zoom disagrees with what the terminals actually rasterize at.
+          const f = fit(canvas, el.clientWidth, el.clientHeight);
+          setCanvas({ ...f, zoom: snapZoom(f.zoom, TERM_BASE_FONT + useStore.getState().fontZoom) });
         }}
         title="Fit everything in view"
       >

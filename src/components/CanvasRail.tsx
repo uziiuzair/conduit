@@ -42,10 +42,17 @@ const FLY_MS = 300;
  */
 export function CanvasRail({
   viewportRef,
+  onZoomActive,
 }: {
   /** The canvas viewport element, owned by WorkspaceCenter and shared with
    *  CanvasControls/CanvasUnderlay — pips and fly-to both need its screen rect. */
   viewportRef: React.RefObject<HTMLDivElement | null>;
+  /** Same flag CanvasUnderlay raises for a wheel-zoom gesture (see its own prop of the
+   *  same name) — WorkspaceCenter hides the terminals while it is true. A fly-to crosses
+   *  several font-ladder rungs continuously over its whole flight, which is exactly the
+   *  per-frame glyph-atlas-rebuild cost that flag exists to hide, and clicking a rail row
+   *  from an overview is the single most common way a user changes zoom on this board. */
+  onZoomActive: (active: boolean) => void;
 }) {
   const projects = useStore((s) => s.projects);
   const live = useStore((s) => s.live);
@@ -161,16 +168,26 @@ export function CanvasRail({
         // arriving between rungs would land the user on a soft terminal.
         snapZoom(Math.max(canvasRef.current.zoom, LIVE_ZOOM_MIN), TERM_BASE_FONT + fontZoom),
       );
+      // The flight interpolates zoom continuously, crossing several font-ladder rungs —
+      // raised for its whole duration and lowered when it ends OR is cancelled by a second
+      // call below (never left stuck true: cancellation immediately re-raises it for the
+      // new flight, and the unmount cleanup effect lowers it if one was still in flight).
+      onZoomActive(true);
       const start = performance.now();
       const step = () => {
         const t = Math.min(1, (performance.now() - start) / FLY_MS);
         const cam = interpolateCamera(from, to, easeInOutCubic(t));
         setCanvas({ ...canvasRef.current, pan: cam.pan, zoom: cam.zoom });
-        flyRef.current = t < 1 ? requestAnimationFrame(step) : null;
+        if (t < 1) {
+          flyRef.current = requestAnimationFrame(step);
+        } else {
+          flyRef.current = null;
+          onZoomActive(false);
+        }
       };
       flyRef.current = requestAnimationFrame(step);
     },
-    [fontZoom, setCanvas, viewportRef],
+    [fontZoom, onZoomActive, setCanvas, viewportRef],
   );
 
   const flyTo = useCallback(
@@ -184,9 +201,15 @@ export function CanvasRail({
 
   useEffect(
     () => () => {
-      if (flyRef.current) cancelAnimationFrame(flyRef.current);
+      // Unmounting mid-flight (leaving the canvas while a fly-to is running) must still
+      // clear WorkspaceCenter's zooming flag -- a bare cancelAnimationFrame would leave it
+      // stuck true forever, mirroring CanvasUnderlay's own settle-timeout cleanup above it.
+      if (flyRef.current) {
+        cancelAnimationFrame(flyRef.current);
+        onZoomActive(false);
+      }
     },
-    [],
+    [onZoomActive],
   );
 
   /**

@@ -558,7 +558,7 @@ export function WorkspaceCenter({
             terminal (.term-stack.canvas-mode, z-index 2). Gated on canvasMode alone, like
             the underlay itself: the board is global, so this renders with no project
             selected too. */}
-        {canvasMode && <CanvasRail viewportRef={canvasViewportRef} />}
+        {canvasMode && <CanvasRail viewportRef={canvasViewportRef} onZoomActive={setZooming} />}
 
         {nothingVisible && <EmptyState />}
 
