@@ -553,11 +553,26 @@ export function CanvasUnderlay({
     const inSelection =
       mode === "move" && ref !== null && selection.some((s) => s.kind === kind && s.id === ref);
     if (inSelection && selection.length > 1) {
-      members = {
-        nodes: selection.filter((s) => s.kind === "node").map((s) => s.id),
-        notes: selection.filter((s) => s.kind === "note").map((s) => s.id),
-        sections: selection.filter((s) => s.kind === "section").map((s) => s.id),
-      };
+      const selectedSections = selection.filter((s) => s.kind === "section").map((s) => s.id);
+      const nodeIds = new Set(selection.filter((s) => s.kind === "node").map((s) => s.id));
+      const noteIds = new Set(selection.filter((s) => s.kind === "note").map((s) => s.id));
+      const sectionIds = new Set(selectedSections);
+      // A section IN the selection still carries everything geometrically inside it,
+      // exactly like a solo section drag always has (the branch below) — a marquee
+      // selection already includes a section's contents because the same rectangle
+      // caught both, but a shift-click only adds the section itself, and without this
+      // fold its frame would slide off its own cards. membersOf's containment check is
+      // already transitive (a node inside a nested section is inside the outer section
+      // too), so folding in each explicitly-selected section's own members is enough —
+      // no separate recursion for nesting is needed. Sets absorb any overlap with what
+      // was already selected directly for free.
+      for (const id of selectedSections) {
+        const m = membersOf(canvas, id);
+        for (const n of m.nodes) nodeIds.add(n);
+        for (const n of m.notes) noteIds.add(n);
+        for (const s of m.sections) sectionIds.add(s);
+      }
+      members = { nodes: [...nodeIds], notes: [...noteIds], sections: [...sectionIds] };
     } else if (kind === "section" && mode === "move" && ref) {
       const m = membersOf(canvas, ref);
       members = { ...m, sections: [...m.sections, ref] };
