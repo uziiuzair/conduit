@@ -1,37 +1,67 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { useStore } from "../store";
+import { createPortal } from "react-dom";
+import { useStore, type Session } from "../store";
+import { TERM_BASE_FONT } from "./Terminal";
+import { snapZoom } from "../terminalZoom";
 import {
+  type Box,
+  CARD_H,
+  CARD_W,
   FOOTER_H,
   HEADER_H,
   LIVE_ZOOM_MIN,
+  type Members,
   NOTE_H,
   NOTE_HEAD_H,
   NOTE_W,
+  SECTION_PALETTE,
+  addNodeAt,
   addNote,
+  addSection,
+  boxOfNode,
+  boxOfNote,
+  boxOfSection,
+  containsBox,
   fit,
   linkEndpoints,
   linkNote,
+  membersOf,
   moveNode,
   moveNote,
   nodeH,
   nodeW,
   notesOf,
+  removeNode,
   removeNote,
+  removeSection,
   resizeNode,
   resizeNote,
+  resizeSection,
+  sectionsByZ,
+  sectionsOf,
   setNoteText,
+  setSectionColor,
+  setSectionTitle,
   toCanvasDelta,
   toCanvasPoint,
+  translateMany,
   zoomAt,
 } from "../canvas";
 import { meterLevel, meterTitle } from "../contextMeter";
-import { useProjectCanvas } from "../hooks/useProjectCanvas";
+import { blocksGlobalShortcut, isEditableTarget, isInTerminal } from "../keyboardGuards";
+import { hasSessionDrag, readSessionDrag, resolveProjectColor } from "../layout";
+import { useCanvas } from "../hooks/useCanvas";
 import { AgentGlyph, glyphStateFor } from "./AgentGlyph";
+import { CanvasSectionFrame } from "./CanvasSection";
 import { deleteSession } from "./Sidebar";
 
+/** How far a pointer has to move before a gesture counts as a drag rather than a click —
+ *  shared by object-click-to-select and the marquee's own click/drag split. */
+const CLICK_DRAG_THRESHOLD_PX = 3;
+
 /**
- * The spatial view of a project: one node per session, each showing that session's REAL
- * live terminal.
+ * The spatial view of the board: one node per curated session, each showing that session's
+ * REAL live terminal — from any project, since the board is global rather than per project.
  *
  * The terminal is not cloned, mirrored, or re-attached. Every session's `TerminalView` is
  * already mounted for its whole life inside `.term-stack` and positioned purely by a
@@ -50,35 +80,181 @@ import { deleteSession } from "./Sidebar";
  * Design: docs/superpowers/specs/2026-08-10-project-canvas-view-viability.md
  */
 export function CanvasUnderlay({
-  projectId,
   viewportRef,
+  onZoomActive,
 }: {
-  projectId: string;
   /** Owned by WorkspaceCenter and shared with the toolbar, which needs the viewport's
    *  size for Fit but is a sibling of this element rather than a child. */
   viewportRef: React.RefObject<HTMLDivElement | null>;
+  /** Raised true while a zoom gesture is in flight, false ~120ms after it settles.
+   *  WorkspaceCenter hides the terminals for that window — see its `zooming`. */
+  onZoomActive: (active: boolean) => void;
 }) {
-  const project = useStore((s) => s.projects.find((p) => p.id === projectId));
   const live = useStore((s) => s.live);
   const selectSession = useStore((s) => s.selectSession);
-  const setCenterMode = useStore((s) => s.setCenterMode);
+  const setCanvasOpen = useStore((s) => s.setCanvasOpen);
   const addSession = useStore((s) => s.addSession);
   const removeSession = useStore((s) => s.removeSession);
   const projects = useStore((s) => s.projects);
+  // "New session here" has to land somewhere -- the board itself spans every project, so
+  // this is the one place left that still means a single project: whichever one is
+  // selected in the sidebar right now. Null (nothing selected) disables the menu item
+  // rather than guessing a project for it.
+  const selectedProjectId = useStore((s) => s.selectedProjectId);
   const sessionContext = useStore((s) => s.sessionContext);
-  const { canvas, setCanvas } = useProjectCanvas(projectId);
+  const autoProjectColors = useStore((s) => s.autoProjectColors);
+  // canvas/setCanvas/snapshot/undo/redo all come from useCanvas — the ONE seam every board
+  // edit flows through, which is what lets CanvasControls (a sibling component, its own
+  // call to this same hook below) share the same undo/redo timeline without either
+  // component knowing the other exists. See that hook's own comment on why the history is
+  // module-scoped rather than kept here as a ref.
+  const { canvas, setCanvas, snapshot, undo, redo } = useCanvas();
 
   // ref === null means panning the plane; mode distinguishes moving from resizing, since
   // both are pointer drags over the same element tree; kind says which array the id
-  // addresses — sessions and notes are separate lists (see canvas.ts).
+  // addresses — sessions, notes and sections are separate lists (see canvas.ts).
   const [drag, setDrag] = useState<{
     ref: string | null;
-    kind: "node" | "note";
+    kind: "node" | "note" | "section";
     mode: "pan" | "move" | "resize";
     lastX: number;
     lastY: number;
+    /** Captured at gesture start for a section move — recomputing per frame would let
+     *  items join and leave as the box swept over them, which reads as the section
+     *  eating the board. */
+    members?: Members;
   } | null>(null);
+
+  /** Ephemeral and never persisted — a selection is a thing you are doing, not a thing the
+   *  board is. Never written into CanvasState or localStorage. */
+  const [selection, setSelection] = useState<
+    Array<{ kind: "node" | "note" | "section"; id: string }>
+  >([]);
+  const isSelected = useCallback(
+    (kind: "node" | "note" | "section", id: string) =>
+      selection.some((s) => s.kind === kind && s.id === id),
+    [selection],
+  );
+  /** Click on an object selects it alone; shift-click toggles it in or out of the set. */
+  const selectObject = useCallback(
+    (kind: "node" | "note" | "section", id: string, additive: boolean) => {
+      setSelection((sel) => {
+        if (!additive) return [{ kind, id }];
+        const already = sel.some((s) => s.kind === kind && s.id === id);
+        return already ? sel.filter((s) => !(s.kind === kind && s.id === id)) : [...sel, { kind, id }];
+      });
+    },
+    [],
+  );
+
+  // Distinguishes a click from a drag: a move/resize/pan gesture that never crossed the
+  // threshold above is a click, and a click on an object selects it (see endDrag) while a
+  // drag does not also fire a spurious select of whatever it started on. Refs, not state —
+  // read once at gesture end, never rendered.
+  const movedRef = useRef(false);
+  const dragStartRef = useRef({ x: 0, y: 0 });
+
+  // Rubber-band selection. Screen-space, relative to the VIEWPORT element's own rect (never
+  // the host's — see the marquee-tracking effect below for why). null when no marquee is in
+  // progress. `additive` is captured at gesture start from the shift key, since a marquee
+  // adds to the existing selection rather than replacing it while held.
+  const [marquee, setMarquee] = useState<{
+    x0: number;
+    y0: number;
+    x1: number;
+    y1: number;
+    additive: boolean;
+  } | null>(null);
+  const marqueeRef = useRef(marquee);
+  marqueeRef.current = marquee;
+
+  // Space-drag pans, since plain-drag on empty plane now marquees (see the plane's own
+  // pointerdown handler and the marquee-tracking effect below). Tracked in a ref rather
+  // than state — it drives an imperative check inside a pointerdown handler, not a render.
+  // Ignored while the keystroke lands in an editable element (a note, a section's title
+  // editor) so ordinary typing of the space bar never arms panning.
+  const spaceHeldRef = useRef(false);
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.code === "Space" && !blocksGlobalShortcut(e.target)) spaceHeldRef.current = true;
+    };
+    const onKeyUp = (e: KeyboardEvent) => {
+      if (e.code === "Space") spaceHeldRef.current = false;
+    };
+    // Space held, then focus leaves the webview entirely (Cmd-Tab away, released outside
+    // the window) — no keyup ever reaches us, and without this the ref would stick `true`
+    // forever, silently panning every later plain drag instead of marqueeing.
+    const onBlur = () => {
+      spaceHeldRef.current = false;
+    };
+    window.addEventListener("keydown", onKeyDown);
+    window.addEventListener("keyup", onKeyUp);
+    window.addEventListener("blur", onBlur);
+    return () => {
+      window.removeEventListener("keydown", onKeyDown);
+      window.removeEventListener("keyup", onKeyUp);
+      window.removeEventListener("blur", onBlur);
+    };
+  }, []);
+
+  // Undo/redo/delete-selection. Bound to window, not the underlay element, so it fires
+  // regardless of which piece of chrome has focus — but two guards keep it from stealing a
+  // keystroke that belongs elsewhere, mirroring CanvasControls' own Escape handler above:
+  // a keystroke inside a live agent terminal belongs to that agent, and one landing in an
+  // editable field (a note's textarea, a section's rename input) is that field's own text,
+  // not a board command. The section rename input additionally stops propagation on every
+  // keydown itself (see CanvasSectionFrame), so it never reaches here at all; the check
+  // below is what protects the note textarea, which has no such handler of its own.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (blocksGlobalShortcut(e.target)) return;
+      const mod = e.metaKey || e.ctrlKey;
+      if (mod && !e.shiftKey && e.key.toLowerCase() === "z") {
+        e.preventDefault();
+        undo();
+        return;
+      }
+      if (mod && e.shiftKey && e.key.toLowerCase() === "z") {
+        e.preventDefault();
+        redo();
+        return;
+      }
+      if ((e.key === "Backspace" || e.key === "Delete") && selection.length > 0) {
+        e.preventDefault();
+        // This removes objects from the BOARD only — removeNode/removeNote/removeSection
+        // never touch a session's lifecycle. Ending a session stays behind the sidebar's
+        // own confirming path (see onDeleteSession in the context menu below); a keystroke
+        // must never reach it.
+        snapshot();
+        let next = canvas;
+        for (const s of selection) {
+          if (s.kind === "node") next = removeNode(next, s.id);
+          else if (s.kind === "note") next = removeNote(next, s.id);
+          else next = removeSection(next, s.id);
+        }
+        setCanvas(next);
+        // Selection referred to objects that may no longer exist — clear it rather than
+        // leave it pointing at deleted ids.
+        setSelection([]);
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [canvas, setCanvas, selection, snapshot, undo, redo]);
+
+  // "Rename" in a section's context menu opens the SAME inline editor as a double-click on
+  // its title chip, but that editor's state lives inside CanvasSectionFrame — a sibling of
+  // this menu. window.prompt() is unreliable in WKWebView (see ProfileBar in Sidebar.tsx),
+  // so this is a request, not the edit state itself: bumping the nonce for a target id is
+  // what tells that one frame to open its own editor.
+  const [renameTarget, setRenameTarget] = useState<string | null>(null);
+  const [renameNonce, setRenameNonce] = useState(0);
   const showTerminals = canvas.zoom >= LIVE_ZOOM_MIN;
+
+  // Drop-affordance for a session dragged in from the sidebar. Read during `dragover` off
+  // the MIME type alone — `dataTransfer.getData` is blocked until drop, only `types` is
+  // readable — so this is the earliest point the outline can render.
+  const [dropActive, setDropActive] = useState(false);
 
   // Right-click menu. Holds the click in BOTH coordinate systems: screen for placing the
   // menu itself, canvas for placing whatever it creates.
@@ -91,23 +267,56 @@ export function CanvasUnderlay({
     noteId?: string;
     /** Set when the click landed on a session card, which gets its own items. */
     nodeRef?: string;
+    /** Set when the click landed on a section's title chip, which gets its own items. */
+    sectionId?: string;
   } | null>(null);
 
   const fitToContent = useCallback(() => {
     const el = viewportRef.current;
     if (!el) return;
-    setCanvas(fit(canvas, el.clientWidth, el.clientHeight));
+    // fit() returns an arbitrary zoom; snapping it to a font-ladder rung is what keeps the
+    // host box (logical x zoom) agreeing with the size the glyphs actually rasterize at —
+    // between rungs they disagree by up to ~4.5%, a visible gap or a clipped column.
+    const f = fit(canvas, el.clientWidth, el.clientHeight);
+    setCanvas({ ...f, zoom: snapZoom(f.zoom, TERM_BASE_FONT + useStore.getState().fontZoom) });
   }, [canvas, setCanvas]);
 
-  // Fit once per project so the canvas never opens on empty space with the cards
-  // off-screen. Only when there is no saved pan/zoom to respect.
-  const fittedRef = useRef<string | null>(null);
-  const hasStored = useStore((s) => Boolean(s.canvases[projectId]));
+  // Fit once so the board never opens on empty space with the cards off-screen. Only when
+  // there is no saved pan/zoom to respect -- there is now one board rather than one per
+  // project, so "no saved pan/zoom" is read directly off the plane instead of off a
+  // per-project record that no longer exists: pan/zoom still sitting at the untouched
+  // default is what a board nobody has ever panned or zoomed looks like, whether that is
+  // because it is brand new or because only its NOTES were migrated in (which carry their
+  // own x/y but never a pan/zoom -- see migrateNotes in canvas.ts).
+  const fittedRef = useRef(false);
   useLayoutEffect(() => {
-    if (fittedRef.current === projectId || hasStored) return;
-    fittedRef.current = projectId;
-    fitToContent();
-  }, [projectId, hasStored, fitToContent]);
+    if (fittedRef.current) return;
+    fittedRef.current = true;
+    const untouched = canvas.pan.x === 0 && canvas.pan.y === 0 && canvas.zoom === 1;
+    if (untouched) fitToContent();
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- intentionally one-shot: see
+    // fittedRef above. Re-running on every `canvas`/`fitToContent` change (both of which
+    // change on virtually every interaction) would re-fit on the user's own panning.
+  }, []);
+
+  const settleRef = useRef<number | null>(null);
+  // The wheel closure is rebuilt per render but its timeout is not; the ref is what the
+  // settle reads so it snaps the LATEST zoom rather than the one the gesture started at.
+  const canvasRef = useRef(canvas);
+  canvasRef.current = canvas;
+  useEffect(
+    () => () => {
+      // Unmounting mid-gesture (Escape / "Hide canvas" within the settle window) must still
+      // clear WorkspaceCenter's `zooming` -- a bare clearTimeout would leave it stuck true
+      // forever, since nothing else ever calls onZoomActive(false) again until another full
+      // zoom gesture completes, and canvas terminals would render as cards on next entry.
+      if (settleRef.current) {
+        window.clearTimeout(settleRef.current);
+        onZoomActive(false);
+      }
+    },
+    [onZoomActive],
+  );
 
   // Wheel: pan by default, zoom with ctrl/cmd — which is also what a trackpad pinch
   // sends. Non-passive so preventDefault actually stops the page rubber-banding.
@@ -127,9 +336,28 @@ export function CanvasUnderlay({
       const rect = el.getBoundingClientRect();
       if (e.ctrlKey || e.metaKey) {
         e.preventDefault();
+        onZoomActive(true);
         setCanvas(
           zoomAt(canvas, Math.exp(-e.deltaY / 200), e.clientX - rect.left, e.clientY - rect.top),
         );
+        if (settleRef.current) window.clearTimeout(settleRef.current);
+        // Settle: snap to a rung so the glyphs rasterize at an integer size, then let the
+        // terminals back. Read through the ref because this closure is one gesture old by
+        // the time it fires.
+        settleRef.current = window.setTimeout(() => {
+          const cur = canvasRef.current;
+          const snapped = snapZoom(cur.zoom, TERM_BASE_FONT + useStore.getState().fontZoom);
+          if (snapped !== cur.zoom) {
+            // Snap about the viewport centre, so settling does not slide the plane.
+            const el2 = viewportRef.current;
+            setCanvas(
+              el2
+                ? zoomAt(cur, snapped / cur.zoom, el2.clientWidth / 2, el2.clientHeight / 2)
+                : { ...cur, zoom: snapped },
+            );
+          }
+          onZoomActive(false);
+        }, 120);
         return;
       }
       if ((e.target as Element | null)?.closest?.(".term-host")) return; // terminal scrollback
@@ -138,21 +366,246 @@ export function CanvasUnderlay({
     };
     host.addEventListener("wheel", onWheel, { passive: false, capture: true });
     return () => host.removeEventListener("wheel", onWheel, { capture: true });
-  }, [canvas, setCanvas]);
+  }, [canvas, setCanvas, onZoomActive]);
+
+  // Dropping a session from the sidebar onto the board. Bound to the same PARENT as the
+  // wheel handler above, in the same capture phase, for the identical reason: the
+  // terminal stack is a SIBLING painted above the underlay, and a card's terminal takes
+  // pointer events once visible (`.term-host.visible`), so a drag over the body of an
+  // already-placed card never reaches a listener on the underlay itself — it would bubble
+  // straight past it to `.workspace`'s own (unrelated) pane-drop handler. Capturing at the
+  // common ancestor sees both the open canvas and every card's terminal.
+  useEffect(() => {
+    const el = viewportRef.current;
+    const host = el?.parentElement ?? el;
+    if (!el || !host) return;
+    const onDragOver = (e: DragEvent) => {
+      // Only claim drags we actually accept — an unrelated drag (a file, browser text
+      // selection, another app's drop source) must fall through to default browser
+      // behaviour rather than being swallowed by a preventDefault it never asked for.
+      if (!hasSessionDrag(e.dataTransfer)) return;
+      e.preventDefault();
+      // MUST match the sidebar row's effectAllowed ("move", shared with the sidebar->pane
+      // drag). The browser computes the drag operation as the intersection of the
+      // source's effectAllowed and the target's dropEffect; "move" does not admit "copy",
+      // so setting "copy" here would make WebKit resolve the operation to "none" and the
+      // `drop` event would never fire — silently, no console warning. The session is not
+      // literally leaving the sidebar (it stays listed there), but the sidebar is a
+      // directory of every session, not a container this drag removes it from, so "move"
+      // is also the honest read of what dropping onto the board does. Do not change this
+      // back to "copy" — change the sidebar's effectAllowed instead if a future consumer
+      // genuinely needs a copy semantic, and only after checking every existing drag it
+      // is shared with.
+      e.dataTransfer!.dropEffect = "move";
+      setDropActive((prev) => (prev ? prev : true));
+    };
+    const onDragLeave = (e: DragEvent) => {
+      // Against HOST, not `el` — a card's terminal lives in the sibling `.term-stack`, so
+      // checking against the underlay alone would read every card as "outside the board"
+      // and flicker the outline off on every pass over one. Checking against the common
+      // ancestor is what keeps "still over the board" true while the cursor is over a
+      // card's live terminal.
+      if (!host.contains(e.relatedTarget as Node | null)) setDropActive(false);
+    };
+    const onDrop = (e: DragEvent) => {
+      setDropActive(false);
+      const payload = readSessionDrag(e.dataTransfer);
+      if (!payload) return;
+      e.preventDefault();
+      // Against EL (the viewport/underlay element), not `host` — `host` is the wider
+      // ancestor shared with the terminal stack, and its rect is offset from the
+      // underlay's own origin that `toCanvasPoint` expects.
+      const rect = el.getBoundingClientRect();
+      // Drop where the cursor is, centred on it rather than corner-anchored — a card
+      // whose top-left lands under the pointer appears to jump down and right.
+      const p = toCanvasPoint(canvas, e.clientX - rect.left, e.clientY - rect.top);
+      snapshot();
+      setCanvas(
+        addNodeAt(canvas, payload.sessionId, payload.projectId, p.x - CARD_W / 2, p.y - CARD_H / 2),
+      );
+    };
+    host.addEventListener("dragover", onDragOver, { capture: true });
+    host.addEventListener("dragleave", onDragLeave, { capture: true });
+    host.addEventListener("drop", onDrop, { capture: true });
+    return () => {
+      host.removeEventListener("dragover", onDragOver, { capture: true });
+      host.removeEventListener("dragleave", onDragLeave, { capture: true });
+      host.removeEventListener("drop", onDrop, { capture: true });
+    };
+  }, [canvas, setCanvas, snapshot]);
+
+  // Fallback for a drag that ends without ever firing `dragleave` on the board — e.g.
+  // cancelled with Esc while still hovering it. This is NOT a theoretical gap: this
+  // exact drag payload already needed this exact fallback once, in WorkspaceCenter's
+  // sidebar-to-pane overlay, whose comment on `sidebarDragging` records that a
+  // Esc-cancelled drag over that overlay fires no `dragleave` at all. `dragend` always
+  // fires on the drag SOURCE regardless of how the drag ended, so listen globally rather
+  // than trust a `dragleave` that may never come. Mirrors that effect exactly.
+  useEffect(() => {
+    if (!dropActive) return;
+    const clear = () => setDropActive(false);
+    window.addEventListener("dragend", clear);
+    window.addEventListener("drop", clear);
+    return () => {
+      window.removeEventListener("dragend", clear);
+      window.removeEventListener("drop", clear);
+    };
+  }, [dropActive]);
+
+  // Marquee drag-tracking: bound to the ancestor in the capture phase, exactly like the
+  // wheel and drag-and-drop handlers above and for the identical reason — `.term-stack` is
+  // a sibling painted above this element, so a plain listener bound to the underlay would
+  // lose the drag the instant it crossed a card's live terminal. A marquee that cannot be
+  // drawn across a card cannot select the things people most want to select. Reads/writes
+  // through refs (`marqueeRef`, `canvasRef`) rather than the closed-over `marquee`/`canvas`
+  // so the effect can bind once and stay correct across the whole gesture.
+  useEffect(() => {
+    const el = viewportRef.current;
+    const host = el?.parentElement ?? el;
+    if (!el || !host) return;
+    const onMove = (e: PointerEvent) => {
+      if (!marqueeRef.current) return;
+      const rect = el.getBoundingClientRect();
+      setMarquee((m) => (m ? { ...m, x1: e.clientX - rect.left, y1: e.clientY - rect.top } : m));
+    };
+    const onUp = () => {
+      const cur = marqueeRef.current;
+      if (!cur) return;
+      setMarquee(null);
+      const x0 = Math.min(cur.x0, cur.x1);
+      const y0 = Math.min(cur.y0, cur.y1);
+      const x1 = Math.max(cur.x0, cur.x1);
+      const y1 = Math.max(cur.y0, cur.y1);
+      if (x1 - x0 < CLICK_DRAG_THRESHOLD_PX && y1 - y0 < CLICK_DRAG_THRESHOLD_PX) {
+        // Never dragged far enough to be a marquee — a plain click on empty plane, which
+        // clears the selection. A shift-click has nothing to add or remove, so it leaves
+        // the existing selection alone rather than clearing it.
+        if (!cur.additive) setSelection([]);
+        return;
+      }
+      const c = canvasRef.current;
+      const p0 = toCanvasPoint(c, x0, y0);
+      const p1 = toCanvasPoint(c, x1, y1);
+      const box: Box = { x: p0.x, y: p0.y, w: p1.x - p0.x, h: p1.y - p0.y };
+      const hits: Array<{ kind: "node" | "note" | "section"; id: string }> = [
+        ...c.nodes
+          .filter((n) => containsBox(box, boxOfNode(n)))
+          .map((n) => ({ kind: "node" as const, id: n.ref })),
+        ...notesOf(c)
+          .filter((n) => containsBox(box, boxOfNote(n)))
+          .map((n) => ({ kind: "note" as const, id: n.id })),
+        ...sectionsOf(c)
+          .filter((s) => containsBox(box, boxOfSection(s)))
+          .map((s) => ({ kind: "section" as const, id: s.id })),
+      ];
+      setSelection((sel) => {
+        if (!cur.additive) return hits;
+        const merged = [...sel];
+        for (const h of hits) if (!merged.some((s) => s.kind === h.kind && s.id === h.id)) merged.push(h);
+        return merged;
+      });
+    };
+    host.addEventListener("pointermove", onMove, { capture: true });
+    host.addEventListener("pointerup", onUp, { capture: true });
+    host.addEventListener("pointercancel", onUp, { capture: true });
+    return () => {
+      host.removeEventListener("pointermove", onMove, { capture: true });
+      host.removeEventListener("pointerup", onUp, { capture: true });
+      host.removeEventListener("pointercancel", onUp, { capture: true });
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- intentionally mount-once: every
+    // value read inside comes through a ref (marqueeRef, canvasRef), so rebinding on canvas
+    // or selection churn would only add pointless listener thrash mid-gesture.
+  }, []);
 
   const onPointerDown = (
     e: React.PointerEvent,
     ref: string | null,
     mode: "pan" | "move" | "resize",
-    kind: "node" | "note" = "node",
+    kind: "node" | "note" | "section" = "node",
   ) => {
+    // Middle-drag always pans, regardless of what the caller asked for — a middle click
+    // must never start a move or a resize. This is the one case the button-0 guard below
+    // is relaxed for.
+    if (e.button === 1) {
+      // Chromium (WebView2 on Windows, and Chrome-based dev tooling) fires its own
+      // middle-click autoscroll on this same press; left alone it fights the pan with its
+      // own scroll cursor.
+      e.preventDefault();
+      (e.currentTarget as Element).setPointerCapture?.(e.pointerId);
+      movedRef.current = false;
+      dragStartRef.current = { x: e.clientX, y: e.clientY };
+      setDrag({ ref: null, kind: "node", mode: "pan", lastX: e.clientX, lastY: e.clientY });
+      return;
+    }
     if (e.button !== 0) return;
     (e.currentTarget as Element).setPointerCapture?.(e.pointerId);
-    setDrag({ ref, kind, mode, lastX: e.clientX, lastY: e.clientY });
+    movedRef.current = false;
+    dragStartRef.current = { x: e.clientX, y: e.clientY };
+    // Membership is captured ONCE, here, at gesture start — never recomputed on later
+    // pointermoves (recomputing mid-drag would let items join/leave as the box swept over
+    // them). A resize is deliberately excluded from both branches below: it changes what a
+    // section contains or a card's own size, never a position, so it has nothing to
+    // translate. Two cases build a Members set: the pressed object is already part of a
+    // multi-selection (move the WHOLE selection, whatever mix of kinds it holds — "Move
+    // and delete operate on the whole selection"), or it is a section being moved alone
+    // (its own geometric children, unrelated to selection).
+    let members: Members | undefined;
+    const inSelection =
+      mode === "move" && ref !== null && selection.some((s) => s.kind === kind && s.id === ref);
+    if (inSelection && selection.length > 1) {
+      const selectedSections = selection.filter((s) => s.kind === "section").map((s) => s.id);
+      const nodeIds = new Set(selection.filter((s) => s.kind === "node").map((s) => s.id));
+      const noteIds = new Set(selection.filter((s) => s.kind === "note").map((s) => s.id));
+      const sectionIds = new Set(selectedSections);
+      // A section IN the selection still carries everything geometrically inside it,
+      // exactly like a solo section drag always has (the branch below) — a marquee
+      // selection already includes a section's contents because the same rectangle
+      // caught both, but a shift-click only adds the section itself, and without this
+      // fold its frame would slide off its own cards. membersOf's containment check is
+      // already transitive (a node inside a nested section is inside the outer section
+      // too), so folding in each explicitly-selected section's own members is enough —
+      // no separate recursion for nesting is needed. Sets absorb any overlap with what
+      // was already selected directly for free.
+      for (const id of selectedSections) {
+        const m = membersOf(canvas, id);
+        for (const n of m.nodes) nodeIds.add(n);
+        for (const n of m.notes) noteIds.add(n);
+        for (const s of m.sections) sectionIds.add(s);
+      }
+      members = { nodes: [...nodeIds], notes: [...noteIds], sections: [...sectionIds] };
+    } else if (kind === "section" && mode === "move" && ref) {
+      const m = membersOf(canvas, ref);
+      members = { ...m, sections: [...m.sections, ref] };
+    }
+    setDrag({ ref, kind, mode, lastX: e.clientX, lastY: e.clientY, members });
   };
 
   const onPointerMove = (e: React.PointerEvent) => {
     if (!drag) return;
+    if (
+      !movedRef.current &&
+      (Math.abs(e.clientX - dragStartRef.current.x) > CLICK_DRAG_THRESHOLD_PX ||
+        Math.abs(e.clientY - dragStartRef.current.y) > CLICK_DRAG_THRESHOLD_PX)
+    ) {
+      movedRef.current = true;
+      // Snapshot LAZILY, exactly once per gesture, on this first transition past the
+      // click/drag threshold — never at pointerdown. Pointerdown fires on every selection
+      // click too, and pushHistory only dedupes a snapshot against the entry immediately
+      // before it, so a snapshot taken there left one dead undo entry behind the very next
+      // click after any real edit (not just repeated no-op clicks). A pan never mutates the
+      // canvas and still gets no entry.
+      if (drag.mode !== "pan") snapshot();
+      // A drag is a definitive act, unlike a click's shift-toggle: starting to move an
+      // object that was not already part of the selection makes it the WHOLE selection the
+      // instant the gesture becomes a drag, so a drag and a plain click on the same object
+      // never leave different things selected afterward. Left alone when the object IS
+      // already selected — including as part of a multi-selection, which is exactly the
+      // set `drag.members` above was built from and must survive untouched.
+      if (drag.mode === "move" && drag.ref !== null && !isSelected(drag.kind, drag.ref)) {
+        setSelection([{ kind: drag.kind, id: drag.ref }]);
+      }
+    }
     const dxScreen = e.clientX - drag.lastX;
     const dyScreen = e.clientY - drag.lastY;
     if (drag.mode === "pan" || drag.ref === null) {
@@ -161,7 +614,19 @@ export function CanvasUnderlay({
     } else {
       // Move and resize are in CANVAS units, so the thing tracks the cursor at any zoom.
       const { dx, dy } = toCanvasDelta(dxScreen, dyScreen, canvas.zoom);
-      if (drag.kind === "note") {
+      if (drag.kind === "section" && drag.mode === "resize") {
+        const section = sectionsOf(canvas).find((s) => s.id === drag.ref);
+        // Resize only changes what the section CONTAINS — contents are deliberately
+        // left where they are, which is what makes "draw a box around those three" work.
+        if (section) setCanvas(resizeSection(canvas, section.id, section.w + dx, section.h + dy));
+      } else if (drag.mode === "move" && drag.members) {
+        // Either a section's own geometric children, or (when the pressed object was part
+        // of a multi-selection) the whole selection regardless of kind — see onPointerDown's
+        // own comment for which one `drag.members` holds. The set captured at pointerdown,
+        // not a fresh membersOf()/selection read — recomputing here would let items
+        // join/leave as the drag swept over them.
+        setCanvas(translateMany(canvas, drag.members, dx, dy));
+      } else if (drag.kind === "note") {
         const note = notesOf(canvas).find((n) => n.id === drag.ref);
         if (note) {
           setCanvas(
@@ -184,10 +649,25 @@ export function CanvasUnderlay({
     setDrag({ ...drag, lastX: e.clientX, lastY: e.clientY });
   };
 
-  const endDrag = () => setDrag(null);
+  // A plain click (no meaningful movement) selects the object the gesture started on;
+  // shift-click toggles it in or out of the set. Pan gestures (drag.ref === null, both
+  // space-drag and middle-drag) never select — see the plane's own pointerdown handler and
+  // the middle-button branch above for why a pan is the only mode that can have a null ref.
+  const endDrag = (e: React.PointerEvent) => {
+    if (drag && drag.ref !== null && !movedRef.current) {
+      selectObject(drag.kind, drag.ref, e.shiftKey);
+    }
+    setDrag(null);
+  };
+  // A cancelled gesture (pointercancel) is not a deliberate release — clear the drag
+  // without treating it as a click.
+  const cancelDrag = () => setDrag(null);
 
-  /** Right-click on the plane, a note, or a card — `on` says which. */
-  const openMenu = (e: React.MouseEvent, on: { noteId?: string; nodeRef?: string } = {}) => {
+  /** Right-click on the plane, a note, a card, or a section's title chip — `on` says which. */
+  const openMenu = (
+    e: React.MouseEvent,
+    on: { noteId?: string; nodeRef?: string; sectionId?: string } = {},
+  ) => {
     const el = viewportRef.current;
     if (!el) return;
     e.preventDefault();
@@ -202,6 +682,7 @@ export function CanvasUnderlay({
     const node = canvas.nodes.find((n) => n.ref === ref);
     if (!node) return;
     const id = crypto.randomUUID();
+    snapshot();
     setCanvas(linkNote(addNote(canvas, id, node.x, node.y + nodeH(node) + 16), id, ref));
     setMenu(null);
   };
@@ -210,43 +691,73 @@ export function CanvasUnderlay({
 
   const addNoteHere = () => {
     if (!menu) return;
+    snapshot();
     setCanvas(addNote(canvas, crypto.randomUUID(), menu.x, menu.y));
     setMenu(null);
   };
 
-  /**
-   * Create a session and put its card where the click was.
-   *
-   * The card is written into the canvas directly rather than letting `reconcile`
-   * auto-place it: auto-placement fills the first free grid slot, which is the right
-   * answer for a session that arrived from somewhere else and the wrong one for a session
-   * the user asked for at a specific spot. `reconcile` then sees the node already exists
-   * and leaves it alone.
-   */
-  const addSessionHere = () => {
+  const addSectionHere = () => {
     if (!menu) return;
-    const { x, y } = menu;
+    snapshot();
+    setCanvas(addSection(canvas, crypto.randomUUID(), menu.x, menu.y, 900, 640, "Section"));
     setMenu(null);
-    const before = new Set((project?.sessions ?? []).map((s) => s.id));
-    void (async () => {
-      await addSession(projectId);
-      const st = useStore.getState();
-      const fresh = (st.projects.find((p) => p.id === projectId)?.sessions ?? []).find(
-        (s) => !before.has(s.id),
-      );
-      if (!fresh) return;
-      // Re-read rather than closing over `canvas`: the await let the store move on, and
-      // the session that was just created is itself one of the changes.
-      const cur = st.canvases[projectId];
-      if (!cur || cur.nodes.some((n) => n.ref === fresh.id)) return;
-      setCanvas({ ...cur, nodes: [...cur.nodes, { ref: fresh.id, x, y }] });
-    })();
   };
 
-  const byId = useMemo(() => new Map((project?.sessions ?? []).map((s) => [s.id, s])), [project]);
+  const setSectionColorHere = (color: number | null) => {
+    if (menu?.sectionId) {
+      snapshot();
+      setCanvas(setSectionColor(canvas, menu.sectionId, color));
+    }
+    setMenu(null);
+  };
+
+  /** Requests CanvasSectionFrame open its own inline editor — see `renameTarget`/
+   *  `renameNonce` above for why this is a request rather than the edit state itself. */
+  const renameSectionHere = () => {
+    if (menu?.sectionId) {
+      setRenameTarget(menu.sectionId);
+      setRenameNonce((n) => n + 1);
+    }
+    setMenu(null);
+  };
+
+  const deleteSectionHere = () => {
+    // Removes the container only — see removeSection's own doc comment. What was inside
+    // stays on the board, exactly like "Remove from board" does for a single card.
+    if (menu?.sectionId) {
+      snapshot();
+      setCanvas(removeSection(canvas, menu.sectionId));
+    }
+    setMenu(null);
+  };
+
+  /**
+   * Create a session at the point the menu was opened, in the currently SELECTED project —
+   * the board itself has no project of its own for a brand new session to belong to. The
+   * menu item is disabled when nothing is selected (see CanvasMenu), so `menu` being open
+   * here implies `selectedProjectId` is set; the null check is defensive only.
+   *
+   * TRANSIENT: this used to also drop the new session's card at the click point, writing
+   * the node directly rather than letting `reconcile` auto-place it. `reconcile` (and its
+   * auto-placement) is gone as of this change — membership is curated now — and explicit
+   * placement has not landed yet, so a session created here gets no card until that lands.
+   * Accepted rather than patched twice; do not add a workaround here.
+   */
+  const addSessionHere = () => {
+    if (!menu || !selectedProjectId) return;
+    setMenu(null);
+    void addSession(selectedProjectId);
+  };
+
+  // Keyed across EVERY project, not one: a node's session may belong to any of them — the
+  // whole point of the global board.
+  const byId = useMemo(
+    () => new Map(projects.flatMap((p) => p.sessions.map((s): [string, Session] => [s.id, s]))),
+    [projects],
+  );
 
   // Note/card pairs to draw a tether between. A link whose session is gone is cleared by
-  // reconcile, so anything unresolvable here is a card that has not been placed yet.
+  // pruneCanvas, so anything unresolvable here is a card that has not been placed yet.
   const tethers = useMemo(
     () =>
       notesOf(canvas)
@@ -261,23 +772,77 @@ export function CanvasUnderlay({
   return (
     <div
       ref={viewportRef}
-      className={`canvas-underlay ${drag?.ref === null ? "panning" : ""}`}
+      className={`canvas-underlay ${drag?.ref === null ? "panning" : ""} ${
+        dropActive ? "drop-active" : ""
+      }`}
       onPointerDown={(e) => {
-        if (e.target === e.currentTarget || (e.target as Element).classList.contains("canvas-plane"))
+        if (
+          !(e.target === e.currentTarget || (e.target as Element).classList.contains("canvas-plane"))
+        )
+          return;
+        // Middle-drag and space-drag pan; plain left-drag on empty plane marquees instead
+        // (below) — see the brief's rationale for moving pan off plain-drag.
+        if (e.button === 1 || (e.button === 0 && spaceHeldRef.current)) {
           onPointerDown(e, null, "pan");
+          return;
+        }
+        if (e.button !== 0) return;
+        const el = viewportRef.current;
+        if (!el) return;
+        e.preventDefault();
+        // Every other gesture in this file captures the pointer at its start — the marquee
+        // is Pointer Events too and needs the same guarantee: without it, a release outside
+        // the window never reaches the capture-phase pointerup listener below, `marquee` is
+        // never cleared, and the rectangle stays painted until another marquee starts.
+        (e.currentTarget as Element).setPointerCapture?.(e.pointerId);
+        const rect = el.getBoundingClientRect();
+        const x = e.clientX - rect.left;
+        const y = e.clientY - rect.top;
+        setMarquee({ x0: x, y0: y, x1: x, y1: y, additive: e.shiftKey });
       }}
       onPointerMove={onPointerMove}
       onPointerUp={endDrag}
-      onPointerCancel={endDrag}
+      onPointerCancel={cancelDrag}
       onContextMenu={(e) => openMenu(e)}
+      // Session-drop handling (dragover/dragleave/drop) is bound imperatively to the
+      // common ancestor in an effect below — see that effect's comment for why a JSX
+      // prop here would miss every drag over an already-placed card. Only the
+      // drop-active class (above) stays driven from here.
     >
       <div
         className="canvas-plane"
         style={{ transform: `translate(${canvas.pan.x}px, ${canvas.pan.y}px) scale(${canvas.zoom})` }}
       >
-        {/* Tethers, drawn UNDER everything. Each runs centre to centre and is then clipped
-            for free by the boxes painting over it, so what remains is exactly the gap
-            between a note and the session it is about. */}
+        {/* Sections FIRST, so document order alone puts them behind everything else — no
+            z-index, no stored z. sectionsByZ orders by descending area so a nested section
+            paints over its parent; see that function's comment for why the order is
+            derived rather than stored. */}
+        {sectionsByZ(canvas).map((section) => (
+          <CanvasSectionFrame
+            key={section.id}
+            section={section}
+            selected={isSelected("section", section.id)}
+            editRequest={renameTarget === section.id ? renameNonce : undefined}
+            onMovePointerDown={(e) => {
+              e.stopPropagation();
+              onPointerDown(e, section.id, "move", "section");
+            }}
+            onResizePointerDown={(e) => {
+              e.stopPropagation();
+              onPointerDown(e, section.id, "resize", "section");
+            }}
+            onContextMenu={(e) => openMenu(e, { sectionId: section.id })}
+            onRename={(title) => {
+              snapshot();
+              setCanvas(setSectionTitle(canvas, section.id, title));
+            }}
+          />
+        ))}
+
+        {/* Tethers, drawn under notes and cards (sections are further back still). Each
+            runs centre to centre and is then clipped for free by the boxes painting over
+            it, so what remains is exactly the gap between a note and the session it is
+            about. */}
         {tethers.length > 0 && (
           <svg className="canvas-links" aria-hidden>
             {tethers.map(({ note, node }) => {
@@ -292,7 +857,7 @@ export function CanvasUnderlay({
         {notesOf(canvas).map((note) => (
           <div
             key={note.id}
-            className="canvas-note"
+            className={`canvas-note ${isSelected("note", note.id) ? "selected" : ""}`}
             style={{ left: note.x, top: note.y, width: note.w, height: note.h }}
             onContextMenu={(e) => openMenu(e, { noteId: note.id })}
           >
@@ -342,16 +907,34 @@ export function CanvasUnderlay({
           </div>
         ))}
 
-        {/* Keyed by session id, in `canvas.nodes` order, which reconcile() and moveNode()
+        {/* Keyed by session id, in `canvas.nodes` order, which pruneCanvas() and moveNode()
             both preserve. Never sort this list. */}
         {canvas.nodes.map((node) => {
           const session = byId.get(node.ref);
           if (!session) return null;
           const status = live[node.ref]?.status ?? "idle";
+          const liveEntry = live[node.ref];
+          const activity = liveEntry?.activity;
+          // How long this session has been waiting on a human. Only meaningful while it IS
+          // waiting -- `updatedAt` is when the status was last asserted, whatever it is.
+          const waitedMs =
+            status === "needsInput" && liveEntry?.updatedAt
+              ? Date.now() - liveEntry.updatedAt
+              : null;
+          const ownerProject = projects.find((p) => p.id === node.projectId);
+          // resolveProjectColor is the ONE place precedence is decided: a user-chosen colour
+          // beats the derived accent, which is used only while autoProjectColors is on, and
+          // null falls through to each consumer's neutral CSS fallback. Never call
+          // projectAccent directly or the sidebar and the board disagree.
+          const projColor = ownerProject
+            ? resolveProjectColor(ownerProject.id, ownerProject.color, autoProjectColors)
+            : null;
           return (
             <div
               key={node.ref}
-              className={`canvas-card status-${status} ${showTerminals ? "live" : "compact"}`}
+              className={`canvas-card status-${status} ${showTerminals ? "live" : "compact"} ${
+                isSelected("node", node.ref) ? "selected" : ""
+              }`}
               style={{ left: node.x, top: node.y, width: nodeW(node), height: nodeH(node) }}
               onContextMenu={(e) => openMenu(e, { nodeRef: node.ref })}
             >
@@ -363,8 +946,8 @@ export function CanvasUnderlay({
                   onPointerDown(e, node.ref, "move");
                 }}
                 onDoubleClick={() => {
-                  selectSession(projectId, node.ref);
-                  setCenterMode(projectId, "terminals");
+                  selectSession(node.projectId, node.ref);
+                  setCanvasOpen(false);
                 }}
                 title="Drag to move · double-click to open in the pane view"
               >
@@ -379,9 +962,32 @@ export function CanvasUnderlay({
               {/* The live terminal is painted here by .term-stack, which sits above this
                   underlay. When zoomed out past the threshold there is no terminal, so the
                   body shows the summary instead of an empty hole. */}
+              {/* The card IS the view below the legibility floor and during zoom gestures,
+                  so it carries what the terminal would have told you. All DOM text, hence
+                  crisp at any zoom -- which is the point of hiding the raster at all. */}
               {!showTerminals && (
-                <div className="canvas-card-body">
-                  <span className="canvas-card-status">{statusLabel(status)}</span>
+                <div className="canvas-card-body rich">
+                  <div className="canvas-card-row">
+                    <span className={`canvas-card-status ${status}`}>{statusLabel(status)}</span>
+                    {waitedMs !== null && (
+                      <span className="canvas-card-waited" title="Waiting for you">
+                        {formatWaited(waitedMs)}
+                      </span>
+                    )}
+                  </div>
+                  {activity && (
+                    <div className="canvas-card-activity" title={activity}>
+                      {activity}
+                    </div>
+                  )}
+                  {/* Context % deliberately lives only in the footer (below), which is
+                      present in both live and compact modes -- one location at every zoom,
+                      rather than a number that appears and vanishes as you zoom. */}
+                  <div className="canvas-card-row dim">
+                    <span className="canvas-card-project" style={{ color: projColor ?? undefined }}>
+                      {ownerProject?.name ?? "—"}
+                    </span>
+                  </div>
                 </div>
               )}
 
@@ -420,43 +1026,95 @@ export function CanvasUnderlay({
         })}
       </div>
 
-      {canvas.nodes.length === 0 && notesOf(canvas).length === 0 && (
+      {/* Screen-space, a sibling of `.canvas-plane` rather than a child of it — the plane
+          carries the pan/zoom transform and the marquee must not scale or slide with it. */}
+      {marquee && (
+        <div
+          className="canvas-marquee"
+          style={{
+            left: Math.min(marquee.x0, marquee.x1),
+            top: Math.min(marquee.y0, marquee.y1),
+            width: Math.abs(marquee.x1 - marquee.x0),
+            height: Math.abs(marquee.y1 - marquee.y0),
+          }}
+        />
+      )}
+
+      {canvas.nodes.length === 0 && notesOf(canvas).length === 0 && sectionsOf(canvas).length === 0 && (
         <div className="canvas-empty">
-          Nothing here yet — right-click to add a session or a note.
+          <div>Empty canvas — drag a session in from the sidebar, or right-click to add a section.</div>
+          <div>Drag to select · Space-drag or middle-drag to pan</div>
         </div>
       )}
 
       {menu && (
         <CanvasMenu
           menu={menu}
-          sessions={project?.sessions ?? []}
+          // Link targets for a note: sessions already ON the board, not every session in
+          // every project. A link draws a tether to a NODE's position, and a session with
+          // no node has no endpoint — offering it here would let a note point at a session
+          // pruneCanvas would treat as dangling the moment anything re-pruned it (the same
+          // state stripLink exists to clean up after the fact). Narrowing the picker makes
+          // the invalid choice unofferable up front instead of merely unrepresentable later.
+          sessions={canvas.nodes
+            .map((n) => byId.get(n.ref))
+            .filter((s): s is Session => s !== undefined)
+            .map((s) => ({ id: s.id, name: s.name }))}
           linkedRef={
             menu.noteId ? notesOf(canvas).find((n) => n.id === menu.noteId)?.linkedRef : undefined
           }
+          sectionColor={
+            menu.sectionId
+              ? (sectionsOf(canvas).find((s) => s.id === menu.sectionId)?.color ?? null)
+              : null
+          }
+          canAddSession={selectedProjectId !== null}
           onClose={closeMenu}
           onAddSession={addSessionHere}
           onAddNote={addNoteHere}
+          onAddSectionHere={addSectionHere}
+          onSetSectionColor={setSectionColorHere}
+          onRenameSection={renameSectionHere}
+          onDeleteSection={deleteSectionHere}
           onLinkNote={(ref) => {
-            if (menu.noteId) setCanvas(linkNote(canvas, menu.noteId, ref));
+            if (menu.noteId) {
+              snapshot();
+              setCanvas(linkNote(canvas, menu.noteId, ref));
+            }
             setMenu(null);
           }}
           onDeleteNote={() => {
-            if (menu.noteId) setCanvas(removeNote(canvas, menu.noteId));
+            if (menu.noteId) {
+              snapshot();
+              setCanvas(removeNote(canvas, menu.noteId));
+            }
             setMenu(null);
           }}
           onOpenSession={() => {
-            if (!menu.nodeRef) return;
+            const node = menu.nodeRef ? canvas.nodes.find((n) => n.ref === menu.nodeRef) : undefined;
             setMenu(null);
-            selectSession(projectId, menu.nodeRef);
-            setCenterMode(projectId, "terminals");
+            if (!node) return;
+            selectSession(node.projectId, node.ref);
+            setCanvasOpen(false);
           }}
           onNoteAbout={() => menu.nodeRef && addNoteAbout(menu.nodeRef)}
+          onRemoveFromBoard={() => {
+            const ref = menu.nodeRef;
+            setMenu(null);
+            // Off the board only — the session itself is untouched and keeps running. See
+            // removeNode's own doc comment; the destructive path below is the other thing.
+            if (ref) {
+              snapshot();
+              setCanvas(removeNode(canvas, ref));
+            }
+          }}
           onDeleteSession={() => {
             const ref = menu.nodeRef;
+            const node = ref ? canvas.nodes.find((n) => n.ref === ref) : undefined;
             setMenu(null);
             // Reuses the sidebar's own delete, confirms and all — the confirms ARE the
             // safety here, and a thinner second path would drift away from them.
-            if (ref) void deleteSession(projects, projectId, ref, removeSession);
+            if (ref && node) void deleteSession(projects, node.projectId, ref, removeSession);
           }}
         />
       )}
@@ -469,27 +1127,48 @@ function CanvasMenu({
   menu,
   sessions,
   linkedRef,
+  sectionColor,
+  canAddSession,
   onClose,
   onAddSession,
   onAddNote,
+  onAddSectionHere,
+  onSetSectionColor,
+  onRenameSection,
+  onDeleteSection,
   onLinkNote,
   onDeleteNote,
   onOpenSession,
   onNoteAbout,
+  onRemoveFromBoard,
   onDeleteSession,
 }: {
-  menu: { screenX: number; screenY: number; noteId?: string; nodeRef?: string };
+  menu: { screenX: number; screenY: number; noteId?: string; nodeRef?: string; sectionId?: string };
   /** Link targets, when the menu is a note's. */
   sessions: Array<{ id: string; name: string }>;
   /** The note's current link, so the list can mark it. */
   linkedRef?: string;
+  /** The section's current colour index, when the menu is a section's — null for neutral,
+   *  so the swatch row can mark which one is active. */
+  sectionColor: number | null;
+  /** Whether a project is selected for "New session here" to create into. False disables
+   *  the item instead of hiding it, so it stays a discoverable action. */
+  canAddSession: boolean;
   onClose: () => void;
   onAddSession: () => void;
   onAddNote: () => void;
+  onAddSectionHere: () => void;
+  onSetSectionColor: (color: number | null) => void;
+  onRenameSection: () => void;
+  /** Removes the container only — everything inside stays on the board. */
+  onDeleteSection: () => void;
   onLinkNote: (ref: string | null) => void;
   onDeleteNote: () => void;
   onOpenSession: () => void;
   onNoteAbout: () => void;
+  /** Off the board only — the session keeps running. Distinct from onDeleteSession, which
+   *  ends it; both live in this same menu, so the wording has to carry the difference. */
+  onRemoveFromBoard: () => void;
   onDeleteSession: () => void;
 }) {
   const ref = useRef<HTMLDivElement>(null);
@@ -520,7 +1199,17 @@ function CanvasMenu({
     return () => window.removeEventListener("keydown", onKey, true);
   }, [onClose]);
 
-  return (
+  // Portalled to document.body rather than rendered in place. This menu (and its backdrop)
+  // is opened from inside .canvas-underlay, which is `position: absolute` and therefore its
+  // own stacking context — a descendant's z-index is resolved only AGAINST THAT CONTEXT'S
+  // OTHER CHILDREN, never against the document as a whole. `.term-stack` is a SIBLING of the
+  // underlay painted above it (z-index 2 vs 1), so no z-index set from inside the underlay
+  // could ever win against it, and `position: fixed` does not escape a stacking context
+  // either — it only escapes normal document FLOW. Portalling to `document.body` is what
+  // makes the existing `.context-menu`/`.canvas-menu-backdrop` z-indexes (1000/999, unchanged
+  // here) mean what they say again. See CLAUDE.md's "Where the orchestration board lives"
+  // for the five earlier instances of this exact hazard.
+  return createPortal(
     <>
       {/* A real backdrop rather than a window listener. Anything can swallow a pointer
           event before it reaches window — xterm does, for selection — and a menu that
@@ -570,18 +1259,70 @@ function CanvasMenu({
             <button onClick={onOpenSession}>Open in panes</button>
             <button onClick={onNoteAbout}>Add a note about this</button>
             <div className="context-menu-sep" />
-            <button className="danger" onClick={onDeleteSession}>
+            {/* Two ways off this card, and they must not be confusable: this one only
+                takes the card off the board, the danger item below ends the session. */}
+            <button
+              onClick={onRemoveFromBoard}
+              title="Takes the card off the board. The session keeps running."
+            >
+              Remove from board
+            </button>
+            <button
+              className="danger"
+              onClick={onDeleteSession}
+              title="Ends the session behind a confirmation. The card and the sidebar entry are both gone."
+            >
               Delete session…
+            </button>
+          </>
+        ) : menu.sectionId ? (
+          <>
+            <div className="context-menu-label">Colour</div>
+            {/* A row, not PROJECT_PALETTE's hover-and-wait flyout: a section's palette is
+                six colours plus neutral, small enough to show at once. */}
+            <div className="canvas-menu-swatches">
+              <button
+                className={`canvas-swatch neutral ${sectionColor === null ? "sel" : ""}`}
+                title="Neutral"
+                onClick={() => onSetSectionColor(null)}
+              />
+              {SECTION_PALETTE.map((c, i) => (
+                <button
+                  key={c}
+                  className={`canvas-swatch ${sectionColor === i ? "sel" : ""}`}
+                  style={{ background: c }}
+                  title={`Colour ${i + 1}`}
+                  onClick={() => onSetSectionColor(i)}
+                />
+              ))}
+            </div>
+            <div className="context-menu-sep" />
+            <button onClick={onRenameSection}>Rename</button>
+            <div className="context-menu-sep" />
+            <button
+              className="danger"
+              onClick={onDeleteSection}
+              title="Removes the container. Everything inside stays on the board."
+            >
+              Delete section
             </button>
           </>
         ) : (
           <>
-            <button onClick={onAddSession}>New session here</button>
+            <button
+              onClick={onAddSession}
+              disabled={!canAddSession}
+              title={canAddSession ? undefined : "Select a project first"}
+            >
+              New session here
+            </button>
             <button onClick={onAddNote}>Add sticky note</button>
+            <button onClick={onAddSectionHere}>New section here</button>
           </>
         )}
       </div>
-    </>
+    </>,
+    document.body,
   );
 }
 
@@ -591,21 +1332,19 @@ function CanvasMenu({
  * top of the first row of nodes; the header was already always-visible, so it hosts these.
  */
 export function CanvasControls({
-  projectId,
   viewportRef,
 }: {
-  projectId: string;
   viewportRef: React.RefObject<HTMLDivElement | null>;
 }) {
-  const { canvas, setCanvas } = useProjectCanvas(projectId);
-  const setCenterMode = useStore((s) => s.setCenterMode);
+  // snapshot shared with CanvasUnderlay via the ONE module-scoped history useCanvas owns —
+  // this is exactly the seam that makes "+ Note" below undoable without either component
+  // knowing the other exists.
+  const { canvas, setCanvas, snapshot } = useCanvas();
+  const setCanvasOpen = useStore((s) => s.setCanvasOpen);
   const isLive = canvas.zoom >= LIVE_ZOOM_MIN;
   // The visible way out is the header's Canvas toggle, which flips to "Hide canvas" while
   // the canvas is open. This is only the keyboard route to the same action.
-  const exitCanvas = useCallback(
-    () => setCenterMode(projectId, "terminals"),
-    [projectId, setCenterMode],
-  );
+  const exitCanvas = useCallback(() => setCanvasOpen(false), [setCanvasOpen]);
 
   // Escape leaves the canvas — but ONLY when the keystroke did not land somewhere that
   // owns it. Escape inside a live agent session is how you interrupt it, and stealing that
@@ -614,10 +1353,9 @@ export function CanvasControls({
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.key !== "Escape") return;
-      const target = e.target as Element | null;
-      if (target?.closest?.(".term-host")) return;
-      if (target?.closest?.("textarea, input, [contenteditable='true']")) {
-        (target as HTMLElement).blur?.();
+      if (isInTerminal(e.target)) return;
+      if (isEditableTarget(e.target)) {
+        (e.target as HTMLElement).blur?.();
         return;
       }
       exitCanvas();
@@ -647,6 +1385,7 @@ export function CanvasControls({
           const el = viewportRef.current;
           if (!el) return;
           const c = toCanvasPoint(canvas, el.clientWidth / 2, el.clientHeight / 2);
+          snapshot();
           setCanvas(addNote(canvas, crypto.randomUUID(), c.x - NOTE_W / 2, c.y - NOTE_H / 2));
         }}
         title="Add a sticky note in the middle of the view"
@@ -657,7 +1396,11 @@ export function CanvasControls({
         className="canvas-btn"
         onClick={() => {
           const el = viewportRef.current;
-          if (el) setCanvas(fit(canvas, el.clientWidth, el.clientHeight));
+          if (!el) return;
+          // Snap to a font-ladder rung — see fitToContent's own comment for why an
+          // unsnapped fit() zoom disagrees with what the terminals actually rasterize at.
+          const f = fit(canvas, el.clientWidth, el.clientHeight);
+          setCanvas({ ...f, zoom: snapZoom(f.zoom, TERM_BASE_FONT + useStore.getState().fontZoom) });
         }}
         title="Fit everything in view"
       >
@@ -685,4 +1428,14 @@ function statusLabel(status: string): string {
     default:
       return "Idle";
   }
+}
+
+/** Coarse "how long" for a card: minutes up to an hour, then hours. Never seconds — a
+ *  card is read at a glance and a ticking number is noise. Exported for CanvasRail, which
+ *  formats the same quantity for the attention queue and must read it identically. */
+export function formatWaited(ms: number): string {
+  const min = Math.floor(ms / 60_000);
+  if (min < 1) return "just now";
+  if (min < 60) return `${min}m`;
+  return `${Math.floor(min / 60)}h ${min % 60}m`;
 }

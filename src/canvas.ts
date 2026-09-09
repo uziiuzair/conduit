@@ -10,6 +10,15 @@
 export interface CanvasNode {
   /** Session id. Also the React key — stable for the node's whole life. */
   ref: string;
+  /**
+   * The project owning this session.
+   *
+   * REQUIRED, which is the opposite of `WsTab.projectId` for borrowed tabs — and correctly
+   * so. A tab lives in a project's layout, so absence can mean "the host"; a global board
+   * has no host for absence to mean, and a session id alone does not locate its project
+   * without scanning every one of them.
+   */
+  projectId: string;
   x: number;
   y: number;
   /** Per-node size. Absent = the default card size, which is what every node created
@@ -53,6 +62,8 @@ export interface CanvasState {
   zoom: number;
   /** Optional so every canvas persisted before notes existed still loads. */
   notes?: CanvasNote[];
+  /** Optional so every canvas persisted before sections existed still loads. */
+  sections?: CanvasSection[];
 }
 
 /** Card footprint in canvas units. A node is a real terminal, so this is sized to be
@@ -66,10 +77,6 @@ export const HEADER_H = 30;
  *  the header: the terminal paints ABOVE the card frame, so any affordance that has to stay
  *  clickable — here the resize grip — needs a band the terminal does not cover. */
 export const FOOTER_H = 18;
-const GAP = 36;
-/** Cards per row when auto-placing. Keeps a fresh project readable rather than a long line. */
-const COLS = 3;
-
 /** Floor on a resize. Small enough to tuck a node away, large enough that the terminal
  *  inside still has usable columns rather than becoming a one-word-per-line ribbon. */
 export const MIN_CARD_W = 320;
@@ -100,47 +107,57 @@ export const emptyCanvas = (): CanvasState => ({ nodes: [], pan: { x: 0, y: 0 },
 export const clampZoom = (z: number): number => Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, z));
 
 /**
- * Reconcile a stored canvas against the project's live sessions: drop nodes whose session
- * is gone, and place any session that has no node yet.
+ * Drop nodes whose session no longer exists, and strip links to sessions that are gone.
  *
- * New nodes are appended, never inserted, and existing nodes keep their array position.
- * That ordering guarantee is load-bearing for the same reason as the note at the top of
- * this file.
+ * The pruning half of what `reconcile` used to do. The PLACING half is deliberately absent:
+ * membership on this board is curated, and a session existing is not a reason for it to be
+ * on screen — that is what makes a position mean something.
  *
- * Auto-placement fills the first free grid slot rather than the slot at the node's index,
- * so deleting a session in the middle does not shuffle everything after it on top of a
- * card the user placed by hand.
+ * Returns the SAME object when nothing changed, which the store's write-back guard relies
+ * on to avoid an infinite render loop.
  */
-export function reconcile(state: CanvasState, sessionIds: string[]): CanvasState {
-  const live = new Set(sessionIds);
-  const kept = state.nodes.filter((n) => live.has(n.ref));
-  const known = new Set(kept.map((n) => n.ref));
-  const taken = new Set(kept.map((n) => slotKey(n)));
-
-  const added: CanvasNode[] = [];
-  for (const ref of sessionIds) {
-    if (known.has(ref)) continue;
-    const { x, y } = firstFreeSlot(taken);
-    taken.add(`${x},${y}`);
-    added.push({ ref, x, y });
-  }
-
-  // A note whose linked session is gone keeps the note and loses only the link. The note
-  // is the user's writing and is never ours to delete; the link is a pointer to something
-  // that no longer exists, and leaving it would draw a tether to nowhere.
+export function pruneCanvas(state: CanvasState, liveSessionIds: Set<string>): CanvasState {
+  const kept = state.nodes.filter((n) => liveSessionIds.has(n.ref));
   const notes = notesOf(state);
-  const dangling = notes.some((n) => n.linkedRef !== undefined && !live.has(n.linkedRef));
+  // A note whose linked session is gone keeps the note and loses only the link. The note is
+  // the user's writing and is never ours to delete; the link points at nothing, and leaving
+  // it would draw a tether to nowhere.
+  const dangling = notes.some((n) => n.linkedRef !== undefined && !liveSessionIds.has(n.linkedRef));
+  if (kept.length === state.nodes.length && !dangling) return state;
   const nextNotes = dangling
     ? notes.map((n) =>
-        n.linkedRef !== undefined && !live.has(n.linkedRef) ? stripLink(n) : n,
+        n.linkedRef !== undefined && !liveSessionIds.has(n.linkedRef) ? stripLink(n) : n,
       )
     : notes;
-
   return {
     ...state,
-    nodes: [...kept, ...added],
+    nodes: kept,
     ...(state.notes === undefined && !dangling ? {} : { notes: nextNotes }),
   };
+}
+
+/**
+ * Put a session on the board at (x, y).
+ *
+ * Idempotent: a session already present keeps its existing position, so a second drop is
+ * harmless rather than a teleport. New nodes are APPENDED and existing ones keep their
+ * array index — see the file header for why that ordering is load-bearing.
+ */
+export function addNodeAt(
+  state: CanvasState,
+  ref: string,
+  projectId: string,
+  x: number,
+  y: number,
+): CanvasState {
+  if (state.nodes.some((n) => n.ref === ref)) return state;
+  return { ...state, nodes: [...state.nodes, { ref, projectId, x, y }] };
+}
+
+/** Take a session off the board. The session itself is untouched and keeps running. */
+export function removeNode(state: CanvasState, ref: string): CanvasState {
+  const kept = state.nodes.filter((n) => n.ref !== ref);
+  return kept.length === state.nodes.length ? state : { ...state, nodes: kept };
 }
 
 /** A copy of `note` with no link. Written as a delete so the field is absent, not
@@ -151,19 +168,33 @@ function stripLink(note: CanvasNote): CanvasNote {
   return rest;
 }
 
-/** The grid slot a hand-placed node happens to occupy, so auto-placement avoids it. */
-function slotKey(n: CanvasNode): string {
-  const col = Math.round(n.x / (CARD_W + GAP));
-  const row = Math.round(n.y / (CARD_H + GAP));
-  return `${col * (CARD_W + GAP)},${row * (CARD_H + GAP)}`;
-}
+/** Vertical spacing between one project's migrated notes and the next project's. */
+const MIGRATE_ROW_H = 1000;
 
-function firstFreeSlot(taken: Set<string>): { x: number; y: number } {
-  for (let i = 0; ; i++) {
-    const x = (i % COLS) * (CARD_W + GAP);
-    const y = Math.floor(i / COLS) * (CARD_H + GAP);
-    if (!taken.has(`${x},${y}`)) return { x, y };
-  }
+/**
+ * Fold the old per-project canvases into the one global board.
+ *
+ * Only NOTES cross. The node placements were produced by the auto-placer this design
+ * removes, and stacking several projects' coordinate spaces onto one plane would pile cards
+ * on top of each other — whereas a note is the user's writing, and `stripLink`'s comment
+ * already records that it is never ours to delete.
+ *
+ * Links are dropped: the linked session may not be on the new board at all, and a tether to
+ * nothing is worse than no tether.
+ */
+export function migrateNotes(old: Record<string, CanvasState>): CanvasState {
+  const notes: CanvasNote[] = [];
+  const seen = new Set<string>();
+  Object.keys(old)
+    .sort()
+    .forEach((projectId, row) => {
+      for (const n of notesOf(old[projectId])) {
+        if (seen.has(n.id)) continue;
+        seen.add(n.id);
+        notes.push({ ...stripLink(n), y: n.y + row * MIGRATE_ROW_H });
+      }
+    });
+  return { ...emptyCanvas(), ...(notes.length ? { notes } : {}) };
 }
 
 /** Move one node. Returns the same object when nothing changed, so React can skip. */
@@ -222,11 +253,12 @@ export function fit(
   viewportH: number,
   padding = 48,
 ): CanvasState {
-  // Notes count as content: a note placed off to one side is something the user put there
-  // on purpose, and a Fit that leaves it outside the viewport has not fitted anything.
+  // Notes and sections count as content too: something the user placed or drew on purpose,
+  // and a Fit that leaves it outside the viewport has not fitted anything.
   const boxes = [
     ...state.nodes.map((n) => ({ x: n.x, y: n.y, w: nodeW(n), h: nodeH(n) })),
     ...notesOf(state).map((n) => ({ x: n.x, y: n.y, w: n.w, h: n.h })),
+    ...sectionsOf(state).map((s) => ({ x: s.x, y: s.y, w: s.w, h: s.h })),
   ];
   if (boxes.length === 0 || viewportW <= 0 || viewportH <= 0) {
     return { ...state, pan: { x: padding, y: padding }, zoom: 1 };
@@ -366,4 +398,289 @@ export function removeNote(state: CanvasState, id: string): CanvasState {
   const notes = notesOf(state);
   const kept = notes.filter((n) => n.id !== id);
   return kept.length === notes.length ? state : { ...state, notes: kept };
+}
+
+// ---- sections ----
+
+/**
+ * A titled container drawn behind its contents.
+ *
+ * Purely visual: it groups, and it moves what it holds. It does not broadcast, stop, spawn,
+ * or otherwise act on the sessions inside it — those would be a different feature with a
+ * different set of risks, and the whole point of this one is organising by hand.
+ *
+ * Membership is GEOMETRIC and computed on demand (`membersOf`), never stored. There is
+ * therefore no list to drift out of sync with position, and nesting is free.
+ */
+export interface CanvasSection {
+  /** Generated at creation; stable for the section's life and its React key. */
+  id: string;
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+  title: string;
+  /** Index into `SECTION_PALETTE`. Absent = neutral, which is what a fresh section is. */
+  color?: number;
+}
+
+export const SECTION_MIN_W = 240;
+export const SECTION_MIN_H = 180;
+
+/**
+ * Section tints. Deliberately its own short list rather than the project palette: a section
+ * is the user's own grouping, and borrowing project colours would make two unrelated
+ * meanings share a hue.
+ */
+export const SECTION_PALETTE: readonly string[] = [
+  "#6b7cff",
+  "#e0723f",
+  "#3fa66b",
+  "#c04f8a",
+  "#c9a227",
+  "#5aa9c9",
+];
+
+/** A canvas's sections, defaulting to none for state saved before sections existed. */
+export const sectionsOf = (state: CanvasState): CanvasSection[] => state.sections ?? [];
+
+export interface Box {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+}
+
+export const boxOfNode = (n: CanvasNode): Box => ({ x: n.x, y: n.y, w: nodeW(n), h: nodeH(n) });
+export const boxOfNote = (n: CanvasNote): Box => ({ x: n.x, y: n.y, w: n.w, h: n.h });
+export const boxOfSection = (s: CanvasSection): Box => ({ x: s.x, y: s.y, w: s.w, h: s.h });
+
+/** True when `inner` sits FULLY inside `outer`. Overlap is not membership: a card half in
+ *  and half out belongs to neither, which is the only reading that keeps a drag honest. */
+export function containsBox(outer: Box, inner: Box): boolean {
+  return (
+    inner.x >= outer.x &&
+    inner.y >= outer.y &&
+    inner.x + inner.w <= outer.x + outer.w &&
+    inner.y + inner.h <= outer.y + outer.h
+  );
+}
+
+/** True when two boxes share any area. Touching edges (zero overlap) do not count — a box
+ *  placed flush against another is not ON it. */
+export function intersectsBox(a: Box, b: Box): boolean {
+  return a.x < b.x + b.w && a.x + a.w > b.x && a.y < b.y + b.h && a.y + a.h > b.y;
+}
+
+export interface Members {
+  nodes: string[];
+  notes: string[];
+  sections: string[];
+}
+
+/** Everything geometrically inside a section. The section itself is never a member. */
+export function membersOf(state: CanvasState, sectionId: string): Members {
+  const self = sectionsOf(state).find((s) => s.id === sectionId);
+  if (!self) return { nodes: [], notes: [], sections: [] };
+  const outer = boxOfSection(self);
+  return {
+    nodes: state.nodes.filter((n) => containsBox(outer, boxOfNode(n))).map((n) => n.ref),
+    notes: notesOf(state)
+      .filter((n) => containsBox(outer, boxOfNote(n)))
+      .map((n) => n.id),
+    sections: sectionsOf(state)
+      .filter((s) => s.id !== sectionId && containsBox(outer, boxOfSection(s)))
+      .map((s) => s.id),
+  };
+}
+
+export function addSection(
+  state: CanvasState,
+  id: string,
+  x: number,
+  y: number,
+  w: number,
+  h: number,
+  title: string,
+): CanvasState {
+  const section: CanvasSection = {
+    id,
+    x,
+    y,
+    w: Math.max(SECTION_MIN_W, w),
+    h: Math.max(SECTION_MIN_H, h),
+    title,
+  };
+  return { ...state, sections: [...sectionsOf(state), section] };
+}
+
+/** Update one section in place, preserving array order. Same object back when unchanged. */
+function patchSection(
+  state: CanvasState,
+  id: string,
+  patch: (s: CanvasSection) => CanvasSection,
+): CanvasState {
+  const sections = sectionsOf(state);
+  const i = sections.findIndex((s) => s.id === id);
+  if (i === -1) return state;
+  const next = patch(sections[i]);
+  const cur = sections[i];
+  if (
+    next.x === cur.x &&
+    next.y === cur.y &&
+    next.w === cur.w &&
+    next.h === cur.h &&
+    next.title === cur.title &&
+    next.color === cur.color
+  ) {
+    return state;
+  }
+  const copy = [...sections];
+  copy[i] = next;
+  return { ...state, sections: copy };
+}
+
+/**
+ * Resize from the bottom-right. Contents are NOT moved — a resize changes what the section
+ * CONTAINS, which is what makes "draw a box around those three" work.
+ */
+export const resizeSection = (state: CanvasState, id: string, w: number, h: number): CanvasState =>
+  patchSection(state, id, (s) => ({
+    ...s,
+    w: Math.max(SECTION_MIN_W, w),
+    h: Math.max(SECTION_MIN_H, h),
+  }));
+
+export const setSectionTitle = (state: CanvasState, id: string, title: string): CanvasState =>
+  patchSection(state, id, (s) => ({ ...s, title }));
+
+/** `null` clears the colour back to neutral. Written as a delete so the field is absent
+ *  rather than `undefined` — persisted state round-trips through JSON, which keeps one and
+ *  drops the other, and absent is what a never-coloured section looks like. */
+export function setSectionColor(state: CanvasState, id: string, color: number | null): CanvasState {
+  return patchSection(state, id, (s) => {
+    if (color === null) {
+      const { color: _drop, ...rest } = s;
+      return rest;
+    }
+    return { ...s, color };
+  });
+}
+
+/** Remove the section. What was inside it stays on the plane — deleting a container must
+ *  never delete a running session. */
+export function removeSection(state: CanvasState, id: string): CanvasState {
+  const sections = sectionsOf(state);
+  const kept = sections.filter((s) => s.id !== id);
+  return kept.length === sections.length ? state : { ...state, sections: kept };
+}
+
+/**
+ * Translate an explicit set of things by the same delta — how a section drag moves its
+ * contents.
+ *
+ * The membership is passed IN rather than recomputed, because a drag must use the set
+ * captured when the gesture started: recomputing mid-drag would let items join and leave as
+ * the box swept over them, which reads as the section eating the board.
+ */
+export function translateMany(
+  state: CanvasState,
+  members: Members,
+  dx: number,
+  dy: number,
+): CanvasState {
+  if (dx === 0 && dy === 0) return state;
+  const nodeIds = new Set(members.nodes);
+  const noteIds = new Set(members.notes);
+  const sectionIds = new Set(members.sections);
+  return {
+    ...state,
+    // Index preserved throughout — see the file header.
+    nodes: state.nodes.map((n) => (nodeIds.has(n.ref) ? { ...n, x: n.x + dx, y: n.y + dy } : n)),
+    ...(state.notes === undefined
+      ? {}
+      : {
+          notes: notesOf(state).map((n) =>
+            noteIds.has(n.id) ? { ...n, x: n.x + dx, y: n.y + dy } : n,
+          ),
+        }),
+    ...(state.sections === undefined
+      ? {}
+      : {
+          sections: sectionsOf(state).map((s) =>
+            sectionIds.has(s.id) ? { ...s, x: s.x + dx, y: s.y + dy } : s,
+          ),
+        }),
+  };
+}
+
+/**
+ * Sections back to front: largest first, so a nested section paints over its parent.
+ *
+ * Derived, never stored. A stored z would mean either an order field to maintain or an
+ * array reorder — and reordering is forbidden here, because React reorders DOM to match
+ * list order and a reorder is a reparent, which kills a PTY.
+ */
+export const sectionsByZ = (state: CanvasState): CanvasSection[] =>
+  [...sectionsOf(state)].sort((a, b) => b.w * b.h - a.w * a.h);
+
+/** Gap left between a placed card and its neighbours by `freeNodeSlot`, so two adjacent
+ *  placements don't read as one wide card. */
+const FREE_SLOT_GAP = 24;
+
+/** How far `freeNodeSlot` is willing to spiral out before giving up and overlapping
+ *  anyway — far enough to clear any realistic pile-up without searching forever. */
+const FREE_SLOT_MAX_RING = 24;
+
+/**
+ * Grid offsets (in cells), forming the Nth square ring around the origin — ring 0 is just
+ * the origin itself, ring 1 the eight cells around it, and so on outward.
+ */
+function ringCells(ring: number): Array<[number, number]> {
+  if (ring === 0) return [[0, 0]];
+  const cells: Array<[number, number]> = [];
+  for (let gx = -ring; gx <= ring; gx++) {
+    cells.push([gx, -ring], [gx, ring]);
+  }
+  for (let gy = -ring + 1; gy <= ring - 1; gy++) {
+    cells.push([-ring, gy], [ring, gy]);
+  }
+  return cells;
+}
+
+/**
+ * The nearest free top-left for a `w` x `h` node whose CENTRE is near `(cx, cy)`, walking a
+ * square grid spiral outward one card-width/height at a time until a slot clears every
+ * existing node.
+ *
+ * This is what keeps the attention rail from piling every session it places on top of the
+ * last one: without it, clicking three queued rows in a row from an empty board drops three
+ * near-coincident cards at the same viewport centre, because placing one does not move where
+ * "the centre" is for the next click. Ring 0 is the exact requested centre, so a board with
+ * nothing there yet places exactly where asked; only a crowded centre pushes outward.
+ *
+ * Checked against `state.nodes` only — the sessions already on the board, which is what a
+ * new card would visually stack on. Notes and sections are not obstacles here on purpose;
+ * this exists to stop cards eating each other, not to keep every new card off every note.
+ */
+export function freeNodeSlot(
+  state: CanvasState,
+  cx: number,
+  cy: number,
+  w: number = CARD_W,
+  h: number = CARD_H,
+): { x: number; y: number } {
+  const boxes = state.nodes.map(boxOfNode);
+  const fits = (x: number, y: number) => !boxes.some((b) => intersectsBox({ x, y, w, h }, b));
+  const stepX = w + FREE_SLOT_GAP;
+  const stepY = h + FREE_SLOT_GAP;
+  for (let ring = 0; ring <= FREE_SLOT_MAX_RING; ring++) {
+    for (const [gx, gy] of ringCells(ring)) {
+      const x = cx - w / 2 + gx * stepX;
+      const y = cy - h / 2 + gy * stepY;
+      if (fits(x, y)) return { x, y };
+    }
+  }
+  // Give up avoiding overlap rather than loop forever or refuse to place the card at all.
+  return { x: cx - w / 2, y: cy - h / 2 };
 }

@@ -581,6 +581,30 @@ button {
   vertical-align: -1px;
 }
 
+/* A section's colour picker: a ROW rather than PROJECT_PALETTE's flyout list above —
+   SECTION_PALETTE (canvas.ts) is six colours plus neutral, small enough to show at once
+   without a submenu's hover-and-wait. */
+.canvas-menu-swatches {
+  display: flex;
+  gap: 6px;
+  padding: 4px 9px 6px;
+}
+.canvas-swatch {
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  flex: none;
+  padding: 0;
+  cursor: pointer;
+  border: 2px solid transparent;
+}
+.canvas-swatch.neutral {
+  background: var(--border);
+}
+.canvas-swatch.sel {
+  border-color: var(--text-bright);
+}
+
 .add-bar {
   border-top: 1px solid var(--border);
 }
@@ -803,17 +827,31 @@ button {
   z-index: 1;
   overflow: hidden;
   background: var(--panel-bg);
-  cursor: grab;
+  /* Plain drag marquees now (pan moved to space-drag / middle-drag), so the resting
+     cursor is a plain pointer rather than the "grab" hand that implied panning. */
+  cursor: default;
   /* A dot grid gives pan and zoom something to read against — without it, moving an
      empty region looks like nothing happened. */
   background-image: radial-gradient(circle, var(--border) 1px, transparent 1px);
   background-size: 24px 24px;
 }
 .canvas-underlay.panning { cursor: grabbing; }
+.canvas-underlay.drop-active { outline: 2px dashed var(--accent); outline-offset: -6px; }
+
+/* Rubber-band selection. Screen-space (see CanvasView's marquee div), so it never scales
+   with zoom or slides with pan the way plane content does. */
+.canvas-marquee {
+  position: absolute; border: 1px solid var(--accent); pointer-events: none;
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+}
 .canvas-plane { position: absolute; top: 0; left: 0; transform-origin: 0 0; }
 
 /* In canvas mode the stack is the pannable plane itself, so it shares the underlay's
-   transform. z-index puts it above the frames.
+   TRANSLATE -- but never its scale. The underlay is DOM and SVG, which a transform
+   renders as vectors; the stack holds rasterized glyph atlases, which a transform would
+   resample into blur. So the stack translates only and its children are sized in the
+   plane's own pixels by placeSession (WorkspaceCenter.tsx). z-index puts it above the
+   frames.
 
    pointer-events is the load-bearing line. .term-stack is full-bleed (inset: 0), so
    sitting above the underlay it would hit-test the ENTIRE canvas -- transparent is still
@@ -856,6 +894,9 @@ button {
   box-shadow: 0 4px 14px rgba(0, 0, 0, 0.3);
   overflow: hidden;
 }
+/* Composed with the base drop-shadow above, not a replacement for it — a selected note
+   would otherwise visibly lose its depth. */
+.canvas-note.selected { box-shadow: 0 0 0 2px var(--accent), 0 4px 14px rgba(0, 0, 0, 0.3); }
 
 /* Drag strip. Empty until the note is linked, at which point it names the session — the
    text itself stays the note's content. */
@@ -973,6 +1014,9 @@ button {
 }
 .canvas-card.status-needsInput { border-color: var(--accent); }
 .canvas-card.status-running { border-color: color-mix(in srgb, var(--accent) 45%, var(--border)); }
+/* Composed with the base drop-shadow above, not a replacement for it — a selected card
+   would otherwise visibly lose its depth. */
+.canvas-card.selected { box-shadow: 0 0 0 2px var(--accent), 0 6px 20px rgba(0, 0, 0, 0.35); }
 
 .canvas-card-head {
   display: flex; align-items: center; gap: 7px; flex: none;
@@ -991,6 +1035,28 @@ button {
   padding: 12px 14px;
 }
 .canvas-card-status { font-size: 12px; color: var(--text-mid); }
+
+/* The rich card. Shown below LIVE_ZOOM_MIN and during zoom gestures — i.e. whenever the
+   terminal is hidden — so it has to carry the session's state on its own. DOM text, so it
+   stays crisp at every zoom, which is the whole reason the raster is hidden. */
+.canvas-card-body.rich {
+  display: flex; flex-direction: column; gap: 6px;
+  padding: 8px 10px; overflow: hidden;
+}
+.canvas-card-row { display: flex; align-items: center; gap: 8px; justify-content: space-between; }
+.canvas-card-row.dim { color: var(--text-dim); font-size: 11px; }
+.canvas-card-status { font-size: 11px; letter-spacing: 0.04em; text-transform: uppercase; }
+.canvas-card-status.needsInput { color: var(--amber); }
+.canvas-card-status.running { color: var(--accent); }
+.canvas-card-waited { font-size: 11px; color: var(--amber); }
+.canvas-card-activity {
+  font-size: 12px; color: var(--text-mid);
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
+}
+.canvas-card-project {
+  font-weight: 500; min-width: 0;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
 
 /* Footer strip: the band the terminal deliberately stops above, so the grip stays
    clickable while the node is live. `margin-top: auto` pins it to the bottom whether or
@@ -1032,10 +1098,97 @@ button {
   .canvas-dot.status-running { animation: none; }
 }
 
+/* Sections paint behind everything by document order — see sectionsByZ for why the order is
+   derived rather than stored. The title chip sits ABOVE the box so it stays grabbable when
+   the box is full of cards. */
+.canvas-section { position: absolute; border-radius: 10px; pointer-events: none; }
+.canvas-section-box { position: absolute; inset: 0; border-radius: 10px; border: 2px solid; }
+/* Deliberately above the box, matching Figma, rather than inside it -- inside, it would
+   compete for space with whatever the section holds. The trade: .term-stack is a sibling
+   painted above .canvas-underlay, and each visible .term-host takes pointer-events back
+   (see .term-stack.canvas-mode .term-host.visible), so a card overlapping this strip
+   covers the chip and makes it undraggable there. Known and accepted, not an oversight --
+   and not rare: a 560px card against a chip spanning up to 70% of even the default 900px
+   section width means a card sitting just above a section, or one left outside after a
+   resize, will typically cover it. */
+.canvas-section-title {
+  position: absolute; top: -26px; left: 0; pointer-events: auto; cursor: grab;
+  font-size: 12px; font-weight: 600; padding: 3px 10px; border-radius: 6px;
+  color: #fff; white-space: nowrap; max-width: 70%; overflow: hidden; text-overflow: ellipsis;
+}
+.canvas-section-title.editing { pointer-events: auto; border: none; outline: none; font: inherit; color: #fff; }
+.canvas-section.selected .canvas-section-box { box-shadow: 0 0 0 2px var(--accent); }
+.canvas-section-grip {
+  position: absolute; right: -6px; bottom: -6px; width: 14px; height: 14px;
+  pointer-events: auto; cursor: nwse-resize; border-radius: 3px; background: var(--border);
+}
+
 .canvas-empty {
   position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
   font-size: 12px; color: var(--text-dim); pointer-events: none;
 }
+
+/* ---- Attention rail + edge pips ------------------------------------------------------
+   Both are mounted by WorkspaceCenter as SIBLINGS of .term-stack, never inside
+   .canvas-underlay -- see CanvasRail.tsx's own doc comment for why nesting them in the
+   underlay's stacking context (z-index 1) would trap them behind every terminal
+   (.term-stack.canvas-mode, z-index 2). The rail is a cross-project QUEUE filtered to
+   "waiting on you" -- not a second sidebar, which is a project-grouped tree of everything. */
+.canvas-rail {
+  /* This 240px is the ONE declaration of the rail's width -- CanvasRail.tsx measures it
+     back off the rendered element (getBoundingClientRect) rather than repeating the number,
+     so the geometry it feeds to edgePips/cameraFor (the visible board = viewport minus this
+     width) can never drift out of sync with what is actually painted here. Change this
+     value freely; nothing else needs to change with it. */
+  position: absolute; top: var(--tabstrip-h); right: 0; bottom: 0; width: 240px; z-index: 4;
+  background: var(--panel-bg); border-left: 1px solid var(--border);
+  display: flex; flex-direction: column; overflow-y: auto;
+}
+.canvas-rail-head {
+  flex: none; padding: 8px 10px; font-size: 10px; letter-spacing: 0.06em; text-transform: uppercase;
+  color: var(--text-dim); border-bottom: 1px solid var(--border);
+}
+.canvas-rail-empty {
+  padding: 14px 10px; font-size: 12px; color: var(--text-dim);
+}
+.canvas-rail-row {
+  display: flex; align-items: center; gap: 8px; padding: 8px 10px; cursor: pointer;
+  border-bottom: 1px solid var(--border);
+}
+.canvas-rail-row:hover { background: var(--hover); }
+.canvas-rail-name {
+  flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font-size: 12px; color: var(--text-hi);
+}
+.canvas-rail-project {
+  flex: none; max-width: 64px; font-size: 11px; color: var(--text-dim);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.canvas-rail-waited { margin-left: auto; flex: none; font-size: 11px; color: var(--amber); }
+
+/* Screen-space, positioned to match .canvas-underlay's own box exactly so a pip's (x, y)
+   -- computed against `boardViewport` (CanvasRail.tsx): the viewport's clientWidth/Height
+   narrowed by the rail's own measured width -- lands where that geometry says. A card
+   sitting behind the opaque rail is therefore correctly OFF screen and gets a pip pinned
+   at the rail's left edge pointing at it, rather than being silently exempted from the
+   whole reason pips exist. Above .term-stack.canvas-mode (z-index 2): the one thing on the
+   board that must outrank a terminal, since a pip's whole job is being seen. */
+.canvas-pip-layer {
+  position: absolute; top: var(--tabstrip-h); left: 0; right: 0; bottom: 0;
+  z-index: 5; pointer-events: none;
+}
+.canvas-pip {
+  position: absolute; pointer-events: auto; cursor: pointer;
+  width: 18px; height: 18px; display: flex; align-items: center; justify-content: center;
+}
+.canvas-pip-arrow {
+  width: 0; height: 0;
+  border-top: 6px solid transparent;
+  border-bottom: 6px solid transparent;
+  border-left: 11px solid var(--pip-tint, var(--accent));
+  filter: drop-shadow(0 1px 2px rgba(0, 0, 0, 0.4));
+}
+
 .board-view { flex: 1; display: flex; flex-direction: column; min-width: 0; }
 
 .board-toolbar {

@@ -40,6 +40,16 @@ exactly as they do in a normal terminal.
   repos can sit side by side. When panes hold more than one project, every tab carries its
   project's name and colour and each pane wears that colour along its top edge. Watch
   **multiple live agent sessions at once**.
+- **A global orchestration board** (`Cmd/Ctrl+Shift+C`) — a single canvas spanning every
+  project, built by hand: drag sessions onto it from the sidebar and arrange them where
+  they mean something (nothing is placed for you). Draw titled, coloured **sections** to
+  group sessions and drag a section to move everything inside it. Click or rubber-band
+  **select**, move several sessions at once, and **undo/redo**. An **attention rail** lists
+  every session waiting on you across every project, sorted by how long, with edge markers
+  pointing at the ones currently off screen — click either to fly the camera there. Zoom in
+  or out and terminals stay sharp at every level (they redraw at the zoomed size instead of
+  stretching a bitmap) without ever rewrapping a running agent's output; zoomed-out cards
+  show the session's live status, wait time, project, and context use.
 - **Real terminals, kept alive** — each session runs the genuine agent CLI in a
   PTY. Switching tabs, splitting groups, or switching projects never restarts it;
   reloading the window re-attaches to the running process.
@@ -220,6 +230,8 @@ Updates are Developer ID–signed, notarized, and minisign-verified before insta
 | Agent **routing** — task kind → ordered agent/model chain     | `src-tauri/src/routing.rs`, `src/routing.ts`        |
 | Usage meter semantics (shared by the panel and the router)    | `src/usageRows.ts`                                  |
 | Pure workspace-layout transforms (split/move/repair/drag)     | `src/layout.ts`                                     |
+| Global orchestration board — geometry, sections, undo, attention | `src/canvas.ts`, `src/canvasHistory.ts`, `src/canvasAttention.ts`, `src/terminalZoom.ts` |
+| Orchestration board UI — canvas, sections, rail/edge pips     | `src/components/CanvasView.tsx`, `src/components/CanvasSection.tsx`, `src/components/CanvasRail.tsx` |
 | Local LLM servers — detect / list models / tool-call probe    | `src-tauri/src/local_llm.rs`                       |
 | Mobile companion WebSocket bridge                             | `src-tauri/src/bridge.rs`                           |
 | Git metadata + branch graph data                              | `src-tauri/src/git.rs`                              |

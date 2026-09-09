@@ -1,4 +1,4 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useLayoutEffect, useRef } from "react";
 import { Terminal as Xterm, type ILink, type IDisposable } from "@xterm/xterm";
 import {
   cellFromPoint,
@@ -14,6 +14,7 @@ import { invoke, Channel } from "@tauri-apps/api/core";
 import { currentTerminalTheme, registerTerminal } from "../themes";
 import { useStore, type SessionRole } from "../store";
 import { SessionChat } from "./SessionChat";
+import { fontForZoom } from "../terminalZoom";
 
 function b64ToBytes(b64: string): Uint8Array {
   const bin = atob(b64);
@@ -24,7 +25,7 @@ function b64ToBytes(b64: string): Uint8Array {
 
 // Base terminal font size; the View-menu zoom offsets it (editors scale from their own
 // 12px base in CodeEditorPane — the two surfaces deliberately keep their 1px gap).
-const TERM_BASE_FONT = 13;
+export const TERM_BASE_FONT = 13;
 
 interface Props {
   sessionId: string;
@@ -63,6 +64,15 @@ interface Props {
   onFocusGroup?: () => void;
   /** Positioning applied to the host (e.g. left/width % for the active group's slot). */
   style?: React.CSSProperties;
+  /**
+   * Canvas zoom, when this terminal is being placed by the canvas.
+   *
+   * Undefined everywhere else, which is what keeps pane mode byte-for-byte unchanged.
+   * The canvas sizes the host box in SCREEN pixels (`logical × canvasScale`) and carries
+   * no `scale()` transform, so the glyphs must be rasterized at `base × canvasScale` or
+   * they would be the wrong size rather than merely soft.
+   */
+  canvasScale?: number;
 }
 
 /**
@@ -85,6 +95,7 @@ export function TerminalView({
   focusOnReveal = true,
   onFocusGroup,
   style,
+  canvasScale,
 }: Props) {
   // Feature switch AND per-session state: the toggle only exists when the preference is
   // on, and only covers the sessions the user actually opened it for.
@@ -343,7 +354,11 @@ export function TerminalView({
       const k = e.key.toLowerCase();
       // Copy
       if (k === "c" && !e.altKey) {
-        const macCopy = isMac && e.metaKey && !e.ctrlKey;
+        // !e.shiftKey: Cmd+C is the only mac copy binding -- nobody copies with
+        // Cmd+Shift+C -- so excluding it here costs nothing and closes the one remaining
+        // overlap with the canvas toggle (Cmd/Ctrl+Shift+C), which on mac now relies on
+        // this NOT firing rather than on a blanket terminal guard (see App.tsx).
+        const macCopy = isMac && e.metaKey && !e.ctrlKey && !e.shiftKey;
         const winCopyShift = !isMac && e.ctrlKey && e.shiftKey;
         const winCopySmart = !isMac && e.ctrlKey && !e.shiftKey && term.hasSelection();
         if (macCopy || winCopyShift || winCopySmart) {
@@ -485,19 +500,34 @@ export function TerminalView({
     fitRef.current = fit;
 
     // Re-fit when the host area changes size (window resize, panel toggles).
+    //
+    // On the canvas the box is `logical × zoom`, so a ZOOM changes it too — and refitting
+    // for a zoom is exactly what must not happen: it renegotiates cols/rows with the PTY
+    // and reflows the agent's output. The box and the font scale by the same factor, so
+    // the grid is already correct; only a change in the LOGICAL size (the resize grip)
+    // is a real resize — see `fitInputsChanged`, which every fit path below asks.
     const ro = new ResizeObserver(() => {
       if (!visibleRef.current) return;
+      if (!fitInputsChanged()) return;
       scheduleFit();
     });
     if (innerRef.current) ro.observe(innerRef.current);
 
     // Web fonts can settle after first paint, changing cell metrics — refit then.
+    //
+    // Deliberately NOT behind fitInputsChanged(): this is a font-FAMILY metrics change (the
+    // fallback face swapping for the real one), not a box or base-font-size change, so the
+    // gate cannot see it and would wrongly skip, leaving the terminal on cols computed from
+    // the fallback font's cell width for the rest of its life. Fires once, at startup.
     void document.fonts?.ready.then(() => {
       if (visibleRef.current) scheduleFit();
     });
 
+    // Window resize (including fullscreen / Stage Manager) — same gate as the ResizeObserver
+    // above, and for the same reason: at a non-1 canvas zoom the box moves without the logical
+    // size moving, and refitting there is the PTY-reflow-on-zoom bug arriving another way.
     const onWinResize = () => {
-      if (visibleRef.current) scheduleFit();
+      if (visibleRef.current && fitInputsChanged()) scheduleFit();
     };
     window.addEventListener("resize", onWinResize);
 
@@ -538,6 +568,19 @@ export function TerminalView({
 
   // Track latest `visible` for the ResizeObserver closure.
   const visibleRef = useRef(visible);
+
+  // Read by the ResizeObserver closure, which is created once. A layout effect so the ref
+  // is current before the browser can deliver a resize for the box this scale just changed.
+  const canvasScaleRef = useRef(canvasScale);
+  useLayoutEffect(() => {
+    canvasScaleRef.current = canvasScale;
+  }, [canvasScale]);
+
+  /** The logical size AND base font size this terminal last fitted at. Both, because a fit's
+   *  result depends on the box and the cell metrics, and only one of the two things that
+   *  change `options.fontSize` should cause a refit — see fitInputsChanged. */
+  const lastFitRef = useRef<{ w: number; h: number; base: number } | null>(null);
+
   useEffect(() => {
     visibleRef.current = visible;
     if (!visible) return;
@@ -546,8 +589,30 @@ export function TerminalView({
     if (!term || !fit) return;
 
     requestAnimationFrame(() => {
+      // The font-zoom effect skips a hidden terminal (see its own guard) so as not to
+      // rebuild an atlas nobody is looking at. Apply that pending size now, BEFORE the fit
+      // gate below reads the base font -- otherwise a fit that does run here would compute
+      // cols/rows from the stale cell metrics this pane still had while backgrounded.
+      const base = TERM_BASE_FONT + useStore.getState().fontZoom;
+      const wanted =
+        canvasScaleRef.current === undefined ? base : fontForZoom(canvasScaleRef.current, base);
+      if (term.options.fontSize !== wanted) term.options.fontSize = wanted;
+
+      // Gated the same way as every other fit path: on the canvas `visible` toggles on
+      // every zoom step and every pan that scrolls a card in or out (viewport culling), so
+      // an unconditional fit() here would reflow a running agent on a reveal that never
+      // changed its logical size or base font.
+      if (fitInputsChanged()) {
+        try {
+          fit.fit();
+        } catch {
+          /* not measurable yet */
+        }
+      }
+      // A pane that was hidden mid-frame can come back showing a stale composite -- the
+      // same failure a re-attach has. Cheap, and only on the transition to visible.
       try {
-        fit.fit();
+        term.refresh(0, term.rows - 1);
       } catch {
         /* not measurable yet */
       }
@@ -568,8 +633,20 @@ export function TerminalView({
       // terminal is behind the chat pane, so focusing it would put the caret somewhere
       // invisible and swallow the next thing typed.
       if (focusOnReveal && !chatOpenRef.current) term.focus();
-      // Late fallback: catch layout/font settling after the first frame.
-      window.setTimeout(() => scheduleFit(), 120);
+      // Late fallback: catches a fit whose inputs settle AFTER the first frame -- the
+      // gate must be evaluated INSIDE the timeout callback, not before it, or it would
+      // just re-read the same DOM/store state the immediate fit above already saw and
+      // could never answer differently. The reason this exists at all, traced against
+      // docs/superpowers/specs/2026-07-07-editor-polish-tier2-design.md §6: the View-menu
+      // font zoom skips fitting a HIDDEN terminal (see that effect's own comment), so a
+      // zoom applied while this pane was backgrounded leaves cols/rows stale until reveal
+      // -- this is "the existing reveal-refit path" that design doc names. Gated the same
+      // as the fit above, and for the same reason: a canvas zoom changes neither the box
+      // nor the base font, so it still never fires here, but a base-font change made while
+      // hidden does and must still be corrected on reveal.
+      window.setTimeout(() => {
+        if (fitInputsChanged()) scheduleFit();
+      }, 120);
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [visible, dirReady, stopped]);
@@ -659,20 +736,68 @@ export function TerminalView({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [stopped]);
 
-  // App-wide font zoom (View menu). Setting options.fontSize changes cell metrics
-  // WITHOUT firing the ResizeObserver (the host box is unchanged), so cols/rows must
-  // be renegotiated with the PTY explicitly. Hidden keep-alive terminals skip the fit
-  // (0×0 hazard) and pick the new size up through the reveal-refit path.
+  // App-wide font zoom (View menu) and canvas zoom, which reach the terminal the same way:
+  // by changing the rasterized glyph size rather than by scaling a finished bitmap.
+  //
+  // Outside the canvas, setting options.fontSize changes cell metrics WITHOUT firing the
+  // ResizeObserver (the host box is unchanged), so cols/rows must be renegotiated with the
+  // PTY explicitly. ON the canvas the opposite holds and the fit must be skipped: the box
+  // already scaled by the same factor, so the grid is right, and refitting would only add
+  // +/-1 drift from font-metric rounding -- which resizes the PTY and reflows the agent.
+  // Hidden keep-alive terminals skip the fit (0x0 hazard) and pick the new size up through
+  // the reveal-refit path.
+  //
+  // The immediate scheduleFit() below goes through fitInputsChanged() like every other fit
+  // path, so the gate's baseline never goes stale behind its back -- a fit that fires
+  // without updating lastFitRef is what makes a future caller wrongly think a base change
+  // is still pending and refit again for nothing. On the canvas canvasScale === undefined
+  // short-circuits first, so the gate is never even consulted there; a base-font change on
+  // a canvas terminal is still picked up one reveal later, which is correct -- a base
+  // change is a real metrics change and does deserve a fit, unlike a zoom.
   const fontZoom = useStore((s) => s.fontZoom);
   useEffect(() => {
     const term = termRef.current;
     if (!term) return;
-    const size = TERM_BASE_FONT + fontZoom;
+    const base = TERM_BASE_FONT + fontZoom;
+    const size = canvasScale === undefined ? base : fontForZoom(canvasScale, base);
     if (term.options.fontSize === size) return;
+    // A hidden terminal picks the size up on reveal (below). Setting it here would rebuild
+    // the glyph atlas for a pane nobody is looking at, which is exactly the cost the
+    // canvas's culling exists to avoid.
+    if (!visibleRef.current) return;
     term.options.fontSize = size;
-    if (visibleRef.current) scheduleFit();
+    if (canvasScale === undefined && visibleRef.current && fitInputsChanged()) scheduleFit();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [fontZoom]);
+  }, [fontZoom, canvasScale]);
+
+  /**
+   * Would a fit be answering a real change?
+   *
+   * Two inputs decide a fit's outcome: the host's LOGICAL (unscaled) box, and the cell
+   * metrics, which follow the BASE font size. A canvas zoom moves neither — it scales the box
+   * and the effective font by the same factor, so cols/rows are already correct and refitting
+   * would only add +/-1 drift that resizes the PTY and reflows the agent. A resize grip moves
+   * the box; a View-menu font zoom moves the base. Both of those are real.
+   *
+   * Baselining the EFFECTIVE font here instead of the base would fire on every canvas zoom,
+   * which is exactly the reflow this gate exists to prevent.
+   *
+   * Updates the baseline when it answers true, so a caller that then fits stays in step.
+   */
+  function fitInputsChanged(): boolean {
+    const el = innerRef.current;
+    if (!el) return true; // not measurable — fit, exactly as before this gate existed
+    const scale = canvasScaleRef.current || 1; // `||`, not `??`: a 0 scale would divide to Infinity
+    const w = el.clientWidth / scale;
+    const h = el.clientHeight / scale;
+    const base = TERM_BASE_FONT + useStore.getState().fontZoom;
+    const last = lastFitRef.current;
+    if (last && last.base === base && Math.abs(last.w - w) < 1 && Math.abs(last.h - h) < 1) {
+      return false;
+    }
+    lastFitRef.current = { w, h, base };
+    return true;
+  }
 
   function scheduleFit() {
     if (disposedRef.current) return;

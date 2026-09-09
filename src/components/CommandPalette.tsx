@@ -109,16 +109,18 @@ function buildCommands(close: () => void): Command[] {
       () => st.setCenterMode(project.id, mode === "board" ? "terminals" : "board"),
       { section: "View" },
     );
-    act(
-      "view-canvas",
-      mode === "canvas" ? "Hide canvas" : "Show canvas",
-      () => st.setCenterMode(project.id, mode === "canvas" ? "terminals" : "canvas"),
-      { section: "View" },
-    );
     act("view-maximize", "Toggle maximized pane", () => st.toggleMaximizeGroup(project.id), {
       section: "View",
     });
   }
+  // The canvas is the one global surface (⇧⌘C) — not project-scoped like the task board
+  // above, so this offers regardless of whether a project is selected.
+  act(
+    "view-canvas",
+    st.canvasOpen ? "Hide canvas" : "Show canvas",
+    () => st.setCanvasOpen(!st.canvasOpen),
+    { section: "View" },
+  );
   act("view-sidebar", st.sidebarCollapsed ? "Show sidebar" : "Hide sidebar", () => st.toggleSidebar(), {
     section: "View",
   });

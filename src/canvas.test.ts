@@ -8,97 +8,163 @@ import {
   MIN_NOTE_W,
   NOTE_H,
   NOTE_W,
+  SECTION_MIN_H,
+  SECTION_MIN_W,
+  addNodeAt,
   addNote,
+  addSection,
+  freeNodeSlot,
+  intersectsBox,
   linkEndpoints,
   linkNote,
+  membersOf,
+  migrateNotes,
   moveNote,
   nodeH,
   nodeW,
   notesOf,
+  pruneCanvas,
+  removeNode,
   removeNote,
+  removeSection,
   resizeNode,
   resizeNote,
+  resizeSection,
+  sectionsByZ,
+  sectionsOf,
   setNoteText,
+  setSectionColor,
+  setSectionTitle,
   toCanvasPoint,
+  translateMany,
   MAX_ZOOM,
   MIN_ZOOM,
   clampZoom,
   emptyCanvas,
   fit,
   moveNode,
-  reconcile,
   toCanvasDelta,
   zoomAt,
+  type CanvasState,
 } from "./canvas";
 
-const at = (ref: string, x: number, y: number) => ({ ref, x, y });
+const at = (ref: string, x: number, y: number) => ({ ref, projectId: "p1", x, y });
+const node = (ref: string, projectId: string, x: number, y: number) => ({ ref, projectId, x, y });
 
-describe("reconcile", () => {
-  it("places every session that has no node yet", () => {
-    const s = reconcile(emptyCanvas(), ["a", "b"]);
-    expect(s.nodes.map((n) => n.ref)).toEqual(["a", "b"]);
-    expect(s.nodes[0]).not.toEqual(s.nodes[1]);
+describe("pruneCanvas", () => {
+  it("drops nodes whose session is gone and keeps the rest in order", () => {
+    const s: CanvasState = {
+      ...emptyCanvas(),
+      nodes: [node("a", "p1", 0, 0), node("b", "p2", 100, 0), node("c", "p1", 200, 0)],
+    };
+    const out = pruneCanvas(s, new Set(["a", "c"]));
+    expect(out.nodes.map((n) => n.ref)).toEqual(["a", "c"]);
   });
 
-  it("drops nodes whose session is gone", () => {
-    const s = reconcile({ ...emptyCanvas(), nodes: [at("a", 0, 0), at("b", 0, 0)] }, ["b"]);
-    expect(s.nodes.map((n) => n.ref)).toEqual(["b"]);
+  it("never places a session that has no node", () => {
+    const out = pruneCanvas(emptyCanvas(), new Set(["a", "b"]));
+    expect(out.nodes).toEqual([]);
   });
 
-  it("keeps hand-placed positions untouched", () => {
-    const placed = { ...emptyCanvas(), nodes: [at("a", 999, 777)] };
-    expect(reconcile(placed, ["a"]).nodes[0]).toEqual(at("a", 999, 777));
+  it("returns the SAME object when nothing changed", () => {
+    const s: CanvasState = { ...emptyCanvas(), nodes: [node("a", "p1", 0, 0)] };
+    expect(pruneCanvas(s, new Set(["a"]))).toBe(s);
   });
 
-  it("preserves node ORDER when a session is added", () => {
-    // Load-bearing: the renderer keys by session id and React reorders DOM to match list
-    // order. A reorder is a reparent, and a reparent kills the PTY.
-    const s0 = reconcile(emptyCanvas(), ["a", "b", "c"]);
-    const s1 = reconcile(s0, ["a", "b", "c", "d"]);
-    expect(s1.nodes.map((n) => n.ref)).toEqual(["a", "b", "c", "d"]);
+  it("keeps a note whose linked session is gone, and drops only the link", () => {
+    let s = addNote(emptyCanvas(), "n1", 0, 0);
+    s = linkNote(s, "n1", "gone");
+    const out = pruneCanvas(s, new Set<string>());
+    expect(notesOf(out)).toHaveLength(1);
+    expect(notesOf(out)[0].linkedRef).toBeUndefined();
+  });
+});
+
+describe("addNodeAt / removeNode", () => {
+  it("adds a node carrying its project", () => {
+    const s = addNodeAt(emptyCanvas(), "a", "p1", 40, 60);
+    expect(s.nodes).toEqual([{ ref: "a", projectId: "p1", x: 40, y: 60 }]);
   });
 
-  it("preserves the order of survivors when one is removed", () => {
-    const s0 = reconcile(emptyCanvas(), ["a", "b", "c"]);
-    const s1 = reconcile(s0, ["a", "c"]);
-    expect(s1.nodes.map((n) => n.ref)).toEqual(["a", "c"]);
+  it("is idempotent — a session already on the board is not duplicated", () => {
+    const s = addNodeAt(addNodeAt(emptyCanvas(), "a", "p1", 0, 0), "a", "p1", 500, 500);
+    expect(s.nodes).toHaveLength(1);
+    expect(s.nodes[0].x).toBe(0);
   });
 
-  it("does not auto-place on top of a hand-placed card", () => {
-    // Someone dragged "a" onto the origin slot; "b" must land somewhere else.
-    const s = reconcile({ ...emptyCanvas(), nodes: [at("a", 0, 0)] }, ["a", "b"]);
-    const b = s.nodes.find((n) => n.ref === "b")!;
-    expect([b.x, b.y]).not.toEqual([0, 0]);
+  it("preserves insertion order across multiple additions", () => {
+    // Load-bearing per the file header: the renderer keys nodes by session id in array
+    // order, and React reorders DOM to match — a reorder is a reparent that kills the PTY.
+    let s = addNodeAt(emptyCanvas(), "a", "p1", 0, 0);
+    s = addNodeAt(s, "b", "p1", 100, 0);
+    s = addNodeAt(s, "c", "p1", 200, 0);
+    expect(s.nodes.map((n) => n.ref)).toEqual(["a", "b", "c"]);
   });
 
-  it("is idempotent", () => {
-    const once = reconcile(emptyCanvas(), ["a", "b", "c"]);
-    expect(reconcile(once, ["a", "b", "c"])).toEqual(once);
+  it("removes a node without touching notes", () => {
+    let s = addNodeAt(emptyCanvas(), "a", "p1", 0, 0);
+    s = addNote(s, "n1", 10, 10);
+    const out = removeNode(s, "a");
+    expect(out.nodes).toEqual([]);
+    expect(notesOf(out)).toHaveLength(1);
+  });
+
+  it("returns the SAME object when removing something absent", () => {
+    const s = emptyCanvas();
+    expect(removeNode(s, "nope")).toBe(s);
+  });
+});
+
+describe("migrateNotes", () => {
+  it("carries every project's notes onto one plane, offset so they do not overlap", () => {
+    const p1: CanvasState = { ...addNote(emptyCanvas(), "n1", 0, 0), nodes: [] };
+    const p2: CanvasState = { ...addNote(emptyCanvas(), "n2", 0, 0), nodes: [] };
+    const out = migrateNotes({ alpha: p1, beta: p2 });
+    expect(notesOf(out).map((n) => n.id).sort()).toEqual(["n1", "n2"]);
+    const ys = notesOf(out).map((n) => n.y);
+    expect(new Set(ys).size).toBe(2);
+  });
+
+  it("carries no nodes — their placements were auto-generated", () => {
+    const p1: CanvasState = { ...emptyCanvas(), nodes: [node("a", "alpha", 0, 0)] };
+    expect(migrateNotes({ alpha: p1 }).nodes).toEqual([]);
+  });
+
+  it("drops a link, since the note's session may not be on the new board", () => {
+    let p1 = addNote(emptyCanvas(), "n1", 0, 0);
+    p1 = linkNote(p1, "n1", "a");
+    expect(notesOf(migrateNotes({ alpha: p1 }))[0].linkedRef).toBeUndefined();
   });
 });
 
 describe("moveNode", () => {
   it("moves without changing the node's index", () => {
-    const s0 = reconcile(emptyCanvas(), ["a", "b", "c"]);
+    const s0: CanvasState = {
+      ...emptyCanvas(),
+      nodes: [node("a", "p1", 0, 0), node("b", "p1", 100, 0), node("c", "p1", 200, 0)],
+    };
     const s1 = moveNode(s0, "b", 500, 500);
     expect(s1.nodes.map((n) => n.ref)).toEqual(["a", "b", "c"]);
     expect(s1.nodes[1]).toEqual(at("b", 500, 500));
   });
 
   it("returns the same object when nothing moved", () => {
-    const s0 = reconcile(emptyCanvas(), ["a"]);
+    const s0: CanvasState = { ...emptyCanvas(), nodes: [node("a", "p1", 0, 0)] };
     expect(moveNode(s0, "a", s0.nodes[0].x, s0.nodes[0].y)).toBe(s0);
   });
 
   it("ignores an unknown ref", () => {
-    const s0 = reconcile(emptyCanvas(), ["a"]);
+    const s0: CanvasState = { ...emptyCanvas(), nodes: [node("a", "p1", 0, 0)] };
     expect(moveNode(s0, "nope", 1, 1)).toBe(s0);
   });
 });
 
 describe("resizeNode", () => {
   it("resizes without moving the node or changing its index", () => {
-    const s0 = reconcile(emptyCanvas(), ["a", "b", "c"]);
+    const s0: CanvasState = {
+      ...emptyCanvas(),
+      nodes: [node("a", "p1", 0, 0), node("b", "p1", 100, 0), node("c", "p1", 200, 0)],
+    };
     const before = s0.nodes[1];
     const s1 = resizeNode(s0, "b", 700, 500);
     expect(s1.nodes.map((n) => n.ref)).toEqual(["a", "b", "c"]);
@@ -108,28 +174,32 @@ describe("resizeNode", () => {
   });
 
   it("clamps to a size whose terminal still has usable columns", () => {
-    const s0 = reconcile(emptyCanvas(), ["a"]);
+    const s0: CanvasState = { ...emptyCanvas(), nodes: [node("a", "p1", 0, 0)] };
     const s1 = resizeNode(s0, "a", 10, 10);
     expect([nodeW(s1.nodes[0]), nodeH(s1.nodes[0])]).toEqual([MIN_CARD_W, MIN_CARD_H]);
   });
 
   it("returns the same object when the size did not change", () => {
-    const s0 = reconcile(emptyCanvas(), ["a"]);
+    const s0: CanvasState = { ...emptyCanvas(), nodes: [node("a", "p1", 0, 0)] };
     expect(resizeNode(s0, "a", CARD_W, CARD_H)).toBe(s0);
     expect(resizeNode(s0, "nope", 400, 400)).toBe(s0);
   });
 
   it("defaults an un-resized node to the card size", () => {
-    const s0 = reconcile(emptyCanvas(), ["a"]);
+    const s0: CanvasState = { ...emptyCanvas(), nodes: [node("a", "p1", 0, 0)] };
     expect(nodeW(s0.nodes[0])).toBe(CARD_W);
     expect(nodeH(s0.nodes[0])).toBe(CARD_H);
   });
 
-  it("survives a reconcile", () => {
-    // Resizing then adding a session must not reset the size — `reconcile` spreads the
-    // node, so this is really a guard against a future rewrite that rebuilds nodes.
-    const s0 = resizeNode(reconcile(emptyCanvas(), ["a"]), "a", 800, 600);
-    const s1 = reconcile(s0, ["a", "b"]);
+  it("survives a pruneCanvas call", () => {
+    // Resizing then pruning must not reset the size — pruneCanvas spreads the node array,
+    // so this is really a guard against a future rewrite that rebuilds nodes. "c" is left
+    // out of the live set so a real rebuild happens, not the identity fast path.
+    let s0 = resizeNode(addNodeAt(emptyCanvas(), "a", "p1", 0, 0), "a", 800, 600);
+    s0 = addNodeAt(s0, "b", "p1", 100, 0);
+    s0 = addNodeAt(s0, "c", "p1", 200, 0);
+    const s1 = pruneCanvas(s0, new Set(["a", "b"]));
+    expect(s1.nodes.map((n) => n.ref)).toEqual(["a", "b"]);
     const a = s1.nodes.find((n) => n.ref === "a")!;
     expect([nodeW(a), nodeH(a)]).toEqual([800, 600]);
   });
@@ -160,7 +230,10 @@ describe("fit", () => {
   it("accounts for a resized node's real extent", () => {
     // fit() used to assume every node was CARD_W x CARD_H; a widened node would then hang
     // off the right edge of a "fitted" view.
-    const wide = { ...emptyCanvas(), nodes: [{ ref: "a", x: 0, y: 0, w: 1600, h: 900 }] };
+    const wide = {
+      ...emptyCanvas(),
+      nodes: [{ ref: "a", projectId: "p1", x: 0, y: 0, w: 1600, h: 900 }],
+    };
     const s = fit(wide, 800, 600);
     expect(1600 * s.zoom + s.pan.x).toBeLessThanOrEqual(800.001);
     expect(900 * s.zoom + s.pan.y).toBeLessThanOrEqual(600.001);
@@ -238,11 +311,11 @@ describe("sticky notes", () => {
     expect(notesOf(s).map((n) => n.id)).toEqual(["b"]);
   });
 
-  it("survives a reconcile, which owns sessions and must not touch notes", () => {
-    // The reason notes are a separate array: reconcile drops nodes whose session is gone,
+  it("survives a pruneCanvas call, which owns sessions and must not touch notes", () => {
+    // The reason notes are a separate array: pruneCanvas drops nodes whose session is gone,
     // and a note has no session to be gone.
-    const s = addNote(reconcile(emptyCanvas(), ["s1"]), "n1", 40, 40);
-    const after = reconcile(s, []);
+    const s = addNote(addNodeAt(emptyCanvas(), "s1", "p1", 0, 0), "n1", 40, 40);
+    const after = pruneCanvas(s, new Set());
     expect(after.nodes).toEqual([]);
     expect(notesOf(after)).toHaveLength(1);
   });
@@ -265,7 +338,13 @@ describe("sticky notes", () => {
 });
 
 describe("note links", () => {
-  const withNote = () => addNote(reconcile(emptyCanvas(), ["s1", "s2"]), "n1", 0, 0);
+  const withNote = () =>
+    addNote(
+      { ...emptyCanvas(), nodes: [node("s1", "p1", 0, 0), node("s2", "p1", 100, 0)] },
+      "n1",
+      0,
+      0,
+    );
 
   it("points a note at a session and back at nothing", () => {
     let s = linkNote(withNote(), "n1", "s1");
@@ -291,35 +370,44 @@ describe("note links", () => {
     // The note is the user's writing and is never ours to delete. The link points at
     // something that no longer exists, and a tether to nowhere is worse than none.
     const s = linkNote(withNote(), "n1", "s1");
-    const after = reconcile(s, ["s2"]);
+    const after = pruneCanvas(s, new Set(["s2"]));
     expect(notesOf(after)).toHaveLength(1);
     expect(notesOf(after)[0].text).toBe("");
     expect("linkedRef" in notesOf(after)[0]).toBe(false);
   });
 
-  it("leaves a live link alone across a reconcile", () => {
+  it("leaves a live link alone across a pruneCanvas call", () => {
     const s = linkNote(withNote(), "n1", "s1");
-    expect(notesOf(reconcile(s, ["s1", "s2"]))[0].linkedRef).toBe("s1");
+    expect(notesOf(pruneCanvas(s, new Set(["s1", "s2"])))[0].linkedRef).toBe("s1");
   });
 
-  it("still reconciles a canvas that has no notes at all", () => {
-    const s = reconcile(emptyCanvas(), ["s1"]);
-    expect(reconcile(s, ["s1"])).toEqual(s);
-    expect(s.notes).toBeUndefined();
+  it("still prunes a canvas that has no notes at all", () => {
+    // Two nodes and a live set with only one of them forces a real rebuild — the identity
+    // fast path would let `out.notes` pass by never having been touched at all.
+    const s: CanvasState = {
+      ...emptyCanvas(),
+      nodes: [node("s1", "p1", 0, 0), node("s2", "p1", 100, 0)],
+    };
+    const out = pruneCanvas(s, new Set(["s1"]));
+    expect(out.nodes.map((n) => n.ref)).toEqual(["s1"]);
+    // Absent, not undefined-by-key: a rebuilt canvas with no notes must not grow a `notes`
+    // key, since persisted state round-trips through JSON and an absent key is what marks
+    // a canvas that predates notes.
+    expect(out.notes).toBeUndefined();
   });
 });
 
 describe("linkEndpoints", () => {
   it("runs centre to centre, which the boxes then clip by painting over it", () => {
     const note = { id: "n", x: 0, y: 0, w: 200, h: 100, text: "" };
-    const node = { ref: "s", x: 400, y: 300, w: 600, h: 400 };
-    expect(linkEndpoints(note, node)).toEqual({ x1: 100, y1: 50, x2: 700, y2: 500 });
+    const n = { ref: "s", projectId: "p1", x: 400, y: 300, w: 600, h: 400 };
+    expect(linkEndpoints(note, n)).toEqual({ x1: 100, y1: 50, x2: 700, y2: 500 });
   });
 
   it("uses the default card size for a node that was never resized", () => {
     const note = { id: "n", x: 0, y: 0, w: 100, h: 100, text: "" };
-    const node = { ref: "s", x: 0, y: 0 };
-    expect(linkEndpoints(note, node)).toEqual({
+    const n = { ref: "s", projectId: "p1", x: 0, y: 0 };
+    expect(linkEndpoints(note, n)).toEqual({
       x1: 50,
       y1: 50,
       x2: CARD_W / 2,
@@ -348,5 +436,188 @@ describe("misc", () => {
   it("scales a drag delta by zoom so the card tracks the cursor", () => {
     expect(toCanvasDelta(100, 50, 2)).toEqual({ dx: 50, dy: 25 });
     expect(toCanvasDelta(100, 50, 0.5)).toEqual({ dx: 200, dy: 100 });
+  });
+});
+
+describe("sections", () => {
+  const withSection = () => addSection(emptyCanvas(), "s1", 0, 0, 800, 600, "Auth");
+
+  it("adds a section with a title and no colour", () => {
+    const s = withSection();
+    expect(sectionsOf(s)).toHaveLength(1);
+    expect(sectionsOf(s)[0]).toMatchObject({ id: "s1", x: 0, y: 0, w: 800, h: 600, title: "Auth" });
+    expect(sectionsOf(s)[0].color).toBeUndefined();
+  });
+
+  it("contains only what fits fully inside its bounds", () => {
+    let s = withSection();
+    s = addNodeAt(s, "in", "p1", 10, 10); // default card 560x340 — fits
+    s = addNodeAt(s, "out", "p1", 900, 10); // outside entirely
+    const m = membersOf(s, "s1");
+    expect(m.nodes).toEqual(["in"]);
+  });
+
+  it("does not contain a node that merely overlaps the edge", () => {
+    let s = withSection();
+    s = addNodeAt(s, "edge", "p1", 700, 10); // 700 + 560 > 800
+    expect(membersOf(s, "s1").nodes).toEqual([]);
+  });
+
+  it("contains a nested section", () => {
+    let s = withSection();
+    s = addSection(s, "s2", 50, 50, 300, 300, "Inner");
+    expect(membersOf(s, "s1").sections).toEqual(["s2"]);
+    expect(membersOf(s, "s2").sections).toEqual([]);
+  });
+
+  it("never contains itself", () => {
+    expect(membersOf(withSection(), "s1").sections).toEqual([]);
+  });
+
+  it("moves its contents when translated, and keeps node array order", () => {
+    let s = withSection();
+    s = addNodeAt(s, "a", "p1", 10, 10);
+    s = addNodeAt(s, "b", "p1", 10, 400);
+    const m = membersOf(s, "s1");
+    const out = translateMany(s, { ...m, sections: [...m.sections, "s1"] }, 100, 50);
+    expect(out.nodes.map((n) => n.ref)).toEqual(["a", "b"]);
+    expect(out.nodes[0]).toMatchObject({ x: 110, y: 60 });
+    expect(sectionsOf(out)[0]).toMatchObject({ x: 100, y: 50 });
+  });
+
+  it("does NOT move contents when resized — a resize changes what it contains", () => {
+    let s = withSection();
+    s = addNodeAt(s, "a", "p1", 10, 10);
+    const out = resizeSection(s, "s1", 400, 300);
+    expect(out.nodes[0]).toMatchObject({ x: 10, y: 10 });
+    expect(sectionsOf(out)[0]).toMatchObject({ w: 400, h: 300 });
+  });
+
+  it("clamps a resize to the minimum", () => {
+    const out = resizeSection(withSection(), "s1", 10, 10);
+    expect(sectionsOf(out)[0].w).toBe(SECTION_MIN_W);
+    expect(sectionsOf(out)[0].h).toBe(SECTION_MIN_H);
+  });
+
+  it("removes a section without removing what was inside it", () => {
+    let s = withSection();
+    s = addNodeAt(s, "a", "p1", 10, 10);
+    const out = removeSection(s, "s1");
+    expect(sectionsOf(out)).toEqual([]);
+    expect(out.nodes).toHaveLength(1);
+  });
+
+  it("orders sections back-to-front by descending area, so a nested one paints over", () => {
+    let s = withSection();
+    s = addSection(s, "s2", 50, 50, 300, 300, "Inner");
+    expect(sectionsByZ(s).map((x) => x.id)).toEqual(["s1", "s2"]);
+  });
+
+  it("sets and clears a colour", () => {
+    let s = setSectionColor(withSection(), "s1", 2);
+    expect(sectionsOf(s)[0].color).toBe(2);
+    s = setSectionColor(s, "s1", null);
+    expect(sectionsOf(s)[0].color).toBeUndefined();
+  });
+
+  it("renames", () => {
+    expect(sectionsOf(setSectionTitle(withSection(), "s1", "Deploy"))[0].title).toBe("Deploy");
+  });
+
+  // Additive beyond the brief's given cases: the id is FOUND in every assertion below, so
+  // each takes patchSection's/removeSection's/translateMany's real compare branch rather
+  // than the trivial "id not found" early return — only that proves the no-op check itself
+  // works, matching this file's existing identity coverage for moveNode/patchNote.
+  it("returns the same object when a setter's new value equals the current one", () => {
+    const s = withSection();
+    expect(resizeSection(s, "s1", 800, 600)).toBe(s);
+    expect(setSectionTitle(s, "s1", "Auth")).toBe(s);
+    expect(setSectionColor(s, "s1", null)).toBe(s); // already uncoloured
+  });
+
+  it("returns the same object for an unknown id or a zero-delta translate", () => {
+    const s = withSection();
+    expect(resizeSection(s, "nope", 400, 300)).toBe(s);
+    expect(setSectionTitle(s, "nope", "x")).toBe(s);
+    expect(removeSection(s, "nope")).toBe(s);
+    expect(translateMany(s, membersOf(s, "s1"), 0, 0)).toBe(s);
+  });
+});
+
+describe("intersectsBox", () => {
+  it("is true for overlapping boxes", () => {
+    expect(intersectsBox({ x: 0, y: 0, w: 100, h: 100 }, { x: 50, y: 50, w: 100, h: 100 })).toBe(
+      true,
+    );
+  });
+
+  it("is false for boxes merely touching edge-to-edge", () => {
+    expect(intersectsBox({ x: 0, y: 0, w: 100, h: 100 }, { x: 100, y: 0, w: 100, h: 100 })).toBe(
+      false,
+    );
+  });
+
+  it("is false for boxes with no overlap at all", () => {
+    expect(intersectsBox({ x: 0, y: 0, w: 100, h: 100 }, { x: 500, y: 500, w: 100, h: 100 })).toBe(
+      false,
+    );
+  });
+});
+
+describe("freeNodeSlot", () => {
+  it("places at the exact requested centre when the board is empty", () => {
+    const { x, y } = freeNodeSlot(emptyCanvas(), 1000, 1000, CARD_W, CARD_H);
+    expect({ x, y }).toEqual({ x: 1000 - CARD_W / 2, y: 1000 - CARD_H / 2 });
+  });
+
+  it("steps outward to clear a card already sitting at the requested centre", () => {
+    const cx = 1000;
+    const cy = 1000;
+    let s = addNodeAt(emptyCanvas(), "a", "p1", cx - CARD_W / 2, cy - CARD_H / 2);
+    const slot = freeNodeSlot(s, cx, cy, CARD_W, CARD_H);
+    const box = { x: slot.x, y: slot.y, w: CARD_W, h: CARD_H };
+    expect(intersectsBox(box, { x: s.nodes[0].x, y: s.nodes[0].y, w: CARD_W, h: CARD_H })).toBe(
+      false,
+    );
+  });
+
+  it("finds a slot clear of several existing cards, not just the first", () => {
+    const cx = 1000;
+    const cy = 1000;
+    let s = emptyCanvas();
+    // Fill the exact centre and its immediate ring so a naive single-step search would fail.
+    s = addNodeAt(s, "centre", "p1", cx - CARD_W / 2, cy - CARD_H / 2);
+    for (const [dx, dy] of [
+      [-1, -1],
+      [0, -1],
+      [1, -1],
+      [-1, 0],
+      [1, 0],
+      [-1, 1],
+      [0, 1],
+      [1, 1],
+    ]) {
+      s = addNodeAt(
+        s,
+        `ring-${dx}-${dy}`,
+        "p1",
+        cx - CARD_W / 2 + dx * (CARD_W + 24),
+        cy - CARD_H / 2 + dy * (CARD_H + 24),
+      );
+    }
+    const slot = freeNodeSlot(s, cx, cy, CARD_W, CARD_H);
+    const box = { x: slot.x, y: slot.y, w: CARD_W, h: CARD_H };
+    for (const n of s.nodes) {
+      expect(intersectsBox(box, { x: n.x, y: n.y, w: CARD_W, h: CARD_H })).toBe(false);
+    }
+  });
+
+  it("ignores notes and sections — only existing nodes are obstacles", () => {
+    const cx = 500;
+    const cy = 500;
+    let s = addNote(emptyCanvas(), "n1", cx - 10, cy - 10);
+    s = addSection(s, "s1", cx - 400, cy - 400, 800, 800, "Everything");
+    const { x, y } = freeNodeSlot(s, cx, cy, CARD_W, CARD_H);
+    expect({ x, y }).toEqual({ x: cx - CARD_W / 2, y: cy - CARD_H / 2 });
   });
 });

@@ -24,9 +24,10 @@ import { TerminalView } from "./Terminal";
 import { CodeEditorPane } from "./CodeEditorPane";
 import { BoardView } from "./BoardView";
 import { CanvasControls, CanvasUnderlay } from "./CanvasView";
+import { CanvasRail } from "./CanvasRail";
 import { ContextMeter } from "./ContextMeter";
 import { FOOTER_H, HEADER_H, LIVE_ZOOM_MIN, nodeH, nodeW } from "../canvas";
-import { useProjectCanvas } from "../hooks/useProjectCanvas";
+import { useCanvas } from "../hooks/useCanvas";
 import { TerminalIcon, FileIcon, CodeIcon, CloseIcon } from "./Icons";
 
 /** Payload carried by a native tab drag (shared between WorkspaceCenter and GroupTabStrip). */
@@ -34,6 +35,10 @@ type TabDrag = { fromGroupId: string; tab: WsTab };
 type PaneZone = "left" | "center" | "right";
 
 const MIN_WEIGHT = 0.14;
+
+/** How far outside the viewport a node still counts as live, in screen pixels. Generous, so
+ *  scrolling a node into frame does not flash a card first. */
+const CULL_MARGIN = 400;
 
 /** Left/width percentages per group, derived from weights — no DOM measurement. */
 function geometry(weights: number[]): { left: number; width: number }[] {
@@ -74,9 +79,11 @@ export function WorkspaceCenter({
 }) {
   const layout = useStore((s) => (projectId ? s.layouts[projectId] : undefined));
   const centerMode = useStore((s) => (projectId ? s.centerMode[projectId] ?? "terminals" : "terminals"));
-  const canvasMode = centerMode === "canvas";
-  // Read unconditionally (hooks cannot be conditional); it is inert outside canvas mode.
-  const { canvas } = useProjectCanvas(projectId ?? null);
+  // The board is global now — not a per-project mode — so it reads its own store field
+  // rather than `centerMode`, and stays open across a project switch.
+  const canvasMode = useStore((s) => s.canvasOpen);
+  // Read unconditionally (hooks cannot be conditional); it is inert while the board is closed.
+  const { canvas } = useCanvas();
   const canvasViewportRef = useRef<HTMLDivElement>(null);
   const setGroupWeights = useStore((s) => s.setGroupWeights);
   const moveTab = useStore((s) => s.moveTab);
@@ -164,24 +171,36 @@ export function WorkspaceCenter({
   const groupIndexOfRef = (ref: string): number =>
     layout ? layout.groups.findIndex((g) => g.tabs.some((t) => t.ref === ref)) : -1;
 
+  // True while a pinch/wheel-zoom is in flight. Terminals hide for its duration: a dozen
+  // GPU-composited surfaces re-rasterizing every frame is the jank, and hiding them makes
+  // the gesture a pure chrome transform. Set from CanvasUnderlay, which owns the wheel
+  // listener, and cleared by it on settle.
+  const [zooming, setZooming] = useState(false);
+
   // Placement for a session terminal of any project. Terminals are a permanent flat
   // stack (keep-alive); only CSS position/visibility changes. display:none when its
   // project isn't active or the session isn't open as a tab.
-  const placeSession = (ownerProjectId: string, sessionId: string) => {
-    if (!layout) {
-      return { visible: false, inActiveGroup: false, style: { display: "none" } as React.CSSProperties };
-    }
+  //
+  // DO NOT reorder the two branches below: canvas mode MUST be checked before the
+  // pane-mode `!layout` bail, not after. The canvas is global, so it has to place a node
+  // even when no project is selected at all -- and `layout` is then always undefined,
+  // since it comes from the SELECTED project. Bailing on `!layout` first would hide every
+  // terminal on the canvas the moment no project is selected, which defeats "global" in
+  // exactly the case that proves it: a fresh install with no project chosen yet.
+  const placeSession = (sessionId: string) => {
     // Pane mode deliberately does NOT check ownership: a layout may borrow another
     // project's session (WsTab.projectId), and `groupIndexOfRef` below already hides
-    // anything the active layout does not hold. Canvas mode still does, because a canvas
-    // is reconciled from its own project's sessions and a borrowed one has no node.
-    if (canvasMode && ownerProjectId !== projectId) {
-      return { visible: false, inActiveGroup: false, style: { display: "none" } as React.CSSProperties };
-    }
-    // Canvas mode positions the SAME mounted terminals by absolute canvas coordinates
-    // instead of group percentages. This is the whole trick behind live terminals in
-    // canvas nodes: one mounted set, two CSS expressions of it. The pan/zoom transform
-    // is applied to .term-stack as a whole, so these coordinates stay in canvas units.
+    // anything the active layout does not hold. Canvas mode does not check either, and
+    // that IS the global board: membership is the node list, which spans every project.
+    //
+    // Canvas mode positions the SAME mounted terminals by absolute coordinates instead of
+    // group percentages. This is the whole trick behind live terminals in canvas nodes:
+    // one mounted set, two CSS expressions of it.
+    //
+    // The coordinates are SCREEN pixels, not canvas units. The stack carries only
+    // translate(pan) -- no scale() -- because scaling a terminal scales a rasterized glyph
+    // atlas, which is the blur. Each host is therefore sized `logical x zoom` and its
+    // glyphs are rasterized at `base x zoom` by TerminalView's canvasScale.
     //
     // `right`/`bottom` are cleared explicitly because .term-host is `inset: 0`, and
     // leaving them at 0 would fight the width/height set here.
@@ -190,23 +209,42 @@ export function WorkspaceCenter({
       if (!node) {
         return { visible: false, inActiveGroup: false, style: { display: "none" } as React.CSSProperties };
       }
+      const z = canvas.zoom;
+      // The stack carries translate(pan), so a node's screen position is its scaled
+      // coordinate plus the pan. No viewport yet (first paint) counts as on-screen -- a
+      // terminal that never went live would never spawn its PTY.
+      const vp = canvasViewportRef.current;
+      const sx = node.x * z + canvas.pan.x;
+      const sy = node.y * z + canvas.pan.y;
+      const onScreen =
+        !vp ||
+        (sx + nodeW(node) * z > -CULL_MARGIN &&
+          sx < vp.clientWidth + CULL_MARGIN &&
+          sy + nodeH(node) * z > -CULL_MARGIN &&
+          sy < vp.clientHeight + CULL_MARGIN);
       return {
-        // Hidden below the legibility threshold — the card renders a summary instead.
-        // Hidden is CSS-only, so the PTY and the xterm are untouched either way.
-        visible: canvas.zoom >= LIVE_ZOOM_MIN,
+        // Hidden below the legibility threshold, during a zoom gesture, or far enough
+        // off-screen to be culled -- the card renders instead in every case. Hidden is
+        // CSS-only, so the PTY and the xterm are untouched.
+        visible: z >= LIVE_ZOOM_MIN && !zooming && onScreen,
         inActiveGroup: false, // never steal the keyboard just because a node scrolled by
         style: {
-          left: node.x,
-          top: node.y + HEADER_H,
-          width: nodeW(node),
-          // Stops above the footer strip so the resize grip stays reachable — the
+          left: node.x * z,
+          top: (node.y + HEADER_H) * z,
+          width: nodeW(node) * z,
+          // Stops above the footer strip so the resize grip stays reachable -- the
           // terminal paints above the card frame and would otherwise cover it.
-          height: nodeH(node) - HEADER_H - FOOTER_H,
+          height: (nodeH(node) - HEADER_H - FOOTER_H) * z,
           right: "auto",
           bottom: "auto",
-          padding: "6px 8px",
+          padding: `${6 * z}px ${8 * z}px`,
         } as React.CSSProperties,
       };
+    }
+    // Pane-mode-only bail -- deliberately AFTER the canvas branch above, not before it. See
+    // the comment at the top of this function.
+    if (!layout) {
+      return { visible: false, inActiveGroup: false, style: { display: "none" } as React.CSSProperties };
     }
     const gi = groupIndexOfRef(sessionId);
     if (gi === -1)
@@ -304,23 +342,38 @@ export function WorkspaceCenter({
           setDropZone(null);
         }}
       >
-        {layout && activeProject && canvasMode && (
+        {/* This chrome strip hosts the canvas's own toggle + zoom/pan controls, and — only
+            when a project happens to be selected — that project's active-group tabs, so a
+            click can still jump into panes. Gated on `canvasMode` ALONE, matching the
+            underlay below: a first-time user with no project yet still needs a way to see
+            "live/overview", Fit, and the close button once the canvas is open, or the
+            canvas can only ever be closed by the keyboard shortcut again. `layout` decides
+            which of the two bodies to render, not whether the strip appears at all. */}
+        {canvasMode && (
           <div className="group-chrome" style={{ left: 0, width: "100%" }}>
-            <GroupTabStrip
-              projectId={projectId!}
-              projects={projects}
-              mixed={mixed}
-              group={activeGroup(layout) ?? layout.groups[0]}
-              home={home}
-              isActiveGroup
-              soloGroup
-              dragging={dragging}
-              dragRef={dragData}
-              onTabDragStart={onTabDragStart}
-              onTabDragEnd={onTabDragEnd}
-              onTabContext={onTabContext}
-              canvasViewportRef={canvasViewportRef}
-            />
+            {layout ? (
+              <GroupTabStrip
+                projectId={projectId!}
+                projects={projects}
+                mixed={mixed}
+                group={activeGroup(layout) ?? layout.groups[0]}
+                home={home}
+                isActiveGroup
+                soloGroup
+                dragging={dragging}
+                dragRef={dragData}
+                onTabDragStart={onTabDragStart}
+                onTabDragEnd={onTabDragEnd}
+                onTabContext={onTabContext}
+                canvasViewportRef={canvasViewportRef}
+              />
+            ) : (
+              <div className="tab-strip">
+                <div className="tab-strip-fill" data-tauri-drag-region />
+                <CanvasToggleButton />
+                <CanvasControls viewportRef={canvasViewportRef} />
+              </div>
+            )}
           </div>
         )}
 
@@ -365,9 +418,14 @@ export function WorkspaceCenter({
           ))}
 
         {/* Underlay FIRST so the terminal stack paints above it — the card frames are
-            chrome around live terminals, not a replacement for them. */}
-        {projectId && canvasMode && (
-          <CanvasUnderlay projectId={projectId} viewportRef={canvasViewportRef} />
+            chrome around live terminals, not a replacement for them. Gated on canvasMode
+            ALONE — this is the actual global board, and it must render (and show every
+            project's placed sessions) with no project selected at all. */}
+        {canvasMode && (
+          <CanvasUnderlay
+            viewportRef={canvasViewportRef}
+            onZoomActive={setZooming}
+          />
         )}
 
         <div
@@ -375,14 +433,18 @@ export function WorkspaceCenter({
           style={
             canvasMode
               ? {
-                  transform: `translate(${canvas.pan.x}px, ${canvas.pan.y}px) scale(${canvas.zoom})`,
+                  // translate ONLY. The children are already sized and placed in screen
+                  // pixels by placeSession; a scale() here is what resampled the glyph
+                  // atlas and made zoomed text soft. The underlay keeps its scale(), being
+                  // vector content that a transform renders crisply.
+                  transform: `translate(${canvas.pan.x}px, ${canvas.pan.y}px)`,
                   transformOrigin: "0 0",
                 }
               : undefined
           }
         >
           {allSessions.map(({ project, session }) => {
-            const pl = placeSession(project.id, session.id);
+            const pl = placeSession(session.id);
             // By ref alone, not by ownership: a borrowed session sits in the active
             // layout's groups too, and clicking into its terminal must activate that group.
             const gi = groupIndexOfRef(session.id);
@@ -401,6 +463,7 @@ export function WorkspaceCenter({
                 }
                 role={session.role}
                 stopped={session.stopped ?? false}
+                canvasScale={canvasMode ? canvas.zoom : undefined}
                 visible={pl.visible}
                 focusOnReveal={pl.inActiveGroup}
                 // Clicking into the terminal body activates its group, like the editor
@@ -489,9 +552,21 @@ export function WorkspaceCenter({
             ))}
         </div>
 
+        {/* The rail and edge pips are siblings of .term-stack, mounted here rather than
+            inside CanvasUnderlay — see CanvasRail's own doc comment for why nesting them
+            in the underlay (a stacking context at z-index 1) would trap them behind every
+            terminal (.term-stack.canvas-mode, z-index 2). Gated on canvasMode alone, like
+            the underlay itself: the board is global, so this renders with no project
+            selected too. */}
+        {canvasMode && <CanvasRail viewportRef={canvasViewportRef} onZoomActive={setZooming} />}
+
         {nothingVisible && <EmptyState />}
 
-        {projectId && centerMode === "board" && (
+        {/* Gated on !canvasMode too: the canvas is global and the task board is
+            per-project, so nothing else keeps them mutually exclusive. Without this, ⇧⌘B
+            then ⇧⌘C left the board's body rendered with the canvas toolbar above it and
+            the attention rail/edge pips floating over a plane the user cannot see. */}
+        {projectId && centerMode === "board" && !canvasMode && (
           <div className="board-overlay">
             <BoardView projectId={projectId} />
           </div>
@@ -548,6 +623,8 @@ function GroupTabStrip({
   const setActiveGroup = useStore((s) => s.setActiveGroup);
   const setCenterMode = useStore((s) => s.setCenterMode);
   const centerMode = useStore((s) => s.centerMode[projectId] ?? "terminals");
+  const canvasOpen = useStore((s) => s.canvasOpen);
+  const setCanvasOpen = useStore((s) => s.setCanvasOpen);
   const requestCloseTab = useStore((s) => s.requestCloseTab);
   const pinTab = useStore((s) => s.pinTab);
   const dirty = useStore((s) => s.dirty);
@@ -655,6 +732,11 @@ function GroupTabStrip({
             onClick={() => {
               setActiveTab(projectId, group.id, t.ref);
               setCenterMode(projectId, "terminals");
+              // This strip also renders as the canvas's own chrome (canvasViewportRef set);
+              // picking a tab there must leave the canvas, or the click has no visible
+              // effect — setCenterMode alone no longer does, since the canvas is a global
+              // flag independent of this project's centerMode.
+              setCanvasOpen(false);
             }}
             onDoubleClick={() => {
               // Double-click pins a preview tab (VS Code semantics).
@@ -723,38 +805,23 @@ function GroupTabStrip({
           type="button"
           className={`header-btn board-tab ${centerMode === "board" ? "active" : ""}`}
           title="Task board (⇧⌘B)"
-          onClick={() =>
-            setCenterMode(projectId, centerMode === "board" ? "terminals" : "board")
-          }
+          onClick={() => {
+            setCenterMode(projectId, centerMode === "board" ? "terminals" : "board");
+            // The canvas is a global flag independent of this project's centerMode (see
+            // the tab-click handler above) -- closing it here is what makes the board and
+            // the canvas mutually exclusive in BOTH directions, not just the direction the
+            // board overlay's own render gate covers.
+            setCanvasOpen(false);
+          }}
         >
           <span className="board-tab-dot" />
           <span>Board</span>
         </button>
       )}
-      {isActiveGroup && (
-        <button
-          type="button"
-          className={`header-btn board-tab ${centerMode === "canvas" ? "active" : ""}`}
-          title={
-            centerMode === "canvas"
-              ? "Back to panes (Esc)"
-              : "Canvas — every session as a card on a pan/zoom plane"
-          }
-          onClick={() =>
-            setCenterMode(projectId, centerMode === "canvas" ? "terminals" : "canvas")
-          }
-        >
-          <span className="board-tab-dot" />
-          {/* One button, both directions. A separate "Close canvas" beside an active
-              "Canvas" toggle was the same action twice. */}
-          <span>{centerMode === "canvas" ? "Hide canvas" : "Canvas"}</span>
-        </button>
-      )}
+      {isActiveGroup && <CanvasToggleButton />}
       {/* Canvas controls live in the persistent header rather than a floating bar of
           their own: one header, and nothing overlapping the top row of nodes. */}
-      {centerMode === "canvas" && canvasViewportRef && (
-        <CanvasControls projectId={projectId} viewportRef={canvasViewportRef} />
-      )}
+      {canvasOpen && canvasViewportRef && <CanvasControls viewportRef={canvasViewportRef} />}
       {wd &&
         (soloGroup ? (
           <button className="header-btn" title="Open in VS Code" onClick={() => void openInVscode(wd)}>
@@ -771,6 +838,33 @@ function GroupTabStrip({
           </button>
         ))}
     </div>
+  );
+}
+
+/**
+ * The canvas's own open/close toggle, in the header. Shared between `GroupTabStrip` (used
+ * both for a normal pane's header, where it is the discovery affordance, and for the
+ * canvas-mode strip itself, where it is the close affordance) and the bare bar
+ * `WorkspaceCenter` renders in canvas mode when no project is selected — one definition so
+ * the two can never say different things or read different state.
+ *
+ * Named "Canvas" deliberately, not "Board": the adjacent per-project button already owns
+ * that word for the task board (the Kanban backed by `.conduit/` files), a shipped feature
+ * users already know by that name. This is the surface `CanvasView.tsx`/`canvas.ts` and the
+ * `canvasOpen` store field are named for throughout the code.
+ */
+function CanvasToggleButton() {
+  const canvasOpen = useStore((s) => s.canvasOpen);
+  const setCanvasOpen = useStore((s) => s.setCanvasOpen);
+  return (
+    <button
+      className={`header-btn board-tab ${canvasOpen ? "active" : ""}`}
+      title={canvasOpen ? "Hide the canvas" : "Show the canvas (Cmd/Ctrl+Shift+C)"}
+      onClick={() => setCanvasOpen(!canvasOpen)}
+    >
+      <span className="board-tab-dot" />
+      <span>{canvasOpen ? "Hide canvas" : "Canvas"}</span>
+    </button>
   );
 }
 
