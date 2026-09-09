@@ -29,12 +29,16 @@ let boardHistory = emptyHistory<CanvasState>();
 export function useCanvas(): {
   canvas: CanvasState;
   setCanvas: (next: CanvasState) => void;
-  /** Record the state as it was BEFORE a gesture or a discrete edit. Call once, at
-   *  gesture start (pointer-down of a move/resize) or immediately before a mutating
-   *  action's own `setCanvas` — never per pointer-move or per keystroke — so one gesture
-   *  is one undo step. `pushHistory` dedupes a snapshot identical to the last one
-   *  recorded, so calling this at the start of a gesture that turns out to be a no-op
-   *  click costs nothing. */
+  /** Record the state as it was BEFORE a gesture or a discrete edit. A discrete,
+   *  non-drag action (adding a note, deleting the selection, linking a note) calls this
+   *  once, immediately before its own `setCanvas`. A pointer-drag gesture (move/resize)
+   *  must call it LAZILY instead — once, on the first pointermove that crosses the
+   *  click/drag threshold, never at pointerdown — because pointerdown also fires on a
+   *  plain selection click, and `pushHistory` only dedupes a snapshot against the entry
+   *  immediately BEFORE it: a snapshot taken at every pointerdown left one dead undo
+   *  entry behind the first click after any real edit (whose `canvas` differs from what
+   *  came before it), not merely repeated no-op clicks in a row. See CanvasUnderlay's
+   *  onPointerMove for where the drag path calls this today. */
   snapshot: () => void;
   /** Step back one edit. No-op when there is nothing to undo. */
   undo: () => void;

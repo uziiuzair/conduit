@@ -540,15 +540,24 @@ export function CanvasUnderlay({
     (e.currentTarget as Element).setPointerCapture?.(e.pointerId);
     movedRef.current = false;
     dragStartRef.current = { x: e.clientX, y: e.clientY };
-    // A move or resize is about to mutate the canvas; a pan only moves the camera and must
-    // never create an undo step. Recorded once here, at gesture start, not per pointermove
-    // in onPointerMove below — that is what makes one drag one undo step.
-    if (mode !== "pan") snapshot();
     // Membership is captured ONCE, here, at gesture start — never recomputed on later
-    // pointermoves. A resize is deliberately excluded: it changes what the section
-    // contains rather than moving anything, so it has no members to capture.
+    // pointermoves (recomputing mid-drag would let items join/leave as the box swept over
+    // them). A resize is deliberately excluded from both branches below: it changes what a
+    // section contains or a card's own size, never a position, so it has nothing to
+    // translate. Two cases build a Members set: the pressed object is already part of a
+    // multi-selection (move the WHOLE selection, whatever mix of kinds it holds — "Move
+    // and delete operate on the whole selection"), or it is a section being moved alone
+    // (its own geometric children, unrelated to selection).
     let members: Members | undefined;
-    if (kind === "section" && mode === "move" && ref) {
+    const inSelection =
+      mode === "move" && ref !== null && selection.some((s) => s.kind === kind && s.id === ref);
+    if (inSelection && selection.length > 1) {
+      members = {
+        nodes: selection.filter((s) => s.kind === "node").map((s) => s.id),
+        notes: selection.filter((s) => s.kind === "note").map((s) => s.id),
+        sections: selection.filter((s) => s.kind === "section").map((s) => s.id),
+      };
+    } else if (kind === "section" && mode === "move" && ref) {
       const m = membersOf(canvas, ref);
       members = { ...m, sections: [...m.sections, ref] };
     }
@@ -558,10 +567,27 @@ export function CanvasUnderlay({
   const onPointerMove = (e: React.PointerEvent) => {
     if (!drag) return;
     if (
-      Math.abs(e.clientX - dragStartRef.current.x) > CLICK_DRAG_THRESHOLD_PX ||
-      Math.abs(e.clientY - dragStartRef.current.y) > CLICK_DRAG_THRESHOLD_PX
+      !movedRef.current &&
+      (Math.abs(e.clientX - dragStartRef.current.x) > CLICK_DRAG_THRESHOLD_PX ||
+        Math.abs(e.clientY - dragStartRef.current.y) > CLICK_DRAG_THRESHOLD_PX)
     ) {
       movedRef.current = true;
+      // Snapshot LAZILY, exactly once per gesture, on this first transition past the
+      // click/drag threshold — never at pointerdown. Pointerdown fires on every selection
+      // click too, and pushHistory only dedupes a snapshot against the entry immediately
+      // before it, so a snapshot taken there left one dead undo entry behind the very next
+      // click after any real edit (not just repeated no-op clicks). A pan never mutates the
+      // canvas and still gets no entry.
+      if (drag.mode !== "pan") snapshot();
+      // A drag is a definitive act, unlike a click's shift-toggle: starting to move an
+      // object that was not already part of the selection makes it the WHOLE selection the
+      // instant the gesture becomes a drag, so a drag and a plain click on the same object
+      // never leave different things selected afterward. Left alone when the object IS
+      // already selected — including as part of a multi-selection, which is exactly the
+      // set `drag.members` above was built from and must survive untouched.
+      if (drag.mode === "move" && drag.ref !== null && !isSelected(drag.kind, drag.ref)) {
+        setSelection([{ kind: drag.kind, id: drag.ref }]);
+      }
     }
     const dxScreen = e.clientX - drag.lastX;
     const dyScreen = e.clientY - drag.lastY;
@@ -571,17 +597,18 @@ export function CanvasUnderlay({
     } else {
       // Move and resize are in CANVAS units, so the thing tracks the cursor at any zoom.
       const { dx, dy } = toCanvasDelta(dxScreen, dyScreen, canvas.zoom);
-      if (drag.kind === "section") {
-        if (drag.mode === "resize") {
-          const section = sectionsOf(canvas).find((s) => s.id === drag.ref);
-          // Resize only changes what the section CONTAINS — contents are deliberately
-          // left where they are, which is what makes "draw a box around those three" work.
-          if (section) setCanvas(resizeSection(canvas, section.id, section.w + dx, section.h + dy));
-        } else if (drag.members) {
-          // The set captured at pointerdown, not a fresh membersOf() call — see the
-          // `members` field's own comment on why recomputing here would be wrong.
-          setCanvas(translateMany(canvas, drag.members, dx, dy));
-        }
+      if (drag.kind === "section" && drag.mode === "resize") {
+        const section = sectionsOf(canvas).find((s) => s.id === drag.ref);
+        // Resize only changes what the section CONTAINS — contents are deliberately
+        // left where they are, which is what makes "draw a box around those three" work.
+        if (section) setCanvas(resizeSection(canvas, section.id, section.w + dx, section.h + dy));
+      } else if (drag.mode === "move" && drag.members) {
+        // Either a section's own geometric children, or (when the pressed object was part
+        // of a multi-selection) the whole selection regardless of kind — see onPointerDown's
+        // own comment for which one `drag.members` holds. The set captured at pointerdown,
+        // not a fresh membersOf()/selection read — recomputing here would let items
+        // join/leave as the drag swept over them.
+        setCanvas(translateMany(canvas, drag.members, dx, dy));
       } else if (drag.kind === "note") {
         const note = notesOf(canvas).find((n) => n.id === drag.ref);
         if (note) {
