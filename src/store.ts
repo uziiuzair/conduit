@@ -722,13 +722,20 @@ function readCanvas(): CanvasState {
   try {
     const raw = localStorage.getItem(CANVAS_KEY);
     if (raw) {
-      const parsed = JSON.parse(raw) as CanvasState;
+      const parsed = JSON.parse(raw) as Partial<CanvasState>;
+      // Valid JSON is not necessarily the right SHAPE -- `'{"nodes":[]}'`, `'[]'` and `'5'`
+      // all parse fine, and used to come back with no `pan`/`zoom` at all, which threw the
+      // first time anything read `canvas.pan.x`. Spreading emptyCanvas() first fills
+      // whatever a malformed value is missing, regardless of shape; `nodes` below still
+      // wins and tolerates `parsed.nodes` being absent or not an array in the first place.
+      const nodes = parsed?.nodes;
       // A node written before the board went global carries no project, and a session id
       // alone does not locate one. Dropping it costs a placement on a per-machine file;
       // keeping it would mean every consumer handling a node it cannot resolve.
       return {
+        ...emptyCanvas(),
         ...parsed,
-        nodes: (parsed.nodes ?? []).filter((n) => typeof n.projectId === "string"),
+        nodes: (Array.isArray(nodes) ? nodes : []).filter((n) => typeof n.projectId === "string"),
       };
     }
     // First run after the board went global. Notes cross; node placements do not, because
