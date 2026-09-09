@@ -24,6 +24,7 @@ import { TerminalView } from "./Terminal";
 import { CodeEditorPane } from "./CodeEditorPane";
 import { BoardView } from "./BoardView";
 import { CanvasControls, CanvasUnderlay } from "./CanvasView";
+import { CanvasRail } from "./CanvasRail";
 import { ContextMeter } from "./ContextMeter";
 import { FOOTER_H, HEADER_H, LIVE_ZOOM_MIN, nodeH, nodeW } from "../canvas";
 import { useCanvas } from "../hooks/useCanvas";
@@ -550,6 +551,14 @@ export function WorkspaceCenter({
               </div>
             ))}
         </div>
+
+        {/* The rail and edge pips are siblings of .term-stack, mounted here rather than
+            inside CanvasUnderlay — see CanvasRail's own doc comment for why nesting them
+            in the underlay (a stacking context at z-index 1) would trap them behind every
+            terminal (.term-stack.canvas-mode, z-index 2). Gated on canvasMode alone, like
+            the underlay itself: the board is global, so this renders with no project
+            selected too. */}
+        {canvasMode && <CanvasRail viewportRef={canvasViewportRef} />}
 
         {nothingVisible && <EmptyState />}
 

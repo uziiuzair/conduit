@@ -1373,8 +1373,9 @@ function statusLabel(status: string): string {
 }
 
 /** Coarse "how long" for a card: minutes up to an hour, then hours. Never seconds — a
- *  card is read at a glance and a ticking number is noise. */
-function formatWaited(ms: number): string {
+ *  card is read at a glance and a ticking number is noise. Exported for CanvasRail, which
+ *  formats the same quantity for the attention queue and must read it identically. */
+export function formatWaited(ms: number): string {
   const min = Math.floor(ms / 60_000);
   if (min < 1) return "just now";
   if (min < 60) return `${min}m`;
