@@ -2,7 +2,7 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } fr
 import { useStore } from "../store";
 import { TERM_BASE_FONT } from "./Terminal";
 import { snapZoom } from "../terminalZoom";
-import { CARD_H, CARD_W, LIVE_ZOOM_MIN, addNodeAt, nodeH, nodeW, type CanvasNode } from "../canvas";
+import { LIVE_ZOOM_MIN, addNodeAt, freeNodeSlot, nodeH, nodeW, type CanvasNode } from "../canvas";
 import { useCanvas } from "../hooks/useCanvas";
 import { resolveProjectColor } from "../layout";
 import { AgentGlyph, glyphStateFor } from "./AgentGlyph";
@@ -224,12 +224,18 @@ export function CanvasRail({
         flyTo(ref);
         return;
       }
-      const el = viewportRef.current;
+      // The SAME narrowed viewport cameraFor/flyToBox use (see boardViewport above), not
+      // the raw DOM rect — using the raw rect here would compute a centre half-covered by
+      // the rail, so this placement and the fly-to that immediately follows it would
+      // disagree about where "the middle" is.
+      const vp = boardViewportRef.current;
       const z = cur.zoom || 1;
-      const cx = el ? el.clientWidth / 2 : 400;
-      const cy = el ? el.clientHeight / 2 : 300;
-      const x = (cx - cur.pan.x) / z - CARD_W / 2;
-      const y = (cy - cur.pan.y) / z - CARD_H / 2;
+      const cx = (vp.w / 2 - cur.pan.x) / z;
+      const cy = (vp.h / 2 - cur.pan.y) / z;
+      // A free slot NEAR the centre, not the centre itself — placing every triaged session
+      // dead on the same point is what turns three rail clicks into one pile of cards; see
+      // freeNodeSlot's own doc comment.
+      const { x, y } = freeNodeSlot(cur, cx, cy);
       // One undo step for the placement, exactly like any other board edit — see
       // useCanvas' own doc comment on `snapshot`.
       snapshot();
@@ -245,7 +251,7 @@ export function CanvasRail({
       setCanvas(next);
       flyTo(ref);
     },
-    [flyTo, setCanvas, snapshot, viewportRef],
+    [flyTo, setCanvas, snapshot],
   );
 
   // ---- Edge pips: markers on the viewport border for queued sessions that ARE on the

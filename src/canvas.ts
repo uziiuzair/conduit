@@ -466,6 +466,12 @@ export function containsBox(outer: Box, inner: Box): boolean {
   );
 }
 
+/** True when two boxes share any area. Touching edges (zero overlap) do not count — a box
+ *  placed flush against another is not ON it. */
+export function intersectsBox(a: Box, b: Box): boolean {
+  return a.x < b.x + b.w && a.x + a.w > b.x && a.y < b.y + b.h && a.y + a.h > b.y;
+}
+
 export interface Members {
   nodes: string[];
   notes: string[];
@@ -617,3 +623,64 @@ export function translateMany(
  */
 export const sectionsByZ = (state: CanvasState): CanvasSection[] =>
   [...sectionsOf(state)].sort((a, b) => b.w * b.h - a.w * a.h);
+
+/** Gap left between a placed card and its neighbours by `freeNodeSlot`, so two adjacent
+ *  placements don't read as one wide card. */
+const FREE_SLOT_GAP = 24;
+
+/** How far `freeNodeSlot` is willing to spiral out before giving up and overlapping
+ *  anyway — far enough to clear any realistic pile-up without searching forever. */
+const FREE_SLOT_MAX_RING = 24;
+
+/**
+ * Grid offsets (in cells), forming the Nth square ring around the origin — ring 0 is just
+ * the origin itself, ring 1 the eight cells around it, and so on outward.
+ */
+function ringCells(ring: number): Array<[number, number]> {
+  if (ring === 0) return [[0, 0]];
+  const cells: Array<[number, number]> = [];
+  for (let gx = -ring; gx <= ring; gx++) {
+    cells.push([gx, -ring], [gx, ring]);
+  }
+  for (let gy = -ring + 1; gy <= ring - 1; gy++) {
+    cells.push([-ring, gy], [ring, gy]);
+  }
+  return cells;
+}
+
+/**
+ * The nearest free top-left for a `w` x `h` node whose CENTRE is near `(cx, cy)`, walking a
+ * square grid spiral outward one card-width/height at a time until a slot clears every
+ * existing node.
+ *
+ * This is what keeps the attention rail from piling every session it places on top of the
+ * last one: without it, clicking three queued rows in a row from an empty board drops three
+ * near-coincident cards at the same viewport centre, because placing one does not move where
+ * "the centre" is for the next click. Ring 0 is the exact requested centre, so a board with
+ * nothing there yet places exactly where asked; only a crowded centre pushes outward.
+ *
+ * Checked against `state.nodes` only — the sessions already on the board, which is what a
+ * new card would visually stack on. Notes and sections are not obstacles here on purpose;
+ * this exists to stop cards eating each other, not to keep every new card off every note.
+ */
+export function freeNodeSlot(
+  state: CanvasState,
+  cx: number,
+  cy: number,
+  w: number = CARD_W,
+  h: number = CARD_H,
+): { x: number; y: number } {
+  const boxes = state.nodes.map(boxOfNode);
+  const fits = (x: number, y: number) => !boxes.some((b) => intersectsBox({ x, y, w, h }, b));
+  const stepX = w + FREE_SLOT_GAP;
+  const stepY = h + FREE_SLOT_GAP;
+  for (let ring = 0; ring <= FREE_SLOT_MAX_RING; ring++) {
+    for (const [gx, gy] of ringCells(ring)) {
+      const x = cx - w / 2 + gx * stepX;
+      const y = cy - h / 2 + gy * stepY;
+      if (fits(x, y)) return { x, y };
+    }
+  }
+  // Give up avoiding overlap rather than loop forever or refuse to place the card at all.
+  return { x: cx - w / 2, y: cy - h / 2 };
+}

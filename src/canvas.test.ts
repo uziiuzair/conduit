@@ -13,6 +13,8 @@ import {
   addNodeAt,
   addNote,
   addSection,
+  freeNodeSlot,
+  intersectsBox,
   linkEndpoints,
   linkNote,
   membersOf,
@@ -539,5 +541,83 @@ describe("sections", () => {
     expect(setSectionTitle(s, "nope", "x")).toBe(s);
     expect(removeSection(s, "nope")).toBe(s);
     expect(translateMany(s, membersOf(s, "s1"), 0, 0)).toBe(s);
+  });
+});
+
+describe("intersectsBox", () => {
+  it("is true for overlapping boxes", () => {
+    expect(intersectsBox({ x: 0, y: 0, w: 100, h: 100 }, { x: 50, y: 50, w: 100, h: 100 })).toBe(
+      true,
+    );
+  });
+
+  it("is false for boxes merely touching edge-to-edge", () => {
+    expect(intersectsBox({ x: 0, y: 0, w: 100, h: 100 }, { x: 100, y: 0, w: 100, h: 100 })).toBe(
+      false,
+    );
+  });
+
+  it("is false for boxes with no overlap at all", () => {
+    expect(intersectsBox({ x: 0, y: 0, w: 100, h: 100 }, { x: 500, y: 500, w: 100, h: 100 })).toBe(
+      false,
+    );
+  });
+});
+
+describe("freeNodeSlot", () => {
+  it("places at the exact requested centre when the board is empty", () => {
+    const { x, y } = freeNodeSlot(emptyCanvas(), 1000, 1000, CARD_W, CARD_H);
+    expect({ x, y }).toEqual({ x: 1000 - CARD_W / 2, y: 1000 - CARD_H / 2 });
+  });
+
+  it("steps outward to clear a card already sitting at the requested centre", () => {
+    const cx = 1000;
+    const cy = 1000;
+    let s = addNodeAt(emptyCanvas(), "a", "p1", cx - CARD_W / 2, cy - CARD_H / 2);
+    const slot = freeNodeSlot(s, cx, cy, CARD_W, CARD_H);
+    const box = { x: slot.x, y: slot.y, w: CARD_W, h: CARD_H };
+    expect(intersectsBox(box, { x: s.nodes[0].x, y: s.nodes[0].y, w: CARD_W, h: CARD_H })).toBe(
+      false,
+    );
+  });
+
+  it("finds a slot clear of several existing cards, not just the first", () => {
+    const cx = 1000;
+    const cy = 1000;
+    let s = emptyCanvas();
+    // Fill the exact centre and its immediate ring so a naive single-step search would fail.
+    s = addNodeAt(s, "centre", "p1", cx - CARD_W / 2, cy - CARD_H / 2);
+    for (const [dx, dy] of [
+      [-1, -1],
+      [0, -1],
+      [1, -1],
+      [-1, 0],
+      [1, 0],
+      [-1, 1],
+      [0, 1],
+      [1, 1],
+    ]) {
+      s = addNodeAt(
+        s,
+        `ring-${dx}-${dy}`,
+        "p1",
+        cx - CARD_W / 2 + dx * (CARD_W + 24),
+        cy - CARD_H / 2 + dy * (CARD_H + 24),
+      );
+    }
+    const slot = freeNodeSlot(s, cx, cy, CARD_W, CARD_H);
+    const box = { x: slot.x, y: slot.y, w: CARD_W, h: CARD_H };
+    for (const n of s.nodes) {
+      expect(intersectsBox(box, { x: n.x, y: n.y, w: CARD_W, h: CARD_H })).toBe(false);
+    }
+  });
+
+  it("ignores notes and sections — only existing nodes are obstacles", () => {
+    const cx = 500;
+    const cy = 500;
+    let s = addNote(emptyCanvas(), "n1", cx - 10, cy - 10);
+    s = addSection(s, "s1", cx - 400, cy - 400, 800, 800, "Everything");
+    const { x, y } = freeNodeSlot(s, cx, cy, CARD_W, CARD_H);
+    expect({ x, y }).toEqual({ x: cx - CARD_W / 2, y: cy - CARD_H / 2 });
   });
 });
