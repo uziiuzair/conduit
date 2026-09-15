@@ -3,6 +3,21 @@
 All notable changes to Conduit are documented here. This project uses
 [semantic versioning](https://semver.org/).
 
+## 0.36.1 — 2026-09-15
+
+- **Fixed — Messages sent to a session now submit themselves.** A message handed to a
+  running agent — by the Conductor's `fleet_send`, or by typing into the conversation
+  pane — arrived in the agent's prompt box but sat there unsent, waiting for someone to
+  press Enter. Short messages went through; anything long or multi-line did not.
+- **Fixed — No more notifications from agents Conduit didn't start.** A `claude` launched
+  from a terminal or another editor could reach Conduit's hook port and raise a Conduit
+  notification for its own turns, labelled with the generic name "Session". Conduit now
+  ignores events from sessions it doesn't own. Related: opening your home folder as a
+  project used to install Conduit's hooks into Claude Code's machine-wide settings, which
+  is how every agent on the machine ended up reporting in; Conduit refuses to install
+  there now. If you hit this, clear the leftover hooks from
+  `~/.claude/settings.local.json`.
+
 ## 0.36.0 — 2026-09-09
 
 - **Added — One global orchestration board.** The canvas is now a single board spanning
