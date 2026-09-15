@@ -225,6 +225,34 @@ pub fn start(
             let _ = request.respond(Response::from_string("ok"));
 
             let Some(session) = session else { continue };
+
+            // PROVENANCE GATE. Everything below this line is ABOUT a Conduit session --
+            // it moves a status dot, raises a notification, wakes a Conductor, or writes
+            // the session's own record -- so a post naming a session we do not own is not
+            // ours to act on.
+            //
+            // This is not a theoretical forgery worry, it is the normal case: an agent
+            // fires whatever hooks its settings tree carries, and that tree is shared with
+            // every other way of launching it. A `claude` started from a plain terminal, a
+            // different editor, or another app entirely inside a hooked directory POSTs
+            // here too -- with no `CONDUIT_SESSION_ID`, so `session=unknown` (the literal
+            // `:-unknown` fallback baked into the hook command). Without this gate the
+            // frontend took `unknown` at face value: `findSession` missed, the subtitle
+            // fell back to the bare word "Session", and every foreign agent's turn ended
+            // as a Conduit banner.
+            //
+            // This tightens the deliberate scope line below (Audit Finding 2), which left
+            // the cosmetic verbs ungated because forging one only moved a dot. That
+            // reasoning held for a forged post; it did not cover the honest one, which is
+            // what actually reaches this port all day. `result`/`note` keep their own,
+            // stricter checks -- membership alone was never enough for them.
+            if !store.has_session(&session) {
+                if std::env::var("CONDUIT_HOOK_LOG").as_deref() == Ok("1") {
+                    eprintln!("[hook] ignored {event} from foreign session={session}");
+                }
+                continue;
+            }
+
             let parsed: Value = serde_json::from_str(&body).unwrap_or(Value::Null);
 
             // Mirror status into the fleet map so the Conductor can read it (fleet_list).
@@ -661,6 +689,12 @@ fn append_agents_md(worktree_path: &str, block: &str) {
 /// Write the OpenCode status plugin into <dir>/<config_rel_path>. Conduit-owned file:
 /// re-install simply overwrites (idempotent). Creates parent dirs as needed.
 pub fn install_plugin(dir: &str, port: u16, profile: &PluginProfile) {
+    // Same reasoning as `install_profile_at`: a plugin dropped at `$HOME` is the agent's
+    // user-level plugin dir, so it would run for every session on the machine.
+    if is_user_config_root(Path::new(dir), dirs::home_dir().as_deref()) {
+        eprintln!("[hooks] refusing to install a plugin into {dir}: user-level config root");
+        return;
+    }
     let path = Path::new(dir).join(profile.config_rel_path);
     if let Some(parent) = path.parent() {
         let _ = fs::create_dir_all(parent);
@@ -805,9 +839,42 @@ fn conduit_hook_entries(port: u16) -> Vec<(&'static str, Vec<Value>)> {
     entries_for(&claude_profile().rows, port)
 }
 
+/// Whether writing an agent config under `dir` would land in that agent's USER-level
+/// settings instead of a project's.
+///
+/// Every profile path here is `<dir>/<agent config dir>/settings.local.json`, which is a
+/// per-project file for every `dir` but one: at `$HOME` it is the exact path the agent
+/// reads as its user-level settings, so the hooks apply to EVERY project on the machine.
+/// Opening `~` as a Conduit project is all it takes, and the result outlives the session —
+/// the file stays behind, and every `claude` on the box (plain terminal, another IDE, a
+/// different app entirely) starts POSTing to Conduit's hook port.
+///
+/// Pure, and takes `home` as an argument, so the guard is testable without touching the
+/// developer's real home directory. Compared by path COMPONENTS, which normalizes away a
+/// trailing separator and a redundant `.`.
+pub fn is_user_config_root(dir: &Path, home: Option<&Path>) -> bool {
+    home.is_some_and(|h| h.components().eq(dir.components()))
+}
+
 /// Generalized installer: write the profile's hooks into <dir>/<config_rel_path>,
 /// backing up once, preserving foreign keys, idempotent (same as `install`).
 pub fn install_profile(dir: &str, port: u16, profile: &HooksProfile) {
+    install_profile_at(dir, port, profile, dirs::home_dir().as_deref());
+}
+
+/// `install_profile` with the home directory injected, so the user-settings guard can be
+/// tested against a temp dir rather than the real `$HOME`.
+fn install_profile_at(dir: &str, port: u16, profile: &HooksProfile, home: Option<&Path>) {
+    if is_user_config_root(Path::new(dir), home) {
+        // Refusing costs this project its status dots. Installing costs the whole machine:
+        // every agent session anywhere starts firing Conduit's hooks. The receiver drops
+        // events for sessions it does not own (see the hook listener), so this is belt and
+        // braces -- but the braces are what stop the user's global settings being written.
+        eprintln!(
+            "[hooks] refusing to install into {dir}: that is the agent's user-level settings root"
+        );
+        return;
+    }
     let path = Path::new(dir).join(profile.config_rel_path);
     if let Some(parent) = path.parent() {
         let _ = fs::create_dir_all(parent);
@@ -1303,6 +1370,69 @@ mod tests {
         v.get("hooks")
             .and_then(|h| h.as_object())
             .expect("hooks object")
+    }
+
+    #[test]
+    fn the_home_directory_is_the_agents_user_settings_root() {
+        // `<dir>/.claude/settings.local.json` is a PROJECT file for every dir except one.
+        // At `$HOME` that exact path is Claude Code's USER-level settings, which apply to
+        // every project on the machine.
+        let home = Path::new("/Users/dev");
+        assert!(is_user_config_root(Path::new("/Users/dev"), Some(home)));
+        assert!(
+            is_user_config_root(Path::new("/Users/dev/"), Some(home)),
+            "a trailing separator is the same directory"
+        );
+        assert!(
+            is_user_config_root(Path::new("/Users/dev/./"), Some(home)),
+            "so is a redundant current-dir component"
+        );
+        assert!(!is_user_config_root(
+            Path::new("/Users/dev/repo"),
+            Some(home)
+        ));
+        assert!(!is_user_config_root(Path::new("/Users/devon"), Some(home)));
+        assert!(
+            !is_user_config_root(Path::new("/Users/dev"), None),
+            "no resolvable home means nothing to protect against"
+        );
+    }
+
+    #[test]
+    fn installing_at_the_home_directory_writes_nothing() {
+        // Opening `~` as a Conduit project used to hook EVERY claude session on the
+        // machine, because the installer wrote the user-level settings file. A project
+        // there gets no hooks rather than all of them.
+        let dir = fresh_test_dir("home_root");
+        install_profile_at(
+            dir.to_str().unwrap(),
+            8423,
+            &claude_profile(),
+            Some(dir.as_path()),
+        );
+        assert!(
+            !settings_path(&dir).exists(),
+            "the user-level settings file must be left alone"
+        );
+    }
+
+    #[test]
+    fn installing_below_the_home_directory_still_writes() {
+        // The guard is the home directory itself, not everything under it -- almost every
+        // real project lives somewhere below `$HOME`.
+        let home = fresh_test_dir("home_child");
+        let project = home.join("repo");
+        fs::create_dir_all(&project).unwrap();
+        install_profile_at(
+            project.to_str().unwrap(),
+            8423,
+            &claude_profile(),
+            Some(home.as_path()),
+        );
+        assert!(
+            settings_path(&project).exists(),
+            "a normal project is unaffected"
+        );
     }
 
     #[test]
