@@ -1117,6 +1117,18 @@ impl Store {
         self.persist();
     }
 
+    /// Whether any project owns this session id — the membership test for "is this ours".
+    ///
+    /// Cheap on purpose (a bool, no clone): the hook listener calls it on EVERY posted
+    /// event, and `pretool` alone fires several times per turn. `fleet_snapshot` answers
+    /// the same question but clones the whole project's session list to do it.
+    pub fn has_session(&self, session_id: &str) -> bool {
+        let projects = self.projects.lock().unwrap_or_else(|e| e.into_inner());
+        projects
+            .iter()
+            .any(|p| p.sessions.iter().any(|s| s.id == session_id))
+    }
+
     /// The agent for a session id, searching all projects. Defaults to Claude for an
     /// unknown id (back-compat / shell-only companions that were never persisted).
     pub fn session_agent(&self, session_id: &str) -> crate::agent::AgentId {
@@ -1913,6 +1925,34 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    #[test]
+    fn a_session_no_project_owns_is_not_ours() {
+        // The membership test the hook listener gates on. Claude Code fires whatever hooks
+        // its settings tree carries, so a `claude` started by a plain terminal or another
+        // IDE will POST to Conduit's hook port too -- with no CONDUIT_SESSION_ID, hence
+        // `session=unknown`. Acting on that is how a foreign agent's turn ends up as a
+        // Conduit notification.
+        let dir = temp_dir("has_session");
+        let store = Store::for_test(&dir);
+        let p = store.add_project("/repo".into());
+        let s = store
+            .add_session(
+                &p.id,
+                "Session 1".into(),
+                false,
+                crate::agent::AgentId::Claude,
+                SessionRole::Worker,
+            )
+            .unwrap();
+        assert!(store.has_session(&s.id), "a session we created is ours");
+        assert!(
+            !store.has_session("unknown"),
+            "the literal fallback id is not ours"
+        );
+        assert!(!store.has_session(&p.id), "a PROJECT id names no session");
+        assert!(!store.has_session(""), "an empty id is not ours");
     }
 
     #[test]
