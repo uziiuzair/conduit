@@ -87,6 +87,32 @@ impl RingBuffer {
     }
 }
 
+/// Text injected programmatically into a running agent's TUI, plus the Enter that submits
+/// it: bracketed paste (DEC mode 2004) around the text, then a bare `\r`.
+///
+/// A TUI reading stdin cannot tell a keystroke from a machine write, so it guesses, and
+/// every modern one guesses the same way -- a single read carrying a lot of text, or any
+/// newline, is a PASTE, and a paste is inserted verbatim. The trailing `\r` is then part
+/// of the pasted body: it lands in the composer as one more newline instead of submitting,
+/// and the message sits there waiting for a human to press Enter. Measured against Claude
+/// Code: a 40-character line submitted, a 742-character single line and a three-line brief
+/// both sat unsent. The threshold is an implementation detail of somebody else's input
+/// handler, so there is nothing safe to target -- wrap EVERY injection, not the long ones.
+///
+/// `CSI 200~` / `CSI 201~` state the boundary instead of leaving it to be guessed. The end
+/// marker closes the paste, so the `\r` after it is unambiguously a keypress -- and that
+/// holds even when the whole thing arrives in ONE read. Which is why this is a single
+/// string and not two writes with a sleep between them: a delay makes the coalescing race
+/// rarer, never absent.
+///
+/// ESC is dropped from `text` because a `CSI 201~` inside the body would close the paste
+/// early and turn the remainder into keystrokes. A mission brief has no business carrying
+/// escape sequences, and the alternative is an injection surface.
+pub fn paste_and_submit(text: &str) -> String {
+    let body: String = text.chars().filter(|c| *c != '\u{1b}').collect();
+    format!("\u{1b}[200~{body}\u{1b}[201~\r")
+}
+
 /// Remove ANSI CSI/OSC escape sequences so peeked output is human/agent-readable.
 pub fn strip_ansi(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
@@ -1193,6 +1219,32 @@ mod tests {
     #[test]
     fn worker_spawn_does_not_set_subagent_model_env() {
         assert_eq!(subagent_model_env(false), None);
+    }
+
+    #[test]
+    fn injected_text_is_bracketed_and_ends_in_a_bare_cr() {
+        // The CR must fall OUTSIDE the paste, or the TUI reads it as one more newline in
+        // the pasted body and the message waits in the composer for a human.
+        assert_eq!(
+            paste_and_submit("ship it"),
+            "\u{1b}[200~ship it\u{1b}[201~\r"
+        );
+    }
+
+    #[test]
+    fn a_newline_in_the_brief_stays_inside_the_paste() {
+        let out = paste_and_submit("line one\nline two");
+        assert!(out.starts_with("\u{1b}[200~line one\nline two\u{1b}[201~"));
+        assert!(out.ends_with("\u{1b}[201~\r"));
+    }
+
+    #[test]
+    fn an_escape_in_the_brief_cannot_close_the_paste_early() {
+        // Otherwise a body carrying `CSI 201~` ends the paste and the rest of it arrives
+        // as keystrokes -- an injection surface, not a formatting quirk.
+        let out = paste_and_submit("safe\u{1b}[201~rm -rf /");
+        assert_eq!(out.matches("\u{1b}[201~").count(), 1);
+        assert_eq!(out, "\u{1b}[200~safe[201~rm -rf /\u{1b}[201~\r");
     }
 
     #[test]

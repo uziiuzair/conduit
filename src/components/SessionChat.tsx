@@ -3,6 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { useStore, type TranscriptItem } from "../store";
 import { renderMarkdown } from "../markdown";
+import { pasteAndSubmit } from "../terminalInput";
 
 /**
  * The rich session view: an agent's conversation rendered as UI instead of read out of a
@@ -94,9 +95,10 @@ export function SessionChat({ sessionId, onClose }: { sessionId: string; onClose
     const text = draft.trim();
     if (!text) return;
     // Straight to the PTY, exactly as if it were typed: the agent is a real CLI and this
-    // pane is a nicer keyboard, not a different protocol. `\r` is the Enter the TUI waits
-    // for.
-    void invoke("pty_write", { sessionId, data: `${text}\r` }).catch(() => {});
+    // pane is a nicer keyboard, not a different protocol. It goes as a bracketed paste
+    // with the Enter outside it -- a bare `${text}\r` is read as ONE paste and leaves the
+    // message sitting in the composer (see `pasteAndSubmit`).
+    void invoke("pty_write", { sessionId, data: pasteAndSubmit(text) }).catch(() => {});
     setDraft("");
     setPinned(true);
   };

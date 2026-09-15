@@ -490,9 +490,11 @@ fn dispatch_tool(name: &str, args: &Value, ctx: &Ctx) -> Result<String, String> 
             if ctx.store.is_private_mode() && !crate::store::can_inject(&caller, &target) {
                 return Err("access-denied: injection blocked by the sharing policy".into());
             }
-            // Trailing CR submits the prompt, as if typed by a human.
+            // Bracketed paste + a trailing CR, so the TUI submits instead of leaving the
+            // brief sitting in its composer for a human to press Enter on. See
+            // `pty::paste_and_submit` for why a bare `{text}\r` does not.
             ctx.pty
-                .write(id, &format!("{text}\r"))
+                .write(id, &crate::pty::paste_and_submit(text))
                 .map_err(|_| "worker-not-running".to_string())?;
             Ok("sent".into())
         }
