@@ -52,11 +52,17 @@ pub fn build<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<Menu<R>> {
     let save = MenuItemBuilder::with_id("save", "Save")
         .accelerator("CmdOrCtrl+S")
         .build(app)?;
-    // Alt-modified accelerator is macOS-only for the same AltGr reason as `replace`.
+    // ⌥⌘S on macOS. Windows/Linux get Ctrl+Shift+S rather than Ctrl+Alt+S: Ctrl+Alt IS
+    // AltGr, so the Alt-modified form is the one that collides (see `replace`), while
+    // Shift-modified is free and is what the rest of this menu already uses for its
+    // second-tier File actions. Leaving it unbound, as it was, meant Save All had no
+    // keyboard route at all off macOS.
     let save_all = {
         let b = MenuItemBuilder::with_id("save-all", "Save All");
         #[cfg(target_os = "macos")]
         let b = b.accelerator("Cmd+Alt+S");
+        #[cfg(not(target_os = "macos"))]
+        let b = b.accelerator("CmdOrCtrl+Shift+S");
         b.build(app)?
     };
     let close_tab = MenuItemBuilder::with_id("close-tab", "Close Tab")
@@ -148,14 +154,14 @@ pub fn build<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<Menu<R>> {
         .item(&theme_warm_dim)
         .item(&theme_near_black)
         .build()?;
-    // ⌥Z is VS Code's word-wrap toggle; Alt accelerators are macOS-only (AltGr, see
-    // `replace` above).
-    let word_wrap = {
-        let b = MenuItemBuilder::with_id("toggle-word-wrap", "Toggle Word Wrap");
-        #[cfg(target_os = "macos")]
-        let b = b.accelerator("Alt+Z");
-        b.build(app)?
-    };
+    // ⌥Z is VS Code's word-wrap toggle, on every platform it ships — including Windows,
+    // where it is bound here too. The AltGr hazard `replace` documents is specifically
+    // Ctrl+Alt (which is what AltGr synthesizes); a PLAIN Alt accelerator carries no
+    // Ctrl and so cannot be confused with one, which is why VS Code itself is happy to
+    // use Alt+Z on a Hungarian layout. Same reasoning as `save_all` above.
+    let word_wrap = MenuItemBuilder::with_id("toggle-word-wrap", "Toggle Word Wrap")
+        .accelerator("Alt+Z")
+        .build(app)?;
     let trim_on_save =
         MenuItemBuilder::with_id("toggle-trim-on-save", "Clean Whitespace on Save").build(app)?;
     let zoom_in = MenuItemBuilder::with_id("zoom-in", "Zoom In")

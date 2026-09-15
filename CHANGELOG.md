@@ -3,6 +3,19 @@
 All notable changes to Conduit are documented here. This project uses
 [semantic versioning](https://semver.org/).
 
+## 0.36.1 — 2026-09-15
+
+- **Fixed — Numeric tab switching works on Windows and Linux.** Jumping to a tab by
+  position was bound to Cmd+1..9 only, so off macOS there was no way to do it at all:
+  Ctrl+digit has to reach the terminal untouched (Ctrl+3 is ESC, which interrupts a
+  running agent) and the Windows key is reserved by the OS. Windows and Linux now use
+  Alt+1..9, matching VS Code. 9 still jumps to the last tab.
+- **Fixed — Save All and Toggle Word Wrap have keyboard shortcuts off macOS.** Both menu
+  items were mac-only, leaving them mouse-only everywhere else. Save All is now
+  Ctrl+Shift+S and Toggle Word Wrap is Alt+Z on Windows and Linux. Find and Replace stays
+  deliberately unbound there: its usual Ctrl+H is backspace in a terminal, and Monaco's
+  own editor-scoped Ctrl+H still works.
+
 ## 0.36.0 — 2026-09-09
 
 - **Added — One global orchestration board.** The canvas is now a single board spanning

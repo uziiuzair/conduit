@@ -15,6 +15,7 @@ import { currentTerminalTheme, registerTerminal } from "../themes";
 import { useStore, type SessionRole } from "../store";
 import { SessionChat } from "./SessionChat";
 import { fontForZoom } from "../terminalZoom";
+import { isMacPlatform } from "../keyboardGuards";
 
 function b64ToBytes(b64: string): Uint8Array {
   const bin = atob(b64);
@@ -232,7 +233,7 @@ export function TerminalView({
 
     // The open-path / clipboard modifier is Cmd on macOS, Ctrl on Windows & Linux (VS Code parity).
     // `navigator.platform` is deprecated and occasionally empty in webviews, so fall back to UA.
-    const isMac = /Mac|iPhone|iPod|iPad/i.test(navigator.platform || navigator.userAgent);
+    const isMac = isMacPlatform(navigator.platform || navigator.userAgent);
     const openModHeld = (ev: { metaKey: boolean; ctrlKey: boolean }) =>
       isMac ? ev.metaKey : ev.ctrlKey;
 
