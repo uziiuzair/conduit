@@ -34,3 +34,42 @@ export function isEditableTarget(target: EventTarget | null): boolean {
 export function blocksGlobalShortcut(target: EventTarget | null): boolean {
   return isInTerminal(target) || isEditableTarget(target);
 }
+
+/**
+ * True when the app is running on a Mac. Pass `navigator.platform || navigator.userAgent`.
+ * `navigator.platform` is deprecated and occasionally empty in a webview, which is why the
+ * caller ORs in the user agent; taking the resolved string keeps this pure and testable.
+ */
+export function isMacPlatform(platformOrUA: string): boolean {
+  return /Mac|iPhone|iPod|iPad/i.test(platformOrUA);
+}
+
+/** A keydown, reduced to the fields a shortcut decision actually reads. */
+export type ModifierKeys = {
+  code: string;
+  metaKey: boolean;
+  ctrlKey: boolean;
+  altKey: boolean;
+  shiftKey: boolean;
+};
+
+/**
+ * The 1-based tab position a keystroke selects (9 = last, browser convention), or null.
+ *
+ * The modifier DIFFERS BY PLATFORM and neither choice is arbitrary:
+ * - macOS uses Cmd+1..9, matching every Mac tabbed app.
+ * - Windows/Linux use **Alt**+1..9, which is what VS Code binds there. Ctrl+digit cannot
+ *   be used: it is a real terminal control code (Ctrl+3 is ESC, which would interrupt the
+ *   agent) and must reach the PTY untouched. Meta is equally unavailable -- it is the
+ *   Windows key, which the OS reserves for the taskbar. Binding this to Cmd-only, as it
+ *   was, left Windows with no numeric tab switching at all.
+ *
+ * Alt+digit does reach a terminal as a meta-prefixed escape, so this is the same trade VS
+ * Code makes: the window-level capture handler claims it before xterm sees it.
+ */
+export function tabSwitchDigit(e: ModifierKeys, isMac: boolean): number | null {
+  const primaryHeld = isMac ? e.metaKey && !e.altKey : e.altKey && !e.metaKey;
+  if (!primaryHeld || e.ctrlKey || e.shiftKey) return null;
+  const m = /^Digit([1-9])$/.exec(e.code);
+  return m ? Number(m[1]) : null;
+}
