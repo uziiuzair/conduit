@@ -32,6 +32,7 @@ import { Onboarding } from "./components/Onboarding";
 import { UpdateNotice } from "./components/UpdateNotice";
 import { TmuxNotice } from "./components/TmuxNotice";
 import { Toasts } from "./components/Toasts";
+import { NewProjectDialog } from "./components/NewProjectDialog";
 import { PendingDecisions } from "./components/PendingDecisions";
 import { Settings } from "./components/Settings";
 import { QuickOpen } from "./components/QuickOpen";
@@ -79,6 +80,8 @@ export default function App() {
   const showSettings = useStore((s) => s.showSettings);
   const settingsTab = useStore((s) => s.settingsTab);
   const setShowSettings = useStore((s) => s.setShowSettings);
+  const newProjectDialog = useStore((s) => s.newProjectDialog);
+  const setNewProjectDialog = useStore((s) => s.setNewProjectDialog);
 
   // Anonymous engagement heartbeat; no-op while opted out (Settings/onboarding).
   useTelemetry(telemetryOptOut);
@@ -516,6 +519,12 @@ export default function App() {
             if (typeof dir === "string") await st.addProject(dir);
           })();
           break;
+        case "new-project":
+          st.setNewProjectDialog("create");
+          break;
+        case "clone-repo":
+          st.setNewProjectDialog("clone");
+          break;
         case "find":
           runEditorAction("actions.find");
           break;
@@ -746,6 +755,9 @@ export default function App() {
       {/* The command palette is the one palette that works with no project open — half its
           rows (open a project, settings, view toggles) are exactly what you want then. */}
       {palette === "commands" && <CommandPalette onClose={() => setPalette(null)} />}
+      {newProjectDialog && (
+        <NewProjectDialog mode={newProjectDialog} onClose={() => setNewProjectDialog(null)} />
+      )}
       {(() => {
         if (palette !== "quickopen" && palette !== "search") return null;
         const p = projects.find((x) => x.id === selectedProjectId);

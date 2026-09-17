@@ -3323,6 +3323,18 @@ button {
 .agent-tile .off { margin-left: auto; font-size: 8px; color: var(--text-dim); }
 .dialog-note { font-size: 11px; color: var(--text-dim); margin: 4px 0 8px; }
 
+/* New Project / Clone Repository dialog. */
+.np-dialog { width: 420px; }
+.np-location-row { display: flex; gap: 8px; }
+.np-location-row .dialog-input { flex: 1; min-width: 0; }
+.np-progress {
+  font-family: var(--mono-font);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.np-error { color: var(--red); white-space: pre-wrap; }
+
 /* Per-session MCP allowlist (new-session dialog). A fieldset for the grouping semantics,
    restyled from the browser default so it reads as part of the dialog rather than a form
    control from another era. Scrolls once the registry outgrows the dialog. */

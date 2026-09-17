@@ -87,6 +87,15 @@ function buildCommands(close: () => void): Command[] {
     });
   }
 
+  // --- Project lifecycle.
+  act("new-project", "New project…", () => st.setNewProjectDialog("create"), {
+    section: "Project",
+  });
+  act("clone-repo", "Clone repository…", () => st.setNewProjectDialog("clone"), {
+    section: "Project",
+    hint: "git clone",
+  });
+
   // --- Session lifecycle.
   if (project) {
     act("new-session", "New session", () => void st.addSession(project.id), {

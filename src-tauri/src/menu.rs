@@ -46,9 +46,13 @@ pub fn build<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<Menu<R>> {
     let new_session = MenuItemBuilder::with_id("new-session", "New Session")
         .accelerator("CmdOrCtrl+T")
         .build(app)?;
+    let new_project = MenuItemBuilder::with_id("new-project", "New Project…")
+        .accelerator("CmdOrCtrl+Shift+N")
+        .build(app)?;
     let open_project = MenuItemBuilder::with_id("open-project", "Open Project…")
         .accelerator("CmdOrCtrl+O")
         .build(app)?;
+    let clone_repo = MenuItemBuilder::with_id("clone-repo", "Clone Repository…").build(app)?;
     let save = MenuItemBuilder::with_id("save", "Save")
         .accelerator("CmdOrCtrl+S")
         .build(app)?;
@@ -78,7 +82,9 @@ pub fn build<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<Menu<R>> {
         .build(app)?;
     let file_menu = SubmenuBuilder::new(app, "File")
         .item(&new_session)
+        .item(&new_project)
         .item(&open_project)
+        .item(&clone_repo)
         .separator()
         .item(&command_palette)
         .item(&quick_open)
