@@ -34,6 +34,7 @@ mod local_llm;
 mod menu;
 mod notify;
 mod plugins;
+mod project_new;
 mod proposals;
 mod pty;
 mod root_chat;
@@ -1678,6 +1679,33 @@ fn git_discard_file(dir: String, path: String) -> Result<String, String> {
     git_mut::discard_file(&dir, &path)
 }
 
+// ---- New Project / Clone Repository --------------------------------------------
+
+#[tauri::command(async)]
+fn create_project_dir(parent: String, name: String, git_init: bool) -> Result<String, String> {
+    project_new::create_project(&parent, &name, git_init)
+}
+
+/// Long-running; `(async)` puts it on the blocking pool so the read loop never
+/// touches the main thread. Progress reaches the dialog as `clone-progress` events,
+/// throttled so a fast transfer doesn't flood the event bus.
+#[tauri::command(async)]
+fn clone_project_repo(
+    app: tauri::AppHandle,
+    url: String,
+    parent: String,
+    name: String,
+) -> Result<String, String> {
+    let mut last = None::<std::time::Instant>;
+    project_new::run_clone(&url, &parent, &name, &mut |line| {
+        let due = last.is_none_or(|t| t.elapsed() >= std::time::Duration::from_millis(100));
+        if due {
+            last = Some(std::time::Instant::now());
+            let _ = app.emit("clone-progress", serde_json::json!({ "line": line }));
+        }
+    })
+}
+
 // ---- Format Document -----------------------------------------------------------
 
 #[tauri::command(async)]
@@ -2324,6 +2352,8 @@ pub fn run() {
             git_show_head,
             git_diff_hunks,
             git_discard_file,
+            create_project_dir,
+            clone_project_repo,
             list_project_files,
             search_content,
             format_content,

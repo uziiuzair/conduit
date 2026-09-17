@@ -1314,6 +1314,10 @@ interface AppState {
   setShowSettings: (v: boolean) => void;
   settingsTab: SettingsTab;
   setSettingsTab: (t: SettingsTab) => void;
+  /** New Project / Clone Repository dialog — in the store (not App state) because the
+   *  native menu, the command palette and the dialog itself all reach for it. */
+  newProjectDialog: "create" | "clone" | null;
+  setNewProjectDialog: (v: "create" | "clone" | null) => void;
 
   // ---- Auto-update ----
   updateInfo: UpdateInfo | null;
@@ -1704,6 +1708,7 @@ export const useStore = create<AppState>((set, get) => {
     rightCollapsed: readRightCollapsed(),
     showSettings: false,
     settingsTab: "agents",
+    newProjectDialog: null,
     menu: null,
     editingSessionId: null,
     editingProjectId: null,
@@ -3280,6 +3285,7 @@ export const useStore = create<AppState>((set, get) => {
         return { rightCollapsed: next };
       }),
     setShowSettings: (v) => set({ showSettings: v }),
+    setNewProjectDialog: (v) => set({ newProjectDialog: v }),
     setSettingsTab: (t) => set({ settingsTab: t }),
 
     openMenu: (menu) => set({ menu }),
