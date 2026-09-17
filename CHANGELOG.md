@@ -3,6 +3,16 @@
 All notable changes to Conduit are documented here. This project uses
 [semantic versioning](https://semver.org/).
 
+## 0.37.0 — 2026-09-18
+
+- **Added — Create a project without leaving Conduit.** File → New Project… (⌘⇧N, also
+  in the command palette) prompts for a name and a location, creates the folder — git
+  repository initialized by default — and opens it as a project. The location field
+  remembers where you last created one.
+- **Added — Clone a repository.** File → Clone Repository… takes a URL (the folder name
+  fills in from it, editable), clones into your chosen location with live progress, and
+  adds the clone as a project. A failing clone shows git's own error in the dialog.
+
 ## 0.36.1 — 2026-09-15
 
 - **Fixed — Messages sent to a session now submit themselves.** A message handed to a
