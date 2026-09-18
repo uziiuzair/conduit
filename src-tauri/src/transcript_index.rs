@@ -103,12 +103,19 @@ fn push_text(out: &mut String, s: &str) {
 }
 
 /// A name for the conversation: the first thing the human said, trimmed to one line.
+///
+/// Claude's own scaffolding is not something the human said: `isMeta` records and the
+/// `<command-name>` / `<local-command-stdout>` wrappers a slash command leaves behind are
+/// skipped. Without that, every conversation begun by `/clear` is titled "/clear".
 pub fn title_of(raw: &str) -> String {
     for line in raw.lines() {
         let Ok(v) = serde_json::from_str::<Value>(line.trim()) else {
             continue;
         };
         if v.get("type").and_then(|t| t.as_str()) != Some("user") {
+            continue;
+        }
+        if v.get("isMeta").and_then(Value::as_bool) == Some(true) {
             continue;
         }
         let content = v.pointer("/message/content");
@@ -128,6 +135,9 @@ pub fn title_of(raw: &str) -> String {
             None => String::new(),
         };
         let one_line: String = text.split_whitespace().collect::<Vec<_>>().join(" ");
+        if one_line.starts_with("<command-") || one_line.starts_with("<local-command-") {
+            continue;
+        }
         if !one_line.is_empty() {
             return one_line.chars().take(90).collect();
         }
@@ -323,6 +333,19 @@ mod tests {
         ]
         .join("\n");
         assert_eq!(title_of(&raw), "fix the canvas bug");
+    }
+
+    #[test]
+    fn a_conversation_begun_by_a_slash_command_is_titled_by_what_came_next() {
+        let meta = r#"{"type":"user","isMeta":true,"message":{"content":"Caveat: local"}}"#;
+        let raw = [
+            meta.to_string(),
+            user("<command-name>/clear</command-name> <command-message>clear</command-message>"),
+            user("<local-command-stdout></local-command-stdout>"),
+            user("ship the release notes"),
+        ]
+        .join("\n");
+        assert_eq!(title_of(&raw), "ship the release notes");
     }
 
     #[test]

@@ -116,10 +116,11 @@ pub fn session_transcript(
     if store.session_agent(&session_id) != crate::agent::AgentId::Claude {
         return Vec::new();
     }
-    let Some(dir) = crate::pty::claude_projects_dir() else {
+    let Some(dir) = crate::pty::session_projects_dir(&store, &session_id) else {
         return Vec::new();
     };
-    let Some(path) = crate::pty::transcript_path(&session_id, &dir) else {
+    let conversation = store.claude_conversation_id(&session_id);
+    let Some(path) = crate::pty::transcript_path(&conversation, &dir) else {
         return Vec::new();
     };
     let Ok(body) = std::fs::read_to_string(&path) else {

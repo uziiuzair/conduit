@@ -921,6 +921,19 @@ pub(crate) fn subagent_model_env(is_conductor: bool) -> Option<(&'static str, &'
 
 /// Resolve Claude's transcript store: `$CLAUDE_CONFIG_DIR/projects` if set,
 /// else `~/.claude/projects`. None when no home dir is available.
+/// A session's Claude transcript store: its account's `<config_dir>/projects` when it runs
+/// under a registered account, else the default store. Every per-session transcript reader
+/// resolves through here, since a session on a non-default account writes elsewhere.
+pub(crate) fn session_projects_dir(
+    store: &crate::store::Store,
+    session_id: &str,
+) -> Option<PathBuf> {
+    match store.session_account_config_dir(session_id) {
+        Some(cfg) if !cfg.is_empty() => Some(PathBuf::from(cfg).join("projects")),
+        _ => claude_projects_dir(),
+    }
+}
+
 pub(crate) fn claude_projects_dir() -> Option<PathBuf> {
     match std::env::var("CLAUDE_CONFIG_DIR") {
         Ok(cfg) if !cfg.is_empty() => Some(PathBuf::from(cfg).join("projects")),

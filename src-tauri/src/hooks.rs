@@ -293,6 +293,53 @@ pub fn start(
                 }
             }
 
+            // Follow a Claude session's conversation. Conduit pins Claude's FIRST
+            // conversation to its own session id, but `/clear`, a plan accepted with "clear
+            // context", an in-TUI `/resume`, and a failed `--resume` that fell through to a
+            // bare `claude` all continue under a NEW id -- and this payload is the only
+            // place that id is announced. Before this was captured, the next launch resumed
+            // the pinned id: the conversation from before the clear, with everything since
+            // looking lost. Persisted immediately, so a crash one second later still reopens
+            // the right conversation.
+            if event == "sessionstart"
+                && store.session_agent(&session) == crate::agent::AgentId::Claude
+            {
+                let reported = parsed.get("session_id").and_then(|v| v.as_str());
+                let current = store.session_agent_conversation_id(&session);
+                match claude_conversation_update(&session, current.as_deref(), reported) {
+                    ClaudeConversationUpdate::Keep => {}
+                    ClaudeConversationUpdate::Reset => {
+                        store.clear_session_agent_conversation_id(&session)
+                    }
+                    ClaudeConversationUpdate::Adopt(cid) => {
+                        // Two sessions must never share a conversation: resuming it from
+                        // both would interleave two agents into one transcript.
+                        if !store.claude_conversation_claimed_elsewhere(&cid, &session) {
+                            let previous = store.claude_conversation_id(&session);
+                            store.set_session_agent_conversation_id(&session, &cid);
+                            // `startup` with a different id while the previous conversation
+                            // is still on disk means the resume FAILED and the bare fallback
+                            // started over. Say so -- silently swapping conversations is
+                            // the failure this whole path exists to end.
+                            let source = parsed.get("source").and_then(|v| v.as_str());
+                            let previous_on_disk =
+                                crate::pty::session_projects_dir(&store, &session)
+                                    .is_some_and(|d| crate::pty::transcript_exists(&previous, &d));
+                            if source == Some("startup") && previous_on_disk {
+                                let _ = app.emit(
+                                    "conversation-restarted",
+                                    json!({
+                                        "session": session,
+                                        "previous": previous,
+                                        "current": cid,
+                                    }),
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+
             // SPEC-D: reactively wake the project's Conductor instead of making it poll
             // fleet_list on a timer. Only for a wake-eligible event (worker stop /
             // needsInput), only when the Conductor is not mid-turn, and debounced so a
@@ -717,6 +764,40 @@ fn entries_for(rows: &[HookRow], port: u16) -> Vec<(&'static str, Vec<Value>)> {
         }
     }
     out
+}
+
+/// What a Claude `SessionStart` means for the session's tracked conversation.
+#[derive(Debug, PartialEq, Eq)]
+pub enum ClaudeConversationUpdate {
+    /// Nothing moved (the payload names the conversation we already track, or no id).
+    Keep,
+    /// The session is back on its pinned id (e.g. `/resume` picked the original).
+    Reset,
+    /// The session moved to this conversation.
+    Adopt(String),
+}
+
+/// Pure decision for the Claude `sessionstart` capture: `pinned` is Conduit's session id,
+/// `captured` the currently tracked `agent_conversation_id`, `reported` the payload's
+/// `session_id`. Deliberately NOT keyed on `source`: every source that changes the id
+/// (`clear`, a `/resume` of another conversation, a fresh `startup` after a failed resume)
+/// has to be followed, and the one that does not (`compact`, our own `--resume`) reports
+/// the id we already hold.
+pub fn claude_conversation_update(
+    pinned: &str,
+    captured: Option<&str>,
+    reported: Option<&str>,
+) -> ClaudeConversationUpdate {
+    let Some(reported) = reported.map(str::trim).filter(|r| !r.is_empty()) else {
+        return ClaudeConversationUpdate::Keep;
+    };
+    if reported == captured.unwrap_or(pinned) {
+        ClaudeConversationUpdate::Keep
+    } else if reported == pinned {
+        ClaudeConversationUpdate::Reset
+    } else {
+        ClaudeConversationUpdate::Adopt(reported.to_string())
+    }
 }
 
 /// Claude's profile = the original conduit_hook_entries, expressed as rows.
@@ -1970,5 +2051,36 @@ mod tests {
             .find("let (session, event) = parse_query(&url);")
             .unwrap();
         assert!(open < parse);
+    }
+
+    #[test]
+    fn a_claude_clear_is_followed_and_the_known_conversation_is_kept() {
+        use ClaudeConversationUpdate::*;
+        // First launch / our own --resume / compact: the id we already track.
+        assert_eq!(claude_conversation_update("pin", None, Some("pin")), Keep);
+        assert_eq!(
+            claude_conversation_update("pin", Some("c1"), Some("c1")),
+            Keep
+        );
+        // /clear (or plan "clear context", or a fresh start after a failed resume).
+        assert_eq!(
+            claude_conversation_update("pin", None, Some("c1")),
+            Adopt("c1".into())
+        );
+        assert_eq!(
+            claude_conversation_update("pin", Some("c1"), Some("c2")),
+            Adopt("c2".into())
+        );
+        // An in-TUI /resume back to the original conversation drops the capture.
+        assert_eq!(
+            claude_conversation_update("pin", Some("c1"), Some("pin")),
+            Reset
+        );
+        // A payload with no usable id changes nothing.
+        assert_eq!(claude_conversation_update("pin", Some("c1"), None), Keep);
+        assert_eq!(
+            claude_conversation_update("pin", Some("c1"), Some("  ")),
+            Keep
+        );
     }
 }

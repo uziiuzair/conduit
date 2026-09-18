@@ -4987,6 +4987,134 @@ input[type="number"]:focus {
   border-color: var(--accent);
 }
 
+.tmux-notice-btn:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
+/* "Sessions reopened a conversation from before a /clear." Top-centre rather than the bottom
+   strip: it can list many sessions, and the bottom-left slot belongs to the tmux notice. */
+.convo-repair {
+  position: fixed;
+  top: 48px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 999;
+  width: min(640px, calc(100vw - 32px));
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 8px 12px;
+  border-radius: 8px;
+  background: var(--sidebar-bg);
+  border: 1px solid var(--border);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
+  font-size: 12px;
+  color: var(--text-mid);
+}
+
+.convo-repair-head,
+.convo-repair-row,
+.convo-repair-foot {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.convo-repair-text {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.convo-repair-text code {
+  font-family: var(--mono-font);
+  font-size: 11px;
+}
+
+.convo-repair-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  max-height: 50vh;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  border-top: 1px solid var(--border);
+  padding-top: 8px;
+}
+
+.convo-repair-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-bright);
+}
+
+.convo-repair-project {
+  color: var(--text-dim);
+  margin-right: 6px;
+}
+
+.convo-repair-meta {
+  flex: 1 1 auto;
+  color: var(--text-dim);
+  font-size: 11px;
+}
+
+.convo-repair-item {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 4px 0;
+}
+
+.convo-repair-item + .convo-repair-item {
+  border-top: 1px solid var(--border);
+}
+
+.convo-repair-convo {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.convo-repair-title {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-mid);
+}
+
+.convo-repair-convo .convo-repair-meta {
+  flex: none;
+}
+
+.convo-repair-fork-toggle {
+  align-self: flex-start;
+  background: none;
+  border: none;
+  padding: 2px 0;
+  font-size: 11px;
+  color: var(--accent);
+  cursor: pointer;
+}
+
+.convo-repair-forks {
+  list-style: none;
+  margin: 0 0 0 12px;
+  padding: 0 0 0 10px;
+  border-left: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
 .tmux-notice-btn.subtle {
   color: var(--text-dim);
   background: transparent;

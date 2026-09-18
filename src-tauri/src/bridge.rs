@@ -407,8 +407,12 @@ fn handle_conn(stream: TcpStream, app: AppHandle, token: Option<String>) {
                             ));
                         }
                         // Transcript backfill (chat history) + start tailing for appends.
-                        if let Some(dir) = crate::pty::claude_projects_dir() {
-                            if let Some(path) = crate::pty::transcript_path(&session_id, &dir) {
+                        // Keyed by the session's CURRENT conversation, which a `/clear`
+                        // moves off the pinned id (see `Store::claude_conversation_id`).
+                        let store = app.state::<Arc<Store>>();
+                        let conversation = store.claude_conversation_id(&session_id);
+                        if let Some(dir) = crate::pty::session_projects_dir(&store, &session_id) {
+                            if let Some(path) = crate::pty::transcript_path(&conversation, &dir) {
                                 let lines = read_lines(&path);
                                 let _ = ws.send(Message::Text(history_payload(&lines).to_string()));
                                 transcript = Some((path, lines.len()));
