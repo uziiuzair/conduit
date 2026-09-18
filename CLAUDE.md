@@ -762,7 +762,8 @@ which project launched.
 VSCode-style "reopen where I left off" + a running-agent quit guard (Claude + agy; others
 deferred). Opening a project eagerly spawns all its sessions (`Terminal.tsx`'s
 `spawnPty`/eager effect, gated by `restoreSessionsOnOpen`; Settings -> General). Resume:
-Claude via `claude --resume <id>` (already), agy via `agy --conversation=<uuid>` threaded as
+Claude via `claude --resume <conversation>` (see "Where conversation continuity lives" -- it
+is NOT always the session id), agy via `agy --conversation=<uuid>` threaded as
 `resume_token` through `spawn` -> `build_invocation`. agy won't let us pin our own id, so the
 `agyusage` hook captures the id agy chose from `~/.gemini/antigravity-cli/conversations/<uuid>.db`,
 disambiguated by a spawn-time baseline (`agy_usage::AgyResumeState`) so two sessions sharing an
@@ -789,13 +790,50 @@ types are a no-op). Design:
 ## Where the transcript readers live
 
 Four separate consumers read Claude's transcript store, and all of them resolve it per
-session (`store.session_account_config_dir` → `<cfg>/projects`, else `pty::claude_projects_dir`)
-because a session on a non-default account writes elsewhere: `transcript.rs` (mobile chat
-items), `context_window.rs` (the per-tab context meter — scans BACKWARDS with a substring
-pre-filter and reads only the trailing 1 MB; the window is resolved by model FAMILY because
-Claude Code runs opus/sonnet at 1M while the id stays bare), `subagents.rs` (the right panel's
+session (`pty::session_projects_dir`: `<account cfg>/projects`, else `pty::claude_projects_dir`)
+because a session on a non-default account writes elsewhere. The per-session readers look up
+`store.claude_conversation_id(session)`, **never `Session.id`** — after a `/clear` the session's
+own id names a conversation it has left (see "Where conversation continuity lives"):
+`transcript.rs` (mobile chat items), `context_window.rs` (the per-tab context meter — scans
+BACKWARDS with a substring pre-filter and reads only the trailing 1 MB; the window is resolved
+by model FAMILY because Claude Code runs opus/sonnet at 1M while the id stays bare), `subagents.rs` (the right panel's
 Agents tab), and `transcript_index.rs` (palette search over past conversations). All are
 read-only and degrade to "show less" rather than erroring.
+
+## Where conversation continuity lives
+
+A Claude session's FIRST conversation is pinned to `Session.id` (`--session-id`), but it does
+not stay there: `/clear`, a plan accepted with "clear context", an in-TUI `/resume`, and a
+failed `--resume` that falls through to the bare `|| claude` all continue under a NEW id.
+Conduit used to resume the pinned id forever, so every restart reopened the conversation from
+before the last clear and the work since looked lost.
+
+- **Capture:** the `sessionstart` hook body carries Claude's `session_id`;
+  `hooks::claude_conversation_update` (pure, tested) decides Keep / Reset / Adopt and the
+  result lands in `Session.agent_conversation_id` — the same field agy and Command Code use —
+  and is saved at once. It is deliberately NOT keyed on `source`: every source that changes
+  the id must be followed, and the ones that don't report the id already held. Refused when
+  another session owns the id (`claude_conversation_claimed_elsewhere`, which counts PINNED
+  ids too). `startup` with a new id while the previous transcript exists means the resume
+  failed; the `conversation-restarted` event makes `App.tsx` say so.
+- **Resume:** `ClaudeAdapter::build_invocation` resumes `resume_token` when its transcript
+  exists, else falls back to the old pinned-id logic unchanged.
+- **Readers:** everything that opens a session's transcript goes through
+  `store.claude_conversation_id`; `search_transcripts` maps a hit back with
+  `session_for_conversation`.
+- **Repair for sessions that drifted before the capture existed:** `conversation_repair.rs`.
+  The link is exact: Claude's `<cfg>/history.jsonl` records `/clear` WITH the id it was typed
+  in, and the conversation it starts opens with a `SessionStart:clear` record within
+  milliseconds. Pre-fix restarts resumed the pinned conversation and users cleared it again, so
+  the clear history FORKS — the newest branch is offered first, older branches (often the
+  "lost" work) as alternatives. `ConversationRepairNotice.tsx` offers them once per launch;
+  switching is explicit (`adopt_claude_conversation` validates, then stop + start restarts the
+  agent). Root chats (`root_chat.rs`) still resume their pinned id.
+- **state.json hardening:** `save` fsyncs the temp file before the rename and keeps a rolling
+  `state.json.bak` (refreshed at most every 5 min, never from an unparseable file); `load_state`
+  falls back to it when state.json exists but will not parse — an empty store is what makes
+  the orphan sweep kill every live session.
+- E2E: `e2e/conversation-continuity.e2e.ts` (hermetic: the session runs under a temp account).
 
 ## Where session persistence's safety net lives
 
