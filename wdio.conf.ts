@@ -35,7 +35,7 @@ const binary =
       : resolve("src-tauri/target/debug/conduit-tauri");
 
 /** Where the app under test keeps its state — `store::data_dir`'s rule, in Node. */
-function e2eDataDir(): string {
+export function e2eDataDir(): string {
   const base =
     platform() === "win32"
       ? (process.env.APPDATA ?? join(homedir(), "AppData", "Roaming"))
