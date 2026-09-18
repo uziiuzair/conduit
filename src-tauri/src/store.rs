@@ -609,28 +609,94 @@ fn pretty_label(profile: &str) -> String {
     }
 }
 
+/// How stale the rolling `state.json.bak` may get before `save` refreshes it. Long enough
+/// that a burst of saves costs one extra copy, short enough that a restore loses minutes.
+const BACKUP_MAX_AGE: std::time::Duration = std::time::Duration::from_secs(5 * 60);
+
+/// Parse a persisted state document: the current object shape, else the legacy bare
+/// `Vec<Project>` array (rewritten to the object shape on the next save). An array can't
+/// deserialize into a struct and vice-versa, so the two branches are unambiguous.
+fn parse_state(data: &[u8]) -> Option<PersistState> {
+    serde_json::from_slice::<PersistState>(data)
+        .ok()
+        .or_else(|| {
+            serde_json::from_slice::<Vec<Project>>(data)
+                .ok()
+                .map(|projects| PersistState {
+                    projects,
+                    ..Default::default()
+                })
+        })
+}
+
+/// Load state.json, falling back to the rolling backup when it EXISTS but will not parse.
+///
+/// An unparseable store loads as an EMPTY one, and an empty store is how the startup orphan
+/// sweep comes to kill every live tmux session (see CLAUDE.md, "Where session persistence's
+/// safety net lives") -- the backup is the difference between losing the last few minutes of
+/// edits and losing every project, session and running agent. A missing state.json is a
+/// first launch, not damage, and never consults the backup.
+fn load_state(save_path: &std::path::Path) -> PersistState {
+    fs::read(save_path)
+        .ok()
+        .and_then(|data| parse_state(&data))
+        .or_else(|| {
+            if !save_path.exists() {
+                return None;
+            }
+            let bak = backup_path(save_path);
+            let restored = fs::read(&bak).ok().and_then(|data| parse_state(&data));
+            if restored.is_some() {
+                eprintln!(
+                    "conduit: state.json is unreadable; restored from {}",
+                    bak.display()
+                );
+            }
+            restored
+        })
+        .unwrap_or_default()
+}
+
+fn backup_path(save_path: &std::path::Path) -> PathBuf {
+    save_path.with_extension("json.bak")
+}
+
+fn write_synced(path: &std::path::Path, data: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    let mut f = fs::File::create(path)?;
+    f.write_all(data)?;
+    f.sync_all()
+}
+
+/// Copy the CURRENT state.json (the last good save, about to be replaced) to the rolling
+/// backup when the backup is missing or older than [`BACKUP_MAX_AGE`]. Only a document that
+/// parses is ever promoted, so a corrupt state.json can never overwrite a good backup.
+fn rotate_backup(save_path: &std::path::Path) {
+    let bak = backup_path(save_path);
+    let fresh = fs::metadata(&bak)
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| t.elapsed().ok())
+        .is_some_and(|age| age < BACKUP_MAX_AGE);
+    if fresh {
+        return;
+    }
+    let Ok(current) = fs::read(save_path) else {
+        return;
+    };
+    if parse_state(&current).is_none() {
+        return;
+    }
+    if let Err(e) = write_synced(&bak, &current) {
+        eprintln!("conduit: failed to refresh state backup: {e}");
+    }
+}
+
 impl Store {
     pub fn new() -> Self {
         let save_path = data_dir().join("state.json");
 
-        // Load the new object shape; fall back to the legacy bare `Vec<Project>` array and
-        // wrap it (rewritten to the object shape on the next save). An array can't
-        // deserialize into a struct and vice-versa, so the two branches are unambiguous.
-        let state = fs::read(&save_path)
-            .ok()
-            .and_then(|data| {
-                serde_json::from_slice::<PersistState>(&data)
-                    .ok()
-                    .or_else(|| {
-                        serde_json::from_slice::<Vec<Project>>(&data)
-                            .ok()
-                            .map(|projects| PersistState {
-                                projects,
-                                ..Default::default()
-                            })
-                    })
-            })
-            .unwrap_or_default();
+        let state = load_state(&save_path);
 
         // Normalize legacy accounts: an account persisted before the `agents` tag existed gets
         // its set detected from disk (falling back to [Claude]) so it is eligible for the right
@@ -726,10 +792,13 @@ impl Store {
             }
         };
         let tmp = self.save_path.with_extension("json.tmp");
-        if let Err(e) = fs::write(&tmp, &data) {
+        // Flushed to disk BEFORE the rename: without the fsync a kernel panic or power loss
+        // can land the rename ahead of the data and leave a zero-length state.json.
+        if let Err(e) = write_synced(&tmp, &data) {
             eprintln!("conduit: failed to write state: {e}");
             return;
         }
+        rotate_backup(&self.save_path);
         // Rename over the target. On Windows a transient lock (AV scan / Search indexer /
         // sync client) can make this fail with ERROR_SHARING_VIOLATION even though a POSIX
         // rename-over-open never does; retry briefly before giving up. macOS/Linux keep the
@@ -1619,6 +1688,55 @@ impl Store {
             })
     }
 
+    /// The id of the Claude conversation this session is CURRENTLY on: the captured
+    /// `agent_conversation_id` when the conversation has moved on from the one Conduit
+    /// pinned (a `/clear`, a plan accepted with "clear context", an in-TUI `/resume`, or a
+    /// failed resume that fell through to a fresh `claude`), else the session's own id.
+    ///
+    /// Every reader of a Claude session's transcript keys off THIS, never `Session.id` --
+    /// the pinned id is only where the session started, and after a `/clear` it names a
+    /// conversation the user has left.
+    pub fn claude_conversation_id(&self, session_id: &str) -> String {
+        self.session_agent_conversation_id(session_id)
+            .unwrap_or_else(|| session_id.to_string())
+    }
+
+    /// The Conduit session whose current conversation is `conversation_id`, if any -- the
+    /// reverse of [`Self::claude_conversation_id`], for mapping a transcript back to its row.
+    pub fn session_for_conversation(&self, conversation_id: &str) -> Option<String> {
+        let projects = self.projects.lock().unwrap_or_else(|e| e.into_inner());
+        let sessions = || projects.iter().flat_map(|p| &p.sessions);
+        // A captured id wins over a pinned one: once a session has moved off its pinned id,
+        // that id is a conversation it LEFT, not the one it is on.
+        sessions()
+            .find(|s| s.agent_conversation_id.as_deref() == Some(conversation_id))
+            .or_else(|| {
+                sessions().find(|s| s.id == conversation_id && s.agent_conversation_id.is_none())
+            })
+            .map(|s| s.id.clone())
+    }
+
+    /// Whether a Claude conversation id belongs to a session OTHER than `except_session`,
+    /// either as that session's pinned id or as its captured one. Claude pins its first
+    /// conversation to `Session.id`, so `conversation_id_in_use` (captured ids only) would
+    /// miss the common case of a session whose conversation never moved.
+    pub fn claude_conversation_claimed_elsewhere(
+        &self,
+        conversation_id: &str,
+        except_session: &str,
+    ) -> bool {
+        self.projects
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .flat_map(|p| &p.sessions)
+            .any(|s| {
+                s.id != except_session
+                    && (s.id == conversation_id
+                        || s.agent_conversation_id.as_deref() == Some(conversation_id))
+            })
+    }
+
     // ---- Trust boundaries (Feature 4: multi-agent silo / controlled sharing) -----
 
     /// This scope's routing OVERRIDES, not the effective table -- the settings UI has to
@@ -2372,6 +2490,96 @@ mod tests {
             store.session_agent_conversation_id(&s.id).as_deref(),
             Some("conv-uuid-1")
         );
+    }
+
+    #[test]
+    fn a_claude_session_follows_its_conversation_past_a_clear() {
+        let dir = temp_dir("claude_conv_follow");
+        let store = Store::for_test(&dir);
+        let p = store.add_project("/repo".into());
+        let a = store
+            .add_session(
+                &p.id,
+                "a".into(),
+                false,
+                AgentId::Claude,
+                SessionRole::Worker,
+            )
+            .unwrap();
+        let b = store
+            .add_session(
+                &p.id,
+                "b".into(),
+                false,
+                AgentId::Claude,
+                SessionRole::Worker,
+            )
+            .unwrap();
+
+        // Never moved: the conversation IS the pinned id, both directions.
+        assert_eq!(store.claude_conversation_id(&a.id), a.id);
+        assert_eq!(
+            store.session_for_conversation(&a.id).as_deref(),
+            Some(a.id.as_str())
+        );
+
+        // After a /clear the session is on a new conversation. Its pinned id is now one it
+        // LEFT, so it must no longer map back to the session.
+        store.set_session_agent_conversation_id(&a.id, "after-clear");
+        assert_eq!(store.claude_conversation_id(&a.id), "after-clear");
+        assert_eq!(
+            store.session_for_conversation("after-clear").as_deref(),
+            Some(a.id.as_str())
+        );
+        assert_eq!(store.session_for_conversation(&a.id), None);
+        assert_eq!(store.session_for_conversation("unknown"), None);
+
+        // Ownership counts a session's PINNED id too, not just captured ones: b's own id is
+        // b's conversation even though b never captured anything.
+        assert!(store.claude_conversation_claimed_elsewhere(&b.id, &a.id));
+        assert!(store.claude_conversation_claimed_elsewhere("after-clear", &b.id));
+        assert!(!store.claude_conversation_claimed_elsewhere("after-clear", &a.id));
+        assert!(!store.claude_conversation_claimed_elsewhere("nobody", &a.id));
+    }
+
+    #[test]
+    fn an_unreadable_state_file_restores_from_the_rolling_backup() {
+        let dir = temp_dir("state_backup");
+        let store = Store::for_test(&dir);
+        let p = store.add_project("/first".into()); // save #1: no prior file, no backup
+        store.add_project("/second".into()); // save #2: backs up the one-project file
+        let save_path = dir.join("state.json");
+        let bak = backup_path(&save_path);
+        assert!(bak.exists(), "the second save should have taken a backup");
+        assert!(
+            !dir.join("state.json.tmp").exists(),
+            "the temp file is renamed away"
+        );
+
+        // Torn / corrupt state.json: the load falls back to the backup instead of an empty
+        // store (which the orphan sweep would read as "kill every live session").
+        fs::write(&save_path, b"{\"projects\": [").unwrap();
+        let loaded = load_state(&save_path);
+        assert_eq!(loaded.projects.len(), 1);
+        assert_eq!(loaded.projects[0].id, p.id);
+
+        // A corrupt current file is never promoted over a good backup, however old it is.
+        let before = fs::read(&bak).unwrap();
+        fs::remove_file(&bak).unwrap();
+        fs::write(&bak, &before).unwrap();
+        let old = std::time::SystemTime::now() - BACKUP_MAX_AGE * 2;
+        fs::File::options()
+            .write(true)
+            .open(&bak)
+            .unwrap()
+            .set_modified(old)
+            .unwrap();
+        rotate_backup(&save_path);
+        assert_eq!(fs::read(&bak).unwrap(), before);
+
+        // A missing state.json is a first launch: empty, and the backup is not consulted.
+        fs::remove_file(&save_path).unwrap();
+        assert!(load_state(&save_path).projects.is_empty());
     }
 
     #[test]

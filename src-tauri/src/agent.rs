@@ -271,8 +271,9 @@ pub trait ProviderAdapter {
     /// The agent command that runs after `cd <dir> &&`, including the `|| <bare>`
     /// fallback. `flags` carries already-quoted extra args (e.g. ` --worktree 'x'`).
     /// `projects_dir` is Claude's transcript store (used only by adapters that resume).
-    /// `resume_token` is the agent's own captured conversation id (agy), for adapters that
-    /// can't pin resume to Conduit's `session_id` the way Claude does. None = start fresh.
+    /// `resume_token` is the agent's own captured conversation id: agy and Command Code can't
+    /// pin one up front, and Claude's moves off the pinned `session_id` after a `/clear`.
+    /// None = the adapter's default (start fresh, or Claude's pinned id).
     fn build_invocation(
         &self,
         session_id: &str,
@@ -352,9 +353,16 @@ impl ProviderAdapter for ClaudeAdapter {
         projects_dir: Option<&Path>,
         flags: &str,
         initial_prompt: Option<&str>,
-        _resume_token: Option<&str>, // Claude resumes via `session_id`/transcript, not this.
+        resume_token: Option<&str>,
     ) -> String {
-        let id = crate::pty::quote_arg(session_id);
+        // Claude pins its FIRST conversation to Conduit's own id (`--session-id`), but the
+        // conversation does not stay there: `/clear`, a plan accepted with "clear context",
+        // an in-TUI `/resume`, or a failed resume that fell through to the bare `|| claude`
+        // each start a conversation under a NEW id. The SessionStart hook captures that id
+        // as `resume_token` (see hooks.rs), and it wins whenever its transcript is still on
+        // disk. Resuming the pinned id instead is what reopened a conversation the user had
+        // cleared away, every time Conduit restarted.
+        //
         // An initial prompt rides as a quoted positional so the worker starts working
         // immediately (used by the Conductor's fleet_spawn). Applied to both branches.
         // `quote_arg` is POSIX single-quoting under `sh -c` and cmd.exe quoting under
@@ -362,6 +370,13 @@ impl ProviderAdapter for ClaudeAdapter {
         let prompt = initial_prompt
             .map(|p| format!(" {}", crate::pty::quote_arg(p)))
             .unwrap_or_default();
+        if let Some(token) = resume_token
+            .filter(|t| projects_dir.is_some_and(|d| crate::pty::transcript_exists(t, d)))
+        {
+            let token = crate::pty::quote_arg(token);
+            return format!("claude{flags} --resume {token}{prompt} || claude{flags}{prompt}");
+        }
+        let id = crate::pty::quote_arg(session_id);
         if projects_dir.is_some_and(|d| crate::pty::transcript_exists(session_id, d)) {
             format!("claude{flags} --resume {id}{prompt} || claude{flags}{prompt}")
         } else {
@@ -2021,6 +2036,76 @@ mod tests {
         #[cfg(windows)]
         let expected = "claude --session-id id \"write a haiku\" || claude \"write a haiku\"";
         assert_eq!(cmd, expected);
+    }
+
+    fn claude_projects_with(tag: &str, ids: &[&str]) -> std::path::PathBuf {
+        let projects =
+            std::env::temp_dir().join(format!("conduit_agent_claude_{tag}_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&projects);
+        let slug = projects.join("-repo");
+        std::fs::create_dir_all(&slug).unwrap();
+        for id in ids {
+            std::fs::write(slug.join(format!("{id}.jsonl")), b"{}\n").unwrap();
+        }
+        projects
+    }
+
+    #[test]
+    fn claude_resumes_the_conversation_it_moved_to_not_the_pinned_one() {
+        // The session started as `pinned`, then a /clear moved it to `after-clear`. Both
+        // transcripts exist; the captured one is where the user actually is.
+        let projects = claude_projects_with("moved", &["pinned", "after-clear"]);
+        let cmd = ClaudeAdapter.build_invocation(
+            "pinned",
+            Some(&projects),
+            "",
+            None,
+            Some("after-clear"),
+        );
+        #[cfg(not(windows))]
+        assert_eq!(cmd, "claude --resume 'after-clear' || claude");
+        #[cfg(windows)]
+        assert_eq!(cmd, "claude --resume after-clear || claude");
+    }
+
+    #[test]
+    fn claude_falls_back_to_the_pinned_id_when_the_captured_transcript_is_gone() {
+        // A captured id whose transcript was deleted must not be resumed (it would fail and
+        // fall through to a fresh conversation) -- the pinned one is still there.
+        let projects = claude_projects_with("gone", &["pinned"]);
+        let cmd =
+            ClaudeAdapter.build_invocation("pinned", Some(&projects), "", None, Some("deleted"));
+        assert!(cmd.contains("--resume"), "got {cmd}");
+        assert!(cmd.contains("pinned"), "got {cmd}");
+        assert!(!cmd.contains("deleted"), "got {cmd}");
+
+        // Neither exists: pin a fresh conversation to our own id, exactly as before.
+        let empty = claude_projects_with("none", &[]);
+        let cmd = ClaudeAdapter.build_invocation("pinned", Some(&empty), "", None, Some("x"));
+        assert!(cmd.contains("--session-id"), "got {cmd}");
+        assert!(!cmd.contains("--resume"), "got {cmd}");
+    }
+
+    #[test]
+    fn claude_carries_flags_and_prompt_onto_a_captured_resume() {
+        let projects = claude_projects_with("flags", &["after-clear"]);
+        let cmd = ClaudeAdapter.build_invocation(
+            "pinned",
+            Some(&projects),
+            " --worktree 'wt'",
+            Some("go"),
+            Some("after-clear"),
+        );
+        #[cfg(not(windows))]
+        assert_eq!(
+            cmd,
+            "claude --worktree 'wt' --resume 'after-clear' 'go' || claude --worktree 'wt' 'go'"
+        );
+        #[cfg(windows)]
+        assert_eq!(
+            cmd,
+            "claude --worktree 'wt' --resume after-clear go || claude --worktree 'wt' go"
+        );
     }
 
     #[test]

@@ -31,6 +31,7 @@ import { RightColumn } from "./components/RightColumn";
 import { Onboarding } from "./components/Onboarding";
 import { UpdateNotice } from "./components/UpdateNotice";
 import { TmuxNotice } from "./components/TmuxNotice";
+import { ConversationRepairNotice } from "./components/ConversationRepairNotice";
 import { Toasts } from "./components/Toasts";
 import { NewProjectDialog } from "./components/NewProjectDialog";
 import { PendingDecisions } from "./components/PendingDecisions";
@@ -286,6 +287,29 @@ export default function App() {
     const unlisten = listen<string[]>("session-stale", ({ payload }) => {
       useStore.getState().markStale(payload ?? []);
     });
+    return () => {
+      void unlisten.then((f) => f());
+    };
+  }, []);
+
+  // A Claude session's resume failed and the bare `|| claude` fallback started a NEW
+  // conversation. Rust has already switched the session onto it (so the next launch reopens
+  // what is on screen), but the user just watched their history vanish -- say where it went.
+  useEffect(() => {
+    const unlisten = listen<{ session: string; previous: string; current: string }>(
+      "conversation-restarted",
+      ({ payload }) => {
+        const found = findSession(useStore.getState().projects, payload.session);
+        const name = found ? `"${found.session.name}"` : "A session";
+        useStore
+          .getState()
+          .pushToast(
+            `${name} couldn't reopen its previous conversation, so Claude started a new one. ` +
+              `The previous one is still on disk — run /resume in that session to go back to it.`,
+            "error",
+          );
+      },
+    );
     return () => {
       void unlisten.then((f) => f());
     };
@@ -747,6 +771,7 @@ export default function App() {
       </div>
       <UpdateNotice />
       <TmuxNotice />
+      <ConversationRepairNotice />
       <Toasts />
       <PendingDecisions />
       {showSettings && (
