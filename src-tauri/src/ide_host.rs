@@ -18,29 +18,13 @@ use std::path::{Path, PathBuf};
 /// 128-bit auth token as 32 lowercase hex chars — the shape claude's own IDE
 /// extensions mint. Never logged, never persisted to state.json (Secrets rule);
 /// it lives in memory and in the 0600 lock file, nowhere else.
+///
+/// A v4 UUID's `simple()` form IS 32 lowercase hex from the OS CSPRNG, on every
+/// platform — the same choice `cli_open::write_token_file_in` documents. (An earlier
+/// draft read /dev/urandom directly, which silently fell back to a guessable
+/// time+pid hash on Windows, where that path does not exist.)
 pub fn mint_token() -> String {
-    // No `rand` dep (lean-deps rule): /dev/urandom on unix; a time+pid FNV fold as
-    // the fallback for the effectively-unheard-of read failure. Localhost-only,
-    // per-spawn token — this is belt-and-braces, not a KDF.
-    let mut buf = [0u8; 16];
-    let ok = std::fs::File::open("/dev/urandom")
-        .and_then(|mut f| std::io::Read::read_exact(&mut f, &mut buf))
-        .is_ok();
-    if !ok {
-        let seed = format!(
-            "{:?}-{}-{:?}",
-            std::time::SystemTime::now(),
-            std::process::id(),
-            std::time::Instant::now()
-        );
-        let mut h: u128 = 0xcbf29ce484222325cbf29ce484222325;
-        for b in seed.bytes() {
-            h ^= b as u128;
-            h = h.wrapping_mul(0x100000001b3);
-        }
-        buf = h.to_le_bytes();
-    }
-    buf.iter().map(|b| format!("{b:02x}")).collect()
+    uuid::Uuid::new_v4().simple().to_string()
 }
 
 /// The lock file body, exactly the fields claude 2.1.267 parses. `runningInWindows`

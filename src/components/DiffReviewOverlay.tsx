@@ -69,6 +69,9 @@ export function DiffReviewOverlay({ diff }: { diff: PendingDiff }) {
         });
         ed.setModel({ original: o, modified: m });
         editorRef.current = ed;
+        // Land keyboard focus inside the overlay so its Esc handler owns the key —
+        // and so the user can start editing the proposal immediately.
+        ed.getModifiedEditor().focus();
       });
     return () => {
       alive = false;
@@ -87,20 +90,26 @@ export function DiffReviewOverlay({ diff }: { diff: PendingDiff }) {
     editorRef.current?.updateOptions({ fontSize: size, lineHeight: Math.round(size * 1.5) });
   }, [fontZoom]);
 
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") {
-        e.stopPropagation();
-        settle(false);
-      }
-    };
-    window.addEventListener("keydown", onKey, true);
-    return () => window.removeEventListener("keydown", onKey, true);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [diff.diffId, busy]);
+  // Esc rejects — but ONLY when the key lands inside this overlay. A window-level
+  // capture listener here once swallowed Esc for the whole app: pressing Esc in a
+  // TERMINAL (its everyday cancel key) rejected some other session's diff, and with
+  // two cards visible one Esc rejected both. Scoped to the overlay root (Monaco keeps
+  // focus inside it), every other component keeps its own Esc.
+  const rootRef = useRef<HTMLDivElement | null>(null);
+  const onRootKeyDown = (e: React.KeyboardEvent) => {
+    if (e.key === "Escape") {
+      e.stopPropagation();
+      settle(false);
+    }
+  };
 
   return (
-    <div className="diff-review-overlay">
+    <div
+      ref={rootRef}
+      className="diff-review-overlay"
+      tabIndex={-1}
+      onKeyDown={onRootKeyDown}
+    >
       <div className="diff-review-header">
         <span className="diff-review-title">
           Claude proposes changes — <strong>{baseName(diff.newFilePath)}</strong>

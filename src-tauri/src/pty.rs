@@ -900,6 +900,13 @@ impl PtyManager {
         // it is here for the launch AFTER a reboot, when there is no tmux left to reattach
         // to and the snapshot is the only record of the screen.
         self.save_scrollback();
+        // IDE lock files die with the process's listeners: leaving them would show dead
+        // "Conduit" entries in other terminals' /ide menus until the next boot's sweep.
+        // The agents themselves keep running under tmux; the next launch re-binds each
+        // session's persisted port and rewrites its lock.
+        if let Some(h) = self.ide_host.get() {
+            h.remove_all_locks();
+        }
         let ids: Vec<String> = self.sessions.iter().map(|e| e.key().clone()).collect();
         for id in ids {
             if let Some((_, m)) = self.sessions.remove(&id) {
