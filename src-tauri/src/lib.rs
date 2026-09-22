@@ -58,7 +58,7 @@ mod updates;
 mod usage_tally;
 mod worktree;
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
@@ -123,6 +123,10 @@ fn pty_spawn(
     // sends the definitions it already holds, looked up fresh at every spawn. None =
     // inherit (no MCP flags), which is the pre-allowlist behavior.
     mcp_allowlist: Option<Vec<crate::agent::McpServer>>,
+    // IDE announce (2026-09-23 spec): whether this spawn starts a per-session IDE
+    // server and points claude at it. None = true (the pref's default), so older
+    // frontends keep announcing without resending the arg.
+    announce_ide: Option<bool>,
     on_event: Channel<String>,
     pty: State<Arc<PtyManager>>,
     hook_state: State<Arc<HookState>>,
@@ -486,6 +490,39 @@ fn pty_spawn(
     let resume_token = (!shell_only)
         .then(|| store.session_agent_conversation_id(&session_id))
         .flatten();
+
+    // IDE announce (2026-09-23 spec): bind this session's own WS/MCP server, write its
+    // lock file where THIS session's claude will look (the account redirect moves the
+    // whole config home), and carry the port into the spawn env. Claude-only — the
+    // protocol is Claude's — and never for the companion shell. A failure to bind
+    // degrades to a plain terminal; it must never fail the spawn.
+    let ide_port =
+        if !shell_only && agent == crate::agent::AgentId::Claude && announce_ide.unwrap_or(true) {
+            let ide_state: State<Arc<crate::ide_host::IdeHost>> = app.state();
+            // Ambient CLAUDE_CONFIG_DIR moves the lock dir the same way it moves the
+            // transcript store (see `pty::claude_projects_dir`).
+            let ambient_cfg = std::env::var("CLAUDE_CONFIG_DIR")
+                .ok()
+                .filter(|s| !s.is_empty());
+            let lock_base = account_config_dir.clone().or(ambient_cfg);
+            let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("/"));
+            let lock_dir = crate::ide_host::lock_dir(lock_base.as_deref(), &home);
+            let events: Arc<dyn crate::ide_host::IdeEvents> =
+                Arc::new(TauriIdeEvents { app: app.clone() });
+            let port = ide_state.start_for_session(
+                &session_id,
+                &cwd,
+                &lock_dir,
+                store.session_ide_port(&session_id),
+                events,
+            );
+            if let Some(p) = port {
+                store.set_session_ide_port(&session_id, p);
+            }
+            port
+        } else {
+            None
+        };
     pty.spawn(
         session_id,
         cwd,
@@ -508,8 +545,86 @@ fn pty_spawn(
         agent_effort.map(str::to_string),
         resume_token,
         strict_mcp,
+        ide_port,
         on_event,
     )
+}
+
+/// `IdeEvents` over Tauri's event bus: the connection loop's side effects become
+/// frontend events. Payload keys are camelCase to match every other Conduit event.
+struct TauriIdeEvents {
+    app: tauri::AppHandle,
+}
+
+impl crate::ide_host::IdeEvents for TauriIdeEvents {
+    fn open_diff(&self, session_id: &str, diff_id: &str, args: &serde_json::Value) {
+        let _ = self.app.emit(
+            "ide-open-diff",
+            serde_json::json!({
+                "sessionId": session_id,
+                "diffId": diff_id,
+                "oldFilePath": args["old_file_path"],
+                "newFilePath": args["new_file_path"],
+                "newFileContents": args["new_file_contents"],
+                "tabName": args["tab_name"],
+            }),
+        );
+    }
+    fn open_file(&self, session_id: &str, path: &str) {
+        let _ = self.app.emit(
+            "ide-open-file",
+            serde_json::json!({"sessionId": session_id, "filePath": path}),
+        );
+    }
+    fn diff_closed(&self, session_id: &str, tab_name: Option<&str>) {
+        let _ = self.app.emit(
+            "ide-diff-closed",
+            serde_json::json!({"sessionId": session_id, "tabName": tab_name}),
+        );
+    }
+}
+
+/// The human's verdict on a parked openDiff. Keep ⇒ claude receives
+/// `[FILE_SAVED, contents]` and writes the file itself; reject ⇒ `[DIFF_REJECTED]`.
+#[tauri::command]
+fn ide_diff_verdict(
+    session_id: String,
+    diff_id: String,
+    keep: bool,
+    contents: Option<String>,
+    ide: State<Arc<crate::ide_host::IdeHost>>,
+) -> Result<bool, String> {
+    Ok(ide.resolve_diff(&session_id, &diff_id, keep, contents.as_deref()))
+}
+
+/// Editor context push (project-scoped): the frontend sends the active file,
+/// selection, open tabs and markers whenever they change; the IDE host caches them
+/// per session and answers claude's read tools from that cache.
+#[tauri::command]
+fn ide_editor_context(
+    project_id: String,
+    context: crate::ide_host::EditorContext,
+    selection_changed: bool,
+    ide: State<Arc<crate::ide_host::IdeHost>>,
+    store: State<Arc<Store>>,
+) -> Result<(), String> {
+    let session_ids = store.project_session_ids(&project_id);
+    ide.update_context(&session_ids, &context, selection_changed);
+    Ok(())
+}
+
+/// Explicit "send this selection to claude" — an at_mentioned notification into one
+/// session's prompt.
+#[tauri::command]
+fn ide_at_mention(
+    session_id: String,
+    file_path: String,
+    line_start: u64,
+    line_end: u64,
+    ide: State<Arc<crate::ide_host::IdeHost>>,
+) -> Result<(), String> {
+    ide.at_mention(&session_id, &file_path, line_start, line_end);
+    Ok(())
 }
 
 #[tauri::command]
@@ -2098,6 +2213,7 @@ pub fn run() {
 
     builder
         .manage(Arc::new(PtyManager::new()))
+        .manage(crate::ide_host::IdeHost::new())
         .manage(Arc::new(Store::new()))
         .manage(Arc::new(HookState::default()))
         .manage(Arc::new(crate::fleet::FleetState::default()))
@@ -2159,6 +2275,37 @@ pub fn run() {
                 agy_resume,
             );
             bridge::start(app.handle().clone());
+
+            // IDE announce: hand the host to the PTY manager (teardown needs it) and
+            // sweep OUR stale lock files — every lock dir Conduit could have written
+            // (ambient + each registered account), a Conduit-named lock whose port no
+            // longer answers. Off the main thread; each probe is a 300 ms TCP connect.
+            {
+                let ide = app.state::<Arc<crate::ide_host::IdeHost>>().inner().clone();
+                pty.set_ide_host(ide);
+                let mut lock_dirs: Vec<std::path::PathBuf> = Vec::new();
+                let ambient_cfg = std::env::var("CLAUDE_CONFIG_DIR")
+                    .ok()
+                    .filter(|s| !s.is_empty());
+                if let Some(home) = dirs::home_dir() {
+                    lock_dirs.push(crate::ide_host::lock_dir(ambient_cfg.as_deref(), &home));
+                    for account in store.list_accounts() {
+                        lock_dirs.push(crate::ide_host::lock_dir(Some(&account.config_dir), &home));
+                    }
+                }
+                std::thread::spawn(move || {
+                    let probe = |port: u16| {
+                        std::net::TcpStream::connect_timeout(
+                            &std::net::SocketAddr::from(([127, 0, 0, 1], port)),
+                            std::time::Duration::from_millis(300),
+                        )
+                        .is_ok()
+                    };
+                    for dir in lock_dirs {
+                        crate::ide_host::sweep_lock_dir(&dir, &probe);
+                    }
+                });
+            }
 
             // Sweep tmux sessions whose Conduit session no longer exists. Persistence
             // means a tmux session outlives the app, so one whose owner was deleted while
@@ -2277,6 +2424,9 @@ pub fn run() {
             stop_session,
             start_session,
             stop_idle_sessions,
+            ide_diff_verdict,
+            ide_editor_context,
+            ide_at_mention,
             pty_is_running,
             tmux_available,
             session_context,
