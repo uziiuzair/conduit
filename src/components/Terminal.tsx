@@ -186,6 +186,9 @@ export function TerminalView({
       // A backend-spawned worker carries a first prompt; consumed once here.
       initialPrompt: useStore.getState().takePendingPrompt(sessionId) ?? null,
       mcpAllowlist,
+      // IDE announce pref (Settings → General): read at spawn time, not subscribed —
+      // a toggle applies to the NEXT spawn, never respawns a live terminal.
+      announceIde: useStore.getState().announceAsIde,
       onEvent: channel,
     })
       .then(() => {

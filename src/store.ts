@@ -577,6 +577,24 @@ function writeRestoreSessionsOnOpen(v: boolean): void {
   }
 }
 
+// IDE announce: Claude sessions connect back to Conduit as their IDE (diff review,
+// selection context). Default ON. Same persisted-pref pattern as restore-on-open.
+const ANNOUNCE_IDE_KEY = "conduit.announceAsIde";
+function readAnnounceAsIde(): boolean {
+  try {
+    return localStorage.getItem(ANNOUNCE_IDE_KEY) !== "0"; // default on (absent => true)
+  } catch {
+    return true;
+  }
+}
+function writeAnnounceAsIde(v: boolean): void {
+  try {
+    localStorage.setItem(ANNOUNCE_IDE_KEY, v ? "1" : "0");
+  } catch {
+    /* quota — non-fatal */
+  }
+}
+
 // Root chat workspace root: the directory the HQ chats read from (their spawn cwd).
 // Empty = the Rust side falls back to the home directory. Same persisted-pref pattern.
 const WORKSPACE_ROOT_KEY = "conduit.workspaceRoot";
@@ -1263,6 +1281,10 @@ interface AppState {
    *  resumes all its sessions instead of waiting for a click. */
   restoreSessionsOnOpen: boolean;
   setRestoreSessionsOnOpen: (v: boolean) => void;
+  /** Persisted. When true (default), Claude sessions announce Conduit as their IDE:
+   *  diff review lands in a Monaco overlay, editor selections reach the session. */
+  announceAsIde: boolean;
+  setAnnounceAsIde: (v: boolean) => void;
   /** Persisted. Whether a launch reopens the project you were last on ("last", the
    *  default) or opens nothing ("none"). Neither one reopens the topmost project as
    *  such — see `initialProjectSelection`. */
@@ -1696,6 +1718,7 @@ export const useStore = create<AppState>((set, get) => {
     pendingDecisions: [],
     decisionRoutes: {},
     restoreSessionsOnOpen: readRestoreSessionsOnOpen(),
+    announceAsIde: readAnnounceAsIde(),
     openBehavior: readOpenBehavior(),
     terminalRenderer: readTerminalRenderer(),
     persistSessions: readPersistSessions(),
@@ -3196,6 +3219,11 @@ export const useStore = create<AppState>((set, get) => {
     setRestoreSessionsOnOpen: (v) => {
       writeRestoreSessionsOnOpen(v);
       set({ restoreSessionsOnOpen: v });
+    },
+
+    setAnnounceAsIde: (v) => {
+      writeAnnounceAsIde(v);
+      set({ announceAsIde: v });
     },
 
     setOpenBehavior: (v) => {
