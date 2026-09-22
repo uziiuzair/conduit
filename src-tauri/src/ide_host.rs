@@ -323,6 +323,456 @@ pub fn dispatch(
     }
 }
 
+// ---------------------------------------------------------------------------
+// The host: per-session listeners, lock files, connections, pending diffs.
+// ---------------------------------------------------------------------------
+
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{mpsc, Arc, Mutex};
+use std::time::Duration;
+
+/// Side effects the connection loop needs from the app. A trait, not an
+/// `AppHandle`, so `tests/ide_host.rs` can drive the real loop over a real
+/// socket (the `cli_open.rs` lesson).
+pub trait IdeEvents: Send + Sync + 'static {
+    fn open_diff(&self, session_id: &str, diff_id: &str, args: &serde_json::Value);
+    fn open_file(&self, session_id: &str, path: &str);
+    fn diff_closed(&self, session_id: &str, tab_name: Option<&str>);
+}
+
+struct PendingDiff {
+    diff_id: String,
+    rpc_id: serde_json::Value,
+    tab_name: String,
+}
+
+struct IdeSessionState {
+    token: String,
+    port: u16,
+    lock_path: PathBuf,
+    workspace_dir: Mutex<String>,
+    context: Mutex<EditorContext>,
+    /// The live connection's outbound queue; None between connections.
+    /// Notifications sent while disconnected are dropped on purpose — claude
+    /// re-reads context through the tools after it reconnects.
+    outbound: Mutex<Option<mpsc::Sender<String>>>,
+    pending: Mutex<Vec<PendingDiff>>,
+    shutdown: AtomicBool,
+    connected: AtomicBool,
+}
+
+impl IdeSessionState {
+    fn send(&self, payload: String) {
+        if let Ok(guard) = self.outbound.lock() {
+            if let Some(tx) = guard.as_ref() {
+                let _ = tx.send(payload);
+            }
+        }
+    }
+}
+
+#[derive(Default)]
+pub struct IdeHost {
+    sessions: Mutex<HashMap<String, Arc<IdeSessionState>>>,
+}
+
+impl IdeHost {
+    pub fn new() -> Arc<IdeHost> {
+        Arc::new(IdeHost::default())
+    }
+
+    /// Bind a listener for this session, write its lock file, start the accept
+    /// thread, and return the port for the spawn env. Idempotent: a session with
+    /// a live server keeps its port (the lock is rewritten — the workspace dir
+    /// may have changed across a resume). `preferred_port` re-binds a persisted
+    /// port after an app restart so a still-running claude's env stays valid;
+    /// a failed preferred bind falls back to an ephemeral port.
+    pub fn start_for_session(
+        &self,
+        session_id: &str,
+        workspace_dir: &str,
+        lock_dir: &Path,
+        preferred_port: Option<u16>,
+        events: Arc<dyn IdeEvents>,
+    ) -> Option<u16> {
+        if let Ok(map) = self.sessions.lock() {
+            if let Some(existing) = map.get(session_id) {
+                if let Ok(mut dir) = existing.workspace_dir.lock() {
+                    *dir = workspace_dir.to_string();
+                }
+                write_lock_file(
+                    &existing.lock_path,
+                    existing.port,
+                    workspace_dir,
+                    &existing.token,
+                );
+                return Some(existing.port);
+            }
+        }
+        let listener = preferred_port
+            .and_then(|p| std::net::TcpListener::bind(("127.0.0.1", p)).ok())
+            .or_else(|| std::net::TcpListener::bind(("127.0.0.1", 0)).ok())?;
+        let port = listener.local_addr().ok()?.port();
+        // Nonblocking accept + sleep polls: shutdown is observed within ~100 ms
+        // without needing a wake-up connection.
+        if listener.set_nonblocking(true).is_err() {
+            return None;
+        }
+        if std::fs::create_dir_all(lock_dir).is_err() {
+            eprintln!("conduit: ide lock dir {lock_dir:?} not writable; session runs without IDE");
+            return None;
+        }
+        let token = mint_token();
+        let lock_path = lock_dir.join(format!("{port}.lock"));
+        write_lock_file(&lock_path, port, workspace_dir, &token);
+        let state = Arc::new(IdeSessionState {
+            token,
+            port,
+            lock_path,
+            workspace_dir: Mutex::new(workspace_dir.to_string()),
+            context: Mutex::new(EditorContext::default()),
+            outbound: Mutex::new(None),
+            pending: Mutex::new(Vec::new()),
+            shutdown: AtomicBool::new(false),
+            connected: AtomicBool::new(false),
+        });
+        if let Ok(mut map) = self.sessions.lock() {
+            map.insert(session_id.to_string(), state.clone());
+        }
+        let sid = session_id.to_string();
+        std::thread::spawn(move || accept_loop(listener, state, sid, events));
+        Some(port)
+    }
+
+    /// Destroy path: stop the listener, drop the lock file, forget the session.
+    /// Pending diffs should be rejected FIRST (`reject_all`) so claude's blocked
+    /// request resolves rather than dangling until its own timeout.
+    pub fn stop_for_session(&self, session_id: &str) {
+        let state = self
+            .sessions
+            .lock()
+            .ok()
+            .and_then(|mut m| m.remove(session_id));
+        if let Some(s) = state {
+            s.shutdown.store(true, Ordering::SeqCst);
+            let _ = std::fs::remove_file(&s.lock_path);
+        }
+    }
+
+    /// Frontend context push, fanned to the named sessions. `selection_changed`
+    /// additionally queues the `selection_changed` notification claude uses for
+    /// its live footer.
+    pub fn update_context(
+        &self,
+        session_ids: &[String],
+        ctx: &EditorContext,
+        selection_changed: bool,
+    ) {
+        let Ok(map) = self.sessions.lock() else {
+            return;
+        };
+        for sid in session_ids {
+            let Some(s) = map.get(sid) else { continue };
+            if let Ok(mut c) = s.context.lock() {
+                *c = ctx.clone();
+            }
+            if selection_changed {
+                if let Some(sel) = &ctx.selection {
+                    let note = serde_json::json!({
+                        "jsonrpc": "2.0",
+                        "method": "selection_changed",
+                        "params": sel,
+                    });
+                    s.send(note.to_string());
+                }
+            }
+        }
+    }
+
+    /// Explicit "send this to claude" — lands in the session's prompt as an
+    /// at-mention.
+    pub fn at_mention(&self, session_id: &str, file_path: &str, line_start: u64, line_end: u64) {
+        let Ok(map) = self.sessions.lock() else {
+            return;
+        };
+        if let Some(s) = map.get(session_id) {
+            let note = serde_json::json!({
+                "jsonrpc": "2.0",
+                "method": "at_mentioned",
+                "params": {"filePath": file_path, "lineStart": line_start, "lineEnd": line_end},
+            });
+            s.send(note.to_string());
+        }
+    }
+
+    /// The human's verdict on one parked openDiff. Keep ⇒ the two-item
+    /// `[FILE_SAVED, contents]` reply (claude then writes the file itself —
+    /// Conduit NEVER touches the file); reject ⇒ `[DIFF_REJECTED]`.
+    pub fn resolve_diff(
+        &self,
+        session_id: &str,
+        diff_id: &str,
+        keep: bool,
+        contents: Option<&str>,
+    ) -> bool {
+        let Ok(map) = self.sessions.lock() else {
+            return false;
+        };
+        let Some(s) = map.get(session_id) else {
+            return false;
+        };
+        let Ok(mut pending) = s.pending.lock() else {
+            return false;
+        };
+        let Some(idx) = pending.iter().position(|p| p.diff_id == diff_id) else {
+            return false;
+        };
+        let p = pending.remove(idx);
+        let reply = if keep {
+            tool_result(&p.rpc_id, &["FILE_SAVED", contents.unwrap_or_default()])
+        } else {
+            tool_result(&p.rpc_id, &["DIFF_REJECTED"])
+        };
+        s.send(reply.to_string());
+        true
+    }
+
+    /// Teardown half of `stop_for_session`; also used alone when a session dies
+    /// with reviews still open.
+    pub fn reject_all(&self, session_id: &str) {
+        let Ok(map) = self.sessions.lock() else {
+            return;
+        };
+        let Some(s) = map.get(session_id) else {
+            return;
+        };
+        let Ok(mut pending) = s.pending.lock() else {
+            return;
+        };
+        for p in pending.drain(..) {
+            s.send(tool_result(&p.rpc_id, &["DIFF_REJECTED"]).to_string());
+        }
+    }
+
+    /// App-exit tidiness: leave no lock files pointing at listeners that are
+    /// about to die with the process. The startup sweep would catch them next
+    /// boot; this just keeps other tools' `/ide` menus clean in between.
+    pub fn remove_all_locks(&self) {
+        if let Ok(map) = self.sessions.lock() {
+            for s in map.values() {
+                let _ = std::fs::remove_file(&s.lock_path);
+            }
+        }
+    }
+}
+
+fn write_lock_file(path: &Path, _port: u16, workspace_dir: &str, token: &str) {
+    let body = lock_json(std::process::id(), workspace_dir, token);
+    if std::fs::write(path, body).is_err() {
+        eprintln!("conduit: could not write ide lock file {path:?}");
+        return;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
+    }
+}
+
+fn accept_loop(
+    listener: std::net::TcpListener,
+    state: Arc<IdeSessionState>,
+    session_id: String,
+    events: Arc<dyn IdeEvents>,
+) {
+    loop {
+        if state.shutdown.load(Ordering::SeqCst) {
+            return;
+        }
+        match listener.accept() {
+            Ok((stream, _)) => {
+                // One live connection at a time: claude reconnects rarely, and
+                // last-wins juggling buys nothing but races. A second dial while
+                // one is live is dropped; claude retries after the old one dies.
+                if state.connected.load(Ordering::SeqCst) {
+                    drop(stream);
+                    continue;
+                }
+                let st = state.clone();
+                let sid = session_id.clone();
+                let ev = events.clone();
+                std::thread::spawn(move || {
+                    st.connected.store(true, Ordering::SeqCst);
+                    connection_loop(stream, &st, &sid, ev.as_ref());
+                    st.connected.store(false, Ordering::SeqCst);
+                    if let Ok(mut out) = st.outbound.lock() {
+                        *out = None;
+                    }
+                });
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            Err(_) => return,
+        }
+    }
+}
+
+/// Auth + subprotocol live in the HTTP upgrade. Reject BEFORE speaking any
+/// protocol: a bad token gets a bare 401, never a token oracle.
+///
+/// `result_large_err`: the Err type is tungstenite's `ErrorResponse`, fixed by
+/// its `Callback` trait — nothing to box here.
+#[allow(clippy::result_large_err)]
+fn upgrade_callback(
+    token: &str,
+    req: &tungstenite::handshake::server::Request,
+    mut resp: tungstenite::handshake::server::Response,
+) -> Result<tungstenite::handshake::server::Response, tungstenite::handshake::server::ErrorResponse>
+{
+    let presented = req
+        .headers()
+        .get("x-claude-code-ide-authorization")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default();
+    // Constant-time-ish compare: fold over all bytes, no early exit.
+    let a = presented.as_bytes();
+    let b = token.as_bytes();
+    let mut diff = a.len() ^ b.len();
+    for i in 0..a.len().min(b.len()) {
+        diff |= (a[i] ^ b[i]) as usize;
+    }
+    if diff != 0 {
+        let mut deny = tungstenite::handshake::server::ErrorResponse::new(None);
+        *deny.status_mut() = tungstenite::http::StatusCode::UNAUTHORIZED;
+        return Err(deny);
+    }
+    // claude requests the `mcp` subprotocol; echo it or the client refuses the
+    // connection.
+    if let Some(proto) = req.headers().get("sec-websocket-protocol") {
+        if proto
+            .to_str()
+            .unwrap_or_default()
+            .split(',')
+            .any(|p| p.trim() == "mcp")
+        {
+            resp.headers_mut().insert(
+                "sec-websocket-protocol",
+                tungstenite::http::HeaderValue::from_static("mcp"),
+            );
+        }
+    }
+    Ok(resp)
+}
+
+fn connection_loop(
+    stream: std::net::TcpStream,
+    state: &IdeSessionState,
+    session_id: &str,
+    events: &dyn IdeEvents,
+) {
+    // The accept socket is nonblocking (inherited); the handshake and the poll
+    // loop both want timed blocking reads instead.
+    if stream.set_nonblocking(false).is_err() {
+        return;
+    }
+    let _ = stream.set_read_timeout(Some(Duration::from_millis(50)));
+
+    let token = state.token.clone();
+    let mut ws = match tungstenite::accept_hdr(stream, |req: &_, resp| {
+        upgrade_callback(&token, req, resp)
+    }) {
+        Ok(ws) => ws,
+        Err(_) => return, // bad token or malformed upgrade — nothing to say
+    };
+
+    let (tx, rx) = mpsc::channel::<String>();
+    if let Ok(mut out) = state.outbound.lock() {
+        *out = Some(tx);
+    }
+
+    let mut next_diff_id: u64 = 0;
+    loop {
+        if state.shutdown.load(Ordering::SeqCst) {
+            let _ = ws.close(None);
+            return;
+        }
+        // Drain queued outbound (notifications, deferred diff replies) first.
+        while let Ok(payload) = rx.try_recv() {
+            if ws.send(tungstenite::Message::Text(payload)).is_err() {
+                return;
+            }
+        }
+        match ws.read() {
+            Ok(tungstenite::Message::Text(text)) => {
+                let Ok(msg) = serde_json::from_str::<serde_json::Value>(&text) else {
+                    continue;
+                };
+                let workspace = state
+                    .workspace_dir
+                    .lock()
+                    .map(|d| d.clone())
+                    .unwrap_or_default();
+                let ctx = state.context.lock().map(|c| c.clone()).unwrap_or_default();
+                for action in dispatch(&msg, &workspace, &ctx, &mut next_diff_id) {
+                    match action {
+                        Action::Reply(payload) => {
+                            if ws
+                                .send(tungstenite::Message::Text(payload.to_string()))
+                                .is_err()
+                            {
+                                return;
+                            }
+                        }
+                        Action::DeferDiff {
+                            diff_id,
+                            rpc_id,
+                            args,
+                        } => {
+                            let tab_name =
+                                args["tab_name"].as_str().unwrap_or_default().to_string();
+                            if let Ok(mut pending) = state.pending.lock() {
+                                pending.push(PendingDiff {
+                                    diff_id: diff_id.clone(),
+                                    rpc_id,
+                                    tab_name,
+                                });
+                            }
+                            events.open_diff(session_id, &diff_id, &args);
+                        }
+                        Action::OpenFile { path } => events.open_file(session_id, &path),
+                        Action::CloseDiff { tab_name } => {
+                            // The user may have answered the TERMINAL prompt instead of
+                            // the overlay — claude resolves its side and closes the tab,
+                            // and the parked entry would otherwise wait forever for a
+                            // verdict nobody is going to give. Drop it WITHOUT replying:
+                            // that rpc id is already answered on claude's side.
+                            if let Ok(mut pending) = state.pending.lock() {
+                                pending.retain(|p| {
+                                    tab_name.as_deref().is_some_and(|t| p.tab_name != t)
+                                });
+                            }
+                            events.diff_closed(session_id, tab_name.as_deref());
+                        }
+                    }
+                }
+            }
+            Ok(tungstenite::Message::Ping(p)) => {
+                let _ = ws.send(tungstenite::Message::Pong(p));
+            }
+            Ok(tungstenite::Message::Close(_)) => return,
+            Ok(_) => {}
+            Err(tungstenite::Error::Io(e))
+                if matches!(
+                    e.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                ) => {}
+            Err(_) => return,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
