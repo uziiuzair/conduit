@@ -13,6 +13,13 @@ All notable changes to Conduit are documented here. This project uses
   editor. Each session gets its own private, authenticated connection, so the diff
   always lands on the session that asked. Toggle under Settings → General →
   "Announce as IDE"; applies to sessions started after the change.
+- **Fixed — sessions now follow a conversation past `/clear`.** Restarting a session
+  used to reopen the conversation from before your last `/clear` — the work since
+  looked lost. Conduit now tracks the conversation Claude is actually in, resumes
+  that one, and offers a one-time repair notice for sessions that drifted before the
+  fix (your "lost" conversations are recoverable from it).
+- **Fixed — sturdier saved state.** Conduit keeps a rolling backup of its own state
+  file and recovers from a corrupted one instead of forgetting your projects.
 
 ## 0.37.0 — 2026-09-18
 
