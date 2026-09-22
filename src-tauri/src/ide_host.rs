@@ -666,6 +666,9 @@ fn upgrade_callback(
     Ok(resp)
 }
 
+// `result_large_err` fires on the thin adapter closure handed to `accept_hdr`
+// too — same fixed `ErrorResponse` type, same reason as `upgrade_callback`.
+#[allow(clippy::result_large_err)]
 fn connection_loop(
     stream: std::net::TcpStream,
     state: &IdeSessionState,
