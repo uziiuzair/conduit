@@ -3,6 +3,17 @@
 All notable changes to Conduit are documented here. This project uses
 [semantic versioning](https://semver.org/).
 
+## 0.38.0 — 2026-09-23
+
+- **Added — Conduit is now a Claude Code IDE.** Claude sessions launched in Conduit
+  connect back to the app the way they connect to VS Code: review Claude's proposed
+  file changes in a side-by-side diff with Keep/Reject (edit the proposal right in the
+  diff before keeping it), send editor selections to a session as context
+  (right-click → "Send selection to Claude"), and let Claude open files in Conduit's
+  editor. Each session gets its own private, authenticated connection, so the diff
+  always lands on the session that asked. Toggle under Settings → General →
+  "Announce as IDE"; applies to sessions started after the change.
+
 ## 0.37.0 — 2026-09-18
 
 - **Added — Create a project without leaving Conduit.** File → New Project… (⌘⇧N, also
