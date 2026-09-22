@@ -110,6 +110,219 @@ pub fn sweep_lock_dir(dir: &Path, probe: &dyn Fn(u16) -> bool) {
     }
 }
 
+// ---------------------------------------------------------------------------
+// MCP dispatcher (pure): one wire message in, a list of actions out. The
+// connection loop owns sockets and side effects; keeping this pure is what
+// makes the wire contract unit-testable without a socket.
+// ---------------------------------------------------------------------------
+
+/// Editor state the frontend pushes down (project-scoped, fanned to that
+/// project's sessions). Everything optional: an empty context is a session whose
+/// project has no editor pane open, and every read tool degrades gracefully.
+#[derive(Default, Clone, serde::Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct EditorContext {
+    pub active_file: Option<String>,
+    /// `{text, filePath, fileUrl, selection: {start, end, isEmpty}}` — built by
+    /// the frontend in claude's own shape so this side never remaps it.
+    pub selection: Option<serde_json::Value>,
+    /// `[{path, label, languageId, active}]`
+    pub open_files: Vec<serde_json::Value>,
+    /// `[{uri, diagnostics: […]}]` per open model.
+    pub diagnostics: Vec<serde_json::Value>,
+}
+
+/// What the connection loop should do for one inbound message, in order.
+pub enum Action {
+    /// Send this JSON-RPC payload back.
+    Reply(serde_json::Value),
+    /// `openDiff`: park the request (no reply yet), surface it to the human.
+    /// The reply is minted later by `IdeHost::resolve_diff`.
+    DeferDiff {
+        diff_id: String,
+        rpc_id: serde_json::Value,
+        args: serde_json::Value,
+    },
+    /// `openFile`: ask the frontend to open the file in the project's editor.
+    OpenFile { path: String },
+    /// `close_tab` (Some) / `closeAllDiffTabs` (None): drop pending reviews.
+    CloseDiff { tab_name: Option<String> },
+}
+
+/// JSON-RPC result whose `content` is a list of text items — the MCP tool-result
+/// shape. `openDiff`'s accept path REQUIRES two items (FILE_SAVED + the final
+/// contents); everything else uses one.
+pub fn tool_result(id: &serde_json::Value, texts: &[&str]) -> serde_json::Value {
+    let content: Vec<serde_json::Value> = texts
+        .iter()
+        .map(|t| serde_json::json!({"type": "text", "text": t}))
+        .collect();
+    serde_json::json!({"jsonrpc": "2.0", "id": id, "result": {"content": content}})
+}
+
+fn rpc_result(id: &serde_json::Value, result: serde_json::Value) -> serde_json::Value {
+    serde_json::json!({"jsonrpc": "2.0", "id": id, "result": result})
+}
+
+/// The advertised tool surface. Ten tools; `executeCode` is deliberately absent
+/// (Jupyter-only — Conduit has no kernel).
+fn tool_defs() -> serde_json::Value {
+    let empty = serde_json::json!({"type":"object","properties":{},"additionalProperties":false});
+    serde_json::json!([
+        {"name": "getWorkspaceFolders", "description": "Get the workspace folders for this session", "inputSchema": empty},
+        {"name": "getCurrentSelection", "description": "Get the current editor selection", "inputSchema": empty},
+        {"name": "getLatestSelection", "description": "Get the most recent editor selection", "inputSchema": empty},
+        {"name": "getOpenEditors", "description": "List open editor tabs", "inputSchema": empty},
+        {"name": "getDiagnostics", "description": "Get language diagnostics", "inputSchema":
+            {"type":"object","properties":{"uri":{"type":"string"}}}},
+        {"name": "checkDocumentDirty", "description": "Whether a document has unsaved changes", "inputSchema":
+            {"type":"object","properties":{"filePath":{"type":"string"}},"required":["filePath"]}},
+        {"name": "saveDocument", "description": "Save a document", "inputSchema":
+            {"type":"object","properties":{"filePath":{"type":"string"}},"required":["filePath"]}},
+        {"name": "openFile", "description": "Open a file in Conduit's editor", "inputSchema":
+            {"type":"object","properties":{
+                "filePath":{"type":"string"},
+                "preview":{"type":"boolean"},
+                "startText":{"type":"string"},
+                "endText":{"type":"string"}},
+             "required":["filePath"]}},
+        {"name": "openDiff", "description": "Show a diff of a proposed change and wait for the user's verdict", "inputSchema":
+            {"type":"object","properties":{
+                "old_file_path":{"type":"string"},
+                "new_file_path":{"type":"string"},
+                "new_file_contents":{"type":"string"},
+                "tab_name":{"type":"string"}}}},
+        {"name": "close_tab", "description": "Close a diff tab by name", "inputSchema":
+            {"type":"object","properties":{"tab_name":{"type":"string"}},"required":["tab_name"]}},
+        {"name": "closeAllDiffTabs", "description": "Close all diff tabs", "inputSchema": empty},
+    ])
+}
+
+fn call_tool(
+    id: &serde_json::Value,
+    name: &str,
+    args: &serde_json::Value,
+    workspace_dir: &str,
+    ctx: &EditorContext,
+    next_diff_id: &mut u64,
+) -> Vec<Action> {
+    match name {
+        "getWorkspaceFolders" => {
+            let body = serde_json::json!({
+                "success": true,
+                "folders": [workspace_dir],
+                "rootPath": workspace_dir,
+            });
+            vec![Action::Reply(tool_result(id, &[&body.to_string()]))]
+        }
+        "getCurrentSelection" | "getLatestSelection" => {
+            let body = match &ctx.selection {
+                Some(sel) => sel.clone(),
+                None => serde_json::json!({"success": false, "message": "No selection"}),
+            };
+            vec![Action::Reply(tool_result(id, &[&body.to_string()]))]
+        }
+        "getOpenEditors" => {
+            let body = serde_json::json!({"tabs": ctx.open_files});
+            vec![Action::Reply(tool_result(id, &[&body.to_string()]))]
+        }
+        "getDiagnostics" => {
+            let uri = args["uri"].as_str();
+            let list: Vec<&serde_json::Value> = ctx
+                .diagnostics
+                .iter()
+                .filter(|d| uri.is_none_or(|u| d["uri"] == u))
+                .collect();
+            let body = serde_json::to_string(&list).unwrap_or_else(|_| "[]".into());
+            vec![Action::Reply(tool_result(id, &[&body]))]
+        }
+        "checkDocumentDirty" => {
+            // Conduit's editor autosaves; dirty is a state it does not keep.
+            let body = serde_json::json!({"success": true, "isDirty": false});
+            vec![Action::Reply(tool_result(id, &[&body.to_string()]))]
+        }
+        "saveDocument" => {
+            let body = serde_json::json!({"success": true, "saved": true});
+            vec![Action::Reply(tool_result(id, &[&body.to_string()]))]
+        }
+        "openFile" => {
+            let path = args["filePath"].as_str().unwrap_or_default().to_string();
+            vec![
+                Action::OpenFile { path },
+                Action::Reply(tool_result(id, &["FILE_OPENED"])),
+            ]
+        }
+        "openDiff" => {
+            let diff_id = format!("d{}", *next_diff_id);
+            *next_diff_id += 1;
+            vec![Action::DeferDiff {
+                diff_id,
+                rpc_id: id.clone(),
+                args: args.clone(),
+            }]
+        }
+        "close_tab" => {
+            let tab = args["tab_name"].as_str().map(str::to_string);
+            vec![
+                Action::CloseDiff { tab_name: tab },
+                Action::Reply(tool_result(id, &["TAB_CLOSED"])),
+            ]
+        }
+        "closeAllDiffTabs" => vec![
+            Action::CloseDiff { tab_name: None },
+            Action::Reply(tool_result(id, &["TAB_CLOSED"])),
+        ],
+        _ => vec![Action::Reply(serde_json::json!({
+            "jsonrpc": "2.0", "id": id,
+            "error": {"code": -32602, "message": "unknown tool"},
+        }))],
+    }
+}
+
+/// One inbound wire message → ordered actions. Requests ALWAYS get a reply
+/// (unknown methods get `{}` — claude tolerates that, and silence would hang its
+/// request); notifications never do. `openDiff` is the one deliberate exception:
+/// its reply is deferred to the human verdict.
+pub fn dispatch(
+    msg: &serde_json::Value,
+    workspace_dir: &str,
+    ctx: &EditorContext,
+    next_diff_id: &mut u64,
+) -> Vec<Action> {
+    let method = msg["method"].as_str().unwrap_or_default();
+    let id = &msg["id"];
+    let has_id = !id.is_null();
+    match method {
+        "initialize" => {
+            let proto = msg["params"]["protocolVersion"]
+                .as_str()
+                .unwrap_or("2025-11-25");
+            vec![Action::Reply(rpc_result(
+                id,
+                serde_json::json!({
+                    "protocolVersion": proto,
+                    "capabilities": {"tools": {"listChanged": true}},
+                    "serverInfo": {"name": "Conduit", "version": env!("CARGO_PKG_VERSION")},
+                }),
+            ))]
+        }
+        "tools/list" => vec![Action::Reply(rpc_result(
+            id,
+            serde_json::json!({"tools": tool_defs()}),
+        ))],
+        "tools/call" => {
+            let name = msg["params"]["name"].as_str().unwrap_or_default();
+            let args = &msg["params"]["arguments"];
+            call_tool(id, name, args, workspace_dir, ctx, next_diff_id)
+        }
+        "ping" => vec![Action::Reply(rpc_result(id, serde_json::json!({})))],
+        // Known no-reply notifications, and any unknown notification.
+        _ if !has_id => Vec::new(),
+        // Unknown REQUEST: answer `{}` rather than hanging the client.
+        _ => vec![Action::Reply(rpc_result(id, serde_json::json!({})))],
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -159,6 +372,175 @@ mod tests {
         assert!(is_conduit_lock(r#"{"ideName":"Conduit","pid":1}"#));
         assert!(!is_conduit_lock(r#"{"ideName":"VS Code","pid":1}"#));
         assert!(!is_conduit_lock("not json"));
+    }
+
+    fn req(method: &str, id: u64, params: serde_json::Value) -> serde_json::Value {
+        serde_json::json!({"jsonrpc":"2.0","id":id,"method":method,"params":params})
+    }
+
+    #[test]
+    fn initialize_echoes_protocol_version() {
+        let mut n = 0;
+        let a = dispatch(
+            &req(
+                "initialize",
+                0,
+                serde_json::json!({"protocolVersion":"2025-11-25"}),
+            ),
+            "/w",
+            &EditorContext::default(),
+            &mut n,
+        );
+        let Action::Reply(r) = &a[0] else {
+            panic!("expected reply")
+        };
+        assert_eq!(r["result"]["protocolVersion"], "2025-11-25");
+        assert_eq!(r["result"]["serverInfo"]["name"], "Conduit");
+        assert_eq!(r["id"], 0);
+    }
+
+    #[test]
+    fn tools_list_has_eleven_tools_and_no_execute_code() {
+        let mut n = 0;
+        let a = dispatch(
+            &req("tools/list", 1, serde_json::json!({})),
+            "/w",
+            &EditorContext::default(),
+            &mut n,
+        );
+        let Action::Reply(r) = &a[0] else { panic!() };
+        let tools = r["result"]["tools"].as_array().unwrap();
+        // getCurrentSelection and getLatestSelection are distinct tools (the spec
+        // table shares a row); executeCode is deliberately absent.
+        assert_eq!(tools.len(), 11);
+        assert!(tools.iter().all(|t| t["name"] != "executeCode"));
+        assert!(tools.iter().any(|t| t["name"] == "openDiff"));
+    }
+
+    #[test]
+    fn open_diff_defers_instead_of_replying() {
+        let mut n = 0;
+        let args = serde_json::json!({"name":"openDiff","arguments":
+            {"old_file_path":"/w/a.txt","new_file_path":"/w/a.txt",
+             "new_file_contents":"hi","tab_name":"t1"}});
+        let a = dispatch(
+            &req("tools/call", 3, args),
+            "/w",
+            &EditorContext::default(),
+            &mut n,
+        );
+        assert!(matches!(&a[0], Action::DeferDiff { diff_id, .. } if diff_id == "d0"));
+        assert_eq!(a.len(), 1, "no reply until the human answers");
+        assert_eq!(n, 1, "counter advanced");
+    }
+
+    #[test]
+    fn unknown_request_gets_empty_result_never_silence() {
+        let mut n = 0;
+        let a = dispatch(
+            &req("some/future_method", 9, serde_json::json!({})),
+            "/w",
+            &EditorContext::default(),
+            &mut n,
+        );
+        let Action::Reply(r) = &a[0] else { panic!() };
+        assert_eq!(r["result"], serde_json::json!({}));
+    }
+
+    #[test]
+    fn notifications_get_no_reply() {
+        let mut n = 0;
+        let msg = serde_json::json!({"jsonrpc":"2.0","method":"ide_connected","params":{"pid":1}});
+        assert!(dispatch(&msg, "/w", &EditorContext::default(), &mut n).is_empty());
+    }
+
+    #[test]
+    fn selection_answers_from_pushed_context() {
+        let mut n = 0;
+        let ctx = EditorContext {
+            selection: Some(serde_json::json!({"text":"x","filePath":"/w/a.ts"})),
+            ..Default::default()
+        };
+        let a = dispatch(
+            &req(
+                "tools/call",
+                4,
+                serde_json::json!({"name":"getCurrentSelection","arguments":{}}),
+            ),
+            "/w",
+            &ctx,
+            &mut n,
+        );
+        let Action::Reply(r) = &a[0] else { panic!() };
+        let text = r["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("/w/a.ts"));
+    }
+
+    #[test]
+    fn open_file_produces_event_and_reply() {
+        let mut n = 0;
+        let a = dispatch(
+            &req(
+                "tools/call",
+                5,
+                serde_json::json!({"name":"openFile","arguments":{"filePath":"/w/b.rs"}}),
+            ),
+            "/w",
+            &EditorContext::default(),
+            &mut n,
+        );
+        assert!(matches!(&a[0], Action::OpenFile { path } if path == "/w/b.rs"));
+        let Action::Reply(r) = &a[1] else { panic!() };
+        assert_eq!(r["result"]["content"][0]["text"], "FILE_OPENED");
+    }
+
+    #[test]
+    fn close_tab_closes_and_replies_tab_closed() {
+        let mut n = 0;
+        let a = dispatch(
+            &req(
+                "tools/call",
+                6,
+                serde_json::json!({"name":"close_tab","arguments":{"tab_name":"T"}}),
+            ),
+            "/w",
+            &EditorContext::default(),
+            &mut n,
+        );
+        assert!(matches!(&a[0], Action::CloseDiff { tab_name: Some(t) } if t == "T"));
+        let Action::Reply(r) = &a[1] else { panic!() };
+        assert_eq!(r["result"]["content"][0]["text"], "TAB_CLOSED");
+        let a2 = dispatch(
+            &req(
+                "tools/call",
+                7,
+                serde_json::json!({"name":"closeAllDiffTabs","arguments":{}}),
+            ),
+            "/w",
+            &EditorContext::default(),
+            &mut n,
+        );
+        assert!(matches!(&a2[0], Action::CloseDiff { tab_name: None }));
+    }
+
+    #[test]
+    fn workspace_folders_report_the_session_dir() {
+        let mut n = 0;
+        let a = dispatch(
+            &req(
+                "tools/call",
+                8,
+                serde_json::json!({"name":"getWorkspaceFolders","arguments":{}}),
+            ),
+            "/w/tree",
+            &EditorContext::default(),
+            &mut n,
+        );
+        let Action::Reply(r) = &a[0] else { panic!() };
+        let body: serde_json::Value =
+            serde_json::from_str(r["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+        assert_eq!(body["folders"], serde_json::json!(["/w/tree"]));
+        assert_eq!(body["success"], true);
     }
 
     #[test]
