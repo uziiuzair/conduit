@@ -199,6 +199,11 @@ pub struct PtyManager {
     /// reattach must not: tmux repaints the pane itself, and a replay on top of that prints
     /// the same screen twice.
     warm_spawns: DashMap<String, ()>,
+    /// The IDE-announce host, set once at startup (`set_ide_host`). Lives here so
+    /// `tear_down` can stop a DESTROYED session's IDE server and drop its lock file;
+    /// a RETIRE keeps both — the persisted port makes the resume spawn reuse them
+    /// (`IdeHost::start_for_session` is idempotent).
+    ide_host: std::sync::OnceLock<Arc<crate::ide_host::IdeHost>>,
 }
 
 /// Why a session's processes are being ended. The two verbs kill the same things; they
@@ -234,7 +239,14 @@ impl PtyManager {
             #[cfg(not(windows))]
             tmux: std::sync::OnceLock::new(),
             warm_spawns: DashMap::new(),
+            ide_host: std::sync::OnceLock::new(),
         }
+    }
+
+    /// Wire the IDE-announce host in at startup. A second call is a no-op (OnceLock),
+    /// which is exactly right — there is one host for the app's lifetime.
+    pub fn set_ide_host(&self, host: Arc<crate::ide_host::IdeHost>) {
+        let _ = self.ide_host.set(host);
     }
 
     /// Absolute tmux path, or None when tmux is unavailable. Resolved on first use.
@@ -301,6 +313,10 @@ impl PtyManager {
         // exactly that file's servers. Set only when the session has its own MCP allowlist
         // (Feature C); false keeps the pre-allowlist inheritance behavior.
         strict_mcp: bool,
+        // IDE announce: this session's own WS/MCP server port (None = not announcing).
+        // POSIX rides build_script's export line (the tmux boundary); Windows rides
+        // cmd.env (no tmux there).
+        ide_port: Option<u16>,
         on_event: Channel<String>,
     ) -> Result<(), String> {
         // Already running → re-attach the live reader to the new channel and force
@@ -409,6 +425,7 @@ impl PtyManager {
                     effort.as_deref(),
                     resume_token.as_deref(),
                     strict_mcp,
+                    ide_port,
                 )
             };
             // Persistence: run `inner` inside a tmux session named after this session id,
@@ -462,6 +479,14 @@ impl PtyManager {
         if !shell_only {
             cmd.env("CONDUIT_SESSION_ID", &session_id);
             cmd.env("CONDUIT_HOOK_PORT", hook_port.to_string());
+            // IDE announce. On Windows this is the real delivery path (no tmux). On
+            // POSIX it only reaches the tmux CLIENT — the copy that matters rides
+            // build_script's export line — but setting it here too keeps the direct
+            // (persistence-off) spawn correct with zero extra branching.
+            if let Some(p) = ide_port {
+                cmd.env("CLAUDE_CODE_SSE_PORT", p.to_string());
+                cmd.env("ENABLE_IDE_INTEGRATION", "true");
+            }
             // The port ABOVE is fixed for this session's lifetime; the path below is how
             // it stays correct anyway. Hook commands source this file before posting, so a
             // session that outlives an app restart onto a different port finds the live
@@ -836,6 +861,15 @@ impl PtyManager {
         self.warm_spawns.remove(session_id);
         if !how.keeps_snapshot() {
             crate::scrollback::remove(session_id);
+            // DESTROY also ends the session's IDE server and removes its lock file —
+            // pending diff reviews are answered DIFF_REJECTED first so claude's blocked
+            // openDiff resolves instead of dangling. RETIRE deliberately keeps both:
+            // the listener costs kilobytes, and the persisted port lets the resume
+            // spawn hand the SAME env to a claude that may still be running under tmux.
+            if let Some(h) = self.ide_host.get() {
+                h.reject_all(session_id);
+                h.stop_for_session(session_id);
+            }
         }
     }
 
@@ -866,6 +900,13 @@ impl PtyManager {
         // it is here for the launch AFTER a reboot, when there is no tmux left to reattach
         // to and the snapshot is the only record of the screen.
         self.save_scrollback();
+        // IDE lock files die with the process's listeners: leaving them would show dead
+        // "Conduit" entries in other terminals' /ide menus until the next boot's sweep.
+        // The agents themselves keep running under tmux; the next launch re-binds each
+        // session's persisted port and rewrites its lock.
+        if let Some(h) = self.ide_host.get() {
+            h.remove_all_locks();
+        }
         let ids: Vec<String> = self.sessions.iter().map(|e| e.key().clone()).collect();
         for id in ids {
             if let Some((_, m)) = self.sessions.remove(&id) {
@@ -1080,6 +1121,11 @@ fn build_script(
     effort: Option<&str>,
     resume_token: Option<&str>,
     strict_mcp: bool,
+    // IDE announce (2026-09-23 spec): the session's own WS/MCP server port. Rides the
+    // export line because that is the ONLY per-session env channel that crosses the
+    // tmux server boundary — `cmd.env` reaches the tmux CLIENT, and the server keeps
+    // its own environment for every session after the one that started it.
+    ide_port: Option<u16>,
 ) -> String {
     let mut flags = String::new();
     if let Some(name) = worktree {
@@ -1130,9 +1176,14 @@ fn build_script(
         resume_token,
     );
     format!(
-        "export CONDUIT_SESSION_ID={sid} CONDUIT_HOOK_PORT={port}; cd {dir} && {invocation}; exec {shell} -i -l",
+        "export CONDUIT_SESSION_ID={sid} CONDUIT_HOOK_PORT={port}{ide}; cd {dir} && {invocation}; exec {shell} -i -l",
         sid = shell_quote(session_id),
         port = port,
+        // CLAUDE_CODE_SSE_PORT is the 2.1.267 auto-connect trigger;
+        // ENABLE_IDE_INTEGRATION covers older CLIs (harmless on new ones).
+        ide = ide_port
+            .map(|p| format!(" CLAUDE_CODE_SSE_PORT={p} ENABLE_IDE_INTEGRATION=true"))
+            .unwrap_or_default(),
         dir = shell_quote(working_directory),
         invocation = invocation,
         shell = shell,
@@ -1343,10 +1394,46 @@ mod tests {
             None,
             None,
             false, // strict_mcp
+            None,  // ide_port
         );
         assert!(script.contains("export CONDUIT_SESSION_ID='sid-1' CONDUIT_HOOK_PORT=7777"));
         assert!(script.contains("claude --session-id 'sid-1' || claude"));
         assert!(script.contains("cd '/repo' &&"));
+        // No IDE announce → neither env var appears anywhere.
+        assert!(!script.contains("CLAUDE_CODE_SSE_PORT"));
+        assert!(!script.contains("ENABLE_IDE_INTEGRATION"));
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn build_script_exports_ide_port_when_present() {
+        // The IDE vars MUST ride the export line: `cmd.env` dies at the tmux server
+        // boundary for every session after the first (the server keeps its own env),
+        // and the export inside `sh -c` is the mechanism that already carries
+        // CONDUIT_SESSION_ID per session.
+        let script = build_script(
+            &crate::agent::ClaudeAdapter,
+            "sid-1",
+            7777,
+            "/repo",
+            "/bin/zsh",
+            None,
+            None,
+            None,
+            None, // plugin_dir
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            false, // strict_mcp
+            Some(61234),
+        );
+        assert!(script.contains(
+            "export CONDUIT_SESSION_ID='sid-1' CONDUIT_HOOK_PORT=7777 \
+             CLAUDE_CODE_SSE_PORT=61234 ENABLE_IDE_INTEGRATION=true;"
+        ));
     }
 
     #[cfg(not(windows))]
@@ -1369,6 +1456,7 @@ mod tests {
             None,
             None,
             true, // strict_mcp
+            None, // ide_port
         );
         assert!(script.contains("--mcp-config '/cfg/mcp.json'"));
         assert!(script.contains("--strict-mcp-config"));
@@ -1396,6 +1484,7 @@ mod tests {
             None,
             None,
             false, // strict_mcp
+            None,  // ide_port
         );
         assert!(script.contains("--mcp-config '/cfg/mcp.json'"));
         assert!(!script.contains("--strict-mcp-config"));
@@ -1422,6 +1511,7 @@ mod tests {
             None,                     // effort
             None,
             false, // strict_mcp
+            None,  // ide_port
         );
         assert!(script.contains("--settings '/cfg/hooks.json'"), "{script}");
         assert!(script.contains("--mcp-config '/cfg/mcp.json'"), "{script}");
@@ -1521,6 +1611,7 @@ mod tests {
             None,
             None,
             false, // strict_mcp
+            None,  // ide_port
         );
         assert!(
             script.contains("'implement the parser'"),
@@ -1727,6 +1818,7 @@ mod tests {
             Some("high"),
             None,
             false, // strict_mcp
+            None,  // ide_port
         );
         assert!(script.contains("--model 'claude-opus-4-8'"), "{script}");
         assert!(script.contains("--effort 'high'"), "{script}");
@@ -1775,6 +1867,7 @@ mod tests {
             None,
             None,
             false, // strict_mcp
+            None,  // ide_port
         );
         assert!(
             with_plugin.contains("--plugin-dir '/opt/continuity-plugin'"),
@@ -1784,7 +1877,7 @@ mod tests {
         // None (continuity off) must add nothing -- purely additive.
         let without_plugin = build_script(
             &*adapter, "sid-1", 8423, "/repo", "/bin/zsh", None, None, None, None, None, None,
-            None, None, None, None, false,
+            None, None, None, None, false, None,
         );
         assert!(!without_plugin.contains("--plugin-dir"), "{without_plugin}");
     }

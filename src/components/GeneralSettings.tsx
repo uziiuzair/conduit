@@ -17,6 +17,8 @@ export function GeneralSettings() {
   const setOpenBehavior = useStore((s) => s.setOpenBehavior);
   const restoreSessionsOnOpen = useStore((s) => s.restoreSessionsOnOpen);
   const setRestoreSessionsOnOpen = useStore((s) => s.setRestoreSessionsOnOpen);
+  const announceAsIde = useStore((s) => s.announceAsIde);
+  const setAnnounceAsIde = useStore((s) => s.setAnnounceAsIde);
   const persistSessions = useStore((s) => s.persistSessions);
   const setPersistSessions = useStore((s) => s.setPersistSessions);
   const tmuxAvailable = useStore((s) => s.tmuxAvailable);
@@ -81,6 +83,20 @@ export function GeneralSettings() {
           Restore sessions when opening a project — relaunch and resume every session of a
           project the moment you open it (Claude and agy reopen the conversation where you left
           off), instead of waiting for a click. Off = sessions spawn only when you click their tab.
+        </span>
+      </label>
+
+      <label className="dialog-toggle">
+        <input
+          type="checkbox"
+          checked={announceAsIde}
+          onChange={(e) => setAnnounceAsIde(e.target.checked)}
+        />
+        <span>
+          Announce as IDE to Claude sessions — new Claude sessions connect to Conduit the way
+          they connect to VS Code: review and edit proposed file changes in a side-by-side
+          diff, and send editor selections to the session as context. Off = sessions run as
+          plain terminals. Applies to sessions started after the change.
         </span>
       </label>
 

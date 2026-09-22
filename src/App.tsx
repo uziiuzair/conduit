@@ -15,6 +15,7 @@ import {
 } from "./store";
 import { type AgentId } from "./agents";
 import { matchProjectByPath } from "./cliOpen";
+import { type PendingDiff } from "./ideBridge";
 import { isEditableTarget, isInTerminal } from "./keyboardGuards";
 import { type ChatItem } from "./rootChat";
 import { type PendingDecision } from "./rootProposals";
@@ -583,6 +584,35 @@ export default function App() {
     });
     return () => {
       void un.then((f) => f());
+    };
+  }, []);
+
+  // Conduit-as-IDE (2026-09-23 spec): a connected claude's openDiff parks in Rust and
+  // surfaces here as a review card; openFile opens the file in the session's
+  // project's editor; diff-closed drops reviews the user answered in the terminal
+  // instead (claude resolved its side and closed the tab).
+  useEffect(() => {
+    const unDiff = listen<PendingDiff>("ide-open-diff", ({ payload }) => {
+      useStore.getState().ideDiffArrived(payload);
+    });
+    const unOpen = listen<{ sessionId: string; filePath: string }>(
+      "ide-open-file",
+      ({ payload }) => {
+        const st = useStore.getState();
+        const found = findSession(st.projects, payload.sessionId);
+        if (found) st.openFile(found.project.id, payload.filePath);
+      },
+    );
+    const unClosed = listen<{ sessionId: string; tabName: string | null }>(
+      "ide-diff-closed",
+      ({ payload }) => {
+        useStore.getState().ideDiffsClosed(payload.sessionId, payload.tabName);
+      },
+    );
+    return () => {
+      void unDiff.then((f) => f());
+      void unOpen.then((f) => f());
+      void unClosed.then((f) => f());
     };
   }, []);
 

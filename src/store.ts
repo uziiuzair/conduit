@@ -13,6 +13,7 @@ import {
 import type { TerminalRenderer } from "./terminalRenderer";
 import { initialProjectSelection, type OpenBehavior } from "./startup";
 import { insertTabAt, repairLayout } from "./layout";
+import { pushDiff, popDiff, closeDiffs, type PendingDiff } from "./ideBridge";
 import { accountKey, type UsageMetric } from "./usageRows";
 import type { Chain, RoutesView, TaskKind, TaskKindInfo } from "./routing";
 import { AGENTS, type AgentId, type AgentInfo, DEFAULT_AGENT, type McpServer } from "./agents";
@@ -572,6 +573,24 @@ function readRestoreSessionsOnOpen(): boolean {
 function writeRestoreSessionsOnOpen(v: boolean): void {
   try {
     localStorage.setItem(RESTORE_SESSIONS_KEY, v ? "1" : "0");
+  } catch {
+    /* quota — non-fatal */
+  }
+}
+
+// IDE announce: Claude sessions connect back to Conduit as their IDE (diff review,
+// selection context). Default ON. Same persisted-pref pattern as restore-on-open.
+const ANNOUNCE_IDE_KEY = "conduit.announceAsIde";
+function readAnnounceAsIde(): boolean {
+  try {
+    return localStorage.getItem(ANNOUNCE_IDE_KEY) !== "0"; // default on (absent => true)
+  } catch {
+    return true;
+  }
+}
+function writeAnnounceAsIde(v: boolean): void {
+  try {
+    localStorage.setItem(ANNOUNCE_IDE_KEY, v ? "1" : "0");
   } catch {
     /* quota — non-fatal */
   }
@@ -1263,6 +1282,17 @@ interface AppState {
    *  resumes all its sessions instead of waiting for a click. */
   restoreSessionsOnOpen: boolean;
   setRestoreSessionsOnOpen: (v: boolean) => void;
+  /** Persisted. When true (default), Claude sessions announce Conduit as their IDE:
+   *  diff review lands in a Monaco overlay, editor selections reach the session. */
+  announceAsIde: boolean;
+  setAnnounceAsIde: (v: boolean) => void;
+  /** Runtime-only: parked openDiff reviews from IDE-connected sessions (FIFO per
+   *  session, rendered by DiffReviewOverlay). Never persisted — a diff request dies
+   *  with the claude that asked it. */
+  pendingDiffs: PendingDiff[];
+  ideDiffArrived: (d: PendingDiff) => void;
+  ideDiffResolved: (sessionId: string, diffId: string) => void;
+  ideDiffsClosed: (sessionId: string, tabName: string | null) => void;
   /** Persisted. Whether a launch reopens the project you were last on ("last", the
    *  default) or opens nothing ("none"). Neither one reopens the topmost project as
    *  such — see `initialProjectSelection`. */
@@ -1696,6 +1726,8 @@ export const useStore = create<AppState>((set, get) => {
     pendingDecisions: [],
     decisionRoutes: {},
     restoreSessionsOnOpen: readRestoreSessionsOnOpen(),
+    announceAsIde: readAnnounceAsIde(),
+    pendingDiffs: [],
     openBehavior: readOpenBehavior(),
     terminalRenderer: readTerminalRenderer(),
     persistSessions: readPersistSessions(),
@@ -3197,6 +3229,17 @@ export const useStore = create<AppState>((set, get) => {
       writeRestoreSessionsOnOpen(v);
       set({ restoreSessionsOnOpen: v });
     },
+
+    setAnnounceAsIde: (v) => {
+      writeAnnounceAsIde(v);
+      set({ announceAsIde: v });
+    },
+
+    ideDiffArrived: (d) => set({ pendingDiffs: pushDiff(get().pendingDiffs, d) }),
+    ideDiffResolved: (sessionId, diffId) =>
+      set({ pendingDiffs: popDiff(get().pendingDiffs, sessionId, diffId) }),
+    ideDiffsClosed: (sessionId, tabName) =>
+      set({ pendingDiffs: closeDiffs(get().pendingDiffs, sessionId, tabName) }),
 
     setOpenBehavior: (v) => {
       writeOpenBehavior(v);

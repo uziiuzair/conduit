@@ -459,6 +459,54 @@ plus install/remove/status), and one listener in `App.tsx`.
   `cli_shim.rs` pin all of it, including that `release.yml` passes no `--features`.
 - Design: `docs/superpowers/specs/2026-09-04-conduit-cli-launcher-design.md`.
 
+## Where the IDE integration lives
+
+Conduit announces itself to the `claude` CLI as an IDE (the VS Code/JetBrains protocol):
+`src-tauri/src/ide_host.rs` (lock files, per-session WS/MCP servers, the tool surface),
+spawn/teardown wiring in `pty.rs`/`lib.rs`, `src/ideBridge.ts` (pure context/queue
+helpers), `DiffReviewOverlay.tsx`, and the context push in `CodeEditorPane.tsx`. The
+protocol is UNDOCUMENTED and was pinned empirically against claude 2.1.267 — the spec's
+"Empirical findings" section is the authority, not intuition or claudecode.nvim's docs.
+
+- **One server per SESSION, and the port is the identity.** The wire carries no client
+  identity, and under tmux Conduit is never the claude process's ancestor, so pid
+  forensics are impossible. Each Claude session gets its own listener (ephemeral port),
+  lock file, and auth token; a connection on that port IS that session. Don't "optimize"
+  this into one shared server — that reintroduces the unanswerable "whose openDiff is
+  this" question. Cost is a couple of threads and KBs per session.
+- **`openDiff` accept is a TWO-item reply**: `[{text:"FILE_SAVED"},{text:<final
+  contents>}]`. A single-item `FILE_SAVED` is *silently ignored* (the binary checks
+  `e[1].text` is a string) and the terminal prompt just stays up — we watched it happen.
+  **claude writes the file itself** from the returned contents; Conduit must never write
+  it. Reject is single-item `DIFF_REJECTED`. The second item is how user edits made in
+  the diff view reach the file.
+- **The IDE env rides `build_script`'s export line, never `cmd.env`** (POSIX). The tmux
+  server keeps its own environment for every session after the one that started it, so
+  `cmd.env` reaches only the tmux client. Windows has no tmux and uses `cmd.env`
+  natively. `CLAUDE_CODE_SSE_PORT` is the auto-connect trigger in 2.1.267
+  (`ENABLE_IDE_INTEGRATION` is dead there; still set for older CLIs).
+- **`close_tab` must prune the pending diff without a verdict.** When the user answers
+  the TERMINAL prompt instead of the overlay, claude resolves its side and closes the
+  tab; the parked entry would otherwise wait forever for a click nobody will make.
+- **The token is never persisted or logged** (Secrets rule): fresh per start via
+  `uuid` v4 (CSPRNG on every platform — an early draft read /dev/urandom, which
+  silently degrades to guessable on Windows). Only `Session.ide_port` persists, so a
+  warm re-attach re-binds the SAME port and a still-running claude's env stays valid;
+  claude re-reads the token from the rewritten lock file.
+- **Retire keeps the listener; only destroy stops it** (`tear_down` gates on
+  `keeps_snapshot()`, same asymmetry as the scrollback snapshot). `kill_all` removes
+  lock files on quit; the startup sweep removes Conduit-named locks whose port no longer
+  answers — never other IDEs' locks.
+- **The lock dir follows the account redirect** (`ide_host::lock_dir` mirrors
+  `agent::claude_profile_env`): an account-pinned session's claude reads
+  `<profile>/.claude/ide`, not the real `~/.claude/ide` — writing to the wrong one
+  announces to a claude that can never see it.
+- **External `/ide` discovery is best-effort by design**: for a lock whose port doesn't
+  match `CLAUDE_CODE_SSE_PORT`, claude validates the lock pid against its ancestors or a
+  hardcoded known-IDE `ps` grep that Conduit will never match. Conduit-spawned sessions
+  bypass that via the env port match; don't chase external-discovery bugs.
+- Design: `docs/superpowers/specs/2026-09-23-ide-integration-design.md`.
+
 ## Where root chat's orchestration lives
 
 Root chat (HQ) reaches Conduit through a SECOND in-app MCP server, `root_mcp.rs`, on

@@ -176,6 +176,14 @@ pub struct Session {
     /// suppresses a repo's own `.mcp.json`.
     #[serde(default)]
     pub mcp_servers: Option<Vec<String>>,
+    /// The IDE-announce listener's port (2026-09-23 spec). Persisted so a warm tmux
+    /// re-attach re-binds the SAME port — the still-running claude's
+    /// CLAUDE_CODE_SSE_PORT then stays valid across an app restart. The auth token is
+    /// deliberately NOT here (Secrets rule): fresh per start, and claude re-reads it
+    /// from the lock file when it reconnects. skip_serializing_if keeps pre-feature
+    /// state.json files byte-identical.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ide_port: Option<u16>,
 }
 
 /// Directed READ policy: may `caller` read `target`'s output? The single source of truth for
@@ -1641,6 +1649,48 @@ impl Store {
             .flat_map(|p| &p.sessions)
             .find(|s| s.id == session_id)
             .and_then(|s| s.agent_conversation_id.clone())
+    }
+
+    /// Every session id in a project — the IDE host's context fan-out set (an editor
+    /// context push is project-scoped; each of that project's sessions answers
+    /// claude's read tools from it).
+    pub fn project_session_ids(&self, project_id: &str) -> Vec<String> {
+        self.projects
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .filter(|p| p.id == project_id)
+            .flat_map(|p| p.sessions.iter().map(|s| s.id.clone()))
+            .collect()
+    }
+
+    /// The persisted IDE-announce port for a session (None = never announced).
+    pub fn session_ide_port(&self, session_id: &str) -> Option<u16> {
+        self.projects
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .flat_map(|p| &p.sessions)
+            .find(|s| s.id == session_id)
+            .and_then(|s| s.ide_port)
+    }
+
+    /// Record the IDE-announce port chosen at spawn so the next warm re-attach can
+    /// re-bind it. No-op when unchanged, so routine respawns don't rewrite state.json.
+    pub fn set_session_ide_port(&self, session_id: &str, port: u16) {
+        let mut projects = self.projects.lock().unwrap_or_else(|e| e.into_inner());
+        let mut changed = false;
+        for p in projects.iter_mut() {
+            for s in p.sessions.iter_mut() {
+                if s.id == session_id && s.ide_port != Some(port) {
+                    s.ide_port = Some(port);
+                    changed = true;
+                }
+            }
+        }
+        if changed {
+            self.save(&projects);
+        }
     }
 
     /// Clear a stale/dead captured conversation id (its db was deleted) so the next spawn
@@ -3155,6 +3205,26 @@ mod tests {
             project_id: None,
         };
         assert!(!serde_json::to_string(&local).unwrap().contains("projectId"));
+    }
+
+    #[test]
+    fn ide_port_absent_for_old_sessions_and_round_trips() {
+        // IDE announce (2026-09-23 spec): the PORT persists so a warm re-attach can
+        // re-bind it and keep a still-running claude's env valid. The TOKEN is
+        // deliberately NOT persisted (Secrets rule) — fresh per start, claude re-reads
+        // the lock file on reconnect.
+        let old: Session = serde_json::from_str(r#"{"id":"s","name":"n"}"#).unwrap();
+        assert_eq!(old.ide_port, None);
+        assert!(
+            !serde_json::to_string(&old).unwrap().contains("idePort"),
+            "absent field must not serialize"
+        );
+        let mut s = old;
+        s.ide_port = Some(61234);
+        let json = serde_json::to_string(&s).unwrap();
+        assert!(json.contains(r#""idePort":61234"#), "{json}");
+        let back: Session = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.ide_port, Some(61234));
     }
 
     #[test]
