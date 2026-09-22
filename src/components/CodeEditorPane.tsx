@@ -4,6 +4,7 @@ import type * as Monaco from "monaco-editor";
 import { monaco, languageFor, setLastFocusedEditor } from "../monaco/setup";
 import * as registry from "../monaco/registry";
 import { useStore, activeGroup, baseName, type FileContent } from "../store";
+import { buildEditorContext, type IdeSelection } from "../ideBridge";
 import { hasFormatter } from "../format/options";
 import { LanguageSelector } from "./LanguageSelector";
 import { MarkdownPreview } from "./MarkdownPreview";
@@ -88,6 +89,8 @@ type LoadState = { kind: "none" } | { kind: "loading" } | { kind: "ready"; fc: F
 export function CodeEditorPane({ projectId, groupId, visible, style }: CodeEditorPaneProps) {
   const hostRef = useRef<HTMLDivElement>(null);
   const editorRef = useRef<monaco.editor.IStandaloneCodeEditor | null>(null);
+  // Debounce handle for the IDE context push (see pushIdeContext in the create effect).
+  const ideePushTimerRef = useRef<number | null>(null);
   const contentSubRef = useRef<{ dispose(): void } | null>(null);
   const currentPathRef = useRef<string | null>(null);
   const visibleRef = useRef(visible);
@@ -321,6 +324,114 @@ export function CodeEditorPane({ projectId, groupId, visible, style }: CodeEdito
     editor.onDidChangeModelContent(() => {
       const m = editor.getModel();
       if (m) setEol(m.getEOL() === "\r\n" ? "CRLF" : "LF");
+    });
+
+    // Conduit-as-IDE (2026-09-23 spec): push editor context down to the per-session
+    // IDE servers so a connected claude's getCurrentSelection/getOpenEditors answer
+    // from live state, and selection changes reach its footer as selection_changed.
+    // Debounced — a drag-select fires per pixel row; claude needs the settled state.
+    const pushIdeContext = (selectionChanged: boolean) => {
+      const st = useStore.getState();
+      const path = currentPathRef.current;
+      const sel = editor.getSelection();
+      const model = editor.getModel();
+      let selection: IdeSelection | null = null;
+      if (path && sel && model) {
+        selection = {
+          text: model.getValueInRange(sel),
+          filePath: path,
+          fileUrl: `file://${path}`,
+          selection: {
+            // Monaco is 1-based; the protocol (like VS Code's API) is 0-based.
+            start: { line: sel.startLineNumber - 1, character: sel.startColumn - 1 },
+            end: { line: sel.endLineNumber - 1, character: sel.endColumn - 1 },
+            isEmpty: sel.isEmpty(),
+          },
+        };
+      }
+      const openPaths = (st.layouts[projectId]?.groups ?? []).flatMap((g) =>
+        g.tabs
+          .filter((t) => t.kind === "file")
+          .map((t) => ({
+            path: t.ref,
+            language: languageFor(t.ref),
+            active: t.ref === path,
+          })),
+      );
+      const markers = monaco.editor
+        .getModelMarkers({})
+        .filter((m) => m.resource.scheme === "file")
+        .reduce<Map<string, unknown[]>>((acc, m) => {
+          const uri = m.resource.toString();
+          const list = acc.get(uri) ?? [];
+          list.push({
+            message: m.message,
+            severity: m.severity,
+            range: {
+              start: { line: m.startLineNumber - 1, character: m.startColumn - 1 },
+              end: { line: m.endLineNumber - 1, character: m.endColumn - 1 },
+            },
+          });
+          acc.set(uri, list);
+          return acc;
+        }, new Map());
+      const context = buildEditorContext({
+        openPaths,
+        selection,
+        markers: Array.from(markers, ([uri, diagnostics]) => ({ uri, diagnostics })),
+      });
+      void invoke("ide_editor_context", {
+        projectId,
+        context,
+        selectionChanged,
+      }).catch(() => {
+        /* IDE host gone mid-quit — harmless */
+      });
+    };
+    editor.onDidChangeCursorSelection(() => {
+      if (ideePushTimerRef.current !== null) window.clearTimeout(ideePushTimerRef.current);
+      ideePushTimerRef.current = window.setTimeout(() => {
+        ideePushTimerRef.current = null;
+        pushIdeContext(true);
+      }, 150);
+    });
+    editor.onDidChangeModel(() => pushIdeContext(false));
+
+    // Explicit at-mention: right-click → "Send selection to Claude". Targets the
+    // project's ACTIVE session tab (active group first), because "which claude" must
+    // be the one the user is looking at, never a guess across sessions.
+    editor.addAction({
+      id: "conduit.sendSelectionToClaude",
+      label: "Send selection to Claude",
+      contextMenuGroupId: "navigation",
+      contextMenuOrder: 1.5,
+      run: () => {
+        const st = useStore.getState();
+        const path = currentPathRef.current;
+        const sel = editor.getSelection();
+        if (!path || !sel) return;
+        const layout = st.layouts[projectId];
+        const groups = layout?.groups ?? [];
+        const ag = activeGroup(layout);
+        const ordered = ag ? [ag, ...groups.filter((g) => g.id !== ag.id)] : groups;
+        const sessionTab = ordered
+          .flatMap((g) => {
+            const t = g.tabs.find((x) => x.ref === g.activeRef);
+            return t && t.kind === "session" ? [t.ref] : [];
+          })
+          .concat(
+            ordered.flatMap((g) =>
+              g.tabs.filter((t) => t.kind === "session").map((t) => t.ref),
+            ),
+          )[0];
+        if (!sessionTab) return;
+        void invoke("ide_at_mention", {
+          sessionId: sessionTab,
+          filePath: path,
+          lineStart: sel.startLineNumber - 1,
+          lineEnd: sel.endLineNumber - 1,
+        });
+      },
     });
 
     const ro = new ResizeObserver(() => {
