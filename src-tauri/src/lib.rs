@@ -30,6 +30,7 @@ mod git_mut;
 mod hookbus;
 mod hooks;
 mod hotexit;
+pub mod ide_host;
 mod local_llm;
 mod menu;
 mod notify;
