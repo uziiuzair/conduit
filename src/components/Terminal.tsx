@@ -14,6 +14,7 @@ import { invoke, Channel } from "@tauri-apps/api/core";
 import { currentTerminalTheme, registerTerminal } from "../themes";
 import { useStore, type SessionRole } from "../store";
 import { SessionChat } from "./SessionChat";
+import { DiffReviewOverlay } from "./DiffReviewOverlay";
 import { fontForZoom } from "../terminalZoom";
 
 function b64ToBytes(b64: string): Uint8Array {
@@ -100,6 +101,10 @@ export function TerminalView({
   // Feature switch AND per-session state: the toggle only exists when the preference is
   // on, and only covers the sessions the user actually opened it for.
   const chatOpen = useStore((s) => s.richSessionView && !!s.richViewOpen[sessionId]);
+  // First parked openDiff for this session (FIFO — later ones queue behind it).
+  const pendingIdeDiff = useStore(
+    (s) => s.pendingDiffs.find((d) => d.sessionId === sessionId) ?? null,
+  );
   const toggleRichView = useStore((s) => s.toggleRichView);
   /** Read at reveal time by the fit/spawn effect. A REF, not a dep: adding chatOpen to
    *  that effect's deps would re-run a fit (and its spawn branch) on every toggle, which
@@ -840,6 +845,11 @@ export function TerminalView({
           nothing to render but an empty pane over a working shell. */}
       {chatOpen && !shellOnly && (
         <SessionChat sessionId={sessionId} onClose={() => toggleRichView(sessionId)} />
+      )}
+      {/* IDE diff review: same overlay contract as SessionChat above — covers, never
+          replaces. Keyed by diffId so each review mounts a fresh Monaco diff. */}
+      {pendingIdeDiff && !shellOnly && (
+        <DiffReviewOverlay key={pendingIdeDiff.diffId} diff={pendingIdeDiff} />
       )}
     </div>
   );

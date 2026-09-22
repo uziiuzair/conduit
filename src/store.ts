@@ -13,6 +13,7 @@ import {
 import type { TerminalRenderer } from "./terminalRenderer";
 import { initialProjectSelection, type OpenBehavior } from "./startup";
 import { insertTabAt, repairLayout } from "./layout";
+import { pushDiff, popDiff, closeDiffs, type PendingDiff } from "./ideBridge";
 import { accountKey, type UsageMetric } from "./usageRows";
 import type { Chain, RoutesView, TaskKind, TaskKindInfo } from "./routing";
 import { AGENTS, type AgentId, type AgentInfo, DEFAULT_AGENT, type McpServer } from "./agents";
@@ -1285,6 +1286,13 @@ interface AppState {
    *  diff review lands in a Monaco overlay, editor selections reach the session. */
   announceAsIde: boolean;
   setAnnounceAsIde: (v: boolean) => void;
+  /** Runtime-only: parked openDiff reviews from IDE-connected sessions (FIFO per
+   *  session, rendered by DiffReviewOverlay). Never persisted — a diff request dies
+   *  with the claude that asked it. */
+  pendingDiffs: PendingDiff[];
+  ideDiffArrived: (d: PendingDiff) => void;
+  ideDiffResolved: (sessionId: string, diffId: string) => void;
+  ideDiffsClosed: (sessionId: string, tabName: string | null) => void;
   /** Persisted. Whether a launch reopens the project you were last on ("last", the
    *  default) or opens nothing ("none"). Neither one reopens the topmost project as
    *  such — see `initialProjectSelection`. */
@@ -1719,6 +1727,7 @@ export const useStore = create<AppState>((set, get) => {
     decisionRoutes: {},
     restoreSessionsOnOpen: readRestoreSessionsOnOpen(),
     announceAsIde: readAnnounceAsIde(),
+    pendingDiffs: [],
     openBehavior: readOpenBehavior(),
     terminalRenderer: readTerminalRenderer(),
     persistSessions: readPersistSessions(),
@@ -3225,6 +3234,12 @@ export const useStore = create<AppState>((set, get) => {
       writeAnnounceAsIde(v);
       set({ announceAsIde: v });
     },
+
+    ideDiffArrived: (d) => set({ pendingDiffs: pushDiff(get().pendingDiffs, d) }),
+    ideDiffResolved: (sessionId, diffId) =>
+      set({ pendingDiffs: popDiff(get().pendingDiffs, sessionId, diffId) }),
+    ideDiffsClosed: (sessionId, tabName) =>
+      set({ pendingDiffs: closeDiffs(get().pendingDiffs, sessionId, tabName) }),
 
     setOpenBehavior: (v) => {
       writeOpenBehavior(v);
