@@ -1893,26 +1893,36 @@ export const useStore = create<AppState>((set, get) => {
       const cur = get();
       const patch: Partial<AppState> = {};
       if (projects) {
-        const fetchedIds = new Set(projects.map((p) => p.id));
-        // A project removed in another window is dropped here (mergeSlices case c) without
-        // ever going through removeProject's own release loop — do that release ourselves,
-        // against the LOCAL layout (still in cur.layouts; mergeSlices only returns survivors),
-        // or every file tab it held leaks a model ref forever.
-        for (const p of cur.projects) {
-          if (fetchedIds.has(p.id)) continue;
-          for (const g of cur.layouts[p.id]?.groups ?? []) {
-            for (const t of g.tabs) {
-              if (t.kind !== "file") continue;
-              registry.release(t.ref);
-              registry.disposeIfUnreferenced(t.ref);
-            }
-          }
-        }
         const merged = mergeSlices(
           { projects: cur.projects, layouts: cur.layouts },
           projects,
           (p) => validateLayout(p.layout ?? defaultLayout(p), p, projects),
         );
+        // A project removed in another window is dropped by mergeSlices (case c) without
+        // ever going through removeProject's own cleanup — replay that cleanup here, against
+        // the LOCAL layout (mergeSlices only returns survivors, so cur.layouts still holds
+        // it): clear dirty (same "last reference" guard removeProject uses — leaving it true
+        // with no tab left to clear it keeps pushing a stale set_dirty_count to Rust's
+        // per-window DirtyGuard, so quit gets a phantom confirm forever), release the model
+        // ref, and drop the project's maximized entry.
+        for (const id of merged.removedProjectIds) {
+          for (const g of cur.layouts[id]?.groups ?? []) {
+            for (const t of g.tabs) {
+              if (t.kind !== "file") continue;
+              // Clear dirty only when this was the model's last reference — the same
+              // absolute path can be open under another project, whose buffer (and its
+              // unsaved edits) survives this release.
+              if ((registry.model(t.ref)?.refCount ?? 1) <= 1) cur.setDirty(t.ref, false);
+              registry.release(t.ref);
+              registry.disposeIfUnreferenced(t.ref);
+            }
+          }
+        }
+        if (merged.removedProjectIds.length) {
+          const maxima = { ...cur.maximized };
+          for (const id of merged.removedProjectIds) delete maxima[id];
+          patch.maximized = maxima;
+        }
         // Balance close/removeProject release: acquire a model ref for every file tab a
         // NEWLY added project's layout carries. Existing projects keep their local layout
         // (mergeSlices never touches it), so their refs were already acquired.

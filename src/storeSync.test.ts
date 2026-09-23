@@ -33,6 +33,7 @@ describe("mergeSlices", () => {
 
     expect(result.projects).toEqual(fetched);
     expect(result.addedProjectIds).toEqual(["p1"]);
+    expect(result.removedProjectIds).toEqual([]);
     expect(result.layouts.p1).toEqual(layout("made-p1"));
   });
 
@@ -46,6 +47,7 @@ describe("mergeSlices", () => {
 
     expect(result.layouts.p1).toBe(localLayout);
     expect(result.addedProjectIds).toEqual([]);
+    expect(result.removedProjectIds).toEqual([]);
   });
 
   it("(c) drops a project Rust no longer reports, layout included", () => {
@@ -59,6 +61,9 @@ describe("mergeSlices", () => {
 
     expect(result.projects.map((p) => p.id)).toEqual(["p1"]);
     expect(result.layouts).not.toHaveProperty("p2");
+    // Named so the caller (store.ts) can replay removeProject's own dirty/maximized/registry
+    // cleanup for exactly these ids — this module has no store or registry to do it itself.
+    expect(result.removedProjectIds).toEqual(["p2"]);
   });
 
   it("(d) adopts fetched session content, preserving reference equality only when the project's JSON is unchanged", () => {
@@ -84,5 +89,6 @@ describe("mergeSlices", () => {
     // Local layouts for both existing projects are untouched either way.
     expect(result.layouts.p1).toBe(current.layouts.p1);
     expect(result.layouts.p2).toBe(current.layouts.p2);
+    expect(result.removedProjectIds).toEqual([]);
   });
 });

@@ -20,7 +20,10 @@
  *      live UI state — tab order, split panes, the active group — that only this window's own
  *      edits may change; a background refetch must never replace it out from under the user.
  *  (c) a project Rust no longer reports (removed in another window) is DROPPED, layout
- *      included. Rust is authoritative for project existence.
+ *      included. Rust is authoritative for project existence. `removedProjectIds` names which
+ *      ones, so the caller (`mergeSyncedSlices` in `store.ts`) can replay `removeProject`'s own
+ *      cleanup for them — clearing `dirty`/`maximized`, releasing the Monaco registry ref —
+ *      none of which this module can do itself (it has no store, no registry).
  *  (d) the merged project adopts the fetched fields wholesale (sessions included — that's the
  *      point of the sync), but when a project's JSON is byte-identical to what this window
  *      already has, the EXISTING object reference is kept so nothing that memoizes on project
@@ -33,6 +36,7 @@ export interface MergeResult {
   projects: Project[];
   layouts: Record<string, ProjectLayout>;
   addedProjectIds: string[];
+  removedProjectIds: string[];
 }
 
 export function mergeSlices(
@@ -41,7 +45,11 @@ export function mergeSlices(
   makeLayout: (p: Project) => ProjectLayout,
 ): MergeResult {
   const currentById = new Map(current.projects.map((p) => [p.id, p]));
+  const fetchedIds = new Set(fetched.map((p) => p.id));
   const addedProjectIds: string[] = [];
+  const removedProjectIds = current.projects
+    .filter((p) => !fetchedIds.has(p.id))
+    .map((p) => p.id);
   const layouts: Record<string, ProjectLayout> = {};
 
   const projects = fetched.map((f) => {
@@ -57,5 +65,5 @@ export function mergeSlices(
     return JSON.stringify(f) === JSON.stringify(existing) ? existing : f;
   });
 
-  return { projects, layouts, addedProjectIds };
+  return { projects, layouts, addedProjectIds, removedProjectIds };
 }
