@@ -2293,6 +2293,16 @@ pub fn run() {
             let pty = app.state::<Arc<PtyManager>>().inner().clone();
             let store = app.state::<Arc<Store>>().inner().clone();
             let tasks = app.state::<Arc<TaskBoard>>().inner().clone();
+
+            // Wire the store-saved broadcast. Fires after every persisted store write.
+            let gen = Arc::new(std::sync::atomic::AtomicU64::new(0));
+            let handle = app.handle().clone();
+            store.set_on_save(Box::new(move || {
+                let _ = handle.emit(
+                    "store-saved",
+                    gen.fetch_add(1, std::sync::atomic::Ordering::SeqCst),
+                );
+            }));
             let agy_usage = app
                 .state::<Arc<crate::agy_usage::AgyUsageState>>()
                 .inner()

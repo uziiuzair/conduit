@@ -7,7 +7,7 @@
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::PathBuf;
-use std::sync::Mutex;
+use std::sync::{Mutex, OnceLock};
 
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -534,6 +534,9 @@ pub struct Store {
     /// of `PersistState`/`save()`, never logged; injected into an `opencode` child's env.
     opencode_key: Mutex<Option<String>>,
     save_path: PathBuf,
+    /// Callback fired after every successful persisted store write. Used to emit broadcast
+    /// events to all windows (e.g., `store-saved`). Never persisted, only set at startup.
+    on_save: OnceLock<Box<dyn Fn() + Send + Sync>>,
 }
 
 /// A read-only view of the project that owns a given Conductor, plus its sessions.
@@ -662,7 +665,12 @@ impl Store {
             active_profile_id: Mutex::new(state.active_profile_id),
             opencode_key: Mutex::new(None),
             save_path,
+            on_save: OnceLock::new(),
         }
+    }
+
+    pub fn set_on_save(&self, f: Box<dyn Fn() + Send + Sync>) {
+        let _ = self.on_save.set(f);
     }
 
     fn save(&self, projects: &[Project]) {
@@ -734,11 +742,15 @@ impl Store {
         // sync client) can make this fail with ERROR_SHARING_VIOLATION even though a POSIX
         // rename-over-open never does; retry briefly before giving up. macOS/Linux keep the
         // single-rename path so their behavior is unchanged.
+        let mut success = false;
         #[cfg(windows)]
         {
             for attempt in 0..10 {
                 match fs::rename(&tmp, &self.save_path) {
-                    Ok(()) => return,
+                    Ok(()) => {
+                        success = true;
+                        break;
+                    }
                     Err(e) => {
                         if attempt == 9 {
                             let _ = fs::remove_file(&tmp);
@@ -751,8 +763,17 @@ impl Store {
             }
         }
         #[cfg(not(windows))]
-        if let Err(e) = fs::rename(&tmp, &self.save_path) {
-            eprintln!("conduit: failed to persist state: {e}");
+        {
+            if let Err(e) = fs::rename(&tmp, &self.save_path) {
+                eprintln!("conduit: failed to persist state: {e}");
+            } else {
+                success = true;
+            }
+        }
+        if success {
+            if let Some(f) = self.on_save.get() {
+                f();
+            }
         }
     }
 
@@ -1935,6 +1956,7 @@ mod tests {
                 active_profile_id: Mutex::new(None),
                 opencode_key: Mutex::new(None),
                 save_path: dir.join("state.json"),
+                on_save: OnceLock::new(),
             }
         }
     }
@@ -1944,6 +1966,19 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    #[test]
+    fn save_fires_on_save_hook() {
+        use std::sync::{atomic::Ordering, Arc};
+        let store = Store::for_test(&temp_dir("on_save"));
+        let hits = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let h = hits.clone();
+        store.set_on_save(Box::new(move || {
+            h.fetch_add(1, Ordering::SeqCst);
+        }));
+        store.add_profile("x");
+        assert!(hits.load(Ordering::SeqCst) >= 1);
     }
 
     #[test]
