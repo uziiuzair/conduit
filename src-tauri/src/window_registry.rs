@@ -49,10 +49,9 @@ impl WindowRegistry {
     /// First label currently showing `profile` ("main" counts).
     ///
     /// Read-only lookup, kept separate from `claim` for a future consumer that wants to
-    /// know whether a profile has a window without also claiming one (Tasks 4/6/7).
-    /// `open_profile_window`'s own check-and-claim now goes through `claim` instead, so
-    /// this is currently only exercised by this module's own tests.
-    #[allow(dead_code)]
+    /// know whether a profile has a window without also claiming one. `open_profile_window`'s
+    /// own check-and-claim goes through `claim` instead; `remove_profile` (Task 6) is what
+    /// consumes this one, to find and close the profile's window before the store mutation.
     pub fn label_for(&self, profile: &Option<String>) -> Option<String> {
         let map = self.map.lock().unwrap_or_else(|e| e.into_inner());
         map.iter()

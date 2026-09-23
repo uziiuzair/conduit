@@ -2135,7 +2135,10 @@ export const useStore = create<AppState>((set, get) => {
     },
 
     addProject: async (path) => {
-      const project = await invoke<Project>("add_project", { path });
+      const project = await invoke<Project>("add_project", {
+        path,
+        profileId: get().activeProfileId,
+      });
       set((s) => ({
         projects: [...s.projects, project],
         layouts: { ...s.layouts, [project.id]: defaultLayout(project) },
@@ -2400,7 +2403,9 @@ export const useStore = create<AppState>((set, get) => {
     },
 
     addRootChat: async () => {
-      const chat = await invoke<RootChat>("add_root_chat").catch(() => null);
+      const chat = await invoke<RootChat>("add_root_chat", {
+        profileId: get().activeProfileId,
+      }).catch(() => null);
       if (!chat) return;
       set((st) => ({
         rootChats: [...st.rootChats, chat],

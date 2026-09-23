@@ -725,8 +725,8 @@ fn load_projects(store: State<Arc<Store>>) -> Vec<Project> {
 }
 
 #[tauri::command]
-fn add_project(path: String, store: State<Arc<Store>>) -> Project {
-    store.add_project(path)
+fn add_project(path: String, profile_id: Option<String>, store: State<Arc<Store>>) -> Project {
+    store.add_project(path, profile_id)
 }
 
 // ---- CLI launcher --------------------------------------------------------------
@@ -765,8 +765,8 @@ fn list_root_chats(store: State<Arc<Store>>) -> Vec<store::RootChat> {
 }
 
 #[tauri::command]
-fn add_root_chat(store: State<Arc<Store>>) -> store::RootChat {
-    store.add_root_chat()
+fn add_root_chat(profile_id: Option<String>, store: State<Arc<Store>>) -> store::RootChat {
+    store.add_root_chat(profile_id)
 }
 
 #[tauri::command]
@@ -940,7 +940,42 @@ fn add_profile(name: String, store: State<Arc<Store>>) -> store::Profile {
 }
 
 #[tauri::command]
-fn remove_profile(id: String, store: State<Arc<Store>>) -> bool {
+fn remove_profile(
+    id: String,
+    app: tauri::AppHandle,
+    store: State<Arc<Store>>,
+    reg: State<Arc<window_registry::WindowRegistry>>,
+    pty: State<Arc<PtyManager>>,
+) -> bool {
+    // If a secondary window is showing this profile, detach its sessions and tear it down
+    // ourselves, BEFORE the store mutation below. The window's `Destroyed` handler fires
+    // asynchronously and could otherwise land AFTER `store.remove_profile` -- at which
+    // point this dangling id would normalize to Default (`sessions_for_profile`) and its
+    // `profile_of` lookup would mis-detach DEFAULT's sessions instead of this profile's.
+    //
+    // "main" is exempt from all of this: it is never destroyed here (it stays open,
+    // showing the removed profile's projects/chats now fallen back to Default), so no
+    // Destroyed event will ever fire for this call and there is nothing to preempt --
+    // detaching its sessions here would kill their PTYs while they're still on screen,
+    // which is exactly the keep-alive-terminal bug this module's doc comment warns about.
+    if let Some(label) = reg.label_for(&Some(id.clone())) {
+        if label != "main" {
+            // Detach while `id` still names a real profile and normalizes to itself
+            // rather than Default.
+            for sid in store.sessions_for_profile(&Some(id.clone())) {
+                pty.detach(&sid);
+            }
+            // Remove the registry entry synchronously, so that by the time the async
+            // Destroyed handler runs, `profile_of(&label)` misses (the label is gone)
+            // and its own detach loop is skipped rather than mis-firing on Default.
+            reg.remove(&label);
+            if let Some(w) = app.get_webview_window(&label) {
+                let _ = w.destroy();
+            }
+        }
+    }
+    // Only now the store mutation: profile removed, its projects/chats fall back to
+    // Default.
     store.remove_profile(&id)
 }
 
@@ -950,7 +985,13 @@ fn get_active_profile(store: State<Arc<Store>>) -> Option<String> {
 }
 
 #[tauri::command]
-fn set_active_profile(id: Option<String>, store: State<Arc<Store>>) -> bool {
+fn set_active_profile(id: Option<String>, window: tauri::Window, store: State<Arc<Store>>) -> bool {
+    // Only "main" may change the global active profile -- a secondary profile window's
+    // identity is fixed to the profile it was opened for (the registry entry), and letting
+    // it rewrite the global would make every other window's Default view jump underneath it.
+    if window.label() != "main" {
+        return false;
+    }
     store.set_active_profile(id)
 }
 
@@ -2680,7 +2721,7 @@ mod tests {
     fn approving_a_pending_proposal_creates_a_worker_session_and_resolves_it() {
         let dir = approve_test_dir("happy");
         let store = Store::for_test(&dir);
-        let project = store.add_project("/repo".into());
+        let project = store.add_project("/repo".into(), store.active_profile());
         let proposals = proposals::Proposals::default();
         let p = proposals
             .register(
@@ -2725,7 +2766,7 @@ mod tests {
     fn approving_with_an_agent_this_build_cannot_spawn_is_refused_not_defaulted_to_claude() {
         let dir = approve_test_dir("bogus_agent");
         let store = Store::for_test(&dir);
-        let project = store.add_project("/repo".into());
+        let project = store.add_project("/repo".into(), store.active_profile());
         let proposals = proposals::Proposals::default();
         let p = proposals
             .register(
@@ -2789,7 +2830,7 @@ mod tests {
     fn approving_an_expired_proposal_is_refused_and_creates_no_session() {
         let dir = approve_test_dir("expired");
         let store = Store::for_test(&dir);
-        let project = store.add_project("/repo".into());
+        let project = store.add_project("/repo".into(), store.active_profile());
         let proposals = proposals::Proposals::default();
         let p = proposals
             .register(
@@ -2826,7 +2867,7 @@ mod tests {
     fn approve_refuses_a_proposal_already_resolved_by_someone_else() {
         let dir = approve_test_dir("race");
         let store = Store::for_test(&dir);
-        let project = store.add_project("/repo".into());
+        let project = store.add_project("/repo".into(), store.active_profile());
         let proposals = proposals::Proposals::default();
         let p = proposals
             .register(
@@ -2867,7 +2908,7 @@ mod tests {
     fn only_one_concurrent_approval_wins_and_no_orphan_session_survives() {
         let dir = approve_test_dir("concurrent");
         let store = Arc::new(Store::for_test(&dir));
-        let project = store.add_project("/repo".into());
+        let project = store.add_project("/repo".into(), store.active_profile());
         let proposals = Arc::new(proposals::Proposals::default());
         let p = proposals
             .register(
@@ -2925,7 +2966,7 @@ mod tests {
     fn list_pending_decisions_reports_the_project_name() {
         let dir = approve_test_dir("pending_list");
         let store = Store::for_test(&dir);
-        let project = store.add_project("/repo".into());
+        let project = store.add_project("/repo".into(), store.active_profile());
         let proposals = proposals::Proposals::default();
         proposals
             .register(

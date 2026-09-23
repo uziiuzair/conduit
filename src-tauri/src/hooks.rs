@@ -1676,7 +1676,7 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         let store = Store::for_test(&dir);
-        let proj = store.add_project("/repo".into());
+        let proj = store.add_project("/repo".into(), store.active_profile());
         let worker = store
             .add_session(
                 &proj.id,
