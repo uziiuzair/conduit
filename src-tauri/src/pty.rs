@@ -818,9 +818,9 @@ impl PtyManager {
     }
 
     /// Detach a session's desktop consumer (its window closed). The PTY, tmux session and
-    /// reader thread all keep running; the next `pty_spawn` re-attaches warm.
-    // Consumed by Task 4 (window close) — no caller yet in this task.
-    #[allow(dead_code)]
+    /// reader thread all keep running; the next `pty_spawn` re-attaches warm. Called from
+    /// `lib.rs`'s `on_window_event` `Destroyed` arm for every session belonging to the
+    /// window's profile.
     pub fn detach(&self, session_id: &str) {
         if let Some(entry) = self.sessions.get(session_id) {
             if let Ok(s) = entry.lock() {

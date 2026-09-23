@@ -797,6 +797,25 @@ impl Store {
         self.save(&projects);
     }
 
+    /// Session ids of every project belonging to `profile` (dangling ids = Default).
+    ///
+    /// Same normalization `Project.profile_id` gets everywhere else it's read: a profile
+    /// id that no longer names a record in `profiles` folds back to Default (`None`)
+    /// rather than forming its own orphan bucket, so a project stranded by something
+    /// other than `remove_profile` (which clears the field itself) still matches
+    /// `sessions_for_profile(&None)`.
+    pub fn sessions_for_profile(&self, profile: &Option<String>) -> Vec<String> {
+        let known: HashSet<String> = self.list_profiles().into_iter().map(|p| p.id).collect();
+        let normalize = |id: &Option<String>| id.clone().filter(|i| known.contains(i));
+        self.projects
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .filter(|p| normalize(&p.profile_id) == normalize(profile))
+            .flat_map(|p| p.sessions.iter().map(|s| s.id.clone()))
+            .collect()
+    }
+
     // ---- Root chats -----------------------------------------------------------------
     // Lock order: mutate `root_chats`, DROP that lock, then take `projects` for `save()`
     // — save() locks accounts/default_accounts/etc. internally and must never run while
@@ -2833,6 +2852,73 @@ mod tests {
             .all(|c| c.profile_id.is_none()));
         assert_eq!(store.list().len(), 2);
         assert_eq!(store.list_root_chats().len(), 1);
+    }
+
+    #[test]
+    fn sessions_for_profile_scopes_by_project_and_normalizes_dangling_ids() {
+        let dir = temp_dir("sessions_for_profile");
+        let store = Store::for_test(&dir);
+
+        let profile = store.add_profile("Streaming");
+
+        // A project created while `profile` is active belongs to it.
+        assert!(store.set_active_profile(Some(profile.id.clone())));
+        let proj_a = store.add_project("/proj-a".into());
+        let sess_a = store
+            .add_session(
+                &proj_a.id,
+                "a".into(),
+                false,
+                crate::agent::AgentId::Claude,
+                SessionRole::Worker,
+            )
+            .unwrap();
+
+        // A project created with no active profile belongs to Default.
+        assert!(store.set_active_profile(None));
+        let proj_default = store.add_project("/proj-default".into());
+        let sess_default = store
+            .add_session(
+                &proj_default.id,
+                "d".into(),
+                false,
+                crate::agent::AgentId::Claude,
+                SessionRole::Worker,
+            )
+            .unwrap();
+
+        // A project whose profile_id points at a profile that no longer exists (e.g. the
+        // record was dropped some other way than `remove_profile`, which itself clears
+        // it). It must normalize to Default, not vanish or its own bogus bucket.
+        let proj_dangling = store.add_project("/proj-dangling".into());
+        let sess_dangling = store
+            .add_session(
+                &proj_dangling.id,
+                "g".into(),
+                false,
+                crate::agent::AgentId::Claude,
+                SessionRole::Worker,
+            )
+            .unwrap();
+        {
+            let mut projects = store.projects.lock().unwrap();
+            let p = projects
+                .iter_mut()
+                .find(|p| p.id == proj_dangling.id)
+                .unwrap();
+            p.profile_id = Some("ghost-profile".into());
+        }
+
+        let a_sessions = store.sessions_for_profile(&Some(profile.id.clone()));
+        assert_eq!(a_sessions, vec![sess_a.id.clone()]);
+
+        let default_sessions = store.sessions_for_profile(&None);
+        assert!(default_sessions.contains(&sess_default.id));
+        assert!(
+            default_sessions.contains(&sess_dangling.id),
+            "a dangling profile id must normalize to Default: {default_sessions:?}"
+        );
+        assert!(!default_sessions.contains(&sess_a.id));
     }
 
     #[test]

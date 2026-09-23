@@ -89,12 +89,27 @@ impl NoWindow for std::process::Command {
     }
 }
 
-/// Unsaved-buffer count pushed from the frontend (`set_dirty_count`). Rust has no
-/// other view of editor dirtiness; the quit paths (menu.rs `quit` arm and the
+/// Unsaved-buffer count pushed from the frontend (`set_dirty_count`), PER WINDOW LABEL.
+/// Rust has no other view of editor dirtiness; the quit paths (menu.rs `quit` arm and the
 /// `CloseRequested` handler below) consult it so a clean quit stays instant and
 /// webview-independent, while a dirty quit round-trips for a confirm dialog.
+///
+/// Keyed by label because closing a SECONDARY window must only gate on that window's own
+/// dirty buffers — a dirty main window must never block a profile window from closing, and
+/// vice versa. The last-window quit path sums every label (`total()`): at that point every
+/// open editor in the app is about to go away together.
 #[derive(Default)]
-pub(crate) struct DirtyGuard(pub std::sync::atomic::AtomicUsize);
+pub(crate) struct DirtyGuard(pub dashmap::DashMap<String, usize>);
+
+impl DirtyGuard {
+    pub fn total(&self) -> usize {
+        self.0.iter().map(|e| *e.value()).sum()
+    }
+
+    pub fn for_label(&self, label: &str) -> usize {
+        self.0.get(label).map(|e| *e.value()).unwrap_or(0)
+    }
+}
 
 /// SPEC-F: does a WORKER session qualify for fleet MCP via mailbox opt-in (as opposed to
 /// a fleet mission)? True iff it has no mission AND has explicitly joined at least one
@@ -1912,8 +1927,8 @@ fn resolve_terminal_path(base: String, token: String) -> Option<fsops::ResolvedP
 // ---- Quit guard ----------------------------------------------------------------
 
 #[tauri::command]
-fn set_dirty_count(count: usize, dirty: State<DirtyGuard>) {
-    dirty.0.store(count, Ordering::SeqCst);
+fn set_dirty_count(window: tauri::Window, count: usize, dirty: State<DirtyGuard>) {
+    dirty.0.insert(window.label().to_string(), count);
 }
 
 /// Actually quit, invoked by the frontend after the dirty-buffer confirm. Preserves
@@ -2217,18 +2232,55 @@ pub fn run() {
         .manage(Arc::new(window_registry::WindowRegistry::default()))
         .manage(DirtyGuard::default())
         .on_window_event(|window, event| {
-            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
-                // Closing the (only) window quits the app; give dirty buffers AND any actively
-                // running agent the same confirm round-trip as Cmd+Q. Clean+idle windows close
-                // instantly. The frontend decides the exact prompt (unsaved files vs running
-                // agents) from the "quit" event.
-                let app = window.app_handle();
-                let dirty = app.state::<DirtyGuard>().0.load(Ordering::SeqCst);
-                let running = live_running_agent(app);
-                if dirty > 0 || running {
-                    api.prevent_close();
-                    let _ = app.emit("menu", "quit");
+            let app = window.app_handle();
+            let label = window.label().to_string();
+            match event {
+                tauri::WindowEvent::CloseRequested { api, .. } => {
+                    if app.webview_windows().len() > 1 {
+                        // Not the last window: closing detaches, never quits. Only this
+                        // window's OWN dirty buffers gate it -- a dirty main window must
+                        // never block a profile window from closing, or vice versa;
+                        // running agents in EITHER window keep running regardless.
+                        if app.state::<DirtyGuard>().for_label(&label) > 0 {
+                            api.prevent_close();
+                            let _ = app.emit_to(&label, "menu", "close-window");
+                        }
+                    } else {
+                        // Last window = the app quit path, exactly as before (summed
+                        // dirty across every window, since they're all going away
+                        // together) plus any actively running agent. Clean+idle closes
+                        // instantly; the frontend decides the exact prompt from "quit".
+                        let dirty = app.state::<DirtyGuard>().total();
+                        let running = live_running_agent(app);
+                        if dirty > 0 || running {
+                            api.prevent_close();
+                            let _ = app.emit_to(&label, "menu", "quit");
+                        }
+                    }
                 }
+                tauri::WindowEvent::Destroyed => {
+                    // The one place a registry entry is reaped and a profile's sessions
+                    // are detached from this window's PTYs -- runs for EVERY window,
+                    // main included, since Task 3's `claim` logic depends on a dead
+                    // window's profile becoming reopenable. Read `profile_of` BEFORE
+                    // `remove`: once removed it would answer "unknown label" and the
+                    // detach loop below would silently detach nothing.
+                    let reg = app.state::<Arc<window_registry::WindowRegistry>>();
+                    if let Some(profile) = reg.profile_of(&label) {
+                        let store = app.state::<Arc<Store>>();
+                        let pty = app.state::<Arc<PtyManager>>();
+                        // `sessions_for_profile` returns an owned Vec after its internal
+                        // lock is dropped, so nothing here holds the registry or store
+                        // lock across `detach` -- which itself locks per-session state
+                        // its reader thread also touches.
+                        for sid in store.sessions_for_profile(&profile) {
+                            pty.detach(&sid);
+                        }
+                    }
+                    reg.remove(&label);
+                    app.state::<DirtyGuard>().0.remove(&label);
+                }
+                _ => {}
             }
         })
         .setup(|app| {
@@ -2886,5 +2938,18 @@ mod tests {
         assert_eq!(rows[0]["projectId"], project.id);
         assert_eq!(rows[0]["projectName"], project.name);
         assert_eq!(rows[0]["kind"], "implementation");
+    }
+
+    #[test]
+    fn dirty_guard_sums_across_labels_and_reads_one_label() {
+        let guard = DirtyGuard::default();
+        guard.0.insert("main".to_string(), 2);
+        guard.0.insert("profile-a".to_string(), 3);
+
+        assert_eq!(guard.total(), 5);
+        assert_eq!(guard.for_label("main"), 2);
+        assert_eq!(guard.for_label("profile-a"), 3);
+        // A label never written reads as clean, not missing-and-panicking.
+        assert_eq!(guard.for_label("profile-b"), 0);
     }
 }
