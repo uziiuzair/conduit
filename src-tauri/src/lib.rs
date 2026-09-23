@@ -991,35 +991,52 @@ fn open_profile_window(
     store: State<Arc<Store>>,
 ) -> Result<(), String> {
     let target = resolve_open_target(&store.list_profiles(), &profile_id)?;
-    if let Some(label) = reg.label_for(&target) {
-        if let Some(w) = app.get_webview_window(&label) {
-            let _ = w.show();
-            let _ = w.unminimize();
-            let _ = w.set_focus();
-            return Ok(());
-        }
-        reg.remove(&label); // stale entry: window died without Destroyed cleanup
-    }
     let label = window_registry::profile_window_label(&target);
-    let builder = tauri::WebviewWindowBuilder::new(&app, &label, tauri::WebviewUrl::default())
-        .title("Conduit")
-        .inner_size(1100.0, 720.0)
-        .min_inner_size(980.0, 600.0)
-        .theme(Some(tauri::Theme::Dark))
-        .disable_drag_drop_handler();
-    #[cfg(target_os = "macos")]
-    let builder = builder.title_bar_style(tauri::TitleBarStyle::Overlay);
-    // Register BEFORE build: the new webview's first `window_profile` call must find it.
-    reg.register(&label, target.clone());
-    builder.build().map_err(|e| {
-        reg.remove(&label);
-        format!("open window: {e}")
-    })?;
-    Ok(())
+    // `claim` is check-then-insert under ONE lock: two concurrent calls for the same
+    // profile can't both see "nothing registered" and both try to build a window under
+    // the same label (the old label_for-then-register split had exactly that race).
+    match reg.claim(&label, &target) {
+        window_registry::Claim::Existing(label) => {
+            if let Some(w) = app.get_webview_window(&label) {
+                let _ = w.show();
+                let _ = w.unminimize();
+                let _ = w.set_focus();
+            }
+            // Else: another call is still building this label, or the entry is stale.
+            // Do nothing rather than remove/rebuild here -- Task 4's Destroyed handler
+            // is what reaps a truly-dead entry, so a stale claim is transient.
+            Ok(())
+        }
+        window_registry::Claim::Claimed(label) => {
+            // `claim` already inserted `label -> target` before returning; that insert
+            // landing before `build()` is load-bearing -- the new webview's first
+            // `window_profile` IPC call must find its own registry entry, or it reports
+            // isMain: false / profileId: null on first paint.
+            let builder =
+                tauri::WebviewWindowBuilder::new(&app, &label, tauri::WebviewUrl::default())
+                    .title("Conduit")
+                    .inner_size(1100.0, 720.0)
+                    .min_inner_size(980.0, 600.0)
+                    .theme(Some(tauri::Theme::Dark))
+                    .disable_drag_drop_handler();
+            #[cfg(target_os = "macos")]
+            let builder = builder.title_bar_style(tauri::TitleBarStyle::Overlay);
+            builder.build().map_err(|e| {
+                reg.remove(&label);
+                format!("open window: {e}")
+            })?;
+            Ok(())
+        }
+    }
 }
 
 #[tauri::command]
 fn close_window(app: tauri::AppHandle, label: String) {
+    if label == "main" {
+        // "main" participates in the quit-confirm path (CloseRequested); it must never
+        // be torn down by a programmatic destroy.
+        return;
+    }
     if let Some(w) = app.get_webview_window(&label) {
         let _ = w.destroy();
     }
