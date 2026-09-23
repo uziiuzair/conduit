@@ -219,13 +219,20 @@ export function Sidebar() {
 function ProfileBar() {
   const profiles = useStore((s) => s.profiles);
   const activeProfileId = useStore((s) => s.activeProfileId);
+  const windowProfile = useStore((s) => s.windowProfile);
   const setActiveProfile = useStore((s) => s.setActiveProfile);
   const addProfile = useStore((s) => s.addProfile);
   const [creating, setCreating] = useState(false);
   const done = useRef(false);
 
-  // A dangling active id (profile removed under us) renders as Default.
-  const value = profiles.some((p) => p.id === activeProfileId) ? activeProfileId! : "";
+  // In window mode the dropdown reflects THIS window's own pinned profile, never the
+  // (main-only) `activeProfileId` -- a secondary window's `activeProfileId` is just
+  // main's boot-time value and never changes. In switch mode there is no window
+  // identity to speak of, so it falls back to the plain active-profile selector, same as
+  // before this feature existed.
+  const selected = WINDOWED ? windowProfile.profileId : activeProfileId;
+  // A dangling id (its profile was removed under us) renders as Default.
+  const value = profiles.some((p) => p.id === selected) ? selected! : "";
 
   const commit = (name: string) => {
     if (done.current) return;
@@ -262,7 +269,15 @@ function ProfileBar() {
             { value: "", label: "Default" },
             ...profiles.map((p) => ({ value: p.id, label: p.name })),
           ]}
-          onChange={(v) => void setActiveProfile(v || null)}
+          onChange={(v) => {
+            const target = v || null;
+            if (!WINDOWED) {
+              void setActiveProfile(target);
+              return;
+            }
+            if (target === windowProfile.profileId) return; // already this window
+            void invoke("open_profile_window", { profileId: target });
+          }}
         />
       )}
       <button

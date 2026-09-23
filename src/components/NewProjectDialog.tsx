@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
@@ -42,6 +42,12 @@ export function NewProjectDialog({
   const [busy, setBusy] = useState(false);
   const [progress, setProgress] = useState("");
   const [error, setError] = useState<string | null>(null);
+  // One id per clone RUN, not per dialog instance: `clone-progress` is a plain broadcast,
+  // so without a filter a second run (another window's dialog, or this one reopened while
+  // a previous clone is still streaming its last throttled lines) would show the wrong
+  // run's progress text. Minted at submit time, not on mount, so an unstarted dialog never
+  // listens for a run that hasn't happened yet.
+  const requestIdRef = useRef("");
 
   const effName = mode === "clone" && !nameTouched ? cloneNameFromUrl(url) : name;
 
@@ -60,9 +66,9 @@ export function NewProjectDialog({
 
   useEffect(() => {
     if (!busy || mode !== "clone") return;
-    const un = listen<{ line: string }>("clone-progress", ({ payload }) =>
-      setProgress(payload.line),
-    );
+    const un = listen<{ line: string; requestId: string }>("clone-progress", ({ payload }) => {
+      if (payload.requestId === requestIdRef.current) setProgress(payload.line);
+    });
     return () => {
       void un.then((f) => f());
     };
@@ -95,6 +101,7 @@ export function NewProjectDialog({
     setBusy(true);
     setError(null);
     setProgress("");
+    requestIdRef.current = crypto.randomUUID();
     try {
       const path =
         mode === "create"
@@ -107,6 +114,7 @@ export function NewProjectDialog({
               url: url.trim(),
               parent: parent.trim(),
               name: effName.trim(),
+              requestId: requestIdRef.current,
             });
       try {
         localStorage.setItem(PARENT_KEY, parent.trim());

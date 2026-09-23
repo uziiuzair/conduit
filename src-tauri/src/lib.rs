@@ -1857,6 +1857,18 @@ fn create_project_dir(parent: String, name: String, git_init: bool) -> Result<St
     project_new::create_project(&parent, &name, git_init)
 }
 
+/// `clone-progress` is a plain broadcast (`app.emit`, not `emit_to`), and the dialog is
+/// the only listener today -- but a second dialog in another window (or a second clone
+/// run in the same one, opened/cancelled/reopened while the first is still streaming)
+/// would otherwise see the wrong run's lines with no way to tell them apart. `requestId`
+/// is round-tripped from the invoke so the dialog can filter its own listener by it.
+#[derive(serde::Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct CloneProgress {
+    line: String,
+    request_id: String,
+}
+
 /// Long-running; `(async)` puts it on the blocking pool so the read loop never
 /// touches the main thread. Progress reaches the dialog as `clone-progress` events,
 /// throttled so a fast transfer doesn't flood the event bus.
@@ -1866,13 +1878,20 @@ fn clone_project_repo(
     url: String,
     parent: String,
     name: String,
+    request_id: String,
 ) -> Result<String, String> {
     let mut last = None::<std::time::Instant>;
     project_new::run_clone(&url, &parent, &name, &mut |line| {
         let due = last.is_none_or(|t| t.elapsed() >= std::time::Duration::from_millis(100));
         if due {
             last = Some(std::time::Instant::now());
-            let _ = app.emit("clone-progress", serde_json::json!({ "line": line }));
+            let _ = app.emit(
+                "clone-progress",
+                CloneProgress {
+                    line,
+                    request_id: request_id.clone(),
+                },
+            );
         }
     })
 }

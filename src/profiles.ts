@@ -78,3 +78,24 @@ export function mountedInWindow(
 ): boolean {
   return !windowed || inProfile(project.profileId, windowProfileId, knownIds);
 }
+
+/**
+ * Whether a per-window event listener guard (App.tsx: `hook`, `fleet-spawn`,
+ * `bridge-open-session`, `conductor-confirm`, `root-chat-*`, `pending-decision`,
+ * `session-stale`, `cli-open`) should act on an item tagged `itemProfileId` in a window
+ * pinned to `windowProfileId`. Takes `windowed` as a parameter (rather than reading the
+ * module-level `WINDOWED` constant) purely so it's testable without a live store; every
+ * call site passes `WINDOWED` from store.ts.
+ *
+ * Switch mode (`windowed=false`) always returns `true` regardless of the ids, which is
+ * exactly the invariant those listeners need: every guard must collapse to today's
+ * (pre-multi-window) behavior with the preference off, not just "usually match."
+ */
+export function eventInThisWindow(
+  windowed: boolean,
+  itemProfileId: string | null | undefined,
+  windowProfileId: string | null,
+  knownIds: ReadonlySet<string>,
+): boolean {
+  return !windowed || eventInWindow(itemProfileId, windowProfileId, knownIds);
+}
