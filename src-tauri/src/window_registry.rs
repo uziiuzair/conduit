@@ -1,5 +1,9 @@
 //! Which window shows which profile. One registry, managed state; the label is the
 //! Tauri window label ("main", "profile-<id>", "profile-default"). `None` = Default.
+//!
+//! This module is scaffolding for profile-windows tasks; consumers land in Tasks 3, 4, 6, 7.
+//! Remove this allow when `open_profile_window` lands.
+#![allow(dead_code)]
 
 use std::collections::HashMap;
 use std::sync::Mutex;
