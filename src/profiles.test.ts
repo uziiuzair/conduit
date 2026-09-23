@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { eventInWindow, inProfile, normalizeProfileId } from "./profiles";
+import { eventInWindow, inProfile, mountedInWindow, normalizeProfileId } from "./profiles";
 
 const known = new Set(["work", "stream"]);
 
@@ -47,5 +47,33 @@ describe("eventInWindow", () => {
   });
   it("a dangling window id matches Default items", () => {
     expect(eventInWindow(null, "deleted-profile" as string, known)).toBe(true);
+  });
+});
+
+describe("mountedInWindow", () => {
+  it("switch mode (windowed=false) mounts every project, regardless of profile", () => {
+    expect(mountedInWindow({ profileId: "work" }, false, null, known)).toBe(true);
+    expect(mountedInWindow({ profileId: "stream" }, false, "work", known)).toBe(true);
+    expect(mountedInWindow({ profileId: null }, false, "work", known)).toBe(true);
+    expect(mountedInWindow({}, false, "work", known)).toBe(true);
+  });
+  it("window mode (windowed=true) mounts only this window's own profile", () => {
+    expect(mountedInWindow({ profileId: "work" }, true, "work", known)).toBe(true);
+    expect(mountedInWindow({ profileId: "stream" }, true, "work", known)).toBe(false);
+    expect(mountedInWindow({ profileId: null }, true, null, known)).toBe(true);
+    expect(mountedInWindow({}, true, null, known)).toBe(true);
+    expect(mountedInWindow({ profileId: "work" }, true, null, known)).toBe(false);
+  });
+  it("window mode normalizes a dangling project profile id to Default", () => {
+    expect(mountedInWindow({ profileId: "deleted-profile" }, true, null, known)).toBe(true);
+    expect(mountedInWindow({ profileId: "deleted-profile" }, true, "work", known)).toBe(false);
+  });
+  it("window mode normalizes a dangling window profile id to Default", () => {
+    expect(
+      mountedInWindow({ profileId: null }, true, "deleted-profile" as string, known),
+    ).toBe(true);
+    expect(
+      mountedInWindow({ profileId: "work" }, true, "deleted-profile" as string, known),
+    ).toBe(false);
   });
 });

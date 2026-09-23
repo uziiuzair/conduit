@@ -775,6 +775,42 @@ button {
   height: 100%;
 }
 
+/* ---- Foreign borrowed tab (multi-window profiles) ----
+   Same absolute left/width geometry as .code-pane, sized by the group's own column, but
+   no visible/hidden toggle: it holds no PTY (unlike the terminals in .term-stack beside
+   it), so WorkspaceCenter mounts/unmounts it freely with the tab's own foreign-ness. */
+.foreign-session-tab {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  z-index: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  text-align: center;
+  padding: 24px;
+  background: var(--panel-bg);
+  color: var(--text-mid);
+  font-size: 13px;
+}
+
+.foreign-session-tab button {
+  font-size: 11px;
+  color: var(--text-mid);
+  padding: 4px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: transparent;
+}
+
+.foreign-session-tab button:hover {
+  color: var(--text-bright);
+  background: var(--selection-bg);
+  border-color: var(--accent);
+}
+
 /* ---- Empty state (ports EmptyStateView) ---- */
 .empty-state {
   position: absolute;

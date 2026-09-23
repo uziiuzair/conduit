@@ -9,6 +9,7 @@ import {
   prettyPath,
   openInVscode,
   baseName,
+  WINDOWED,
   type Project,
   type EditorGroup,
   type WsTab,
@@ -20,6 +21,7 @@ import {
   readSessionDrag,
   tabProjectId,
 } from "../layout";
+import { mountedInWindow, normalizeProfileId } from "../profiles";
 import { TerminalView } from "./Terminal";
 import { CodeEditorPane } from "./CodeEditorPane";
 import { BoardView } from "./BoardView";
@@ -79,6 +81,12 @@ export function WorkspaceCenter({
 }) {
   const layout = useStore((s) => (projectId ? s.layouts[projectId] : undefined));
   const centerMode = useStore((s) => (projectId ? s.centerMode[projectId] ?? "terminals" : "terminals"));
+  // Multi-window profiles: this window's own pinned identity (boot-stable — see WINDOWED
+  // and mountedInWindow in profiles.ts) plus the known-profile set needed to normalize a
+  // dangling profileId to Default. Drives which projects' terminals mount in THIS window.
+  const profiles = useStore((s) => s.profiles);
+  const windowProfile = useStore((s) => s.windowProfile);
+  const knownProfileIds = new Set(profiles.map((p) => p.id));
   // The board is global now — not a per-project mode — so it reads its own store field
   // rather than `centerMode`, and stays open across a project switch.
   const canvasMode = useStore((s) => s.canvasOpen);
@@ -311,6 +319,7 @@ export function WorkspaceCenter({
   // sidebar, a drag-reorder there would make React physically move every keep-alive
   // terminal node (detach + reattach), blurring the focused xterm and dropping selections.
   const allSessions = projects
+    .filter((p) => mountedInWindow(p, WINDOWED, windowProfile.profileId, knownProfileIds))
     .flatMap((p) => p.sessions.map((s) => ({ project: p, session: s })))
     .sort((a, b) => a.session.id.localeCompare(b.session.id));
 
@@ -496,6 +505,44 @@ export function WorkspaceCenter({
                   }
                   style={{ left: `${geom[gi].left}%`, width: `${geom[gi].width}%` }}
                 />
+              );
+            })}
+
+          {/* A borrowed tab whose session's PROJECT is not mounted in this window (see
+              mountedInWindow/allSessions above) has no TerminalView in the stack to show —
+              the pane would otherwise render as a silently empty slot. A session missing
+              from the store entirely (deleted) is a different, already-handled case and
+              stays out of this branch; repairLayout prunes that tab on the next write. No
+              keep-alive concern here: this placeholder holds no PTY, so it mounts/unmounts
+              freely with the group's own visibility, unlike the terminals beside it. */}
+          {layout &&
+            projectId &&
+            !canvasMode &&
+            layout.groups.map((g, gi) => {
+              if (isMax && gi !== maxIdx) return null;
+              const activeTab = g.tabs.find((t) => t.ref === g.activeRef);
+              if (!activeTab || activeTab.kind !== "session") return null;
+              const found = findSession(projects, activeTab.ref);
+              if (!found) return null;
+              if (mountedInWindow(found.project, WINDOWED, windowProfile.profileId, knownProfileIds)) {
+                return null;
+              }
+              const foreignProfileId = normalizeProfileId(found.project.profileId, knownProfileIds);
+              return (
+                <div
+                  key={projectId + "::foreign::" + g.id}
+                  className="foreign-session-tab"
+                  style={{ left: `${geom[gi].left}%`, width: `${geom[gi].width}%` }}
+                >
+                  <span>This session lives in another profile's window.</span>
+                  <button
+                    onClick={() =>
+                      void invoke("open_profile_window", { profileId: foreignProfileId })
+                    }
+                  >
+                    Open that window
+                  </button>
+                </div>
               );
             })}
 
@@ -856,6 +903,12 @@ function GroupTabStrip({
 function CanvasToggleButton() {
   const canvasOpen = useStore((s) => s.canvasOpen);
   const setCanvasOpen = useStore((s) => s.setCanvasOpen);
+  const isMain = useStore((s) => s.windowProfile.isMain);
+  // The canvas is a single global board; a secondary window mounts only its own
+  // profile's projects (mountedInWindow above), so a card dragged onto it from another
+  // profile would have no mounted terminal to place. Hiding the one entry point is
+  // enough — canvasOpen/CanvasUnderlay etc. are untouched, main-only usage as before.
+  if (WINDOWED && !isMain) return null;
   return (
     <button
       className={`header-btn board-tab ${canvasOpen ? "active" : ""}`}

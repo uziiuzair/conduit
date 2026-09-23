@@ -56,3 +56,25 @@ export function eventInWindow(
 ): boolean {
   return inProfile(itemProfileId, windowProfileId, knownIds);
 }
+
+/**
+ * Whether a project's terminals should be MOUNTED in this OS window — the keep-alive
+ * gate, not a visibility filter. In switch mode (`windowed=false`) every project is
+ * mounted everywhere, matching the one shared window that existed before multi-window
+ * profiles: hidden profiles keep their terminals mounted, they're just not shown. In
+ * window mode (`windowed=true`) each window mounts only its own pinned profile's
+ * projects — a dangling `project.profileId` normalizes to Default via `inProfile`, so a
+ * removed profile's projects surface in the Default window rather than mounting nowhere.
+ *
+ * `windowed` and `windowProfileId` are both boot-stable for the life of a window (see
+ * `WINDOWED`/`windowProfile` in store.ts — a project's profile never changes at runtime),
+ * so the mount set this decides is boot-stable too and can never unmount a live terminal.
+ */
+export function mountedInWindow(
+  project: { profileId?: string | null },
+  windowed: boolean,
+  windowProfileId: string | null,
+  knownIds: ReadonlySet<string>,
+): boolean {
+  return !windowed || inProfile(project.profileId, windowProfileId, knownIds);
+}

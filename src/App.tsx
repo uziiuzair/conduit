@@ -117,14 +117,18 @@ export default function App() {
   const [palette, setPalette] = useState<"quickopen" | "search" | "commands" | null>(null);
 
   useEffect(() => {
-    void load();
+    // Discover + start enabled plugins, but only on the main window. `windowProfile`
+    // resolves async inside `load()` (the `window_profile` IPC round trip) and is not
+    // known yet on this first render — it starts at its main/Default default (see
+    // `windowProfile`'s initial state in store.ts) — so this reads the store's verdict
+    // AFTER `load()` resolves rather than off the stale value closed over here. A
+    // secondary window running its own plugin set would double every hook/command a
+    // plugin registers globally.
+    void load().then(() => {
+      if (useStore.getState().windowProfile.isMain) void initPlugins();
+    });
     void loadAgents();
   }, [load, loadAgents]);
-
-  // Discover + start enabled plugins.
-  useEffect(() => {
-    void initPlugins();
-  }, []);
 
   // Suppress the webview's default context menu (Reload / Inspect Element).
   // Our own row menus call preventDefault + stopPropagation, so they're unaffected —

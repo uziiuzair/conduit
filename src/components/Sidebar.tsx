@@ -12,6 +12,7 @@ import {
   worktreeRemove,
   globalSelectedSessionId,
   resolvedAccountKey,
+  WINDOWED,
   type Project,
   type Session,
 } from "../store";
@@ -141,16 +142,21 @@ export function Sidebar() {
   const setShowSettings = useStore((s) => s.setShowSettings);
   const profiles = useStore((s) => s.profiles);
   const activeProfileId = useStore((s) => s.activeProfileId);
-  // The profile filter applies HERE (and to selection repair in the store) only. The
+  const windowProfile = useStore((s) => s.windowProfile);
+  // In window mode this sidebar is permanently pinned to ITS OWN window's profile, never
+  // the global `activeProfileId` — that field is main's boot-time value and only main
+  // may change it (see stampProfileId in store.ts). In switch mode it's the usual active
+  // profile. The filter applies HERE (and to selection repair in the store) only. The
   // workspace keeps the full projects array — hidden projects' terminals stay mounted.
+  const filterProfileId = WINDOWED ? windowProfile.profileId : activeProfileId;
   const knownProfileIds = useMemo(() => new Set(profiles.map((p) => p.id)), [profiles]);
   const visibleProjects = useMemo(
-    () => projects.filter((p) => inProfile(p.profileId, activeProfileId, knownProfileIds)),
-    [projects, activeProfileId, knownProfileIds],
+    () => projects.filter((p) => inProfile(p.profileId, filterProfileId, knownProfileIds)),
+    [projects, filterProfileId, knownProfileIds],
   );
   const visibleChats = useMemo(
-    () => rootChats.filter((c) => inProfile(c.profileId, activeProfileId, knownProfileIds)),
-    [rootChats, activeProfileId, knownProfileIds],
+    () => rootChats.filter((c) => inProfile(c.profileId, filterProfileId, knownProfileIds)),
+    [rootChats, filterProfileId, knownProfileIds],
   );
   const selectedAgent = useStore((s) => {
     const id = globalSelectedSessionId(s);
