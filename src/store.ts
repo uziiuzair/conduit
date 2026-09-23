@@ -3734,7 +3734,14 @@ export const useStore = create<AppState>((set, get) => {
     setCenterMode: (projectId, mode) =>
       set((s) => ({ centerMode: { ...s.centerMode, [projectId]: mode } })),
 
-    setCanvasOpen: (open) => set({ canvasOpen: open }),
+    // The canvas is one global board; a secondary window mounts only its own profile's
+    // projects (see mountedInWindow/allSessions in WorkspaceCenter.tsx), so opening it
+    // there would show a board that can place nothing from another profile. This is the
+    // ONE choke point every entry point routes through (the header toggle, ⇧⌘C in
+    // App.tsx, the command palette) — gating only the button would leave the keyboard
+    // shortcut and palette able to open a canvas with its own close button hidden.
+    setCanvasOpen: (open) =>
+      set({ canvasOpen: open && !(WINDOWED && !get().windowProfile.isMain) }),
     setGlobalCanvas: (next) =>
       set(() => {
         writeCanvas(next);
