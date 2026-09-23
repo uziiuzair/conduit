@@ -35,7 +35,7 @@ import {
   type PendingDecision,
 } from "./rootProposals";
 import { projectsNeedingRoutes, type RoutesByProject } from "./pendingDecisionRouting";
-import { inProfile, type Profile } from "./profiles";
+import { inProfile, type Profile, type WindowProfile } from "./profiles";
 import { type CanvasState, emptyCanvas, migrateNotes } from "./canvas";
 import type { ContinuityFeed } from "./continuityFeed";
 import type * as Monaco from "monaco-editor";
@@ -645,6 +645,31 @@ function writeLastProject(id: string | null): void {
   }
 }
 
+// Multi-window profiles: "window" = picking a profile opens (or focuses) a separate OS
+// window permanently pinned to it, like Obsidian vaults, instead of re-filtering this
+// one. Read ONCE at module init into `WINDOWED` below — restart-gated, so a mid-session
+// flip cannot leave an already-open window straddling both models. Same persisted-pref
+// pattern as the toggles above.
+const PROFILE_WINDOW_MODE_KEY = "conduit.profileWindowMode";
+function readProfileWindowMode(): "switch" | "window" {
+  try {
+    return localStorage.getItem(PROFILE_WINDOW_MODE_KEY) === "window" ? "window" : "switch";
+  } catch {
+    return "switch";
+  }
+}
+function writeProfileWindowMode(v: "switch" | "window"): void {
+  try {
+    localStorage.setItem(PROFILE_WINDOW_MODE_KEY, v);
+  } catch {
+    /* quota — non-fatal */
+  }
+}
+/** Boot-frozen: whether THIS launch runs in multi-window profiles mode. A change to the
+ *  `profileWindowMode` preference takes effect only after restarting Conduit — read this,
+ *  never `profileWindowMode` (state), to decide behavior. */
+export const WINDOWED = readProfileWindowMode() === "window";
+
 // Terminal renderer: which xterm rasterizer new panes ask for, and which live panes swap to
 // when it changes. Default WebGL (VS Code's default) — one GPU draw per viewport instead of
 // per-glyph CPU blits. Canvas stays selectable because WebGL costs one live GPU context per
@@ -1218,6 +1243,18 @@ interface AppState {
    *  shows a project the sidebar hides. */
   setActiveProfile: (id: string | null) => Promise<void>;
 
+  // ---- multi-window profiles: this window's identity + the pref that enables it ----
+  /** This OS window's own profile identity, from the Rust `window_profile` command.
+   *  Default (main, Default profile) until `load()` resolves it. In window mode this is
+   *  what a secondary window stamps new items with and restores its own selection from —
+   *  never `activeProfileId`, which in window mode is main's boot-time value and only
+   *  main may change. */
+  windowProfile: WindowProfile;
+  /** Persisted (per-machine) preference. Behavior itself is boot-frozen — see the
+   *  exported `WINDOWED` const — so this state exists only for the Settings checkbox. */
+  profileWindowMode: "switch" | "window";
+  setProfileWindowMode: (v: "switch" | "window") => void;
+
   // ---- root chat (HQ): read-only claude -p conversations above all projects ----
   rootChats: RootChat[];
   /** Non-null while the chat view overlays the (still-mounted) terminal workspace. */
@@ -1647,6 +1684,14 @@ export const useStore = create<AppState>((set, get) => {
     });
   };
 
+  // Which profile a newly created project/root-chat gets stamped with. In switch mode
+  // this is just the active profile; in window mode it MUST be this window's own pinned
+  // identity, never `activeProfileId` — that field is global, only "main" may write it
+  // (lib.rs), and a secondary window's copy of it is frozen at main's boot-time value.
+  // Stamping with it there would silently mis-file a project under main's profile.
+  const stampProfileId = (): string | null =>
+    WINDOWED ? get().windowProfile.profileId : get().activeProfileId;
+
   // Clear a session's "needs you" once you attend to it.
   const clearNeeds = (sessionId: string) => {
     set((s) => {
@@ -1687,6 +1732,8 @@ export const useStore = create<AppState>((set, get) => {
     sessionDirs: {},
     profiles: [],
     activeProfileId: null,
+    windowProfile: { label: "main", profileId: null, isMain: true },
+    profileWindowMode: readProfileWindowMode(),
     rootChats: [],
     selectedRootChatId: null,
     rootChatItems: {},
@@ -1765,6 +1812,7 @@ export const useStore = create<AppState>((set, get) => {
         hotExitEntries,
         profiles,
         activeProfileId,
+        wp,
       ] = await Promise.all([
         invoke<Project[]>("load_projects"),
         getHomeDir().catch(() => null),
@@ -1777,6 +1825,9 @@ export const useStore = create<AppState>((set, get) => {
         invoke<HotExitEntry[]>("hotexit_load").catch(() => [] as HotExitEntry[]),
         invoke<Profile[]>("list_profiles").catch(() => [] as Profile[]),
         invoke<string | null>("get_active_profile").catch(() => null),
+        invoke<WindowProfile>("window_profile").catch(
+          (): WindowProfile => ({ label: "main", profileId: null, isMain: true }),
+        ),
       ]);
       const layouts: Record<string, ProjectLayout> = {};
       for (const p of projects) {
@@ -1801,15 +1852,19 @@ export const useStore = create<AppState>((set, get) => {
       const visibleIds = projects
         .filter((p) => inProfile(p.profileId, activeProfileId, knownProfiles))
         .map((p) => p.id);
+      // A secondary window is permanently pinned to its own profile, not the global
+      // active one (that field is main's boot-time value here — see `stampProfileId`) —
+      // so it lands on the first project IN ITS OWN profile and ignores the last-project
+      // memory and openBehavior entirely, both of which are main's concept of "where I
+      // left off".
+      const selectedProjectId = wp.isMain
+        ? initialProjectSelection(visibleIds, get().openBehavior, readLastProject())
+        : (projects.find((p) => inProfile(p.profileId, wp.profileId, knownProfiles))?.id ?? null);
       set({
         projects,
         homeDir: home,
         layouts,
-        selectedProjectId: initialProjectSelection(
-          visibleIds,
-          get().openBehavior,
-          readLastProject(),
-        ),
+        selectedProjectId,
         accounts,
         defaultAccounts,
         privateMode: trust.privateMode,
@@ -1817,6 +1872,7 @@ export const useStore = create<AppState>((set, get) => {
         hotExit,
         profiles,
         activeProfileId,
+        windowProfile: wp,
       });
       void get().loadRootChats();
     },
@@ -1843,7 +1899,11 @@ export const useStore = create<AppState>((set, get) => {
       const profile = await invoke<Profile>("add_profile", { name: clean }).catch(() => null);
       if (!profile) return;
       set((s) => ({ profiles: [...s.profiles, profile] }));
-      await get().setActiveProfile(profile.id);
+      // In window mode, switching the global active profile would silently repoint
+      // main's boot profile out from under it — a secondary window's identity is fixed
+      // to the profile it was opened for, not to this. Just append; the new profile is
+      // picked up the next time a window is opened for it.
+      if (!WINDOWED) await get().setActiveProfile(profile.id);
     },
 
     setActiveProfile: async (id) => {
@@ -1868,6 +1928,11 @@ export const useStore = create<AppState>((set, get) => {
         }
         return patch;
       });
+    },
+
+    setProfileWindowMode: (v) => {
+      writeProfileWindowMode(v);
+      set({ profileWindowMode: v });
     },
 
     setDefaultAgent: (id) => {
@@ -2137,7 +2202,7 @@ export const useStore = create<AppState>((set, get) => {
     addProject: async (path) => {
       const project = await invoke<Project>("add_project", {
         path,
-        profileId: get().activeProfileId,
+        profileId: stampProfileId(),
       });
       set((s) => ({
         projects: [...s.projects, project],
@@ -2404,7 +2469,7 @@ export const useStore = create<AppState>((set, get) => {
 
     addRootChat: async () => {
       const chat = await invoke<RootChat>("add_root_chat", {
-        profileId: get().activeProfileId,
+        profileId: stampProfileId(),
       }).catch(() => null);
       if (!chat) return;
       set((st) => ({
@@ -3630,6 +3695,11 @@ export const useStore = create<AppState>((set, get) => {
 // update is worse than none. Cheap — one localStorage write per project switch, and only when
 // the id actually changes.
 useStore.subscribe((s, prev) => {
+  // A secondary window's "last project" is not a memory Conduit should overwrite with —
+  // it never reads this memory back (`load()` restores it from its own pinned profile
+  // instead), and letting it write would clobber main's memory with whatever the
+  // secondary happened to have selected.
+  if (!s.windowProfile.isMain) return;
   if (s.selectedProjectId !== prev.selectedProjectId) writeLastProject(s.selectedProjectId);
 });
 

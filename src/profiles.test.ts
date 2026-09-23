@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { inProfile, normalizeProfileId } from "./profiles";
+import { eventInWindow, inProfile, normalizeProfileId } from "./profiles";
 
 const known = new Set(["work", "stream"]);
 
@@ -32,5 +32,20 @@ describe("inProfile", () => {
   it("a dangling ACTIVE id behaves as Default", () => {
     expect(inProfile(null, "deleted-profile" as string, known)).toBe(true);
     expect(inProfile("work", "deleted-profile" as string, known)).toBe(false);
+  });
+});
+
+describe("eventInWindow", () => {
+  it("same profile matches", () => {
+    expect(eventInWindow("work", "work", known)).toBe(true);
+  });
+  it("cross profile does not match", () => {
+    expect(eventInWindow("work", "stream", known)).toBe(false);
+  });
+  it("a dangling item id matches the Default window", () => {
+    expect(eventInWindow("deleted-profile", null, known)).toBe(true);
+  });
+  it("a dangling window id matches Default items", () => {
+    expect(eventInWindow(null, "deleted-profile" as string, known)).toBe(true);
   });
 });
