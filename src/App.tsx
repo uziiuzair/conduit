@@ -43,6 +43,7 @@ import { useTelemetry } from "./hooks/useTelemetry";
 import { useUpdater } from "./hooks/useUpdater";
 import { useFileWatch } from "./hooks/useFileWatch";
 import { useHotExit } from "./hooks/useHotExit";
+import { useStoreSync } from "./hooks/useStoreSync";
 import { initPlugins, feedHook, feedFleet } from "./plugins";
 
 interface HookPayload {
@@ -95,6 +96,9 @@ export default function App() {
 
   // Hot exit's crash net: debounced backups of dirty buffers to the app-data dir.
   useHotExit();
+
+  // Cross-window convergence: debounced refetch + merge off Rust's `store-saved` broadcast.
+  useStoreSync();
 
   // macOS exits native fullscreen on an unconsumed Escape (AppKit cancelOperation).
   // Swallow the OS default at the window level — bubble phase, so terminal/dialog

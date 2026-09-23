@@ -13,6 +13,7 @@ import {
 import type { TerminalRenderer } from "./terminalRenderer";
 import { initialProjectSelection, type OpenBehavior } from "./startup";
 import { insertTabAt, repairLayout } from "./layout";
+import { mergeSlices } from "./storeSync";
 import { accountKey, type UsageMetric } from "./usageRows";
 import type { Chain, RoutesView, TaskKind, TaskKindInfo } from "./routing";
 import { AGENTS, type AgentId, type AgentInfo, DEFAULT_AGENT, type McpServer } from "./agents";
@@ -1369,6 +1370,11 @@ interface AppState {
   dismissUpdate: () => void;
 
   load: () => Promise<void>;
+  /** Cross-window convergence: debounced off the `store-saved` broadcast (useStoreSync.ts).
+   *  Refetches the read slices another window's write may have changed and merges them via
+   *  `mergeSlices` (storeSync.ts) — never touches `windowProfile`, `selectedProjectId`, or
+   *  any localStorage-backed pref. */
+  mergeSyncedSlices: () => Promise<void>;
   agents: AgentInfo[] | null;
   defaultAgent: AgentId;
   agentSetupComplete: boolean;
@@ -1874,6 +1880,56 @@ export const useStore = create<AppState>((set, get) => {
         activeProfileId,
         windowProfile: wp,
       });
+      void get().loadRootChats();
+    },
+
+    mergeSyncedSlices: async () => {
+      const [projects, profiles, accounts, defaultAccounts] = await Promise.all([
+        invoke<Project[]>("load_projects").catch(() => null),
+        invoke<Profile[]>("list_profiles").catch(() => null),
+        invoke<Account[]>("list_accounts").catch(() => null),
+        invoke<DefaultAccounts>("get_default_accounts").catch(() => null),
+      ]);
+      const cur = get();
+      const patch: Partial<AppState> = {};
+      if (projects) {
+        const fetchedIds = new Set(projects.map((p) => p.id));
+        // A project removed in another window is dropped here (mergeSlices case c) without
+        // ever going through removeProject's own release loop — do that release ourselves,
+        // against the LOCAL layout (still in cur.layouts; mergeSlices only returns survivors),
+        // or every file tab it held leaks a model ref forever.
+        for (const p of cur.projects) {
+          if (fetchedIds.has(p.id)) continue;
+          for (const g of cur.layouts[p.id]?.groups ?? []) {
+            for (const t of g.tabs) {
+              if (t.kind !== "file") continue;
+              registry.release(t.ref);
+              registry.disposeIfUnreferenced(t.ref);
+            }
+          }
+        }
+        const merged = mergeSlices(
+          { projects: cur.projects, layouts: cur.layouts },
+          projects,
+          (p) => validateLayout(p.layout ?? defaultLayout(p), p, projects),
+        );
+        // Balance close/removeProject release: acquire a model ref for every file tab a
+        // NEWLY added project's layout carries. Existing projects keep their local layout
+        // (mergeSlices never touches it), so their refs were already acquired.
+        for (const id of merged.addedProjectIds) {
+          for (const g of merged.layouts[id]?.groups ?? []) {
+            for (const t of g.tabs) {
+              if (t.kind === "file") registry.acquire(t.ref);
+            }
+          }
+        }
+        patch.projects = merged.projects;
+        patch.layouts = merged.layouts;
+      }
+      if (profiles) patch.profiles = profiles;
+      if (accounts) patch.accounts = accounts;
+      if (defaultAccounts) patch.defaultAccounts = defaultAccounts;
+      set(patch);
       void get().loadRootChats();
     },
 
