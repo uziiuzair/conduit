@@ -1099,9 +1099,20 @@ fn open_profile_window(
 
 #[tauri::command]
 fn close_window(app: tauri::AppHandle, label: String) {
-    if label == "main" {
-        // "main" participates in the quit-confirm path (CloseRequested); it must never
-        // be torn down by a programmatic destroy.
+    // Destroying the LAST window is a quit, and a quit must go through the quit-confirm
+    // path (`CloseRequested`'s single-window branch: running-agent check, then dirty-buffer
+    // confirm) -- never a bare programmatic destroy that bypasses both. That hazard is what
+    // this guard exists to close, and it is a property of "is this the last window", not of
+    // the label: refusing only `label == "main"` let a dirty `main` with a secondary window
+    // still open hit `CloseRequested`'s multi-window branch (which emits `close-window` at
+    // `main`'s own label, same as any other window), run the frontend's confirm, and then
+    // have THIS command silently refuse the destroy anyway -- the user confirms a dialog and
+    // main just stays open with no feedback. With another window alive, closing this one
+    // (main or a secondary) is not a quit: `Destroyed` (`on_window_event`) still reaps its
+    // registry entry and per-label dirty guard, and nothing downstream requires "main"
+    // specifically to keep existing -- the hook server's cli-open target-window fallback
+    // already tries any live window when its preferred target (main included) is gone.
+    if app.webview_windows().len() <= 1 {
         return;
     }
     if let Some(w) = app.get_webview_window(&label) {
