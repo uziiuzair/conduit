@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
+import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { invoke } from "@tauri-apps/api/core";
 import { ask, open } from "@tauri-apps/plugin-dialog";
 import {
@@ -368,8 +369,16 @@ export default function App() {
   }, []);
 
   // Native menu clicks relayed by Rust as a "menu" event whose payload is the item id.
+  // Window-scoped (not the plain top-level `listen`): Rust's on_window_event now
+  // targets a specific window's label with `emit_to` for close-window/quit
+  // (window_registry design, Task 4), and a plain `listen(...)` here registers as
+  // EventTarget::Any, which Tauri's listener-side match always matches regardless of
+  // the emitter's target -- so every open window's Any-scoped listener would ALSO fire
+  // for an event meant for only one of them. A window-scoped listener still receives
+  // every broadcast `app.emit(...)` (menu.rs's other custom ids, e.g. Cmd+T/palette),
+  // since a broadcast passes no filter and matches every listener unconditionally.
   useEffect(() => {
-    const unlisten = listen<string>("menu", ({ payload }) => {
+    const unlisten = getCurrentWebviewWindow().listen<string>("menu", ({ payload }) => {
       const st = useStore.getState();
       switch (payload) {
         case "settings":
