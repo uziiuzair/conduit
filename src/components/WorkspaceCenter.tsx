@@ -1,4 +1,4 @@
-import { Fragment, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { Fragment, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import {
   useStore,
@@ -86,7 +86,7 @@ export function WorkspaceCenter({
   // dangling profileId to Default. Drives which projects' terminals mount in THIS window.
   const profiles = useStore((s) => s.profiles);
   const windowProfile = useStore((s) => s.windowProfile);
-  const knownProfileIds = new Set(profiles.map((p) => p.id));
+  const knownProfileIds = useMemo(() => new Set(profiles.map((p) => p.id)), [profiles]);
   // The board is global now — not a per-project mode — so it reads its own store field
   // rather than `centerMode`, and stays open across a project switch.
   const canvasMode = useStore((s) => s.canvasOpen);

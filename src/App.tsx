@@ -121,15 +121,19 @@ export default function App() {
     // resolves async inside `load()` (the `window_profile` IPC round trip) and is not
     // known yet on this first render — it starts at its main/Default default (see
     // `windowProfile`'s initial state in store.ts) — so this reads the store's verdict
-    // AFTER `load()` settles rather than off the stale value closed over here. `finally`,
-    // not `then`: `load()`'s `load_projects` call has no `.catch`, so a rejection must
-    // still leave `windowProfile` at its main/Default default and start plugins there —
-    // `then` would skip this entirely and regress "plugins still start on main" the one
-    // time load partially fails. A secondary window running its own plugin set would
-    // double every hook/command a plugin registers globally.
-    void load().finally(() => {
-      if (useStore.getState().windowProfile.isMain) void initPlugins();
-    });
+    // AFTER `load()` settles rather than off the stale value closed over here. Success-only
+    // `.then`, with an explicit no-op rejection arm (not `.finally`): `load()`'s
+    // `load_projects` call has no `.catch`, so on a total rejection `windowProfile` is
+    // never corrected and still reads its main/Default default — including in a
+    // SECONDARY window, where that default is simply wrong. load failed → no state, no
+    // plugin host, in any window: the app is already broken, and a window whose state
+    // never loaded has no use for a plugin host either way.
+    void load().then(
+      () => {
+        if (useStore.getState().windowProfile.isMain) void initPlugins();
+      },
+      () => {},
+    );
     void loadAgents();
   }, [load, loadAgents]);
 
