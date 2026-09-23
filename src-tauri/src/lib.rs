@@ -55,6 +55,7 @@ mod transcript;
 mod transcript_index;
 mod updates;
 mod usage_tally;
+mod window_registry;
 mod worktree;
 
 use std::path::Path;
@@ -2110,6 +2111,7 @@ pub fn run() {
         .manage(Arc::new(broker::Broker::default()))
         .manage(Arc::new(broker::Presence::default()))
         .manage(Arc::new(proposals::Proposals::default()))
+        .manage(Arc::new(window_registry::WindowRegistry::default()))
         .manage(DirtyGuard::default())
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
@@ -2144,6 +2146,8 @@ pub fn run() {
                 .state::<Arc<crate::agy_usage::AgyResumeState>>()
                 .inner()
                 .clone();
+            app.state::<Arc<window_registry::WindowRegistry>>()
+                .register("main", store.active_profile());
             hooks::start(
                 app.handle().clone(),
                 hook_state,
