@@ -254,14 +254,16 @@ pub fn on_event<R: Runtime>(app: &AppHandle<R>, id: &str) {
             let dirty = app.state::<DirtyGuard>().total() > 0;
             let running = crate::live_running_agent(app);
             if dirty || running {
-                let _ = app.emit("menu", "quit");
+                let target = crate::focused_label(app).unwrap_or_else(|| "main".into());
+                let _ = app.emit_to(&target, "menu", "quit");
             } else {
                 app.state::<Arc<PtyManager>>().kill_all();
                 app.exit(0);
             }
         }
         other => {
-            let _ = app.emit("menu", other);
+            let target = crate::focused_label(app).unwrap_or_else(|| "main".into());
+            let _ = app.emit_to(&target, "menu", other);
         }
     }
 }

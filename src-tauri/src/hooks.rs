@@ -63,6 +63,7 @@ pub fn start(
     board: Arc<crate::board::BoardState>,
     agy_usage: Arc<crate::agy_usage::AgyUsageState>,
     agy_resume: Arc<crate::agy_usage::AgyResumeState>,
+    reg: Arc<crate::window_registry::WindowRegistry>,
 ) {
     thread::spawn(move || {
         let mut server: Option<Server> = None;
@@ -103,16 +104,42 @@ pub fn start(
             if url.starts_with("/open") {
                 let app = app.clone();
                 let token = cli_token.clone();
+                let store = store.clone();
+                let reg = reg.clone();
                 crate::cli_open::handle_open(request, &token, move |open| {
+                    // Target: the project's own profile window when `path` names an
+                    // already-open project, else whichever window has OS focus, else
+                    // "main". App.tsx's `cli-open` listener is window-scoped (converted
+                    // alongside this), so an event that reaches the wrong window is
+                    // silently ignored rather than landing in EVERY window the way a
+                    // broadcast used to -- which is what let a `conduit .` on a path NOT
+                    // yet open, with two windows up, race: both windows' Any-scoped
+                    // listeners missed the (window-local) project match and both called
+                    // `addProject`, adding it twice.
+                    let target = store
+                        .project_profile_for_path(&open.path)
+                        .and_then(|profile| reg.label_for(&profile))
+                        .or_else(|| crate::focused_label(&app))
+                        .unwrap_or_else(|| "main".to_string());
+
                     // Show AND unminimize AND focus: on macOS an app whose window was
                     // closed is still running, and emitting into a hidden window would
-                    // "succeed" while the user saw nothing happen.
-                    if let Some(w) = app.get_webview_window("main") {
-                        let _ = w.show();
-                        let _ = w.unminimize();
-                        let _ = w.set_focus();
-                    }
-                    let _ = app.emit("cli-open", &open);
+                    // "succeed" while the user saw nothing happen. If the target's own
+                    // window is gone (a stale registry entry, or "main" closed), fall
+                    // back to ANY live window -- and emit to THAT window's own label,
+                    // never the stale `target`: focusing window B while emitting to
+                    // label A would leave nothing listening.
+                    let win = app
+                        .get_webview_window(&target)
+                        .or_else(|| app.webview_windows().into_values().next());
+                    let Some(win) = win else {
+                        return;
+                    };
+                    let target = win.label().to_string();
+                    let _ = win.show();
+                    let _ = win.unminimize();
+                    let _ = win.set_focus();
+                    let _ = app.emit_to(&target, "cli-open", &open);
                 });
                 continue;
             }

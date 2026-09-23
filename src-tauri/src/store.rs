@@ -612,6 +612,32 @@ fn pretty_label(profile: &str) -> String {
     }
 }
 
+/// Windows paths are case-insensitive and may use either separator. Mirrors
+/// `WINDOWS_PATH` in `src/cliOpen.ts`.
+fn is_windows_path(p: &str) -> bool {
+    let b = p.as_bytes();
+    b.len() >= 3 && b[0].is_ascii_alphabetic() && b[1] == b':' && (b[2] == b'\\' || b[2] == b'/')
+}
+
+/// Rust port of `normalize` in `src/cliOpen.ts`: trims, then for a Windows-shaped path
+/// unifies separators and lowercases, then strips trailing separators (never reducing a
+/// root to the empty string). `project_profile_for_path` calls this on BOTH sides of the
+/// comparison -- a project's own stored path is exactly as likely to carry a trailing
+/// slash as the CLI's argument is.
+fn normalize_cli_path(path: &str) -> String {
+    let mut p = path.trim().to_string();
+    if p.is_empty() {
+        return p;
+    }
+    if is_windows_path(&p) {
+        p = p.replace('\\', "/").to_lowercase();
+    }
+    while p.len() > 1 && (p.ends_with('/') || p.ends_with('\\')) {
+        p.pop();
+    }
+    p
+}
+
 impl Store {
     pub fn new() -> Self {
         let save_path = data_dir().join("state.json");
@@ -833,6 +859,31 @@ impl Store {
             .filter(|p| normalize(&p.profile_id) == normalize(profile))
             .flat_map(|p| p.sessions.iter().map(|s| s.id.clone()))
             .collect()
+    }
+
+    /// Rust port of `matchProjectByPath` (`src/cliOpen.ts`): an EXACT match after
+    /// normalization, never a prefix/subdirectory containment rule -- a project's path
+    /// never matches one of its own children (`is_child` is a different question this
+    /// function does not answer). Outer `None` = no open project owns `path` (the
+    /// cli-open sink then falls back to the focused window); inner `Option<String>` is
+    /// that project's profile, normalized against `list_profiles()` the same way
+    /// `sessions_for_profile` normalizes a dangling id to Default -- so the result is
+    /// directly usable by `WindowRegistry::label_for`.
+    pub fn project_profile_for_path(&self, path: &str) -> Option<Option<String>> {
+        let want = normalize_cli_path(path);
+        if want.is_empty() || want == "/" {
+            return None;
+        }
+        // Lock order matches `sessions_for_profile`: `list_profiles()` first (and
+        // dropped), then `projects`.
+        let known: HashSet<String> = self.list_profiles().into_iter().map(|p| p.id).collect();
+        let projects = self.projects.lock().unwrap_or_else(|e| e.into_inner());
+        let profile_id = projects
+            .iter()
+            .find(|p| normalize_cli_path(&p.path) == want)?
+            .profile_id
+            .clone();
+        Some(profile_id.filter(|id| known.contains(id)))
     }
 
     // ---- Root chats -----------------------------------------------------------------
@@ -2949,6 +3000,72 @@ mod tests {
             "a dangling profile id must normalize to Default: {default_sessions:?}"
         );
         assert!(!default_sessions.contains(&sess_a.id));
+    }
+
+    #[test]
+    fn project_profile_for_path_ports_match_project_by_path_vectors() {
+        // Ported from src/cliOpen.test.ts's `matchProjectByPath` suite. `alpha` sits
+        // under a real profile and `beta/` (trailing slash stored on the PROJECT side,
+        // not just the query) under Default, so a hit can be told apart by which
+        // profile comes back rather than every match reading as `Some(None)`.
+        let dir = temp_dir("project_profile_for_path");
+        let store = Store::for_test(&dir);
+        let x = store.add_profile("X");
+        store.add_project("/Users/u/code/alpha".into(), Some(x.id.clone()));
+        store.add_project("/Users/u/code/beta/".into(), None);
+
+        // Exact match.
+        assert_eq!(
+            store.project_profile_for_path("/Users/u/code/alpha"),
+            Some(Some(x.id.clone()))
+        );
+
+        // Trailing slash on either side of the comparison.
+        assert_eq!(
+            store.project_profile_for_path("/Users/u/code/alpha/"),
+            Some(Some(x.id.clone()))
+        );
+        assert_eq!(
+            store.project_profile_for_path("/Users/u/code/beta"),
+            Some(None)
+        );
+
+        // Non-member path -> None, so the caller falls back to the focused window.
+        assert_eq!(store.project_profile_for_path("/Users/u/code/gamma"), None);
+
+        // A prefix is never a subdirectory/containment match.
+        assert_eq!(
+            store.project_profile_for_path("/Users/u/code/alpha-2"),
+            None
+        );
+        assert_eq!(store.project_profile_for_path("/Users/u/code"), None);
+
+        // Empty and root paths never match.
+        assert_eq!(store.project_profile_for_path(""), None);
+        assert_eq!(store.project_profile_for_path("/"), None);
+    }
+
+    #[test]
+    fn project_profile_for_path_is_case_insensitive_on_windows_paths() {
+        let dir = temp_dir("project_profile_for_path_windows");
+        let store = Store::for_test(&dir);
+        store.add_project("C:\\Users\\u\\Code\\Alpha".into(), None);
+        assert_eq!(
+            store.project_profile_for_path("c:/users/u/code/alpha"),
+            Some(None)
+        );
+    }
+
+    #[test]
+    fn project_profile_for_path_normalizes_a_dangling_profile_to_default() {
+        let dir = temp_dir("project_profile_for_path_dangling");
+        let store = Store::for_test(&dir);
+        let proj = store.add_project("/proj".into(), Some("ghost-profile".into()));
+        // `profile_id` names a profile record that was never created -- must normalize
+        // to Default (None), the same rule `sessions_for_profile` applies, so
+        // `WindowRegistry::label_for` never gets asked about an id no window is
+        // registered under.
+        assert_eq!(store.project_profile_for_path(&proj.path), Some(None));
     }
 
     #[test]

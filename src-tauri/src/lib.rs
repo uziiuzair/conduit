@@ -694,6 +694,17 @@ fn search_transcripts(
     hits
 }
 
+/// The window currently holding OS focus, if any. Lets an event that used to be a
+/// broadcast (menu clicks, cli-open) target the one window the user is actually looking
+/// at instead of hard-coding "main" -- multiple profile windows can be open at once
+/// (window_registry design). Generic over `R` because `menu.rs`'s `on_event` is.
+pub(crate) fn focused_label<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> Option<String> {
+    app.webview_windows()
+        .iter()
+        .find(|(_, w)| w.is_focused().unwrap_or(false))
+        .map(|(label, _)| label.clone())
+}
+
 /// Whether any session with a LIVE PTY is currently marked running. Cross-checks the fleet
 /// status against a real process so a stale "running" (an agent killed mid-turn, or a deleted
 /// session whose status was never cleared) can't trigger a spurious quit prompt. Fed for agy by
@@ -2352,8 +2363,11 @@ pub fn run() {
                 .state::<Arc<crate::agy_usage::AgyResumeState>>()
                 .inner()
                 .clone();
-            app.state::<Arc<window_registry::WindowRegistry>>()
-                .register("main", store.active_profile());
+            let reg = app
+                .state::<Arc<window_registry::WindowRegistry>>()
+                .inner()
+                .clone();
+            reg.register("main", store.active_profile());
             hooks::start(
                 app.handle().clone(),
                 hook_state,
@@ -2366,6 +2380,7 @@ pub fn run() {
                 board.clone(),
                 agy_usage,
                 agy_resume,
+                reg,
             );
             bridge::start(app.handle().clone());
 
