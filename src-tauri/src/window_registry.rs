@@ -1,9 +1,8 @@
 //! Which window shows which profile. One registry, managed state; the label is the
 //! Tauri window label ("main", "profile-<id>", "profile-default"). `None` = Default.
 //!
-//! This module is scaffolding for profile-windows tasks; consumers land in Tasks 3, 4, 6, 7.
-//! Remove this allow when `open_profile_window` lands.
-#![allow(dead_code)]
+//! Consumed by the `window_profile`/`open_profile_window`/`close_window` commands
+//! (Task 3); further consumers land in Tasks 4, 6, 7.
 
 use std::collections::HashMap;
 use std::sync::Mutex;
@@ -88,6 +87,18 @@ mod tests {
         );
         registry.remove("profile-b");
         assert_eq!(registry.profile_of("profile-b"), None);
+    }
+
+    /// Pins the capability file the way `cli_shim.rs` pins `release.yml`: a secondary
+    /// profile window opened without a matching `windows` entry gets zero permissions.
+    #[test]
+    fn capability_covers_profile_windows() {
+        let raw = include_str!("../capabilities/default.json");
+        assert!(
+            raw.contains("\"profile-*\""),
+            "secondary windows would have zero permissions"
+        );
+        assert!(raw.contains("\"main\""));
     }
 
     #[test]

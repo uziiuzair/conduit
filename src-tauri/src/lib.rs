@@ -939,6 +939,92 @@ fn set_active_profile(id: Option<String>, store: State<Arc<Store>>) -> bool {
     store.set_active_profile(id)
 }
 
+// ---- Profile window commands --------------------------------------------------
+
+#[derive(serde::Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct WindowProfileInfo {
+    label: String,
+    profile_id: Option<String>,
+    is_main: bool,
+}
+
+#[tauri::command]
+fn window_profile(
+    window: tauri::Window,
+    reg: State<Arc<window_registry::WindowRegistry>>,
+) -> WindowProfileInfo {
+    let label = window.label().to_string();
+    let profile_id = reg.profile_of(&label).flatten();
+    WindowProfileInfo {
+        is_main: label == "main",
+        label,
+        profile_id,
+    }
+}
+
+/// Normalize an `open_profile_window` request into the profile it should show: `None`
+/// passes through as Default, `Some(id)` must match a known profile or the window would
+/// open with no way to tell which (now nonexistent) profile it was meant to filter to.
+/// Pure so it's unit-testable without a `Store`.
+fn resolve_open_target(
+    profiles: &[store::Profile],
+    id: &Option<String>,
+) -> Result<Option<String>, String> {
+    match id {
+        None => Ok(None),
+        Some(id) => {
+            if profiles.iter().any(|p| &p.id == id) {
+                Ok(Some(id.clone()))
+            } else {
+                Err(format!("unknown profile: {id}"))
+            }
+        }
+    }
+}
+
+#[tauri::command]
+fn open_profile_window(
+    app: tauri::AppHandle,
+    profile_id: Option<String>,
+    reg: State<Arc<window_registry::WindowRegistry>>,
+    store: State<Arc<Store>>,
+) -> Result<(), String> {
+    let target = resolve_open_target(&store.list_profiles(), &profile_id)?;
+    if let Some(label) = reg.label_for(&target) {
+        if let Some(w) = app.get_webview_window(&label) {
+            let _ = w.show();
+            let _ = w.unminimize();
+            let _ = w.set_focus();
+            return Ok(());
+        }
+        reg.remove(&label); // stale entry: window died without Destroyed cleanup
+    }
+    let label = window_registry::profile_window_label(&target);
+    let builder = tauri::WebviewWindowBuilder::new(&app, &label, tauri::WebviewUrl::default())
+        .title("Conduit")
+        .inner_size(1100.0, 720.0)
+        .min_inner_size(980.0, 600.0)
+        .theme(Some(tauri::Theme::Dark))
+        .disable_drag_drop_handler();
+    #[cfg(target_os = "macos")]
+    let builder = builder.title_bar_style(tauri::TitleBarStyle::Overlay);
+    // Register BEFORE build: the new webview's first `window_profile` call must find it.
+    reg.register(&label, target.clone());
+    builder.build().map_err(|e| {
+        reg.remove(&label);
+        format!("open window: {e}")
+    })?;
+    Ok(())
+}
+
+#[tauri::command]
+fn close_window(app: tauri::AppHandle, label: String) {
+    if let Some(w) = app.get_webview_window(&label) {
+        let _ = w.destroy();
+    }
+}
+
 // ---- Project task board commands ---------------------------------------------
 
 /// Resolve a project id to its on-disk repo root, using the same `Store` accessor
@@ -2302,6 +2388,9 @@ pub fn run() {
             remove_profile,
             get_active_profile,
             set_active_profile,
+            window_profile,
+            open_profile_window,
+            close_window,
             set_project_color,
             root_chat::root_chat_send,
             root_chat::root_chat_stop,
@@ -2462,6 +2551,34 @@ mod tests {
     #[test]
     fn idle_targets_empty_project_stops_nothing() {
         assert!(idle_stop_targets(&[], &id_set(&[]), &id_set(&[])).is_empty());
+    }
+
+    fn test_profile(id: &str) -> store::Profile {
+        store::Profile {
+            id: id.to_string(),
+            name: id.to_string(),
+        }
+    }
+
+    #[test]
+    fn resolve_open_target_none_is_default() {
+        let profiles = [test_profile("a")];
+        assert_eq!(resolve_open_target(&profiles, &None), Ok(None));
+    }
+
+    #[test]
+    fn resolve_open_target_known_id_passes_through() {
+        let profiles = [test_profile("a"), test_profile("b")];
+        assert_eq!(
+            resolve_open_target(&profiles, &Some("b".to_string())),
+            Ok(Some("b".to_string()))
+        );
+    }
+
+    #[test]
+    fn resolve_open_target_unknown_id_is_refused() {
+        let profiles = [test_profile("a")];
+        assert!(resolve_open_target(&profiles, &Some("ghost".to_string())).is_err());
     }
 
     /// The invariant that keeps root chat from escalating: a dispatched session is a
