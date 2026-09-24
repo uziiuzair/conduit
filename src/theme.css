@@ -58,13 +58,22 @@ body {
   cursor: default;
 }
 
-/* Keep selection where it's actually useful: form fields, the Monaco editor, and
-   the terminal (xterm draws its own selection, but native stays on for copy). */
+/* Keep selection where it's actually useful: form fields, the Monaco editor, the
+   terminal (xterm draws its own selection, but native stays on for copy), and every
+   surface whose text a person reads and quotes — chat threads (HQ + session chat,
+   bubbles, tool lines, insight cards) and settings copy. Chrome (sidebar, tabs,
+   buttons) stays non-selectable like any native app. */
 input,
 textarea,
 [contenteditable="true"],
 .monaco-editor,
-.xterm {
+.xterm,
+.hq-scroll,
+.chat-empty,
+.settings-intro,
+.setting-status,
+.setting-detail-inner,
+.dialog-hint {
   -webkit-user-select: text;
   user-select: text;
 }
