@@ -1937,8 +1937,12 @@ fn resolve_prettier_options(path: String) -> Option<format::PrettierConfig> {
 // ---- Hot exit -------------------------------------------------------------------
 
 #[tauri::command]
-fn hotexit_save(entries: Vec<hotexit::HotExitEntry>) -> Result<(), String> {
-    hotexit::save(&entries)
+fn hotexit_save(
+    window: tauri::Window,
+    entries: Vec<hotexit::HotExitEntry>,
+    state: State<hotexit::HotExitState>,
+) -> Result<(), String> {
+    state.save_for(window.label(), &entries)
 }
 
 #[tauri::command]
@@ -2324,6 +2328,7 @@ pub fn run() {
         .manage(Arc::new(proposals::Proposals::default()))
         .manage(Arc::new(window_registry::WindowRegistry::default()))
         .manage(DirtyGuard::default())
+        .manage(hotexit::HotExitState::default())
         .on_window_event(|window, event| {
             let app = window.app_handle();
             let label = window.label().to_string();
