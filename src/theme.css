@@ -3517,6 +3517,157 @@ button {
   line-height: 1.5;
 }
 
+/* ---- Setting rows (Settings -> General) ----
+   One row per option: short title on the control line, the full explanation behind the
+   (i) disclosure, status lines (restart notes, missing deps) always visible. Rows are
+   quiet by default and lift on hover, System-Settings style; the disclosure animates
+   via the grid 0fr -> 1fr trick so height is content-driven. */
+.general-settings {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.setting-row {
+  padding: 9px 10px;
+  border-radius: 7px;
+  transition: background 120ms ease-out;
+}
+.setting-row:hover {
+  background: var(--hover);
+}
+.setting-row.disabled .setting-row-label {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.setting-row-head {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+.setting-row-label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  flex: 1;
+  cursor: pointer;
+}
+.setting-row-label:not(label) {
+  cursor: default;
+}
+.setting-row-title {
+  font-size: 12.5px;
+  color: var(--text-bright);
+  line-height: 1.4;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.setting-row-title code {
+  font-family: var(--mono-font);
+  font-size: 11.5px;
+  padding: 0 3px;
+  border-radius: 3px;
+  background: var(--hover);
+}
+.setting-info {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border-radius: 6px;
+  color: var(--text-dim);
+  flex-shrink: 0;
+  transition:
+    color 120ms ease-out,
+    background 120ms ease-out;
+}
+.setting-info:hover,
+.setting-info.on {
+  color: var(--accent);
+  background: var(--hover);
+}
+.setting-info:focus-visible {
+  outline: 1px solid var(--accent);
+  outline-offset: 1px;
+}
+/* Status + detail + control share the title's left edge (checkbox 15px + 8px gap),
+   so everything under a title reads as one column. */
+.setting-status,
+.setting-control,
+.setting-detail {
+  padding-left: 23px;
+}
+.setting-status {
+  font-size: 11.5px;
+  color: var(--text-mid);
+  line-height: 1.55;
+  margin-top: 3px;
+}
+.setting-status code {
+  font-family: var(--mono-font);
+  font-size: 11px;
+  padding: 0 3px;
+  border-radius: 3px;
+  background: var(--hover);
+}
+.setting-control {
+  margin-top: 7px;
+}
+.setting-detail {
+  display: grid;
+  grid-template-rows: 0fr;
+  transition: grid-template-rows 180ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+.setting-detail[data-open] {
+  grid-template-rows: 1fr;
+}
+.setting-detail-inner {
+  overflow: hidden;
+  font-size: 11.5px;
+  color: var(--text-mid);
+  line-height: 1.6;
+  /* Measure cap: the dialog is wide, an 11.5px paragraph running its full width is
+     what made the old panel unreadable. */
+  max-width: 62ch;
+  opacity: 0;
+  transition: opacity 160ms ease-out;
+}
+.setting-detail[data-open] .setting-detail-inner {
+  opacity: 1;
+  padding-top: 5px;
+  padding-bottom: 2px;
+}
+.setting-detail-inner code {
+  font-family: var(--mono-font);
+  font-size: 11px;
+  padding: 0 3px;
+  border-radius: 3px;
+  background: var(--hover);
+}
+/* Same affordance as "Choose…" above — one button style, not a third. */
+.cli-shim-action > button {
+  font-size: 12px;
+  padding: 4px 12px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: var(--sidebar-bg);
+  color: var(--text-bright);
+  cursor: pointer;
+}
+.cli-shim-action > button:hover {
+  border-color: var(--accent);
+}
+@media (prefers-reduced-motion: reduce) {
+  .setting-detail,
+  .setting-detail-inner,
+  .setting-row,
+  .setting-info {
+    transition: none;
+  }
+}
+
 /* ---- Trust panel (Settings -> Security) ---- */
 .trust-panel {
   display: flex;
@@ -5729,7 +5880,6 @@ input[type="number"]:focus {
 .hq-list { margin-bottom: 6px; }
 .root-chat-row .name { flex: 1; }
 .root-chat-running { color: var(--accent); flex: none; }
-.workspace-root-field { flex-direction: column; align-items: stretch; gap: 8px; }
 .workspace-root-input { display: flex; gap: 8px; }
 .workspace-root-input input {
   flex: 1; background: color-mix(in srgb, var(--border) 40%, transparent);
@@ -5750,26 +5900,6 @@ input[type="number"]:focus {
   border-color: var(--accent);
 }
 
-/* The `conduit` CLI row: copy on the left, one action button on the right, matching
-   the "Choose…" affordance above rather than inventing a third button style. */
-.cli-shim-field { flex-direction: column; align-items: stretch; gap: 8px; }
-.cli-shim-field > button {
-  align-self: flex-start;
-  font-size: 12px;
-  color: var(--text-bright);
-  background: var(--sidebar-bg);
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  padding: 4px 12px;
-  cursor: pointer;
-}
-.cli-shim-field > button:hover { border-color: var(--accent); }
-.cli-shim-field code {
-  font-family: var(--mono-font);
-  background: color-mix(in srgb, var(--border) 40%, transparent);
-  border-radius: 4px;
-  padding: 1px 5px;
-}
 
 /* HQ row glyph — the chat counterpart of a session row's agent mark. */
 .root-chat-glyph { color: var(--text-mid); flex: none; }
