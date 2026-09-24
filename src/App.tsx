@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
+import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { invoke } from "@tauri-apps/api/core";
 import { ask, open } from "@tauri-apps/plugin-dialog";
 import {
@@ -8,12 +9,14 @@ import {
   globalSelectedSessionId,
   activeGroup,
   baseName,
+  WINDOWED,
   type Session,
   type TodoItem,
   type TodoStatus,
   type AgyUsage,
 } from "./store";
 import { type AgentId } from "./agents";
+import { eventInThisWindow, normalizeProfileId } from "./profiles";
 import { matchProjectByPath } from "./cliOpen";
 import { type PendingDiff } from "./ideBridge";
 import { isEditableTarget, isInTerminal } from "./keyboardGuards";
@@ -44,6 +47,7 @@ import { useTelemetry } from "./hooks/useTelemetry";
 import { useUpdater } from "./hooks/useUpdater";
 import { useFileWatch } from "./hooks/useFileWatch";
 import { useHotExit } from "./hooks/useHotExit";
+import { useStoreSync } from "./hooks/useStoreSync";
 import { initPlugins, feedHook, feedFleet } from "./plugins";
 
 interface HookPayload {
@@ -59,6 +63,71 @@ function runEditorAction(id: string): void {
   if (ed) {
     ed.focus();
     void ed.getAction(id)?.run();
+  }
+}
+
+/** Guard wrapper for App.tsx's per-window listeners, binding the pure (and tested,
+ *  profiles.test.ts) `eventInThisWindow` to `WINDOWED` and this window's live profile
+ *  list. The item's profile id is a THUNK, not a value: switch mode returns `true`
+ *  before ever calling it, so a caller's store lookup (`findSession`, `rootChats.find`,
+ *  `projects.find`) only runs when a guard can actually change the outcome -- the
+ *  property a reviewer checks for each guard is "does this collapse to today's behavior
+ *  with the pref off", and this is where that collapse happens. */
+function inThisWindow(
+  getItemProfileId: () => string | null | undefined,
+  windowProfileId: string | null,
+  profiles: { id: string }[],
+): boolean {
+  if (!WINDOWED) return true;
+  return eventInThisWindow(
+    true,
+    getItemProfileId(),
+    windowProfileId,
+    new Set(profiles.map((p) => p.id)),
+  );
+}
+
+/** One `conduit <path> [--agent <id>]` invocation's payload -- shared by the live
+ *  `cli-open` listener and the `take_pending_opens` boot-time drain below. */
+type CliOpenPayload = { path: string; agent?: string | null };
+
+/** Apply one `cli-open` payload: select (or add) its project and spawn `--agent`'s
+ *  session if given. Factored out of the live listener so the SAME logic also handles a
+ *  payload that arrived while this window didn't exist yet -- queued by the Rust sink
+ *  (Finding 1's pending-open path) and drained via `take_pending_opens` once `load()`
+ *  resolves. Before that fix, the sink's fallback-to-any-window path would ask App.tsx to
+ *  open/focus the right window (the redirect branch below) but had nothing to hand the
+ *  payload to once that window existed, so the project was never selected and `--agent`
+ *  never spawned. */
+async function applyCliOpenPayload(payload: CliOpenPayload): Promise<void> {
+  const st = useStore.getState();
+  let projectId = matchProjectByPath(st.projects, payload.path);
+  // Rust already resolved ONE target window (the matched project's own profile window,
+  // else the focused window, else "main") before emitting -- but a fallback edge
+  // (ambiguous focus) can still land the event here for a project that isn't this
+  // window's. Redirect rather than handle it locally in that case.
+  if (projectId && WINDOWED) {
+    const project = st.projects.find((p) => p.id === projectId);
+    if (!inThisWindow(() => project?.profileId, st.windowProfile.profileId, st.profiles)) {
+      const knownIds = new Set(st.profiles.map((p) => p.id));
+      void invoke("open_profile_window", {
+        profileId: normalizeProfileId(project?.profileId, knownIds),
+      });
+      return;
+    }
+  }
+  if (!projectId) {
+    // Store::add_project does not dedupe, which is what makes the match above
+    // load-bearing rather than an optimization.
+    await st.addProject(payload.path);
+    projectId = useStore.getState().selectedProjectId;
+  } else {
+    st.selectProject(projectId);
+  }
+  // `--agent` creates a session unconditionally and never resumes an existing
+  // one, so its effect never depends on `restoreSessionsOnOpen`.
+  if (projectId && payload.agent) {
+    await useStore.getState().addSession(projectId, { agent: payload.agent as AgentId });
   }
 }
 
@@ -97,6 +166,9 @@ export default function App() {
   // Hot exit's crash net: debounced backups of dirty buffers to the app-data dir.
   useHotExit();
 
+  // Cross-window convergence: debounced refetch + merge off Rust's `store-saved` broadcast.
+  useStoreSync();
+
   // macOS exits native fullscreen on an unconsumed Escape (AppKit cancelOperation).
   // Swallow the OS default at the window level — bubble phase, so terminal/dialog
   // Escape handling has already run — and keep the app in fullscreen.
@@ -114,14 +186,61 @@ export default function App() {
   const [palette, setPalette] = useState<"quickopen" | "search" | "commands" | null>(null);
 
   useEffect(() => {
-    void load();
+    // Discover + start enabled plugins, but only on the main window. `windowProfile`
+    // resolves async inside `load()` (the `window_profile` IPC round trip) and is not
+    // known yet on this first render — it starts at its main/Default default (see
+    // `windowProfile`'s initial state in store.ts) — so this reads the store's verdict
+    // AFTER `load()` settles rather than off the stale value closed over here. Success-only
+    // `.then`, with an explicit no-op rejection arm (not `.finally`): `load()`'s
+    // `load_projects` call has no `.catch`, so on a total rejection `windowProfile` is
+    // never corrected and still reads its main/Default default — including in a
+    // SECONDARY window, where that default is simply wrong. load failed → no state, no
+    // plugin host, in any window: the app is already broken, and a window whose state
+    // never loaded has no use for a plugin host either way.
+    //
+    // Report this window's `WINDOWED` pref to Rust as early as possible, independent of
+    // `load()` -- the cli-open sink's pending-open path (`hooks.rs`'s `WindowModeFlag`)
+    // must know whether ANY window is in window mode before it can safely decide that a
+    // `label_for` miss means "no window for this profile" rather than merely "not the
+    // active profile" (which is the normal case in switch mode with more than one
+    // profile). Every window reports the same machine-level value, so this races
+    // harmlessly across windows and is idempotent.
+    void invoke("set_profile_window_mode", { windowed: WINDOWED }).catch(() => {});
+    void load().then(
+      () => {
+        if (useStore.getState().windowProfile.isMain) void initPlugins();
+        // Finding 1's pending-open queue: drain whatever `conduit <path> [--agent <id>]`
+        // invocations the Rust cli-open sink queued for THIS window's label while it had
+        // no live window to emit to yet (a project's own profile had none open, and
+        // there was nothing to redirect the payload to). Runs in every window, not just
+        // main -- any window's label can be the one a queued open was addressed to.
+        // Applied in order, one at a time (never in parallel): each may add/select a
+        // project and spawn a session, and `applyCliOpenPayload` reads/writes store
+        // state that a concurrent second call could race.
+        invoke<CliOpenPayload[]>("take_pending_opens")
+          .then(async (opens) => {
+            for (const open of opens) await applyCliOpenPayload(open);
+          })
+          .catch(() => {});
+        // Work root chat proposed while this window was closed: catch up now that
+        // `st.projects`/`st.profiles`/`st.windowProfile` are populated. Finding 5: this
+        // used to fire from its own mount effect, racing `load()` -- when the
+        // `list_pending_decisions` fetch resolved first, its per-window filter ran
+        // against the store's EMPTY boot defaults (`projects: []`, `profiles: []`,
+        // `windowProfile: { profileId: null, isMain: true }`), under which
+        // `inThisWindow` finds every card's (missing) profile trivially matching this
+        // window's (null) default and accepts it -- every OTHER window's cards too, in
+        // every window, until the next reload happened to lose the race the other way.
+        void useStore.getState().loadPendingDecisions((projectId) => {
+          const st = useStore.getState();
+          const cardProfile = () => st.projects.find((p) => p.id === projectId)?.profileId;
+          return inThisWindow(cardProfile, st.windowProfile.profileId, st.profiles);
+        });
+      },
+      () => {},
+    );
     void loadAgents();
   }, [load, loadAgents]);
-
-  // Discover + start enabled plugins.
-  useEffect(() => {
-    void initPlugins();
-  }, []);
 
   // Suppress the webview's default context menu (Reload / Inspect Element).
   // Our own row menus call preventDefault + stopPropagation, so they're unaffected —
@@ -205,6 +324,18 @@ export default function App() {
       feedHook(payload);
       const { session, event, body } = payload;
       const st = useStore.getState();
+      // The UI-state feed below applies only for sessions whose project is in THIS
+      // window (plugin feed above is already main-only via initPlugins). A session not
+      // found locally normalizes to Default, same as everywhere else in profiles.ts.
+      if (
+        !inThisWindow(
+          () => findSession(st.projects, session)?.project.profileId,
+          st.windowProfile.profileId,
+          st.profiles,
+        )
+      ) {
+        return;
+      }
       switch (event) {
         case "prompt":
           st.setStatus(session, "running");
@@ -286,7 +417,17 @@ export default function App() {
   // its answer reaches the sidebar instead of the frontend inventing a second timeout.
   useEffect(() => {
     const unlisten = listen<string[]>("session-stale", ({ payload }) => {
-      useStore.getState().markStale(payload ?? []);
+      const st = useStore.getState();
+      // Same guard as the `hook` listener above: mirror the stale verdict into UI state
+      // only for sessions whose project is in THIS window.
+      const ids = (payload ?? []).filter((id) =>
+        inThisWindow(
+          () => findSession(st.projects, id)?.project.profileId,
+          st.windowProfile.profileId,
+          st.profiles,
+        ),
+      );
+      st.markStale(ids);
     });
     return () => {
       void unlisten.then((f) => f());
@@ -316,18 +457,30 @@ export default function App() {
     };
   }, []);
 
-  // Root chat stream: items/done/error pushed by the per-message `claude -p` child.
+  // Root chat stream: items/done/error pushed by the per-message `claude -p` child. Every
+  // open window receives the broadcast regardless of target (root_mcp.rs emits via plain
+  // `app.emit`), so each guards by the CHAT's own profile -- a chat not yet known locally
+  // normalizes to Default, same as everywhere else in profiles.ts.
   useEffect(() => {
     const unItem = listen<{ chatId: string; item: ChatItem }>("root-chat-item", ({ payload }) => {
-      useStore.getState().rootChatItemArrived(payload.chatId, payload.item);
+      const st = useStore.getState();
+      const chatProfile = () => st.rootChats.find((c) => c.id === payload.chatId)?.profileId;
+      if (!inThisWindow(chatProfile, st.windowProfile.profileId, st.profiles)) return;
+      st.rootChatItemArrived(payload.chatId, payload.item);
     });
     const unDone = listen<{ chatId: string }>("root-chat-done", ({ payload }) => {
-      useStore.getState().rootChatDone(payload.chatId);
+      const st = useStore.getState();
+      const chatProfile = () => st.rootChats.find((c) => c.id === payload.chatId)?.profileId;
+      if (!inThisWindow(chatProfile, st.windowProfile.profileId, st.profiles)) return;
+      st.rootChatDone(payload.chatId);
     });
     const unErr = listen<{ chatId: string; message: string }>(
       "root-chat-error",
       ({ payload }) => {
-        useStore.getState().rootChatFailed(payload.chatId, payload.message);
+        const st = useStore.getState();
+        const chatProfile = () => st.rootChats.find((c) => c.id === payload.chatId)?.profileId;
+        if (!inThisWindow(chatProfile, st.windowProfile.profileId, st.profiles)) return;
+        st.rootChatFailed(payload.chatId, payload.message);
       },
     );
     return () => {
@@ -337,17 +490,24 @@ export default function App() {
     };
   }, []);
 
-  // Work root chat proposed. Also loaded once on mount so a proposal made while the
-  // window was closed is not lost.
+  // Work root chat proposed. The mount-time catch-up fetch (a proposal made while this
+  // window was closed must not be lost) is fired from the `load()` success arm above,
+  // not here -- see that effect's own comment (Finding 5) for why it must wait for
+  // `st.projects`/`st.profiles`/`st.windowProfile` to actually be populated before its
+  // per-window filter can mean anything.
   useEffect(() => {
     // Each card's routing table is fetched for the CARD's OWN project by
     // `loadPendingDecisions`/`decisionArrived` (see `decisionRoutes`). It must NOT come
     // from the shared `routes` slot: that is globals-only when loaded with `null`, and it
     // is also written by the new-session dialog and the routing panel, so a card for
     // project Y would be routed by whichever project was opened last.
-    void useStore.getState().loadPendingDecisions();
     const unPending = listen<PendingDecision>("pending-decision", ({ payload }) => {
-      useStore.getState().decisionArrived(payload);
+      // A card carries its own project (not a profile field directly) -- route by that
+      // project's profile, same broadcast-vs-target-window reasoning as root chat above.
+      const st = useStore.getState();
+      const cardProfile = () => st.projects.find((p) => p.id === payload.projectId)?.profileId;
+      if (!inThisWindow(cardProfile, st.windowProfile.profileId, st.profiles)) return;
+      st.decisionArrived(payload);
     });
     const unCreated = listen<{ id: string; title: string; seed: string }>(
       "root-chat-created",
@@ -356,11 +516,19 @@ export default function App() {
         // chat's first message — so it must actually be sent, or the model is told
         // work happened that never did. `loadRootChats` first so the chat this send
         // targets is in the store (Rust already created it before emitting this event).
+        // `loadRootChats` runs in every window (harmless -- it's the same reconciling
+        // fetch every window already does); only the window whose profile matches the
+        // new chat actually sends the seed, or a broadcast fork would fire once per open
+        // window instead of once.
         void useStore
           .getState()
           .loadRootChats()
           .then(() => {
-            if (payload.seed) void useStore.getState().sendRootChat(payload.id, payload.seed);
+            if (!payload.seed) return;
+            const st = useStore.getState();
+            const chatProfile = () => st.rootChats.find((c) => c.id === payload.id)?.profileId;
+            if (!inThisWindow(chatProfile, st.windowProfile.profileId, st.profiles)) return;
+            void st.sendRootChat(payload.id, payload.seed);
           });
       },
     );
@@ -393,8 +561,16 @@ export default function App() {
   }, []);
 
   // Native menu clicks relayed by Rust as a "menu" event whose payload is the item id.
+  // Window-scoped (not the plain top-level `listen`): Rust's on_window_event now
+  // targets a specific window's label with `emit_to` for close-window/quit
+  // (window_registry design, Task 4), and a plain `listen(...)` here registers as
+  // EventTarget::Any, which Tauri's listener-side match always matches regardless of
+  // the emitter's target -- so every open window's Any-scoped listener would ALSO fire
+  // for an event meant for only one of them. A window-scoped listener still receives
+  // every broadcast `app.emit(...)` (menu.rs's other custom ids, e.g. Cmd+T/palette),
+  // since a broadcast passes no filter and matches every listener unconditionally.
   useEffect(() => {
-    const unlisten = listen<string>("menu", ({ payload }) => {
+    const unlisten = getCurrentWebviewWindow().listen<string>("menu", ({ payload }) => {
       const st = useStore.getState();
       switch (payload) {
         case "settings":
@@ -528,6 +704,29 @@ export default function App() {
           })();
           break;
         }
+        case "close-window": {
+          // Rust forwards this here when this window is a SECONDARY one being closed
+          // (not the last window) with a nonzero per-window dirty count (`DirtyGuard`,
+          // lib.rs `CloseRequested`); a running agent never gates a window close, only
+          // quit -- sessions persist under tmux regardless of which windows are open.
+          // `st.dirty` is this window's OWN dirty set (Monaco buffers only ever open for
+          // projects THIS window mounts), so no extra profile filtering is needed here --
+          // unlike `quit`'s single-window total, this mirrors just the dirty-buffer half
+          // of that flow.
+          void (async () => {
+            const flushed = await st.flushHotExit();
+            const n = Object.keys(st.dirty).length;
+            const ok =
+              flushed ||
+              n === 0 ||
+              (await ask(
+                `Close this window with unsaved changes? Backing them up failed — ${n} file${n === 1 ? " has" : "s have"} unsaved edits that will be lost.`,
+                { title: "Conduit", kind: "warning", okLabel: "Close Anyway", cancelLabel: "Cancel" },
+              ));
+            if (ok) void invoke("close_window", { label: st.windowProfile.label });
+          })();
+          break;
+        }
         case "close-tab": {
           const layout = st.selectedProjectId ? st.layouts[st.selectedProjectId] : undefined;
           const g = activeGroup(layout);
@@ -580,7 +779,11 @@ export default function App() {
     const un = listen<{ sessionId: string }>("bridge-open-session", ({ payload }) => {
       const st = useStore.getState();
       const found = findSession(st.projects, payload.sessionId);
-      if (found) st.selectSession(found.project.id, payload.sessionId);
+      if (!found) return;
+      if (!inThisWindow(() => found.project.profileId, st.windowProfile.profileId, st.profiles)) {
+        return;
+      }
+      st.selectSession(found.project.id, payload.sessionId);
     });
     return () => {
       void un.then((f) => f());
@@ -617,26 +820,15 @@ export default function App() {
   }, []);
 
   // The `conduit` CLI launcher. The Rust side has already focused the window; this
-  // owns what the app then shows.
+  // owns what the app then shows. Window-scoped for the same reason the "menu" listener
+  // above is: Rust's hook server now resolves ONE target window (the matched project's
+  // own profile window, else the focused window, else "main") and `emit_to`s it, so a
+  // plain top-level `listen(...)` here -- EventTarget::Any -- would fire in every open
+  // window regardless of that target, reopening the double-`add_project` bug this
+  // targeting exists to kill.
   useEffect(() => {
-    const un = listen<{ path: string; agent?: string | null }>("cli-open", ({ payload }) => {
-      void (async () => {
-        const st = useStore.getState();
-        let projectId = matchProjectByPath(st.projects, payload.path);
-        if (!projectId) {
-          // Store::add_project does not dedupe, which is what makes the match above
-          // load-bearing rather than an optimization.
-          await st.addProject(payload.path);
-          projectId = useStore.getState().selectedProjectId;
-        } else {
-          st.selectProject(projectId);
-        }
-        // `--agent` creates a session unconditionally and never resumes an existing
-        // one, so its effect never depends on `restoreSessionsOnOpen`.
-        if (projectId && payload.agent) {
-          await useStore.getState().addSession(projectId, { agent: payload.agent as AgentId });
-        }
-      })();
+    const un = getCurrentWebviewWindow().listen<CliOpenPayload>("cli-open", ({ payload }) => {
+      void applyCliOpenPayload(payload);
     });
     return () => {
       void un.then((f) => f());
@@ -648,27 +840,45 @@ export default function App() {
     const unSpawn = listen<{ projectId: string; session: Session; task?: string }>(
       "fleet-spawn",
       ({ payload }) => {
-        useStore
-          .getState()
-          .mergeSpawnedSession(payload.projectId, payload.session, payload.task);
+        const st = useStore.getState();
+        const spawnProfile = () => st.projects.find((p) => p.id === payload.projectId)?.profileId;
+        // Skip the mount/select side effect when the spawned session's project isn't
+        // this window's -- the STORE still converges via the `store-saved` broadcast
+        // (Task 9), so appending it here too would be redundant, and opening a tab in
+        // this window's layout for a project it doesn't show would be outright wrong.
+        if (inThisWindow(spawnProfile, st.windowProfile.profileId, st.profiles)) {
+          st.mergeSpawnedSession(payload.projectId, payload.session, payload.task);
+        }
         feedFleet("fleet.spawn", { session: payload.session.id });
       },
     );
-    const unConfirm = listen<{ requestId: string; name: string; branch: string; dirty: boolean }>(
-      "conductor-confirm",
-      ({ payload }) => {
-        // Stop kills the worker's running process; its worktree files stay on disk.
-        const where = payload.branch ? ` (${payload.branch})` : "";
-        const msg = payload.dirty
-          ? `The Conductor wants to stop "${payload.name}"${where}.\n\nIt has uncommitted changes — those stay on disk, but its running process will be terminated. Allow?`
-          : `The Conductor wants to stop "${payload.name}"${where}. Its running process will be terminated. Allow?`;
-        const approved = window.confirm(msg);
-        void invoke("conductor_confirm_response", {
-          requestId: payload.requestId,
-          approved,
-        }).catch(() => {});
-      },
-    );
+    const unConfirm = listen<{
+      requestId: string;
+      sessionId: string;
+      name: string;
+      branch: string;
+      dirty: boolean;
+    }>("conductor-confirm", ({ payload }) => {
+      const st = useStore.getState();
+      const workerProfile = () => findSession(st.projects, payload.sessionId)?.project.profileId;
+      // Guarded by the worker session's own project: this is a broadcast (fleet.rs
+      // `app.emit`), so every open window would otherwise pop the SAME confirm dialog for
+      // a worker only one window's sidebar can even show. A window that skips it answers
+      // nothing; Rust's own 60s timeout already default-denies if no window responds.
+      if (!inThisWindow(workerProfile, st.windowProfile.profileId, st.profiles)) {
+        return;
+      }
+      // Stop kills the worker's running process; its worktree files stay on disk.
+      const where = payload.branch ? ` (${payload.branch})` : "";
+      const msg = payload.dirty
+        ? `The Conductor wants to stop "${payload.name}"${where}.\n\nIt has uncommitted changes — those stay on disk, but its running process will be terminated. Allow?`
+        : `The Conductor wants to stop "${payload.name}"${where}. Its running process will be terminated. Allow?`;
+      const approved = window.confirm(msg);
+      void invoke("conductor_confirm_response", {
+        requestId: payload.requestId,
+        approved,
+      }).catch(() => {});
+    });
     return () => {
       void unSpawn.then((f) => f());
       void unConfirm.then((f) => f());

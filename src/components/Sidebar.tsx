@@ -12,6 +12,7 @@ import {
   worktreeRemove,
   globalSelectedSessionId,
   resolvedAccountKey,
+  WINDOWED,
   type Project,
   type Session,
 } from "../store";
@@ -141,16 +142,21 @@ export function Sidebar() {
   const setShowSettings = useStore((s) => s.setShowSettings);
   const profiles = useStore((s) => s.profiles);
   const activeProfileId = useStore((s) => s.activeProfileId);
-  // The profile filter applies HERE (and to selection repair in the store) only. The
+  const windowProfile = useStore((s) => s.windowProfile);
+  // In window mode this sidebar is permanently pinned to ITS OWN window's profile, never
+  // the global `activeProfileId` — that field is main's boot-time value and only main
+  // may change it (see stampProfileId in store.ts). In switch mode it's the usual active
+  // profile. The filter applies HERE (and to selection repair in the store) only. The
   // workspace keeps the full projects array — hidden projects' terminals stay mounted.
+  const filterProfileId = WINDOWED ? windowProfile.profileId : activeProfileId;
   const knownProfileIds = useMemo(() => new Set(profiles.map((p) => p.id)), [profiles]);
   const visibleProjects = useMemo(
-    () => projects.filter((p) => inProfile(p.profileId, activeProfileId, knownProfileIds)),
-    [projects, activeProfileId, knownProfileIds],
+    () => projects.filter((p) => inProfile(p.profileId, filterProfileId, knownProfileIds)),
+    [projects, filterProfileId, knownProfileIds],
   );
   const visibleChats = useMemo(
-    () => rootChats.filter((c) => inProfile(c.profileId, activeProfileId, knownProfileIds)),
-    [rootChats, activeProfileId, knownProfileIds],
+    () => rootChats.filter((c) => inProfile(c.profileId, filterProfileId, knownProfileIds)),
+    [rootChats, filterProfileId, knownProfileIds],
   );
   const selectedAgent = useStore((s) => {
     const id = globalSelectedSessionId(s);
@@ -213,13 +219,20 @@ export function Sidebar() {
 function ProfileBar() {
   const profiles = useStore((s) => s.profiles);
   const activeProfileId = useStore((s) => s.activeProfileId);
+  const windowProfile = useStore((s) => s.windowProfile);
   const setActiveProfile = useStore((s) => s.setActiveProfile);
   const addProfile = useStore((s) => s.addProfile);
   const [creating, setCreating] = useState(false);
   const done = useRef(false);
 
-  // A dangling active id (profile removed under us) renders as Default.
-  const value = profiles.some((p) => p.id === activeProfileId) ? activeProfileId! : "";
+  // In window mode the dropdown reflects THIS window's own pinned profile, never the
+  // (main-only) `activeProfileId` -- a secondary window's `activeProfileId` is just
+  // main's boot-time value and never changes. In switch mode there is no window
+  // identity to speak of, so it falls back to the plain active-profile selector, same as
+  // before this feature existed.
+  const selected = WINDOWED ? windowProfile.profileId : activeProfileId;
+  // A dangling id (its profile was removed under us) renders as Default.
+  const value = profiles.some((p) => p.id === selected) ? selected! : "";
 
   const commit = (name: string) => {
     if (done.current) return;
@@ -256,7 +269,15 @@ function ProfileBar() {
             { value: "", label: "Default" },
             ...profiles.map((p) => ({ value: p.id, label: p.name })),
           ]}
-          onChange={(v) => void setActiveProfile(v || null)}
+          onChange={(v) => {
+            const target = v || null;
+            if (!WINDOWED) {
+              void setActiveProfile(target);
+              return;
+            }
+            if (target === windowProfile.profileId) return; // already this window
+            void invoke("open_profile_window", { profileId: target });
+          }}
         />
       )}
       <button

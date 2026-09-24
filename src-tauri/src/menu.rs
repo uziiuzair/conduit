@@ -11,7 +11,6 @@
 //! The custom handler kills every PTY first (mirroring the `ExitRequested` cleanup in
 //! `lib.rs`) and only then exits, so no `claude` PTY is ever orphaned.
 
-use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 use tauri::menu::{Menu, MenuBuilder, MenuItemBuilder, SubmenuBuilder};
@@ -252,17 +251,19 @@ pub fn on_event<R: Runtime>(app: &AppHandle<R>, id: &str) {
             // back `quit_app` on approval. A clean+idle quit exits immediately,
             // webview-independent. PTYs die before exit either way, mirroring
             // `RunEvent::ExitRequested`.
-            let dirty = app.state::<DirtyGuard>().0.load(Ordering::SeqCst) > 0;
+            let dirty = app.state::<DirtyGuard>().total() > 0;
             let running = crate::live_running_agent(app);
             if dirty || running {
-                let _ = app.emit("menu", "quit");
+                let target = crate::focused_label(app).unwrap_or_else(|| "main".into());
+                let _ = app.emit_to(&target, "menu", "quit");
             } else {
                 app.state::<Arc<PtyManager>>().kill_all();
                 app.exit(0);
             }
         }
         other => {
-            let _ = app.emit("menu", other);
+            let target = crate::focused_label(app).unwrap_or_else(|| "main".into());
+            let _ = app.emit_to(&target, "menu", other);
         }
     }
 }

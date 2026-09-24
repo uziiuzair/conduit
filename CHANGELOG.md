@@ -3,6 +3,16 @@
 All notable changes to Conduit are documented here. This project uses
 [semantic versioning](https://semver.org/).
 
+## 0.39.0 — 2026-09-24
+
+- **Added — Profiles can open in their own windows.** A new Settings → General option makes
+  picking a profile open (or focus) a separate window pinned to it, Obsidian-style — run two
+  profiles side by side. Each window shows and runs only its profile's projects; closing a
+  window leaves its sessions running and they reattach warm when it reopens.
+- **Fixed — closed-window terminals no longer go permanently silent.** A terminal whose
+  window disappeared used to be unrecoverable after ~2000 dropped frames; it now detaches
+  cleanly and reattaches on the next open.
+
 ## 0.38.0 — 2026-09-23
 
 - **Added — Conduit is now a Claude Code IDE.** Claude sessions launched in Conduit

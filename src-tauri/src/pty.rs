@@ -27,8 +27,32 @@ use dashmap::DashMap;
 use portable_pty::{native_pty_system, CommandBuilder, PtySize};
 use tauri::ipc::Channel;
 
-type Sink = Arc<Mutex<Channel<String>>>;
+type Sink = Arc<Mutex<Option<Channel<String>>>>;
 type Subscribers = Arc<Mutex<Vec<(u64, SyncSender<String>)>>>;
+
+#[derive(Debug, PartialEq, Eq)]
+enum SinkSend {
+    Ok,
+    Failed,
+    Detached,
+}
+
+/// One reader-loop send. Detached is NOT a failure — it's the window being closed.
+fn send_to_sink(sink: &Sink, encoded: String) -> SinkSend {
+    match sink.lock() {
+        Ok(guard) => match guard.as_ref() {
+            Some(ch) => {
+                if ch.send(encoded).is_ok() {
+                    SinkSend::Ok
+                } else {
+                    SinkSend::Failed
+                }
+            }
+            None => SinkSend::Detached,
+        },
+        Err(_) => SinkSend::Failed,
+    }
+}
 
 /// Bounded buffer (frames) per remote subscriber before frames start dropping.
 const SUBSCRIBER_BUFFER: usize = 1024;
@@ -325,7 +349,7 @@ impl PtyManager {
         if let Some(existing) = self.sessions.get(&session_id) {
             if let Ok(s) = existing.lock() {
                 if let Ok(mut sink) = s.sink.lock() {
-                    *sink = on_event;
+                    *sink = Some(on_event);
                 }
             }
             drop(existing); // release the shard guard before resize re-locks it
@@ -549,7 +573,7 @@ impl PtyManager {
 
         let subscribers: Subscribers = Arc::new(Mutex::new(Vec::new()));
         let subs_for_reader = subscribers.clone();
-        let sink: Sink = Arc::new(Mutex::new(on_event));
+        let sink: Sink = Arc::new(Mutex::new(Some(on_event)));
         let output = Arc::new(RingBuffer::new(OUTPUT_RING_BYTES));
         let output_for_reader = output.clone();
         let suppress_flag = Arc::new(AtomicBool::new(suppress_remote));
@@ -579,7 +603,11 @@ impl PtyManager {
         // replay on top of that would show the same screen twice.
         if let Some(snapshot) = self.take_cold_scrollback(&session_id) {
             let encoded = base64::engine::general_purpose::STANDARD.encode(&snapshot);
-            let _ = sink.lock().map(|s| s.send(encoded));
+            let _ = sink.lock().map(|s| {
+                if let Some(ch) = s.as_ref() {
+                    let _ = ch.send(encoded);
+                }
+            });
         }
 
         // The reader self-reaps its map entry when the child exits on its own (below), so
@@ -596,13 +624,19 @@ impl PtyManager {
         thread::spawn(move || {
             let engine = base64::engine::general_purpose::STANDARD;
             let mut buf = [0u8; 16 * 1024];
-            // Exit if the sink stays dead for a long run of reads (orphaned, never
-            // re-attached, never killed) — a safety net against a forever-looping
-            // thread. Resets on any successful send, so reload gaps don't trip it.
+            // Detach the sink after a long run of failed sends (dead channel that was
+            // never re-attached, never detached via a clean window close, never killed)
+            // — a safety net so a stuck Channel doesn't retry forever. This never ends
+            // the loop: the child may still be alive, so send failure only clears the
+            // sink (see `send_to_sink`'s `Failed` arm below); the reader keeps reading
+            // into the ring buffer either way. Resets on any successful send, so reload
+            // gaps don't trip it.
             let mut consecutive_fails: u32 = 0;
-            // Whether the loop ended because the child actually exited (EOF/error) vs the
-            // orphaned-sink safety break (process may still be alive — must NOT reap then).
-            let mut child_exited = false;
+            // Only a real read EOF/error sets this — sink/channel state never ends the
+            // loop. No initializer: every path out of the loop below (`Ok(0)`/`Err(_)`)
+            // assigns before breaking, so it is always set by the time either `#[cfg]`
+            // arm below reads it.
+            let child_exited;
             loop {
                 match reader.read(&mut buf) {
                     Ok(0) => {
@@ -620,16 +654,20 @@ impl PtyManager {
                                 broadcast(&mut subs, &encoded);
                             }
                         }
-                        let ok = sink
-                            .lock()
-                            .map(|s| s.send(encoded).is_ok())
-                            .unwrap_or(false);
-                        if ok {
-                            consecutive_fails = 0;
-                        } else {
-                            consecutive_fails += 1;
-                            if consecutive_fails > 2000 {
-                                break;
+                        match send_to_sink(&sink, encoded) {
+                            SinkSend::Ok => consecutive_fails = 0,
+                            SinkSend::Detached => {} // window closed; ring buffer + scrollback keep running
+                            SinkSend::Failed => {
+                                consecutive_fails += 1;
+                                if consecutive_fails > 2000 {
+                                    // The channel is dead but the child is alive: detach instead of the
+                                    // old `break` that left a zombie entry whose next spawn re-attached
+                                    // to silence.
+                                    if let Ok(mut s) = sink.lock() {
+                                        *s = None;
+                                    }
+                                    consecutive_fails = 0;
+                                }
                             }
                         }
                     }
@@ -647,11 +685,12 @@ impl PtyManager {
                 }
             }
             if let Ok(s) = sink.lock() {
-                let _ = s.send(enc_notice);
+                if let Some(ch) = s.as_ref() {
+                    let _ = ch.send(enc_notice);
+                }
             }
             // Free the dead session's handles/buffers and let a re-spawn of this id
-            // cold-start instead of re-attaching a dead PTY. Only on a real child exit
-            // (not the orphaned-sink safety break, where the process may still be alive).
+            // cold-start instead of re-attaching a dead PTY. Only on a real child exit.
             // Windows-only so macOS behavior is untouched (see the clones above).
             #[cfg(windows)]
             if child_exited {
@@ -801,6 +840,20 @@ impl PtyManager {
         // scrollback rather than replaying stale content twice.
         crate::scrollback::remove(session_id);
         Some(snapshot)
+    }
+
+    /// Detach a session's desktop consumer (its window closed). The PTY, tmux session and
+    /// reader thread all keep running; the next `pty_spawn` re-attaches warm. Called from
+    /// `lib.rs`'s `on_window_event` `Destroyed` arm for every session belonging to the
+    /// window's profile.
+    pub fn detach(&self, session_id: &str) {
+        if let Some(entry) = self.sessions.get(session_id) {
+            if let Ok(s) = entry.lock() {
+                if let Ok(mut sink) = s.sink.lock() {
+                    *sink = None;
+                }
+            }
+        }
     }
 
     pub fn kill(&self, session_id: &str) {
@@ -1262,6 +1315,24 @@ mod tests {
     use std::sync::atomic::{AtomicU32, Ordering};
 
     const ID: &str = "11111111-2222-3333-4444-555555555555";
+
+    #[test]
+    fn detached_sink_send_never_counts_a_failure() {
+        // Pure helper the reader loop uses; None = detached, must not tick the fail counter.
+        let sink: Sink = Arc::new(Mutex::new(None));
+        assert_eq!(send_to_sink(&sink, "x".into()), SinkSend::Detached);
+        let live: Sink = Arc::new(Mutex::new(Some(tauri::ipc::Channel::new(|_| Ok(())))));
+        assert_eq!(send_to_sink(&live, "x".into()), SinkSend::Ok);
+    }
+
+    #[test]
+    fn detach_flips_sink_and_reattach_restores() {
+        let sink: Sink = Arc::new(Mutex::new(Some(tauri::ipc::Channel::new(|_| Ok(())))));
+        *sink.lock().unwrap() = None; // what detach() does
+        assert_eq!(send_to_sink(&sink, "x".into()), SinkSend::Detached);
+        *sink.lock().unwrap() = Some(tauri::ipc::Channel::new(|_| Ok(())));
+        assert_eq!(send_to_sink(&sink, "x".into()), SinkSend::Ok);
+    }
 
     #[test]
     fn destroying_a_session_drops_its_scrollback_but_retiring_keeps_it() {

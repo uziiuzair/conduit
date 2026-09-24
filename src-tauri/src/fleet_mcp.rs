@@ -1065,8 +1065,8 @@ mod tests {
     #[test]
     fn resolve_pair_rejects_id_from_a_foreign_project() {
         let store = Store::for_test(&temp_dir("foreign"));
-        let proj_a = store.add_project("/repo-a".into());
-        let proj_b = store.add_project("/repo-b".into());
+        let proj_a = store.add_project("/repo-a".into(), store.active_profile());
+        let proj_b = store.add_project("/repo-b".into(), store.active_profile());
         let conductor_a = store
             .add_session(
                 &proj_a.id,
@@ -1093,7 +1093,7 @@ mod tests {
     #[test]
     fn resolve_pair_rejects_a_completely_unknown_id() {
         let store = Store::for_test(&temp_dir("unknown"));
-        let proj = store.add_project("/repo".into());
+        let proj = store.add_project("/repo".into(), store.active_profile());
         let conductor = store
             .add_session(
                 &proj.id,
@@ -1111,7 +1111,7 @@ mod tests {
     #[test]
     fn resolve_pair_allows_a_legitimate_in_project_worker() {
         let store = Store::for_test(&temp_dir("legit"));
-        let proj = store.add_project("/repo".into());
+        let proj = store.add_project("/repo".into(), store.active_profile());
         let conductor = store
             .add_session(
                 &proj.id,
@@ -1140,7 +1140,7 @@ mod tests {
     fn private_mode_still_denies_a_siloed_in_project_target_via_can_read() {
         let store = Store::for_test(&temp_dir("siloed"));
         store.set_trust_settings(crate::store::TrustSettings { private_mode: true });
-        let proj = store.add_project("/repo".into());
+        let proj = store.add_project("/repo".into(), store.active_profile());
         let conductor = store
             .add_session(
                 &proj.id,
@@ -1181,7 +1181,7 @@ mod tests {
 
     fn store_with_conductor_and_worker(tag: &str) -> (Store, Session, Session) {
         let store = Store::for_test(&temp_dir(tag));
-        let proj = store.add_project("/repo".into());
+        let proj = store.add_project("/repo".into(), store.active_profile());
         let conductor = store
             .add_session(
                 &proj.id,
@@ -1249,7 +1249,7 @@ mod tests {
     fn readable_by_hides_a_siloed_authors_records_from_an_over_clearance_reader() {
         let store = Store::for_test(&temp_dir("readable_by"));
         store.set_trust_settings(crate::store::TrustSettings { private_mode: true });
-        let proj = store.add_project("/repo".into());
+        let proj = store.add_project("/repo".into(), store.active_profile());
         let conductor = store
             .add_session(
                 &proj.id,
@@ -1340,7 +1340,7 @@ mod tests {
     fn fleet_inbox_filters_by_can_read() {
         let store = Store::for_test(&temp_dir("inbox_can_read"));
         store.set_trust_settings(crate::store::TrustSettings { private_mode: true });
-        let proj = store.add_project("/repo".into());
+        let proj = store.add_project("/repo".into(), store.active_profile());
         let reader = store
             .add_session(
                 &proj.id,
@@ -1481,7 +1481,7 @@ mod tests {
     fn fleet_roster_filters_by_can_read() {
         let store = Store::for_test(&temp_dir("roster_can_read"));
         store.set_trust_settings(crate::store::TrustSettings { private_mode: true });
-        let proj = store.add_project("/repo".into());
+        let proj = store.add_project("/repo".into(), store.active_profile());
         let reader = store
             .add_session(
                 &proj.id,
@@ -1542,7 +1542,7 @@ mod tests {
         // never has a Mission record at all -- fleet_roster structurally can't surface it,
         // since it only ever reads BoardKind::Mission records.
         let store = Store::for_test(&temp_dir("roster_no_custom"));
-        let proj = store.add_project("/repo".into());
+        let proj = store.add_project("/repo".into(), store.active_profile());
         let manual = store
             .add_session(
                 &proj.id,
@@ -1587,7 +1587,7 @@ mod tests {
     #[test]
     fn caller_project_root_resolves_from_session_not_args() {
         let store = Store::for_test(&temp_dir("caller_project_root"));
-        let proj = store.add_project("/repo-caller-project-root".into());
+        let proj = store.add_project("/repo-caller-project-root".into(), store.active_profile());
         let conductor = store
             .add_session(
                 &proj.id,

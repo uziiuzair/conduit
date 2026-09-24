@@ -7,7 +7,7 @@
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::PathBuf;
-use std::sync::Mutex;
+use std::sync::{Mutex, OnceLock};
 
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -542,6 +542,9 @@ pub struct Store {
     /// of `PersistState`/`save()`, never logged; injected into an `opencode` child's env.
     opencode_key: Mutex<Option<String>>,
     save_path: PathBuf,
+    /// Callback fired after every successful persisted store write. Used to emit broadcast
+    /// events to all windows (e.g., `store-saved`). Never persisted, only set at startup.
+    on_save: OnceLock<Box<dyn Fn() + Send + Sync>>,
 }
 
 /// A read-only view of the project that owns a given Conductor, plus its sessions.
@@ -700,6 +703,32 @@ fn rotate_backup(save_path: &std::path::Path) {
     }
 }
 
+/// Windows paths are case-insensitive and may use either separator. Mirrors
+/// `WINDOWS_PATH` in `src/cliOpen.ts`.
+fn is_windows_path(p: &str) -> bool {
+    let b = p.as_bytes();
+    b.len() >= 3 && b[0].is_ascii_alphabetic() && b[1] == b':' && (b[2] == b'\\' || b[2] == b'/')
+}
+
+/// Rust port of `normalize` in `src/cliOpen.ts`: trims, then for a Windows-shaped path
+/// unifies separators and lowercases, then strips trailing separators (never reducing a
+/// root to the empty string). `project_profile_for_path` calls this on BOTH sides of the
+/// comparison -- a project's own stored path is exactly as likely to carry a trailing
+/// slash as the CLI's argument is.
+fn normalize_cli_path(path: &str) -> String {
+    let mut p = path.trim().to_string();
+    if p.is_empty() {
+        return p;
+    }
+    if is_windows_path(&p) {
+        p = p.replace('\\', "/").to_lowercase();
+    }
+    while p.len() > 1 && (p.ends_with('/') || p.ends_with('\\')) {
+        p.pop();
+    }
+    p
+}
+
 impl Store {
     pub fn new() -> Self {
         let save_path = data_dir().join("state.json");
@@ -736,7 +765,12 @@ impl Store {
             active_profile_id: Mutex::new(state.active_profile_id),
             opencode_key: Mutex::new(None),
             save_path,
+            on_save: OnceLock::new(),
         }
+    }
+
+    pub fn set_on_save(&self, f: Box<dyn Fn() + Send + Sync>) {
+        let _ = self.on_save.set(f);
     }
 
     fn save(&self, projects: &[Project]) {
@@ -811,11 +845,15 @@ impl Store {
         // sync client) can make this fail with ERROR_SHARING_VIOLATION even though a POSIX
         // rename-over-open never does; retry briefly before giving up. macOS/Linux keep the
         // single-rename path so their behavior is unchanged.
+        let mut success = false;
         #[cfg(windows)]
         {
             for attempt in 0..10 {
                 match fs::rename(&tmp, &self.save_path) {
-                    Ok(()) => return,
+                    Ok(()) => {
+                        success = true;
+                        break;
+                    }
                     Err(e) => {
                         if attempt == 9 {
                             let _ = fs::remove_file(&tmp);
@@ -828,8 +866,17 @@ impl Store {
             }
         }
         #[cfg(not(windows))]
-        if let Err(e) = fs::rename(&tmp, &self.save_path) {
-            eprintln!("conduit: failed to persist state: {e}");
+        {
+            if let Err(e) = fs::rename(&tmp, &self.save_path) {
+                eprintln!("conduit: failed to persist state: {e}");
+            } else {
+                success = true;
+            }
+        }
+        if success {
+            if let Some(f) = self.on_save.get() {
+                f();
+            }
         }
     }
 
@@ -840,7 +887,7 @@ impl Store {
             .clone()
     }
 
-    pub fn add_project(&self, path: String) -> Project {
+    pub fn add_project(&self, path: String, profile_id: Option<String>) -> Project {
         let name = PathBuf::from(&path)
             .file_name()
             .map(|s| s.to_string_lossy().into_owned())
@@ -854,12 +901,10 @@ impl Store {
             default_accounts: HashMap::new(),
             board_enabled: false,
             routes: Default::default(),
-            // A project created while a profile is active belongs to that profile.
-            profile_id: self
-                .active_profile_id
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .clone(),
+            // Stamped from the caller's argument, not the global -- a project created
+            // from a secondary profile window must belong to THAT window's profile even
+            // if another window has since changed the global active profile.
+            profile_id,
             color: None,
         };
         let mut projects = self.projects.lock().unwrap_or_else(|e| e.into_inner());
@@ -874,6 +919,50 @@ impl Store {
         self.save(&projects);
     }
 
+    /// Session ids of every project belonging to `profile` (dangling ids = Default).
+    ///
+    /// Same normalization `Project.profile_id` gets everywhere else it's read: a profile
+    /// id that no longer names a record in `profiles` folds back to Default (`None`)
+    /// rather than forming its own orphan bucket, so a project stranded by something
+    /// other than `remove_profile` (which clears the field itself) still matches
+    /// `sessions_for_profile(&None)`.
+    pub fn sessions_for_profile(&self, profile: &Option<String>) -> Vec<String> {
+        let known: HashSet<String> = self.list_profiles().into_iter().map(|p| p.id).collect();
+        let normalize = |id: &Option<String>| id.clone().filter(|i| known.contains(i));
+        self.projects
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .filter(|p| normalize(&p.profile_id) == normalize(profile))
+            .flat_map(|p| p.sessions.iter().map(|s| s.id.clone()))
+            .collect()
+    }
+
+    /// Rust port of `matchProjectByPath` (`src/cliOpen.ts`): an EXACT match after
+    /// normalization, never a prefix/subdirectory containment rule -- a project's path
+    /// never matches one of its own children (`is_child` is a different question this
+    /// function does not answer). Outer `None` = no open project owns `path` (the
+    /// cli-open sink then falls back to the focused window); inner `Option<String>` is
+    /// that project's profile, normalized against `list_profiles()` the same way
+    /// `sessions_for_profile` normalizes a dangling id to Default -- so the result is
+    /// directly usable by `WindowRegistry::label_for`.
+    pub fn project_profile_for_path(&self, path: &str) -> Option<Option<String>> {
+        let want = normalize_cli_path(path);
+        if want.is_empty() || want == "/" {
+            return None;
+        }
+        // Lock order matches `sessions_for_profile`: `list_profiles()` first (and
+        // dropped), then `projects`.
+        let known: HashSet<String> = self.list_profiles().into_iter().map(|p| p.id).collect();
+        let projects = self.projects.lock().unwrap_or_else(|e| e.into_inner());
+        let profile_id = projects
+            .iter()
+            .find(|p| normalize_cli_path(&p.path) == want)?
+            .profile_id
+            .clone();
+        Some(profile_id.filter(|id| known.contains(id)))
+    }
+
     // ---- Root chats -----------------------------------------------------------------
     // Lock order: mutate `root_chats`, DROP that lock, then take `projects` for `save()`
     // — save() locks accounts/default_accounts/etc. internally and must never run while
@@ -886,7 +975,7 @@ impl Store {
             .clone()
     }
 
-    pub fn add_root_chat(&self) -> RootChat {
+    pub fn add_root_chat(&self, profile_id: Option<String>) -> RootChat {
         let account_id = self
             .default_accounts
             .lock()
@@ -901,11 +990,8 @@ impl Store {
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_secs())
                 .unwrap_or(0),
-            profile_id: self
-                .active_profile_id
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .clone(),
+            // Stamped from the caller's argument, not the global -- see `add_project`.
+            profile_id,
         };
         self.root_chats
             .lock()
@@ -2084,6 +2170,7 @@ mod tests {
                 active_profile_id: Mutex::new(None),
                 opencode_key: Mutex::new(None),
                 save_path: dir.join("state.json"),
+                on_save: OnceLock::new(),
             }
         }
     }
@@ -2096,6 +2183,19 @@ mod tests {
     }
 
     #[test]
+    fn save_fires_on_save_hook() {
+        use std::sync::{atomic::Ordering, Arc};
+        let store = Store::for_test(&temp_dir("on_save"));
+        let hits = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let h = hits.clone();
+        store.set_on_save(Box::new(move || {
+            h.fetch_add(1, Ordering::SeqCst);
+        }));
+        store.add_profile("x");
+        assert!(hits.load(Ordering::SeqCst) >= 1);
+    }
+
+    #[test]
     fn a_session_no_project_owns_is_not_ours() {
         // The membership test the hook listener gates on. Claude Code fires whatever hooks
         // its settings tree carries, so a `claude` started by a plain terminal or another
@@ -2104,7 +2204,7 @@ mod tests {
         // Conduit notification.
         let dir = temp_dir("has_session");
         let store = Store::for_test(&dir);
-        let p = store.add_project("/repo".into());
+        let p = store.add_project("/repo".into(), store.active_profile());
         let s = store
             .add_session(
                 &p.id,
@@ -2127,7 +2227,7 @@ mod tests {
     fn add_session_without_worktree_leaves_fields_empty() {
         let dir = temp_dir("plain");
         let store = Store::for_test(&dir);
-        let p = store.add_project("/repo".into());
+        let p = store.add_project("/repo".into(), store.active_profile());
         let s = store
             .add_session(
                 &p.id,
@@ -2148,7 +2248,7 @@ mod tests {
         // relaunches what the user stopped. This is that guarantee, through real state.json.
         let dir = temp_dir("hibernate_roundtrip");
         let store = Store::for_test(&dir);
-        let p = store.add_project("/repo".into());
+        let p = store.add_project("/repo".into(), store.active_profile());
         let s = store
             .add_session(
                 &p.id,
@@ -2197,9 +2297,9 @@ mod tests {
     fn reorder_project_moves_and_clamps() {
         let dir = temp_dir("reorder_p");
         let store = Store::for_test(&dir);
-        let a = store.add_project("/a".into());
-        let b = store.add_project("/b".into());
-        let c = store.add_project("/c".into());
+        let a = store.add_project("/a".into(), store.active_profile());
+        let b = store.add_project("/b".into(), store.active_profile());
+        let c = store.add_project("/c".into(), store.active_profile());
         // Move first to the middle (post-removal insertion index).
         assert!(store.reorder_project(&a.id, 1));
         let order: Vec<_> = store.list().iter().map(|p| p.id.clone()).collect();
@@ -2215,7 +2315,7 @@ mod tests {
     fn reorder_session_moves_within_project_only() {
         let dir = temp_dir("reorder_s");
         let store = Store::for_test(&dir);
-        let p = store.add_project("/repo".into());
+        let p = store.add_project("/repo".into(), store.active_profile());
         let mk = |name: &str| {
             store
                 .add_session(
@@ -2255,7 +2355,7 @@ mod tests {
     fn add_session_with_worktree_computes_path_and_branch() {
         let dir = temp_dir("wt");
         let store = Store::for_test(&dir);
-        let p = store.add_project("/repo".into());
+        let p = store.add_project("/repo".into(), store.active_profile());
         let s = store
             .add_session(
                 &p.id,
@@ -2281,7 +2381,7 @@ mod tests {
     fn session_agent_returns_stored_agent_else_claude() {
         let dir = temp_dir("lookup");
         let store = Store::for_test(&dir);
-        let p = store.add_project("/repo".into());
+        let p = store.add_project("/repo".into(), store.active_profile());
         let s = store
             .add_session(
                 &p.id,
@@ -2302,7 +2402,7 @@ mod tests {
     fn add_session_defaults_agent_to_claude() {
         let dir = temp_dir("agent_default");
         let store = Store::for_test(&dir);
-        let p = store.add_project("/repo".into());
+        let p = store.add_project("/repo".into(), store.active_profile());
         let s = store
             .add_session(
                 &p.id,
@@ -2348,7 +2448,7 @@ mod tests {
             )
             .unwrap();
 
-        let p = store.add_project("/repo".into());
+        let p = store.add_project("/repo".into(), store.active_profile());
         let s = store
             .add_session(
                 &p.id,
@@ -2394,7 +2494,7 @@ mod tests {
             .add_account("B".into(), b_dir.to_string_lossy().into_owned())
             .unwrap();
 
-        let p = store.add_project("/repo".into());
+        let p = store.add_project("/repo".into(), store.active_profile());
         let s = store
             .add_session(
                 &p.id,
@@ -2467,7 +2567,7 @@ mod tests {
         let a = store
             .add_account("A".into(), a_dir.to_string_lossy().into_owned())
             .unwrap();
-        let p = store.add_project("/repo".into());
+        let p = store.add_project("/repo".into(), store.active_profile());
         let s = store
             .add_session(
                 &p.id,
@@ -2496,7 +2596,7 @@ mod tests {
         let a = store
             .add_account("A".into(), a_dir.to_string_lossy().into_owned())
             .unwrap();
-        let p = store.add_project("/repo".into());
+        let p = store.add_project("/repo".into(), store.active_profile());
         let s = store
             .add_session(
                 &p.id,
@@ -2518,7 +2618,7 @@ mod tests {
     fn agent_conversation_id_round_trips_and_is_idempotent() {
         let dir = temp_dir("agent_conv_id");
         let store = Store::for_test(&dir);
-        let p = store.add_project("/repo".into());
+        let p = store.add_project("/repo".into(), store.active_profile());
         let s = store
             .add_session(
                 &p.id,
@@ -2546,7 +2646,7 @@ mod tests {
     fn a_claude_session_follows_its_conversation_past_a_clear() {
         let dir = temp_dir("claude_conv_follow");
         let store = Store::for_test(&dir);
-        let p = store.add_project("/repo".into());
+        let p = store.add_project("/repo".into(), None);
         let a = store
             .add_session(
                 &p.id,
@@ -2596,8 +2696,8 @@ mod tests {
     fn an_unreadable_state_file_restores_from_the_rolling_backup() {
         let dir = temp_dir("state_backup");
         let store = Store::for_test(&dir);
-        let p = store.add_project("/first".into()); // save #1: no prior file, no backup
-        store.add_project("/second".into()); // save #2: backs up the one-project file
+        let p = store.add_project("/first".into(), None); // save #1: no prior file, no backup
+        store.add_project("/second".into(), None); // save #2: backs up the one-project file
         let save_path = dir.join("state.json");
         let bak = backup_path(&save_path);
         assert!(bak.exists(), "the second save should have taken a backup");
@@ -2696,7 +2796,7 @@ mod tests {
     fn fleet_snapshot_returns_project_and_sessions() {
         let dir = temp_dir("fleet_snap");
         let store = Store::for_test(&dir);
-        let p = store.add_project("/repo".into());
+        let p = store.add_project("/repo".into(), store.active_profile());
         let c = store
             .add_session(
                 &p.id,
@@ -2725,7 +2825,7 @@ mod tests {
     fn add_session_rejects_second_conductor() {
         let dir = temp_dir("conductor_unique");
         let store = Store::for_test(&dir);
-        let p = store.add_project("/repo".into());
+        let p = store.add_project("/repo".into(), store.active_profile());
         let c1 = store.add_session(
             &p.id,
             "Conductor".into(),
@@ -2756,7 +2856,7 @@ mod tests {
     fn conductor_never_gets_a_worktree() {
         let dir = temp_dir("conductor_no_wt");
         let store = Store::for_test(&dir);
-        let p = store.add_project("/repo".into());
+        let p = store.add_project("/repo".into(), store.active_profile());
         // use_worktree=true is ignored for a Conductor.
         let c = store
             .add_session(
@@ -2896,7 +2996,7 @@ mod tests {
         store.set_trust_settings(TrustSettings { private_mode: true });
         assert!(store.is_private_mode());
 
-        let p = store.add_project("/repo".into());
+        let p = store.add_project("/repo".into(), store.active_profile());
         let s = store
             .add_session(
                 &p.id,
@@ -3016,7 +3116,7 @@ mod tests {
     fn project_color_set_clear_and_persist() {
         let dir = temp_dir("proj_color");
         let store = Store::for_test(&dir);
-        let p = store.add_project("/repo".into());
+        let p = store.add_project("/repo".into(), store.active_profile());
         assert!(p.color.is_none(), "a new project has no chosen colour");
         assert!(store.set_project_color(&p.id, Some("#c4906c".into())));
         assert_eq!(
@@ -3044,7 +3144,7 @@ mod tests {
         // Default profile: no records, no active id; creations carry no profile.
         assert!(store.list_profiles().is_empty());
         assert!(store.active_profile().is_none());
-        let home = store.add_project("/home-proj".into());
+        let home = store.add_project("/home-proj".into(), store.active_profile());
         assert!(home.profile_id.is_none());
 
         // An unknown id is refused; Some(known) and None both stick.
@@ -3055,9 +3155,9 @@ mod tests {
         assert_eq!(store.active_profile().as_deref(), Some(stream.id.as_str()));
 
         // Creations while a profile is active inherit it — projects and root chats both.
-        let p = store.add_project("/stream-proj".into());
+        let p = store.add_project("/stream-proj".into(), store.active_profile());
         assert_eq!(p.profile_id.as_deref(), Some(stream.id.as_str()));
-        let chat = store.add_root_chat();
+        let chat = store.add_root_chat(store.active_profile());
         assert_eq!(chat.profile_id.as_deref(), Some(stream.id.as_str()));
 
         // Round-trip: the persisted file carries profiles, the active id, and memberships.
@@ -3094,12 +3194,168 @@ mod tests {
     }
 
     #[test]
+    fn sessions_for_profile_scopes_by_project_and_normalizes_dangling_ids() {
+        let dir = temp_dir("sessions_for_profile");
+        let store = Store::for_test(&dir);
+
+        let profile = store.add_profile("Streaming");
+
+        // A project created while `profile` is active belongs to it.
+        assert!(store.set_active_profile(Some(profile.id.clone())));
+        let proj_a = store.add_project("/proj-a".into(), store.active_profile());
+        let sess_a = store
+            .add_session(
+                &proj_a.id,
+                "a".into(),
+                false,
+                crate::agent::AgentId::Claude,
+                SessionRole::Worker,
+            )
+            .unwrap();
+
+        // A project created with no active profile belongs to Default.
+        assert!(store.set_active_profile(None));
+        let proj_default = store.add_project("/proj-default".into(), store.active_profile());
+        let sess_default = store
+            .add_session(
+                &proj_default.id,
+                "d".into(),
+                false,
+                crate::agent::AgentId::Claude,
+                SessionRole::Worker,
+            )
+            .unwrap();
+
+        // A project whose profile_id points at a profile that no longer exists (e.g. the
+        // record was dropped some other way than `remove_profile`, which itself clears
+        // it). It must normalize to Default, not vanish or its own bogus bucket.
+        let proj_dangling = store.add_project("/proj-dangling".into(), store.active_profile());
+        let sess_dangling = store
+            .add_session(
+                &proj_dangling.id,
+                "g".into(),
+                false,
+                crate::agent::AgentId::Claude,
+                SessionRole::Worker,
+            )
+            .unwrap();
+        {
+            let mut projects = store.projects.lock().unwrap();
+            let p = projects
+                .iter_mut()
+                .find(|p| p.id == proj_dangling.id)
+                .unwrap();
+            p.profile_id = Some("ghost-profile".into());
+        }
+
+        let a_sessions = store.sessions_for_profile(&Some(profile.id.clone()));
+        assert_eq!(a_sessions, vec![sess_a.id.clone()]);
+
+        let default_sessions = store.sessions_for_profile(&None);
+        assert!(default_sessions.contains(&sess_default.id));
+        assert!(
+            default_sessions.contains(&sess_dangling.id),
+            "a dangling profile id must normalize to Default: {default_sessions:?}"
+        );
+        assert!(!default_sessions.contains(&sess_a.id));
+    }
+
+    #[test]
+    fn project_profile_for_path_ports_match_project_by_path_vectors() {
+        // Ported from src/cliOpen.test.ts's `matchProjectByPath` suite. `alpha` sits
+        // under a real profile and `beta/` (trailing slash stored on the PROJECT side,
+        // not just the query) under Default, so a hit can be told apart by which
+        // profile comes back rather than every match reading as `Some(None)`.
+        let dir = temp_dir("project_profile_for_path");
+        let store = Store::for_test(&dir);
+        let x = store.add_profile("X");
+        store.add_project("/Users/u/code/alpha".into(), Some(x.id.clone()));
+        store.add_project("/Users/u/code/beta/".into(), None);
+
+        // Exact match.
+        assert_eq!(
+            store.project_profile_for_path("/Users/u/code/alpha"),
+            Some(Some(x.id.clone()))
+        );
+
+        // Trailing slash on either side of the comparison.
+        assert_eq!(
+            store.project_profile_for_path("/Users/u/code/alpha/"),
+            Some(Some(x.id.clone()))
+        );
+        assert_eq!(
+            store.project_profile_for_path("/Users/u/code/beta"),
+            Some(None)
+        );
+
+        // Non-member path -> None, so the caller falls back to the focused window.
+        assert_eq!(store.project_profile_for_path("/Users/u/code/gamma"), None);
+
+        // A prefix is never a subdirectory/containment match.
+        assert_eq!(
+            store.project_profile_for_path("/Users/u/code/alpha-2"),
+            None
+        );
+        assert_eq!(store.project_profile_for_path("/Users/u/code"), None);
+
+        // Empty and root paths never match.
+        assert_eq!(store.project_profile_for_path(""), None);
+        assert_eq!(store.project_profile_for_path("/"), None);
+    }
+
+    #[test]
+    fn project_profile_for_path_is_case_insensitive_on_windows_paths() {
+        let dir = temp_dir("project_profile_for_path_windows");
+        let store = Store::for_test(&dir);
+        store.add_project("C:\\Users\\u\\Code\\Alpha".into(), None);
+        assert_eq!(
+            store.project_profile_for_path("c:/users/u/code/alpha"),
+            Some(None)
+        );
+    }
+
+    #[test]
+    fn project_profile_for_path_normalizes_a_dangling_profile_to_default() {
+        let dir = temp_dir("project_profile_for_path_dangling");
+        let store = Store::for_test(&dir);
+        let proj = store.add_project("/proj".into(), Some("ghost-profile".into()));
+        // `profile_id` names a profile record that was never created -- must normalize
+        // to Default (None), the same rule `sessions_for_profile` applies, so
+        // `WindowRegistry::label_for` never gets asked about an id no window is
+        // registered under.
+        assert_eq!(store.project_profile_for_path(&proj.path), Some(None));
+    }
+
+    #[test]
+    fn add_project_stamps_argument_not_global() {
+        // A project created from a secondary profile window must be stamped with THAT
+        // window's profile, regardless of what the global active profile currently is --
+        // another window could have changed it in between.
+        let dir = temp_dir("add_project_stamps_argument");
+        let store = Store::for_test(&dir);
+        assert!(store.active_profile().is_none());
+        let p = store.add_project("/tmp/x".into(), Some("p1".into()));
+        assert_eq!(p.profile_id.as_deref(), Some("p1"));
+    }
+
+    #[test]
+    fn add_root_chat_stamps_none_argument_over_active_global() {
+        let dir = temp_dir("add_root_chat_stamps_none");
+        let store = Store::for_test(&dir);
+        let profile = store.add_profile("Work");
+        assert!(store.set_active_profile(Some(profile.id.clone())));
+        // The global says `profile`, but an explicit None argument must still win.
+        let chat = store.add_root_chat(None);
+        assert_eq!(chat.profile_id, None);
+    }
+
+    #[test]
     fn root_chat_crud_and_account_pinning() {
         let dir = temp_dir("root_chat");
         let store = Store::for_test(&dir);
         // Pin: the global Claude default at creation time travels onto the chat.
         store.set_default_account(crate::agent::AgentId::Claude, Some("acct-1".into()));
-        let chat = store.add_root_chat();
+        let chat = store.add_root_chat(store.active_profile());
         assert_eq!(chat.title, "New Chat");
         assert_eq!(chat.account_id.as_deref(), Some("acct-1"));
         assert!(chat.created_at > 0);
@@ -3130,7 +3386,7 @@ mod tests {
             .add_account("Work".into(), profile.to_string_lossy().into_owned())
             .unwrap();
         store.set_default_account(crate::agent::AgentId::Claude, Some(acct.id.clone()));
-        let chat = store.add_root_chat();
+        let chat = store.add_root_chat(store.active_profile());
         assert_eq!(
             store.root_chat_config_dir(&chat.id).as_deref(),
             Some(profile.to_string_lossy().as_ref())
@@ -3138,7 +3394,7 @@ mod tests {
         // No default at creation -> no pinned account -> None (caller falls back to
         // pty::claude_projects_dir()).
         store.set_default_account(crate::agent::AgentId::Claude, None);
-        let bare = store.add_root_chat();
+        let bare = store.add_root_chat(store.active_profile());
         assert!(store.root_chat_config_dir(&bare.id).is_none());
     }
 

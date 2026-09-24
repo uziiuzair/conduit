@@ -481,7 +481,19 @@ fn dispatch_tool(name: &str, args: &Value, ctx: &Ctx) -> Result<String, String> 
                     "fork rate limit: at most {MAX_FORKS_PER_MINUTE_PER_CHAT} new chats per minute from one chat. Continue in this chat, or wait and try again."
                 ));
             }
-            let chat = ctx.store.add_root_chat();
+            // Stamp the PARENT chat's own profile, not whatever the global active
+            // profile happens to be right now: a fork made from a secondary profile
+            // window's chat must land in that SAME profile, or it silently vanishes from
+            // the window that spawned it and reappears wherever the global active
+            // profile is pointing (which in window mode is frozen at whatever "main"
+            // booted with, unrelated to the forking chat's own window). `known_chat`
+            // already refused this request if `ctx.chat_id` weren't a real chat, so the
+            // lookup falling through to the global default is defensive only.
+            let parent_profile = match ctx.store.root_chat(&ctx.chat_id) {
+                Some(parent) => parent.profile_id,
+                None => ctx.store.active_profile(),
+            };
+            let chat = ctx.store.add_root_chat(parent_profile);
             ctx.store.rename_root_chat(&chat.id, title);
             let seed = args.get("seed").and_then(|v| v.as_str()).unwrap_or("");
             // The desktop reconciles its sidebar from this event; without it the new chat
@@ -726,7 +738,7 @@ mod tests {
     fn peek_is_refused_for_a_siloed_session_only_under_private_mode() {
         let dir = temp_dir("peek");
         let store = Store::for_test(&dir);
-        let p = store.add_project("/repo".into());
+        let p = store.add_project("/repo".into(), store.active_profile());
         let s = store
             .add_session(
                 &p.id,
@@ -761,7 +773,7 @@ mod tests {
     fn a_public_session_stays_peekable_under_private_mode() {
         let dir = temp_dir("peek_public");
         let store = Store::for_test(&dir);
-        let p = store.add_project("/repo".into());
+        let p = store.add_project("/repo".into(), store.active_profile());
         let s = store
             .add_session(
                 &p.id,
@@ -786,7 +798,7 @@ mod tests {
     fn a_siloed_public_session_is_still_refused_under_private_mode() {
         let dir = temp_dir("peek_siloed_public");
         let store = Store::for_test(&dir);
-        let p = store.add_project("/repo".into());
+        let p = store.add_project("/repo".into(), store.active_profile());
         let s = store
             .add_session(
                 &p.id,
@@ -820,7 +832,7 @@ mod tests {
     fn a_non_siloed_confidential_session_is_still_refused_under_private_mode() {
         let dir = temp_dir("peek_confidential_unsiloed");
         let store = Store::for_test(&dir);
-        let p = store.add_project("/repo".into());
+        let p = store.add_project("/repo".into(), store.active_profile());
         let s = store
             .add_session(
                 &p.id,
@@ -866,7 +878,7 @@ mod tests {
         let store = Store::for_test(&dir);
         // No root chats exist, so any caller id is a stranger.
         assert!(known_chat(&store, "nope").is_err());
-        let chat = store.add_root_chat();
+        let chat = store.add_root_chat(store.active_profile());
         assert!(known_chat(&store, &chat.id).is_ok());
     }
 
@@ -874,8 +886,8 @@ mod tests {
     fn dispatch_work_records_a_proposal_and_reports_its_status() {
         let dir = temp_dir("dispatch");
         let store = Arc::new(Store::for_test(&dir));
-        let project = store.add_project("/repo".into());
-        let chat = store.add_root_chat();
+        let project = store.add_project("/repo".into(), store.active_profile());
+        let chat = store.add_root_chat(store.active_profile());
         let proposals = Arc::new(Proposals::default());
 
         let out = dispatch_work_inner(
@@ -919,8 +931,8 @@ mod tests {
     fn dispatch_status_reports_expired_past_the_window_and_refuses_a_late_approval() {
         let dir = temp_dir("dispatch_expired");
         let store = Arc::new(Store::for_test(&dir));
-        let project = store.add_project("/repo".into());
-        let chat = store.add_root_chat();
+        let project = store.add_project("/repo".into(), store.active_profile());
+        let chat = store.add_root_chat(store.active_profile());
         let proposals = Arc::new(Proposals::default());
 
         let out = dispatch_work_inner(
@@ -960,8 +972,8 @@ mod tests {
     fn dispatch_work_refuses_a_kind_outside_the_routing_table() {
         let dir = temp_dir("dispatch_bad_kind");
         let store = Arc::new(Store::for_test(&dir));
-        let project = store.add_project("/repo".into());
-        let chat = store.add_root_chat();
+        let project = store.add_project("/repo".into(), store.active_profile());
+        let chat = store.add_root_chat(store.active_profile());
         let proposals = Arc::new(Proposals::default());
         let err = dispatch_work_inner(
             &store,
@@ -998,8 +1010,8 @@ mod tests {
     fn dispatch_work_refuses_an_agent_this_build_cannot_spawn() {
         let dir = temp_dir("dispatch_bad_agent");
         let store = Arc::new(Store::for_test(&dir));
-        let project = store.add_project("/repo".into());
-        let chat = store.add_root_chat();
+        let project = store.add_project("/repo".into(), store.active_profile());
+        let chat = store.add_root_chat(store.active_profile());
         let proposals = Arc::new(Proposals::default());
         let err = dispatch_work_inner(
             &store,
@@ -1033,7 +1045,7 @@ mod tests {
     fn dispatch_work_refuses_an_unknown_project() {
         let dir = temp_dir("dispatch_bad");
         let store = Arc::new(Store::for_test(&dir));
-        let chat = store.add_root_chat();
+        let chat = store.add_root_chat(store.active_profile());
         let proposals = Arc::new(Proposals::default());
         let err = dispatch_work_inner(
             &store,
@@ -1068,7 +1080,7 @@ mod tests {
     fn dispatch_tool_session_peek_refuses_a_siloed_session_under_private_mode() {
         let dir = temp_dir("dispatch_peek_denied");
         let store = Arc::new(Store::for_test(&dir));
-        let p = store.add_project("/repo".into());
+        let p = store.add_project("/repo".into(), store.active_profile());
         let s = store
             .add_session(
                 &p.id,
@@ -1104,8 +1116,8 @@ mod tests {
     fn dispatch_work_emits_a_pending_decision_the_frontend_can_render() {
         let dir = temp_dir("dispatch_emits");
         let store = Arc::new(Store::for_test(&dir));
-        let project = store.add_project("/repo".into());
-        let chat = store.add_root_chat();
+        let project = store.add_project("/repo".into(), store.active_profile());
+        let chat = store.add_root_chat(store.active_profile());
         let (emit, log) = capturing_sink();
         let ctx = Ctx {
             emit,
@@ -1165,8 +1177,8 @@ mod tests {
     fn the_live_emit_is_byte_for_byte_the_catch_up_payload() {
         let dir = temp_dir("dispatch_same_payload");
         let store = Arc::new(Store::for_test(&dir));
-        let project = store.add_project("/repo".into());
-        let chat = store.add_root_chat();
+        let project = store.add_project("/repo".into(), store.active_profile());
+        let chat = store.add_root_chat(store.active_profile());
         let (emit, log) = capturing_sink();
         let proposals = Arc::new(Proposals::default());
         let ctx = Ctx {
@@ -1192,7 +1204,7 @@ mod tests {
     fn sessions_list_refuses_an_unknown_project_instead_of_answering_empty() {
         let dir = temp_dir("sessions_list_bad_project");
         let store = Arc::new(Store::for_test(&dir));
-        store.add_project("/repo".into());
+        store.add_project("/repo".into(), store.active_profile());
         let (emit, _log) = capturing_sink();
         let ctx = Ctx {
             emit,
@@ -1221,7 +1233,7 @@ mod tests {
     fn chat_fork_is_capped_per_chat_per_minute() {
         let dir = temp_dir("chat_fork_cap");
         let store = Arc::new(Store::for_test(&dir));
-        let chat = store.add_root_chat();
+        let chat = store.add_root_chat(store.active_profile());
         let (emit, log) = capturing_sink();
         let ctx = Ctx {
             emit,
@@ -1246,6 +1258,39 @@ mod tests {
             1 + MAX_FORKS_PER_MINUTE_PER_CHAT
         );
         assert_eq!(log.lock().unwrap().len(), MAX_FORKS_PER_MINUTE_PER_CHAT);
+    }
+
+    /// A fork made from a chat living in a non-Default profile must land in that SAME
+    /// profile, not whatever the global active profile happens to be -- the mismatch a
+    /// secondary profile window produces the instant its active profile differs from
+    /// "main"'s (the common case in window mode, and reachable in switch mode too
+    /// between a profile switch and the next fork).
+    #[test]
+    fn chat_fork_stamps_the_parents_profile_not_the_global_active_one() {
+        let dir = temp_dir("chat_fork_parent_profile");
+        let store = Arc::new(Store::for_test(&dir));
+        let profile = store.add_profile("Streaming");
+        let chat = store.add_root_chat(Some(profile.id.clone()));
+        assert_eq!(
+            store.active_profile(),
+            None,
+            "global active profile stays Default throughout"
+        );
+        let (emit, _log) = capturing_sink();
+        let ctx = Ctx {
+            emit,
+            store: store.clone(),
+            pty: Arc::new(PtyManager::new()),
+            fleet: Arc::new(FleetState::default()),
+            proposals: Arc::new(Proposals::default()),
+            chat_id: chat.id.clone(),
+        };
+        let out = dispatch_tool("chat_fork", &json!({ "title": "fork" }), &ctx).unwrap();
+        let parsed: Value = serde_json::from_str(&out).unwrap();
+        let fork = store
+            .root_chat(parsed["id"].as_str().unwrap())
+            .expect("fork was created");
+        assert_eq!(fork.profile_id, Some(profile.id));
     }
 
     #[test]

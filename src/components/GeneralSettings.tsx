@@ -28,6 +28,8 @@ export function GeneralSettings() {
   const setRichSessionView = useStore((s) => s.setRichSessionView);
   const autoProjectColors = useStore((s) => s.autoProjectColors);
   const setAutoProjectColors = useStore((s) => s.setAutoProjectColors);
+  const profileWindowMode = useStore((s) => s.profileWindowMode);
+  const setProfileWindowMode = useStore((s) => s.setProfileWindowMode);
   const probeTmux = useStore((s) => s.probeTmux);
   const workspaceRoot = useStore((s) => s.workspaceRoot);
   const setWorkspaceRoot = useStore((s) => s.setWorkspaceRoot);
@@ -111,6 +113,19 @@ export function GeneralSettings() {
           (sidebar folder, tab badges in mixed panes). Off = projects stay neutral unless
           you pick a colour yourself by right-clicking the project. Colours you pick stay
           either way.
+        </span>
+      </label>
+
+      <label className="dialog-toggle">
+        <input
+          type="checkbox"
+          checked={profileWindowMode === "window"}
+          onChange={(e) => setProfileWindowMode(e.target.checked ? "window" : "switch")}
+        />
+        <span>
+          Open profiles in their own windows — picking a profile opens (or focuses) a separate
+          window pinned to it, like Obsidian vaults, instead of re-filtering this one.
+          Takes effect after restarting Conduit.
         </span>
       </label>
 
