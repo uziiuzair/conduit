@@ -5771,6 +5771,14 @@ input[type="number"]:focus {
 .hq-pulse {
   width: 8px; height: 8px; border-radius: 999px; background: var(--hq-rose);
   animation: hq-pulse 1.2s ease-in-out infinite;
+  flex: none;
+}
+/* Working row: the pulse plus what the agent is in right now (hook `activity`) —
+   the session chat's stand-in for Claude's TUI-only spinner words. */
+.hq-working { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.hq-working-label {
+  font-size: 12px; color: var(--hq-ink-3);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 @keyframes hq-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.35; } }
 .hq-thread-composer {

@@ -76,6 +76,7 @@ export function SessionChat({ sessionId, onClose }: { sessionId: string; onClose
   const items = useStore((s) => s.transcripts[sessionId]);
   const loadTranscript = useStore((s) => s.loadTranscript);
   const agentId = useStore((s) => findSession(s.projects, sessionId)?.session.agent ?? "claude");
+  const live = useStore((s) => s.live[sessionId]);
   const [draft, setDraft] = useState("");
   const endRef = useRef<HTMLDivElement | null>(null);
   const inputRef = useRef<HTMLTextAreaElement | null>(null);
@@ -98,11 +99,19 @@ export function SessionChat({ sessionId, onClose }: { sessionId: string; onClose
     };
   }, [sessionId, loadTranscript]);
 
+  // Working indicator: driven by the hook-derived session status, because Claude's own
+  // rotating spinner words ("Scheming…", "Baking…") are terminal-TUI-only — they reach
+  // neither the transcript nor any hook. `activity` is the next best truth: the tool the
+  // agent is actually in right now, from PreToolUse.
+  const working = live?.status === "running";
+  const workingLabel = live?.compacting ? "Compacting…" : (live?.activity ?? "Working…");
+
   // Follow the tail only while the reader is already at the bottom, so scrolling back to
-  // read something does not get yanked away every time the agent speaks.
+  // read something does not get yanked away every time the agent speaks (or the working
+  // indicator appears).
   useEffect(() => {
     if (pinned) endRef.current?.scrollIntoView({ block: "end" });
-  }, [items, pinned]);
+  }, [items, pinned, working]);
 
   // Auto-grow with the draft, capped so the composer never eats the pane (same
   // behavior as the HQ composer).
@@ -161,6 +170,12 @@ export function SessionChat({ sessionId, onClose }: { sessionId: string; onClose
             </p>
           ) : (
             items.map((item, i) => <Item key={i} item={item} />)
+          )}
+          {working && (
+            <div className="hq-working">
+              <span className="hq-pulse" aria-hidden />
+              <span className="hq-working-label">{workingLabel}</span>
+            </div>
           )}
           <div ref={endRef} />
         </div>
