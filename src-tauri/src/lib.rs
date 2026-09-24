@@ -1112,6 +1112,17 @@ fn close_window(app: tauri::AppHandle, label: String) {
     // registry entry and per-label dirty guard, and nothing downstream requires "main"
     // specifically to keep existing -- the hook server's cli-open target-window fallback
     // already tries any live window when its preferred target (main included) is gone.
+    //
+    // The `len()` check and the `destroy()` below are NOT atomic with each other -- there
+    // is no lock spanning them. Correctness today rests entirely on this command being a
+    // plain (non-`async`) `#[tauri::command]`: Tauri v2 dispatches those synchronously on
+    // the same windowing event loop thread that also creates and destroys webview windows,
+    // so nothing can create or destroy another window between this check and this destroy
+    // call. DO NOT mark this command `async` (or move the destroy off this thread) without
+    // first adding a lock/mutex spanning the check-then-act pair -- doing so would silently
+    // reopen a real race where two closing windows could each see `len() > 1` and both
+    // proceed to destroy, leaving zero windows open with neither call having gone through
+    // the quit-confirm path this guard exists to protect.
     if app.webview_windows().len() <= 1 {
         return;
     }
