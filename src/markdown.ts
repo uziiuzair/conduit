@@ -154,3 +154,35 @@ const md = new Marked({ gfm: true, breaks: false, async: false });
 export function renderMarkdown(source: string): string {
   return sanitizeHtml(md.parse(source) as string);
 }
+
+/** One run of an assistant message: plain markdown, or the inside of an Insight block. */
+export type MdSegment = { kind: "md" | "insight"; text: string };
+
+/** Matches the explanatory output style's callout as Claude writes it:
+ *  `★ Insight ─────…`  (a code span, dash rule of any length)
+ *  …bullet points…
+ *  `─────…`            (closing code-span rule)
+ *  The wrapper lines are chrome, not content — the UI draws its own card. */
+const INSIGHT_RE = /`★\s*Insight[^\n`]*`\s*\n([\s\S]*?)\n\s*`─+`/g;
+
+/**
+ * Split an assistant message around its `★ Insight` blocks so the renderer can wrap
+ * each one in a styled callout instead of showing the raw dash-rule chrome. Text
+ * without any block comes back as a single "md" segment. Pure, node-testable.
+ */
+export function splitInsights(source: string): MdSegment[] {
+  const out: MdSegment[] = [];
+  let last = 0;
+  for (const m of source.matchAll(INSIGHT_RE)) {
+    const at = m.index ?? 0;
+    const before = source.slice(last, at).trim();
+    if (before) out.push({ kind: "md", text: before });
+    const inner = m[1].trim();
+    if (inner) out.push({ kind: "insight", text: inner });
+    last = at + m[0].length;
+  }
+  const rest = source.slice(last).trim();
+  if (rest) out.push({ kind: "md", text: rest });
+  if (out.length === 0) out.push({ kind: "md", text: source });
+  return out;
+}

@@ -3,7 +3,8 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { findSession, useStore, type TranscriptItem } from "../store";
 import { AGENTS } from "../agents";
-import { renderMarkdown } from "../markdown";
+import { modeLabel, nextMode } from "../permissionMode";
+import { renderMarkdown, splitInsights } from "../markdown";
 import { pasteAndSubmit } from "../terminalInput";
 import { ArrowUpIcon } from "./Icons";
 
@@ -46,17 +47,35 @@ const EVENT_MARK: Record<string, string> = {
 const SHIFT_TAB = "\x1b[Z";
 
 function Item({ item }: { item: TranscriptItem }) {
-  const html = useMemo(
-    () => (item.kind === "bubble" && item.role !== "user" ? renderMarkdown(item.text ?? "") : ""),
+  // Assistant prose is split around `★ Insight` blocks so each renders as a styled
+  // callout instead of showing the output style's raw dash-rule chrome.
+  const segments = useMemo(
+    () =>
+      item.kind === "bubble" && item.role !== "user"
+        ? splitInsights(item.text ?? "").map((seg) => ({
+            kind: seg.kind,
+            html: renderMarkdown(seg.text),
+          }))
+        : [],
     [item],
   );
   if (item.kind === "bubble") {
     // A typed prompt is literal text (pre-wrap in CSS) — rendering it as markdown would
     // silently eat backticks and underscores out of the thing the person actually wrote.
-    return item.role === "user" ? (
-      <div className="hq-bubble-user">{item.text}</div>
-    ) : (
-      <div className="hq-assistant" dangerouslySetInnerHTML={{ __html: html }} />
+    if (item.role === "user") return <div className="hq-bubble-user">{item.text}</div>;
+    return (
+      <>
+        {segments.map((seg, i) =>
+          seg.kind === "insight" ? (
+            <aside key={i} className="hq-insight">
+              <span className="hq-insight-label">★ Insight</span>
+              <div className="hq-assistant" dangerouslySetInnerHTML={{ __html: seg.html }} />
+            </aside>
+          ) : (
+            <div key={i} className="hq-assistant" dangerouslySetInnerHTML={{ __html: seg.html }} />
+          ),
+        )}
+      </>
     );
   }
   if (item.kind === "event") {
@@ -136,11 +155,15 @@ export function SessionChat({ sessionId, onClose }: { sessionId: string; onClose
 
   // The permission-mode chip: forwards Shift+Tab to the PTY, which is exactly the
   // keystroke that cycles Claude's auto-accept / plan / normal modes in the terminal.
-  // The chat is a keyboard over the same session, so the cycle is real — but the CURRENT
-  // mode lives only in the agent's own footer (no hook reports it), so the chip names
-  // the action, never claims a state it cannot know.
+  // The label is the hook-reported `permission_mode` (newer CLIs send it on every hook);
+  // a click also bumps it optimistically along Claude's own cycle so the chip answers
+  // immediately, and the next hook's report overwrites the guess if it was wrong. On a
+  // CLI too old to report the mode, the chip names the action instead of a state.
+  const mode = live?.permissionMode;
+  const setPermissionMode = useStore((s) => s.setPermissionMode);
   const cycleMode = () => {
     void invoke("pty_write", { sessionId, data: SHIFT_TAB }).catch(() => {});
+    if (mode) setPermissionMode(sessionId, nextMode(mode));
   };
 
   return (
@@ -207,9 +230,9 @@ export function SessionChat({ sessionId, onClose }: { sessionId: string; onClose
                 <button
                   className="hq-chip hq-chip-btn"
                   onClick={cycleMode}
-                  title="Cycle this session's permission mode (auto-accept → plan → normal) — the same Shift+Tab the terminal takes; its footer shows the active mode"
+                  title="Cycle this session's permission mode (normal → auto-accept → plan) — the same Shift+Tab the terminal takes"
                 >
-                  mode ⇧⇥
+                  {modeLabel(mode) ?? "mode"} ⇧⇥
                 </button>
                 <span className="hq-hint">Enter to send · Shift+Enter for newline</span>
               </div>

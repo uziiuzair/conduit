@@ -5773,6 +5773,25 @@ input[type="number"]:focus {
   animation: hq-pulse 1.2s ease-in-out infinite;
   flex: none;
 }
+/* Insight callout: the explanatory output style's `★ Insight` block, drawn as a card
+   instead of its raw dash-rule chrome. Full 1px accent-tint border, soft accent wash. */
+.hq-insight {
+  border: 1px solid var(--hq-rose-line);
+  background: color-mix(in srgb, var(--hq-rose) 7%, transparent);
+  border-radius: 10px;
+  padding: 10px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.hq-insight-label {
+  font-size: 10.5px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--hq-rose);
+}
+.hq-insight .hq-assistant { font-size: 13.5px; }
+
 /* Working row: the pulse plus what the agent is in right now (hook `activity`) —
    the session chat's stand-in for Claude's TUI-only spinner words. */
 .hq-working { display: flex; align-items: center; gap: 8px; min-width: 0; }

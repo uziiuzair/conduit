@@ -325,6 +325,12 @@ export interface LiveState {
   todos: TodoItem[];
   /** Short "what it's doing now" label while running (from PreToolUse). */
   activity?: string;
+  /**
+   * Claude's permission mode as the hook stream last reported it ("default",
+   * "acceptEdits", "plan", "bypassPermissions"). Hook-carried, so it lags a Shift+Tab
+   * until the next hook fires; absent entirely on CLIs too old to send it.
+   */
+  permissionMode?: string;
   /** True between a PreCompact event and the next activity, for a "compacting" hint. */
   compacting?: boolean;
   /**
@@ -1661,6 +1667,7 @@ interface AppState {
   markStale: (ids: string[]) => void;
   setTodos: (id: string, todos: TodoItem[]) => void;
   setActivity: (id: string, activity: string | undefined) => void;
+  setPermissionMode: (id: string, permissionMode: string | undefined) => void;
   setCompacting: (id: string, compacting: boolean) => void;
   setThemePref: (pref: ThemePref) => void;
   applySystemDark: (dark: boolean) => void;
@@ -3580,6 +3587,10 @@ export const useStore = create<AppState>((set, get) => {
     setActivity: (id, activity) =>
       set((s) => ({
         live: { ...s.live, [id]: { ...(s.live[id] ?? EMPTY_LIVE), activity } },
+      })),
+    setPermissionMode: (id, permissionMode) =>
+      set((s) => ({
+        live: { ...s.live, [id]: { ...(s.live[id] ?? EMPTY_LIVE), permissionMode } },
       })),
     setCompacting: (id, compacting) =>
       set((s) => ({

@@ -336,6 +336,12 @@ export default function App() {
       ) {
         return;
       }
+      // Newer Claude CLIs put `permission_mode` in every hook body — capture it
+      // wherever it appears so the chat's mode chip can show real state. Absent on
+      // older CLIs, in which case the chip stays label-only.
+      if (typeof body?.permission_mode === "string") {
+        st.setPermissionMode(session, body.permission_mode);
+      }
       switch (event) {
         case "prompt":
           st.setStatus(session, "running");
