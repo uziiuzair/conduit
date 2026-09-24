@@ -3,7 +3,7 @@
 All notable changes to Conduit are documented here. This project uses
 [semantic versioning](https://semver.org/).
 
-## 0.38.0 — 2026-09-24
+## 0.39.0 — 2026-09-24
 
 - **Added — Profiles can open in their own windows.** A new Settings → General option makes
   picking a profile open (or focus) a separate window pinned to it, Obsidian-style — run two
