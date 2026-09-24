@@ -85,6 +85,50 @@ function inThisWindow(
   );
 }
 
+/** One `conduit <path> [--agent <id>]` invocation's payload -- shared by the live
+ *  `cli-open` listener and the `take_pending_opens` boot-time drain below. */
+type CliOpenPayload = { path: string; agent?: string | null };
+
+/** Apply one `cli-open` payload: select (or add) its project and spawn `--agent`'s
+ *  session if given. Factored out of the live listener so the SAME logic also handles a
+ *  payload that arrived while this window didn't exist yet -- queued by the Rust sink
+ *  (Finding 1's pending-open path) and drained via `take_pending_opens` once `load()`
+ *  resolves. Before that fix, the sink's fallback-to-any-window path would ask App.tsx to
+ *  open/focus the right window (the redirect branch below) but had nothing to hand the
+ *  payload to once that window existed, so the project was never selected and `--agent`
+ *  never spawned. */
+async function applyCliOpenPayload(payload: CliOpenPayload): Promise<void> {
+  const st = useStore.getState();
+  let projectId = matchProjectByPath(st.projects, payload.path);
+  // Rust already resolved ONE target window (the matched project's own profile window,
+  // else the focused window, else "main") before emitting -- but a fallback edge
+  // (ambiguous focus) can still land the event here for a project that isn't this
+  // window's. Redirect rather than handle it locally in that case.
+  if (projectId && WINDOWED) {
+    const project = st.projects.find((p) => p.id === projectId);
+    if (!inThisWindow(() => project?.profileId, st.windowProfile.profileId, st.profiles)) {
+      const knownIds = new Set(st.profiles.map((p) => p.id));
+      void invoke("open_profile_window", {
+        profileId: normalizeProfileId(project?.profileId, knownIds),
+      });
+      return;
+    }
+  }
+  if (!projectId) {
+    // Store::add_project does not dedupe, which is what makes the match above
+    // load-bearing rather than an optimization.
+    await st.addProject(payload.path);
+    projectId = useStore.getState().selectedProjectId;
+  } else {
+    st.selectProject(projectId);
+  }
+  // `--agent` creates a session unconditionally and never resumes an existing
+  // one, so its effect never depends on `restoreSessionsOnOpen`.
+  if (projectId && payload.agent) {
+    await useStore.getState().addSession(projectId, { agent: payload.agent as AgentId });
+  }
+}
+
 export default function App() {
   // Poll Claude + agy usage at the app root so it refreshes for every account regardless of
   // which agent is selected or whether the sidebar is collapsed (both would unmount a
@@ -151,9 +195,45 @@ export default function App() {
     // SECONDARY window, where that default is simply wrong. load failed → no state, no
     // plugin host, in any window: the app is already broken, and a window whose state
     // never loaded has no use for a plugin host either way.
+    //
+    // Report this window's `WINDOWED` pref to Rust as early as possible, independent of
+    // `load()` -- the cli-open sink's pending-open path (`hooks.rs`'s `WindowModeFlag`)
+    // must know whether ANY window is in window mode before it can safely decide that a
+    // `label_for` miss means "no window for this profile" rather than merely "not the
+    // active profile" (which is the normal case in switch mode with more than one
+    // profile). Every window reports the same machine-level value, so this races
+    // harmlessly across windows and is idempotent.
+    void invoke("set_profile_window_mode", { windowed: WINDOWED }).catch(() => {});
     void load().then(
       () => {
         if (useStore.getState().windowProfile.isMain) void initPlugins();
+        // Finding 1's pending-open queue: drain whatever `conduit <path> [--agent <id>]`
+        // invocations the Rust cli-open sink queued for THIS window's label while it had
+        // no live window to emit to yet (a project's own profile had none open, and
+        // there was nothing to redirect the payload to). Runs in every window, not just
+        // main -- any window's label can be the one a queued open was addressed to.
+        // Applied in order, one at a time (never in parallel): each may add/select a
+        // project and spawn a session, and `applyCliOpenPayload` reads/writes store
+        // state that a concurrent second call could race.
+        invoke<CliOpenPayload[]>("take_pending_opens")
+          .then(async (opens) => {
+            for (const open of opens) await applyCliOpenPayload(open);
+          })
+          .catch(() => {});
+        // Work root chat proposed while this window was closed: catch up now that
+        // `st.projects`/`st.profiles`/`st.windowProfile` are populated. Finding 5: this
+        // used to fire from its own mount effect, racing `load()` -- when the
+        // `list_pending_decisions` fetch resolved first, its per-window filter ran
+        // against the store's EMPTY boot defaults (`projects: []`, `profiles: []`,
+        // `windowProfile: { profileId: null, isMain: true }`), under which
+        // `inThisWindow` finds every card's (missing) profile trivially matching this
+        // window's (null) default and accepts it -- every OTHER window's cards too, in
+        // every window, until the next reload happened to lose the race the other way.
+        void useStore.getState().loadPendingDecisions((projectId) => {
+          const st = useStore.getState();
+          const cardProfile = () => st.projects.find((p) => p.id === projectId)?.profileId;
+          return inThisWindow(cardProfile, st.windowProfile.profileId, st.profiles);
+        });
       },
       () => {},
     );
@@ -385,15 +465,17 @@ export default function App() {
     };
   }, []);
 
-  // Work root chat proposed. Also loaded once on mount so a proposal made while the
-  // window was closed is not lost.
+  // Work root chat proposed. The mount-time catch-up fetch (a proposal made while this
+  // window was closed must not be lost) is fired from the `load()` success arm above,
+  // not here -- see that effect's own comment (Finding 5) for why it must wait for
+  // `st.projects`/`st.profiles`/`st.windowProfile` to actually be populated before its
+  // per-window filter can mean anything.
   useEffect(() => {
     // Each card's routing table is fetched for the CARD's OWN project by
     // `loadPendingDecisions`/`decisionArrived` (see `decisionRoutes`). It must NOT come
     // from the shared `routes` slot: that is globals-only when loaded with `null`, and it
     // is also written by the new-session dialog and the routing panel, so a card for
     // project Y would be routed by whichever project was opened last.
-    void useStore.getState().loadPendingDecisions();
     const unPending = listen<PendingDecision>("pending-decision", ({ payload }) => {
       // A card carries its own project (not a profile field directly) -- route by that
       // project's profile, same broadcast-vs-target-window reasoning as root chat above.
@@ -691,43 +773,9 @@ export default function App() {
   // window regardless of that target, reopening the double-`add_project` bug this
   // targeting exists to kill.
   useEffect(() => {
-    const un = getCurrentWebviewWindow().listen<{ path: string; agent?: string | null }>(
-      "cli-open",
-      ({ payload }) => {
-        void (async () => {
-          const st = useStore.getState();
-          let projectId = matchProjectByPath(st.projects, payload.path);
-          // Rust already resolved ONE target window (the matched project's own profile
-          // window, else the focused window, else "main") before emitting -- but a
-          // fallback edge (no window open yet for that profile, ambiguous focus) can still
-          // land the event here for a project that isn't this window's. Redirect rather
-          // than handle it locally in that case.
-          if (projectId && WINDOWED) {
-            const project = st.projects.find((p) => p.id === projectId);
-            if (!inThisWindow(() => project?.profileId, st.windowProfile.profileId, st.profiles)) {
-              const knownIds = new Set(st.profiles.map((p) => p.id));
-              void invoke("open_profile_window", {
-                profileId: normalizeProfileId(project?.profileId, knownIds),
-              });
-              return;
-            }
-          }
-          if (!projectId) {
-            // Store::add_project does not dedupe, which is what makes the match above
-            // load-bearing rather than an optimization.
-            await st.addProject(payload.path);
-            projectId = useStore.getState().selectedProjectId;
-          } else {
-            st.selectProject(projectId);
-          }
-          // `--agent` creates a session unconditionally and never resumes an existing
-          // one, so its effect never depends on `restoreSessionsOnOpen`.
-          if (projectId && payload.agent) {
-            await useStore.getState().addSession(projectId, { agent: payload.agent as AgentId });
-          }
-        })();
-      },
-    );
+    const un = getCurrentWebviewWindow().listen<CliOpenPayload>("cli-open", ({ payload }) => {
+      void applyCliOpenPayload(payload);
+    });
     return () => {
       void un.then((f) => f());
     };

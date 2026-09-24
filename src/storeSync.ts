@@ -29,6 +29,18 @@
  *      already has, the EXISTING object reference is kept so nothing that memoizes on project
  *      identity re-renders for no reason. `JSON.stringify` per project is cheap at Conduit's
  *      scale and runs at most every 300ms (the debounce in `useStoreSync.ts`).
+ *
+ * `mountedIds` (multi-window profiles) narrows (b) to projects this window actually RENDERS.
+ * A window mode window's `layouts` map still carries an entry for every project Rust knows
+ * about (so a borrowed cross-project tab can validate against its host, and so switching the
+ * window's own profile at a future boot has something to read) — but for a project this
+ * window doesn't mount, there is no local edit to protect, and keeping the local (boot-time,
+ * or last-sync) copy forever is exactly how a stale copy of another window's OWN project
+ * layout got persisted over its current one (`revalidateAllLayouts`, `store.ts`, runs on
+ * every removal and iterates every layout it holds — never just the ones it mounts). Case
+ * (b) still applies unnarrowed to a MOUNTED project, so this window's own edits are still
+ * never overwritten. In switch mode every id is mounted (every project's terminals are
+ * mounted in the one window), so callers pass the full id set and this is a no-op.
  */
 import type { Project, ProjectLayout } from "./store";
 
@@ -43,6 +55,7 @@ export function mergeSlices(
   current: { projects: Project[]; layouts: Record<string, ProjectLayout> },
   fetched: Project[],
   makeLayout: (p: Project) => ProjectLayout,
+  mountedIds: ReadonlySet<string>,
 ): MergeResult {
   const currentById = new Map(current.projects.map((p) => [p.id, p]));
   const fetchedIds = new Set(fetched.map((p) => p.id));
@@ -59,8 +72,15 @@ export function mergeSlices(
       layouts[f.id] = makeLayout(f);
       return f;
     }
-    // Existing project: the layout is this window's own, never Rust's — carry it over
-    // untouched (falling back to a fresh one only if it is somehow missing).
+    // Existing project this window doesn't mount: no local edit to protect, so always
+    // adopt the freshly fetched (and repaired) layout rather than freezing whatever this
+    // window happened to have on its last fetch.
+    if (!mountedIds.has(f.id)) {
+      layouts[f.id] = makeLayout(f);
+      return JSON.stringify(f) === JSON.stringify(existing) ? existing : f;
+    }
+    // Existing MOUNTED project: the layout is this window's own, never Rust's — carry it
+    // over untouched (falling back to a fresh one only if it is somehow missing).
     layouts[f.id] = current.layouts[f.id] ?? makeLayout(f);
     return JSON.stringify(f) === JSON.stringify(existing) ? existing : f;
   });

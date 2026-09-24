@@ -64,6 +64,8 @@ pub fn start(
     agy_usage: Arc<crate::agy_usage::AgyUsageState>,
     agy_resume: Arc<crate::agy_usage::AgyResumeState>,
     reg: Arc<crate::window_registry::WindowRegistry>,
+    pending_opens: Arc<crate::window_registry::PendingOpens>,
+    window_mode: Arc<crate::window_registry::WindowModeFlag>,
 ) {
     thread::spawn(move || {
         let mut server: Option<Server> = None;
@@ -106,18 +108,65 @@ pub fn start(
                 let token = cli_token.clone();
                 let store = store.clone();
                 let reg = reg.clone();
+                let pending_opens = pending_opens.clone();
+                let window_mode = window_mode.clone();
                 crate::cli_open::handle_open(request, &token, move |open| {
-                    // Target: the project's own profile window when `path` names an
-                    // already-open project, else whichever window has OS focus, else
-                    // "main". App.tsx's `cli-open` listener is window-scoped (converted
-                    // alongside this), so an event that reaches the wrong window is
-                    // silently ignored rather than landing in EVERY window the way a
-                    // broadcast used to -- which is what let a `conduit .` on a path NOT
-                    // yet open, with two windows up, race: both windows' Any-scoped
-                    // listeners missed the (window-local) project match and both called
-                    // `addProject`, adding it twice.
-                    let target = store
-                        .project_profile_for_path(&open.path)
+                    let profile_match = store.project_profile_for_path(&open.path);
+
+                    // Known project whose own profile has no LIVE window yet: queue the
+                    // open for that window's boot-time drain (`take_pending_opens`) and
+                    // create/focus it directly, rather than falling through to the
+                    // focused/main fallback below. That fallback used to hand the event
+                    // to whatever window happened to be open, and App.tsx's
+                    // foreign-project redirect there only knows how to open/focus the
+                    // right window -- it has nothing to hand the payload to once that
+                    // window exists, so the requested project was never selected and
+                    // `--agent` never spawned a session.
+                    //
+                    // GATED on `window_mode` (reported by the frontend -- see
+                    // `WindowModeFlag`'s doc comment), not merely on `label_for` missing.
+                    // `label_for` is a profile-EQUALITY lookup, and in SWITCH mode the
+                    // registry holds exactly one entry ("main" -> whichever profile is
+                    // currently active) -- so it misses for every OTHER (inactive)
+                    // profile too, which is the common case with more than one profile
+                    // defined. Without this gate, a `conduit <path>` on a project in a
+                    // merely-inactive (not literally windowless) profile would have read
+                    // that ordinary miss as "no window anywhere for this profile" and
+                    // built a REAL second OS window even in switch mode -- exactly the
+                    // invariant this feature must never break.
+                    if window_mode.get() {
+                        if let Some(profile) = &profile_match {
+                            if reg.label_for(profile).is_none() {
+                                match crate::open_or_focus_profile_window(&app, &reg, profile) {
+                                    Ok(label) => {
+                                        pending_opens.push(&label, open);
+                                        return;
+                                    }
+                                    Err(e) => {
+                                        // Don't drop the open on a failed window build --
+                                        // fall through to the old fallback below (whatever
+                                        // window is focused, else "main") instead. Reaching
+                                        // the wrong window still beats losing the
+                                        // invocation outright, which a bare `return` here
+                                        // would have done.
+                                        eprintln!(
+                                            "conduit: pending-open window creation failed: {e}"
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    // Everything else: the matched project's own (already live) profile
+                    // window, else whichever window has OS focus, else "main". App.tsx's
+                    // `cli-open` listener is window-scoped, so an event that reaches the
+                    // wrong window is silently ignored rather than landing in EVERY
+                    // window the way a broadcast used to -- which is what let a
+                    // `conduit .` on a path NOT yet open, with two windows up, race: both
+                    // windows' Any-scoped listeners missed the (window-local) project
+                    // match and both called `addProject`, adding it twice.
+                    let target = profile_match
                         .and_then(|profile| reg.label_for(&profile))
                         .or_else(|| crate::focused_label(&app))
                         .unwrap_or_else(|| "main".to_string());

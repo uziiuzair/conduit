@@ -36,7 +36,7 @@ import {
   type PendingDecision,
 } from "./rootProposals";
 import { projectsNeedingRoutes, type RoutesByProject } from "./pendingDecisionRouting";
-import { inProfile, type Profile, type WindowProfile } from "./profiles";
+import { inProfile, mountedInWindow, type Profile, type WindowProfile } from "./profiles";
 import { type CanvasState, emptyCanvas, migrateNotes } from "./canvas";
 import type { ContinuityFeed } from "./continuityFeed";
 import type * as Monaco from "monaco-editor";
@@ -957,15 +957,25 @@ function validateLayout(
  * layout, so removing it needed one repair. A borrowed session lives in someone else's
  * panes, so a targeted repair would leave a tab pointing at a session that no longer
  * exists. Only changed layouts are persisted -- this runs on every removal.
+ *
+ * In window mode a project this window doesn't MOUNT is skipped entirely — `layouts`
+ * still carries a (stale, boot-time-or-last-sync) copy of it (see `mergeSlices`'
+ * `mountedIds` in storeSync.ts), and repairing + persisting that copy here would
+ * overwrite the OWNING window's current layout with this window's outdated one. This
+ * window has no business writing a layout for a project it never renders. In switch
+ * mode `mountedInWindow` always returns true, so nothing here changes.
  */
 function revalidateAllLayouts(
   layouts: Record<string, ProjectLayout>,
   maximized: Record<string, string>,
   projects: Project[],
+  windowProfileId: string | null,
+  knownProfileIds: ReadonlySet<string>,
 ): { layouts: Record<string, ProjectLayout>; maximized: Record<string, string> } {
   const nextLayouts = { ...layouts };
   const nextMax = { ...maximized };
   for (const p of projects) {
+    if (!mountedInWindow(p, WINDOWED, windowProfileId, knownProfileIds)) continue;
     const cur = layouts[p.id];
     if (!cur) continue;
     const next = validateLayout(cur, p, projects);
@@ -1285,7 +1295,12 @@ interface AppState {
 
   /** Work root chat proposed, waiting on your approval. Runtime-only; Rust owns it. */
   pendingDecisions: PendingDecision[];
-  loadPendingDecisions: () => Promise<void>;
+  /** `accept` mirrors the live `pending-decision` listener's own per-window guard
+   *  (App.tsx's `inThisWindow`) — omit only for a caller that wants every card
+   *  regardless of window (there is none today; App.tsx's mount-time catch-up always
+   *  passes one). Without it, this catch-up fetch showed every OTHER window's cards too,
+   *  since (unlike the live event) it never went through that guard. */
+  loadPendingDecisions: (accept?: (projectId: string) => boolean) => Promise<void>;
   decisionArrived: (d: PendingDecision) => void;
   approveDecision: (id: string, agent: string, model?: string) => Promise<void>;
   denyDecision: (id: string) => Promise<void>;
@@ -1893,10 +1908,20 @@ export const useStore = create<AppState>((set, get) => {
       const cur = get();
       const patch: Partial<AppState> = {};
       if (projects) {
+        // Identity preservation (case b) only matters for a layout this window actually
+        // renders. In switch mode every project is mounted everywhere, so this is every
+        // fetched id — a no-op narrowing.
+        const knownProfileIds = new Set((profiles ?? cur.profiles).map((p) => p.id));
+        const mountedIds = new Set(
+          projects
+            .filter((p) => mountedInWindow(p, WINDOWED, cur.windowProfile.profileId, knownProfileIds))
+            .map((p) => p.id),
+        );
         const merged = mergeSlices(
           { projects: cur.projects, layouts: cur.layouts },
           projects,
           (p) => validateLayout(p.layout ?? defaultLayout(p), p, projects),
+          mountedIds,
         );
         // A project removed in another window is dropped by mergeSlices (case c) without
         // ever going through removeProject's own cleanup — replay that cleanup here, against
@@ -1924,10 +1949,47 @@ export const useStore = create<AppState>((set, get) => {
           patch.maximized = maxima;
         }
         // Balance close/removeProject release: acquire a model ref for every file tab a
-        // NEWLY added project's layout carries. Existing projects keep their local layout
-        // (mergeSlices never touches it), so their refs were already acquired.
+        // NEWLY added project's layout carries. An existing MOUNTED project keeps its
+        // local layout (mergeSlices never touches it for those), so its refs were
+        // already acquired.
         for (const id of merged.addedProjectIds) {
           for (const g of merged.layouts[id]?.groups ?? []) {
+            for (const t of g.tabs) {
+              if (t.kind === "file") registry.acquire(t.ref);
+            }
+          }
+        }
+        // Same balance for an existing NON-MOUNTED project whose layout mergeSlices
+        // swapped wholesale (case b' — this window doesn't render it, so it always
+        // adopts the freshly fetched layout on every sync, not just when added/removed).
+        // Without this, every such swap would leak the OLD layout's file-tab refs
+        // (never released) while never acquiring the NEW layout's — this project isn't
+        // mounted here, so nothing else in this window would ever balance them either.
+        // A ref shared with a MOUNTED tab elsewhere in this window is untouched net: the
+        // release only drops it to 0 (and disposes) when NOTHING else references it, and
+        // the immediate re-acquire below only matters for a ref that genuinely still
+        // appears in the new layout.
+        const addedOrRemoved = new Set([...merged.addedProjectIds, ...merged.removedProjectIds]);
+        for (const [id, next] of Object.entries(merged.layouts)) {
+          if (addedOrRemoved.has(id)) continue;
+          const prev = cur.layouts[id];
+          if (!prev || prev === next) continue;
+          for (const g of prev.groups) {
+            for (const t of g.tabs) {
+              if (t.kind !== "file") continue;
+              // Guarded (unlike the removedProjectIds block above, which fires only on
+              // an actual removal): this loop reruns on every debounced sync tick for
+              // every non-mounted project whose layout changed, and `setDirty` has no
+              // short-circuit of its own — an unconditional call here would `set()` the
+              // store for a ref that is, overwhelmingly, already NOT dirty.
+              if ((registry.model(t.ref)?.refCount ?? 1) <= 1 && cur.dirty[t.ref]) {
+                cur.setDirty(t.ref, false);
+              }
+              registry.release(t.ref);
+              registry.disposeIfUnreferenced(t.ref);
+            }
+          }
+          for (const g of next.groups) {
             for (const t of g.tabs) {
               if (t.kind === "file") registry.acquire(t.ref);
             }
@@ -2306,7 +2368,14 @@ export const useStore = create<AppState>((set, get) => {
         delete maxima[id];
         const projects = st.projects.filter((p) => p.id !== id);
         // Other projects may have borrowed this one's sessions into their panes.
-        const { layouts, maximized } = revalidateAllLayouts(remaining, maxima, projects);
+        const knownProfileIds = new Set(st.profiles.map((p) => p.id));
+        const { layouts, maximized } = revalidateAllLayouts(
+          remaining,
+          maxima,
+          projects,
+          st.windowProfile.profileId,
+          knownProfileIds,
+        );
         const selectedProjectId =
           st.selectedProjectId === id ? projects[0]?.id ?? null : st.selectedProjectId;
         return { projects, layouts, selectedProjectId, maximized };
@@ -2518,7 +2587,14 @@ export const useStore = create<AppState>((set, get) => {
         );
         // Every layout, not just this project's: a removed session may have been borrowed
         // into ANOTHER project's panes, and that tab would otherwise point at nothing.
-        const { layouts, maximized } = revalidateAllLayouts(s.layouts, s.maximized, projects);
+        const knownProfileIds = new Set(s.profiles.map((p) => p.id));
+        const { layouts, maximized } = revalidateAllLayouts(
+          s.layouts,
+          s.maximized,
+          projects,
+          s.windowProfile.profileId,
+          knownProfileIds,
+        );
         return { projects, live, sessionContext, layouts, maximized };
       });
     },
@@ -2650,10 +2726,11 @@ export const useStore = create<AppState>((set, get) => {
         rootChatRunning: { ...st.rootChatRunning, [chatId]: false },
       })),
 
-    loadPendingDecisions: async () => {
-      const list = await invoke<PendingDecision[]>("list_pending_decisions").catch(
+    loadPendingDecisions: async (accept) => {
+      const fetched = await invoke<PendingDecision[]>("list_pending_decisions").catch(
         () => [] as PendingDecision[],
       );
+      const list = accept ? fetched.filter((d) => accept(d.projectId)) : fetched;
       set({ pendingDecisions: list });
       for (const p of projectsNeedingRoutes(list, get().decisionRoutes)) {
         void get().loadDecisionRouting(p);

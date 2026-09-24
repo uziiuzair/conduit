@@ -24,12 +24,16 @@ const layout = (tag: string): ProjectLayout => ({
 
 const makeLayout = (p: Project): ProjectLayout => layout(`made-${p.id}`);
 
+/** Every existing test predates `mountedIds` and asserts switch-mode-equivalent
+ *  behavior — passing every known id keeps that behavior unchanged. */
+const allIds = (...ps: Project[]) => new Set(ps.map((p) => p.id));
+
 describe("mergeSlices", () => {
   it("(a) adds a fetched-new project with a layout built via makeLayout", () => {
     const current = { projects: [], layouts: {} };
     const fetched = [project("p1")];
 
-    const result = mergeSlices(current, fetched, makeLayout);
+    const result = mergeSlices(current, fetched, makeLayout, allIds(...fetched));
 
     expect(result.projects).toEqual(fetched);
     expect(result.addedProjectIds).toEqual(["p1"]);
@@ -37,17 +41,33 @@ describe("mergeSlices", () => {
     expect(result.layouts.p1).toEqual(layout("made-p1"));
   });
 
-  it("(b) an existing project keeps its LOCAL layout object identity", () => {
+  it("(b) an existing MOUNTED project keeps its LOCAL layout object identity", () => {
     const localLayout = layout("local");
     const current = { projects: [project("p1")], layouts: { p1: localLayout } };
     // Rust's copy changed shape (new session) but this window's layout must not be replaced.
     const fetched = [project("p1", [session("s1")])];
 
-    const result = mergeSlices(current, fetched, makeLayout);
+    const result = mergeSlices(current, fetched, makeLayout, allIds(...fetched));
 
     expect(result.layouts.p1).toBe(localLayout);
     expect(result.addedProjectIds).toEqual([]);
     expect(result.removedProjectIds).toEqual([]);
+  });
+
+  it("(b') an existing project NOT mounted in this window adopts the fetched layout instead", () => {
+    const localLayout = layout("local");
+    const current = { projects: [project("p1")], layouts: { p1: localLayout } };
+    const fetched = [project("p1", [session("s1")])];
+
+    // p1 is not in mountedIds -- this window doesn't render it (a foreign profile's
+    // project in window mode), so it has no local edit worth protecting.
+    const result = mergeSlices(current, fetched, makeLayout, new Set());
+
+    expect(result.layouts.p1).toEqual(layout("made-p1"));
+    expect(result.layouts.p1).not.toBe(localLayout);
+    // The project itself still follows the usual identity rule (d): JSON changed -> the
+    // fetched object is adopted.
+    expect(result.projects[0]).toBe(fetched[0]);
   });
 
   it("(c) drops a project Rust no longer reports, layout included", () => {
@@ -57,7 +77,7 @@ describe("mergeSlices", () => {
     };
     const fetched = [project("p1")]; // p2 removed elsewhere; Rust is authoritative
 
-    const result = mergeSlices(current, fetched, makeLayout);
+    const result = mergeSlices(current, fetched, makeLayout, allIds(...fetched));
 
     expect(result.projects.map((p) => p.id)).toEqual(["p1"]);
     expect(result.layouts).not.toHaveProperty("p2");
@@ -79,7 +99,7 @@ describe("mergeSlices", () => {
       changedFetched,
     ];
 
-    const result = mergeSlices(current, fetched, makeLayout);
+    const result = mergeSlices(current, fetched, makeLayout, allIds(...fetched));
 
     const p1 = result.projects.find((p) => p.id === "p1");
     const p2 = result.projects.find((p) => p.id === "p2");

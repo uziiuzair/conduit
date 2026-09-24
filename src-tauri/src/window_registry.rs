@@ -5,6 +5,7 @@
 //! (Task 3); further consumers land in Tasks 4, 6, 7.
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 
 #[derive(Default)]
@@ -72,6 +73,80 @@ impl WindowRegistry {
         }
         map.insert(label.to_string(), profile.clone());
         Claim::Claimed(label.to_string())
+    }
+}
+
+/// `conduit <path> [--agent <id>]` payloads waiting for the profile window they're
+/// addressed to, keyed by that window's LABEL (its would-be label if the window doesn't
+/// exist yet -- see `profile_window_label`).
+///
+/// Exists for one reason: the hook server's `/open` sink used to fall through to "main"
+/// (or whichever window has OS focus) whenever the matched project's own profile had no
+/// live window, and `App.tsx`'s foreign-project redirect only knows how to open/focus
+/// the right window -- it has nothing to hand the payload to once that window exists, so
+/// the requested project was never selected and `--agent` never spawned a session. The
+/// sink now queues the payload here and creates/focuses the window directly instead of
+/// emitting anywhere; the newly-booted window drains its own entry via
+/// `take_pending_opens` once `load()` resolves, the same way a live `cli-open` event is
+/// handled.
+#[derive(Default)]
+pub struct PendingOpens {
+    map: Mutex<HashMap<String, Vec<crate::cli_open::OpenRequest>>>,
+}
+
+impl PendingOpens {
+    pub fn push(&self, label: &str, open: crate::cli_open::OpenRequest) {
+        self.map
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .entry(label.to_string())
+            .or_default()
+            .push(open);
+    }
+
+    /// Drain and return every payload queued for `label`. Empty (not an error) when
+    /// nothing is pending -- the overwhelmingly common case, so every window's boot pays
+    /// one cheap map lookup.
+    pub fn take(&self, label: &str) -> Vec<crate::cli_open::OpenRequest> {
+        self.map
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(label)
+            .unwrap_or_default()
+    }
+}
+
+/// Whether this app instance is running with `profileWindowMode: "window"` (multi-window
+/// profiles) rather than the default `"switch"` (one shared window). The pref lives in
+/// localStorage -- a per-machine frontend value Rust has no other way to learn -- so every
+/// window's frontend reports it once, early at boot, via `set_profile_window_mode`; every
+/// window reports the SAME value (it's one machine-level setting), so the command is not
+/// restricted to "main" the way `set_active_profile` is.
+///
+/// This exists because `WindowRegistry::label_for` is a profile-EQUALITY lookup, and in
+/// switch mode the registry holds exactly one entry ("main" -> whichever profile is
+/// currently active) -- so `label_for` MISSES for every OTHER (inactive) profile, which is
+/// the common case whenever more than one profile exists. The cli-open sink's pending-open
+/// path (`hooks.rs`) must not read that miss as "no window for this profile, build one": in
+/// switch mode a miss means nothing more than "this isn't the active profile", and it must
+/// still fall through to whichever window already exists. Only a `label_for` miss WHILE
+/// this flag is true is trustworthy as "the profile has no window anywhere".
+///
+/// Defaults to `false` (switch mode) until the first window's frontend calls in -- the SAFE
+/// default: a `/open` request racing the very first instant of app boot (before any window
+/// has run its own startup effect) degrades to the pre-fix fall-through-to-main behavior for
+/// that brief window, rather than ever risking a real second OS window while the app might
+/// actually be in switch mode.
+#[derive(Default)]
+pub struct WindowModeFlag(AtomicBool);
+
+impl WindowModeFlag {
+    pub fn set(&self, windowed: bool) {
+        self.0.store(windowed, Ordering::SeqCst);
+    }
+
+    pub fn get(&self) -> bool {
+        self.0.load(Ordering::SeqCst)
     }
 }
 
@@ -177,5 +252,51 @@ mod tests {
         registry.register("main", None);
         let claim = registry.claim("profile-default", &None);
         assert_eq!(claim, Claim::Existing("main".to_string()));
+    }
+
+    fn open(path: &str) -> crate::cli_open::OpenRequest {
+        crate::cli_open::OpenRequest {
+            path: path.to_string(),
+            agent: None,
+        }
+    }
+
+    #[test]
+    fn pending_opens_take_is_empty_when_nothing_was_queued() {
+        let pending = PendingOpens::default();
+        assert!(pending.take("profile-a").is_empty());
+    }
+
+    #[test]
+    fn pending_opens_round_trips_and_drains() {
+        let pending = PendingOpens::default();
+        pending.push("profile-a", open("/repo/one"));
+        pending.push("profile-a", open("/repo/two"));
+        pending.push("profile-b", open("/repo/three"));
+
+        let a = pending.take("profile-a");
+        assert_eq!(a.len(), 2);
+        assert_eq!(a[0].path, "/repo/one");
+        assert_eq!(a[1].path, "/repo/two");
+
+        // Draining "a" leaves "b" untouched, and "a" itself is now empty -- a second
+        // window boot for the same label must not replay an already-delivered open.
+        assert!(pending.take("profile-a").is_empty());
+        assert_eq!(pending.take("profile-b").len(), 1);
+    }
+
+    #[test]
+    fn window_mode_flag_defaults_to_switch_mode() {
+        // The safe default: unreached until a window's frontend reports in.
+        assert!(!WindowModeFlag::default().get());
+    }
+
+    #[test]
+    fn window_mode_flag_round_trips() {
+        let flag = WindowModeFlag::default();
+        flag.set(true);
+        assert!(flag.get());
+        flag.set(false);
+        assert!(!flag.get());
     }
 }

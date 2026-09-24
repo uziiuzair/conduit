@@ -996,14 +996,37 @@ fn get_active_profile(store: State<Arc<Store>>) -> Option<String> {
 }
 
 #[tauri::command]
-fn set_active_profile(id: Option<String>, window: tauri::Window, store: State<Arc<Store>>) -> bool {
+fn set_active_profile(
+    id: Option<String>,
+    window: tauri::Window,
+    store: State<Arc<Store>>,
+    reg: State<Arc<window_registry::WindowRegistry>>,
+) -> bool {
     // Only "main" may change the global active profile -- a secondary profile window's
     // identity is fixed to the profile it was opened for (the registry entry), and letting
     // it rewrite the global would make every other window's Default view jump underneath it.
     if window.label() != "main" {
         return false;
     }
-    store.set_active_profile(id)
+    let ok = store.set_active_profile(id.clone());
+    if ok {
+        // Keep the registry's "main" entry in lock-step with the store. This command is
+        // the ONLY place `active_profile_id` changes at runtime, and only in switch mode
+        // -- window mode never calls it (the ProfileBar routes every pick through
+        // `open_profile_window` instead; see Sidebar.tsx/store.ts's `WINDOWED` gates), so
+        // `main`'s registry entry (set once at boot) never needs refreshing there. In
+        // switch mode it does: without this, switching profiles mid-session leaves
+        // "main" registered under its BOOT-time profile forever, and `label_for` would
+        // keep reporting a miss for the newly active profile even though "main" is
+        // showing it -- e.g. the cli-open sink's normal (non-pending-open) fallthrough
+        // would needlessly fall to `focused_label`/`"main"` instead of finding "main"
+        // directly. NOT load-bearing for the pending-open path itself, which is gated on
+        // `WindowModeFlag` (window mode only) rather than trusting `label_for` misses in
+        // switch mode -- see that flag's own doc comment for why a stale-or-not registry
+        // entry is unreliable there regardless.
+        reg.register("main", id);
+    }
+    ok
 }
 
 // ---- Profile window commands --------------------------------------------------
@@ -1014,6 +1037,14 @@ struct WindowProfileInfo {
     label: String,
     profile_id: Option<String>,
     is_main: bool,
+}
+
+/// Reported once, early, by every window's frontend on boot with the `WINDOWED` constant
+/// (`profileWindowMode` localStorage pref) — see `WindowModeFlag`'s doc comment for why
+/// the cli-open sink needs this signal from the ONE place that actually knows the mode.
+#[tauri::command]
+fn set_profile_window_mode(windowed: bool, flag: State<Arc<window_registry::WindowModeFlag>>) {
+    flag.set(windowed);
 }
 
 #[tauri::command]
@@ -1050,19 +1081,21 @@ fn resolve_open_target(
     }
 }
 
-#[tauri::command]
-fn open_profile_window(
-    app: tauri::AppHandle,
-    profile_id: Option<String>,
-    reg: State<Arc<window_registry::WindowRegistry>>,
-    store: State<Arc<Store>>,
-) -> Result<(), String> {
-    let target = resolve_open_target(&store.list_profiles(), &profile_id)?;
-    let label = window_registry::profile_window_label(&target);
+/// Create or focus the window for `target` (a resolved profile, `None` = Default),
+/// returning the label it ended up at. Shared by the `open_profile_window` command and
+/// the cli-open sink's pending-open path (`hooks.rs`) so both go through the exact same
+/// claim-or-build logic and a race between them resolves the same way `claim` already
+/// guarantees for two concurrent `open_profile_window` calls.
+pub(crate) fn open_or_focus_profile_window(
+    app: &tauri::AppHandle,
+    reg: &Arc<window_registry::WindowRegistry>,
+    target: &Option<String>,
+) -> Result<String, String> {
+    let label = window_registry::profile_window_label(target);
     // `claim` is check-then-insert under ONE lock: two concurrent calls for the same
     // profile can't both see "nothing registered" and both try to build a window under
     // the same label (the old label_for-then-register split had exactly that race).
-    match reg.claim(&label, &target) {
+    match reg.claim(&label, target) {
         window_registry::Claim::Existing(label) => {
             if let Some(w) = app.get_webview_window(&label) {
                 let _ = w.show();
@@ -1072,7 +1105,7 @@ fn open_profile_window(
             // Else: another call is still building this label, or the entry is stale.
             // Do nothing rather than remove/rebuild here -- Task 4's Destroyed handler
             // is what reaps a truly-dead entry, so a stale claim is transient.
-            Ok(())
+            Ok(label)
         }
         window_registry::Claim::Claimed(label) => {
             // `claim` already inserted `label -> target` before returning; that insert
@@ -1080,7 +1113,7 @@ fn open_profile_window(
             // `window_profile` IPC call must find its own registry entry, or it reports
             // isMain: false / profileId: null on first paint.
             let builder =
-                tauri::WebviewWindowBuilder::new(&app, &label, tauri::WebviewUrl::default())
+                tauri::WebviewWindowBuilder::new(app, &label, tauri::WebviewUrl::default())
                     .title("Conduit")
                     .inner_size(1100.0, 720.0)
                     .min_inner_size(980.0, 600.0)
@@ -1092,9 +1125,33 @@ fn open_profile_window(
                 reg.remove(&label);
                 format!("open window: {e}")
             })?;
-            Ok(())
+            Ok(label)
         }
     }
+}
+
+#[tauri::command]
+fn open_profile_window(
+    app: tauri::AppHandle,
+    profile_id: Option<String>,
+    reg: State<Arc<window_registry::WindowRegistry>>,
+    store: State<Arc<Store>>,
+) -> Result<(), String> {
+    let target = resolve_open_target(&store.list_profiles(), &profile_id)?;
+    open_or_focus_profile_window(&app, reg.inner(), &target)?;
+    Ok(())
+}
+
+/// One window's drain of every `conduit <path> [--agent <id>]` invocation the cli-open
+/// sink queued for it while it had no live window yet (Finding 1's pending-open path).
+/// Called once per window right after `load()` resolves, alongside the live `cli-open`
+/// listener that handles the same payload shape for a window that was already open.
+#[tauri::command]
+fn take_pending_opens(
+    window: tauri::Window,
+    pending: State<Arc<window_registry::PendingOpens>>,
+) -> Vec<cli_open::OpenRequest> {
+    pending.take(window.label())
 }
 
 #[tauri::command]
@@ -2327,6 +2384,8 @@ pub fn run() {
         .manage(Arc::new(broker::Presence::default()))
         .manage(Arc::new(proposals::Proposals::default()))
         .manage(Arc::new(window_registry::WindowRegistry::default()))
+        .manage(Arc::new(window_registry::PendingOpens::default()))
+        .manage(Arc::new(window_registry::WindowModeFlag::default()))
         .manage(DirtyGuard::default())
         .manage(hotexit::HotExitState::default())
         .on_window_event(|window, event| {
@@ -2414,6 +2473,14 @@ pub fn run() {
                 .inner()
                 .clone();
             reg.register("main", store.active_profile());
+            let pending_opens = app
+                .state::<Arc<window_registry::PendingOpens>>()
+                .inner()
+                .clone();
+            let window_mode = app
+                .state::<Arc<window_registry::WindowModeFlag>>()
+                .inner()
+                .clone();
             hooks::start(
                 app.handle().clone(),
                 hook_state,
@@ -2427,6 +2494,8 @@ pub fn run() {
                 agy_usage,
                 agy_resume,
                 reg,
+                pending_opens,
+                window_mode,
             );
             bridge::start(app.handle().clone());
 
@@ -2570,7 +2639,9 @@ pub fn run() {
             get_active_profile,
             set_active_profile,
             window_profile,
+            set_profile_window_mode,
             open_profile_window,
+            take_pending_opens,
             close_window,
             set_project_color,
             root_chat::root_chat_send,
