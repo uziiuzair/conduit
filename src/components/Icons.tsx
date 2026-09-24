@@ -118,3 +118,13 @@ export const ChatBubbleIcon = ({ size = 13, className }: P) =>
   svg(size, className, (
     <path d="M21 12a8 8 0 0 1-8 8H5.6c-.9 0-1.4-1-.9-1.7l1-1.4A8 8 0 1 1 21 12z" />
   ));
+
+// Settings: the (i) disclosure on a setting row.
+export const InfoIcon = ({ size = 13, className }: P) =>
+  svg(size, className, (
+    <>
+      <circle cx="12" cy="12" r="9" />
+      <path d="M12 11v5" />
+      <circle cx="12" cy="7.6" r="0.4" fill="currentColor" stroke="none" />
+    </>
+  ));

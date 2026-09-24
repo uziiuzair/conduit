@@ -1239,6 +1239,12 @@ fn resolve_open_target(
     }
 }
 
+/// Title for a secondary profile window: "Conduit (<profile name>)", so the OS window
+/// switcher can tell two Conduits apart. `None` is the implicit Default profile.
+fn profile_window_title(name: Option<&str>) -> String {
+    format!("Conduit ({})", name.unwrap_or("Default"))
+}
+
 /// Create or focus the window for `target` (a resolved profile, `None` = Default),
 /// returning the label it ended up at. Shared by the `open_profile_window` command and
 /// the cli-open sink's pending-open path (`hooks.rs`) so both go through the exact same
@@ -1270,9 +1276,18 @@ pub(crate) fn open_or_focus_profile_window(
             // landing before `build()` is load-bearing -- the new webview's first
             // `window_profile` IPC call must find its own registry entry, or it reports
             // isMain: false / profileId: null on first paint.
+            // Titled per profile so the window switcher / Mission Control can tell two
+            // Conduits apart; only main keeps the bare "Conduit" (tauri.conf.json).
+            let name = target.as_ref().and_then(|id| {
+                app.state::<Arc<Store>>()
+                    .list_profiles()
+                    .into_iter()
+                    .find(|p| &p.id == id)
+                    .map(|p| p.name)
+            });
             let builder =
                 tauri::WebviewWindowBuilder::new(app, &label, tauri::WebviewUrl::default())
-                    .title("Conduit")
+                    .title(profile_window_title(name.as_deref()))
                     .inner_size(1100.0, 720.0)
                     .min_inner_size(980.0, 600.0)
                     .theme(Some(tauri::Theme::Dark))
@@ -3011,6 +3026,15 @@ mod tests {
     fn resolve_open_target_none_is_default() {
         let profiles = [test_profile("a")];
         assert_eq!(resolve_open_target(&profiles, &None), Ok(None));
+    }
+
+    #[test]
+    fn profile_window_title_names_the_profile() {
+        assert_eq!(
+            profile_window_title(Some("Streaming")),
+            "Conduit (Streaming)"
+        );
+        assert_eq!(profile_window_title(None), "Conduit (Default)");
     }
 
     #[test]
