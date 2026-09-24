@@ -58,6 +58,13 @@ body {
   cursor: default;
 }
 
+/* Selection wears the accent, not the browser's default blue. A translucent wash
+   keeps the glyphs' own colors readable through it (code spans, links, dim hints),
+   so no forced `color` — it derives from --accent and follows every theme. */
+::selection {
+  background: color-mix(in srgb, var(--accent) 32%, transparent);
+}
+
 /* Keep selection where it's actually useful: form fields, the Monaco editor, the
    terminal (xterm draws its own selection, but native stays on for copy), and every
    surface whose text a person reads and quotes — chat threads (HQ + session chat,
