@@ -3,6 +3,31 @@
 All notable changes to Conduit are documented here. This project uses
 [semantic versioning](https://semver.org/).
 
+## 0.40.0 — 2026-09-24
+
+- **Changed — the session chat view speaks HQ's design language.** The rich session view
+  is now the same condensed, centered conversation the root chat uses — warm accent
+  bubbles for you, plain prose for the agent, quiet one-line tool calls — instead of a
+  full-width wall of grey boxes and badges.
+- **Added — permission mode from the chat.** The session chat's composer carries a mode
+  chip showing Claude's current mode (normal / auto-accept / plan — read live from the
+  hook stream) and clicking it cycles modes, the same Shift+Tab the terminal takes.
+- **Added — the chat shows what the agent is doing.** While a session runs, the thread
+  ends in a pulse plus the tool it is in right now ("Editing store.ts", "Compacting…"),
+  so a working agent never looks stalled.
+- **Changed — Insight blocks render as callouts.** The explanatory output style's
+  `★ Insight` sections draw as accent cards instead of raw dash-rule chrome.
+- **Fixed — chat and settings text is selectable.** Conversation threads (HQ and
+  session chat) and settings explanations can be selected and copied; app chrome
+  stays non-selectable like a native app.
+- **Changed — profile windows carry their profile's name.** A second window is titled
+  "Conduit (Streaming)" instead of a second bare "Conduit", so the window switcher and
+  Mission Control can tell them apart.
+- **Changed — Settings → General is scannable.** Every option is now a short one-line
+  title with an (i) that unfolds the full explanation, instead of a wall of paragraphs.
+  Notes you must see — restart requirements, a missing tmux, the CLI install path —
+  stay visible without clicking.
+
 ## 0.39.0 — 2026-09-24
 
 - **Added — Profiles can open in their own windows.** A new Settings → General option makes
