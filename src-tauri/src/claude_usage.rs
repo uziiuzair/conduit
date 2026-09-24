@@ -224,6 +224,17 @@ struct CachedPlan {
 /// not know beats showing a number the user might act on.
 const PLAN_STALE_MAX_SECS: u64 = 60 * 60;
 
+/// How long a successful read may be served DIRECTLY, skipping a new network fetch
+/// entirely -- not merely as a failure fallback. Multi-window profiles means several
+/// windows can each run their own independent 5-minute `fetch_claude_usage` poll
+/// (`useClaudeAmbient`) against the same account; without this, two windows open at once
+/// doubled the real request rate against an endpoint that already rate-limits a single
+/// Conduit instance competing with the `claude` CLI itself for the same budget. Shorter
+/// than `PLAN_STALE_MAX_SECS` on purpose: this path is taken even when the fetch would
+/// have SUCCEEDED, so it has to still be fresh enough to trust outright, not merely
+/// better than nothing.
+const PLAN_FRESH_MAX_SECS: u64 = 4 * 60;
+
 fn now_secs() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -274,6 +285,19 @@ impl ClaudeAuth {
             .filter(|c| now.saturating_sub(c.fetched_at) <= PLAN_STALE_MAX_SECS)
             .cloned()
     }
+
+    /// The last good read for this account, if it's fresh enough to serve WITHOUT
+    /// attempting a new network fetch at all -- regardless of which window's poll this
+    /// is. See `PLAN_FRESH_MAX_SECS`.
+    fn fresh_plan(&self, key: &str) -> Option<CachedPlan> {
+        let now = now_secs();
+        self.last_plan
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(key)
+            .filter(|c| now.saturating_sub(c.fetched_at) <= PLAN_FRESH_MAX_SECS)
+            .cloned()
+    }
 }
 
 /// Tauri command: usage for EVERY registered Claude account plus the environment default.
@@ -297,8 +321,26 @@ pub async fn fetch_claude_usage(
             .into_iter()
             .map(|(account_id, label, config_dir)| {
                 let key = account_key(account_id.as_deref());
-                let token = tokens.get(&key).cloned();
                 let local = read_local_usage(config_dir.as_deref());
+
+                // TTL gate: a read this fresh is served AS-IS, without ever touching the
+                // rate-limited endpoint -- regardless of which window's poll this is (see
+                // `PLAN_FRESH_MAX_SECS`). This is not the failure-path stale serving
+                // below; it fires even when a live fetch would have succeeded, precisely
+                // to avoid attempting one.
+                if let Some(fresh) = auth.fresh_plan(&key) {
+                    return ClaudeAccountUsage {
+                        account_id,
+                        label,
+                        usage: ClaudeUsage {
+                            local,
+                            plan: Some(fresh.windows),
+                            plan_source: "live".into(),
+                        },
+                    };
+                }
+
+                let token = tokens.get(&key).cloned();
                 let (mut plan, mut plan_source) = fetch_plan(token.clone());
                 // A connected account whose fetch didn't come back live may just hold a
                 // stale token: Claude Code rotates the on-disk credentials whenever one of
@@ -792,6 +834,32 @@ mod tests {
             },
         );
         assert!(auth.recent_plan("acc").is_none());
+    }
+
+    #[test]
+    fn a_fresh_read_is_servable_without_a_new_fetch() {
+        let auth = super::ClaudeAuth::default();
+        assert!(auth.fresh_plan("acc").is_none(), "nothing cached yet");
+        auth.remember_plan("acc", &[win(0.42)]);
+        let got = auth.fresh_plan("acc").expect("a fresh read is servable");
+        assert!((got.windows[0].pct_used - 0.42).abs() < 1e-9);
+    }
+
+    #[test]
+    fn a_read_past_the_fresh_ttl_is_not_served_without_a_new_fetch() {
+        // Past PLAN_FRESH_MAX_SECS it must go back to the network -- but it's still well
+        // inside the (much longer) PLAN_STALE_MAX_SECS failure-fallback window, so a
+        // throttled retry can still serve it as "stale" rather than going blank.
+        let auth = super::ClaudeAuth::default();
+        auth.last_plan.lock().unwrap().insert(
+            "acc".into(),
+            super::CachedPlan {
+                windows: vec![win(0.9)],
+                fetched_at: super::now_secs() - super::PLAN_FRESH_MAX_SECS - 1,
+            },
+        );
+        assert!(auth.fresh_plan("acc").is_none());
+        assert!(auth.recent_plan("acc").is_some());
     }
 
     #[test]
