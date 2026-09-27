@@ -1303,7 +1303,11 @@ pub(crate) fn open_or_focus_profile_window(
     }
 }
 
-#[tauri::command]
+// `(async)` is required, not a speed-up: `WebviewWindowBuilder::build` deadlocks on Windows
+// when called from a synchronous command (WebView2 creation waits on the UI thread the
+// command is blocking) -- documented on the builder itself. `claim` already makes two
+// concurrent opens of one profile safe, which is what running off-thread needs.
+#[tauri::command(async)]
 fn open_profile_window(
     app: tauri::AppHandle,
     profile_id: Option<String>,
