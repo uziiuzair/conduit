@@ -113,6 +113,12 @@ export function RightColumn({
   // Last branch we observed, so a checkout made in the terminal can be detected
   // and the file tree reloaded once — without remounting it on every poll tick.
   const lastBranch = useRef<string | null | undefined>(undefined);
+  // The dir whose git reads are still in flight. One read is four `git` processes, and in a
+  // large or cloud-synced repo that can take longer than GIT_POLL_MS (2.6 s measured on
+  // Windows), so without this ticks stack up behind each other and spawn git forever.
+  const gitInFlight = useRef<string | null>(null);
+  const currentDir = useRef(workingDirectory);
+  currentDir.current = workingDirectory;
 
   // Re-read git state (branch, changes, graph) WITHOUT remounting the file tree.
   // Safe to call on a timer — unlike `refresh`, it never bumps `refreshKey`, so
@@ -126,14 +132,20 @@ export function RightColumn({
       lastBranch.current = undefined;
       return;
     }
-    void invoke<Change[]>("git_changes", { dir: workingDirectory })
-      .then(setChanges)
-      .catch(() => setChanges([]));
-    void invoke<GraphCommit[]>("git_graph", { dir: workingDirectory })
-      .then(setGraph)
-      .catch(() => setGraph([]));
-    void invoke<string | null>("git_branch", { dir: workingDirectory })
-      .then((b) => {
+    if (gitInFlight.current === workingDirectory) return;
+    gitInFlight.current = workingDirectory;
+    const dir = workingDirectory;
+    // A read that lands after the panel moved to another dir must not paint the old repo.
+    const stillCurrent = () => currentDir.current === dir;
+    const reads = [
+      invoke<Change[]>("git_changes", { dir })
+        .then((c) => stillCurrent() && setChanges(c))
+        .catch(() => stillCurrent() && setChanges([])),
+      invoke<GraphCommit[]>("git_graph", { dir })
+        .then((g) => stillCurrent() && setGraph(g))
+        .catch(() => stillCurrent() && setGraph([])),
+      invoke<string | null>("git_branch", { dir }).then((b) => {
+        if (!stillCurrent()) return;
         // Branch changed underfoot (e.g. `git checkout` in the terminal): reload
         // the tree once so it reflects the new branch. Skip the first read
         // (undefined sentinel) and dir switches — those remount the tree anyway.
@@ -143,7 +155,11 @@ export function RightColumn({
         lastBranch.current = b;
         setBranch(b);
       })
-      .catch(() => setBranch(null));
+      .catch(() => stillCurrent() && setBranch(null)),
+    ];
+    void Promise.allSettled(reads).then(() => {
+      if (gitInFlight.current === dir) gitInFlight.current = null;
+    });
   }, [workingDirectory]);
 
   // Manual refresh button: full reload, including a file-tree remount.

@@ -205,7 +205,7 @@ pub fn parse_models(out: &str) -> Vec<CommandCodeModel> {
 }
 
 /// Tauri command: read the Command Code config for an account (None = ambient).
-#[tauri::command]
+#[tauri::command(async)]
 pub fn command_code_config(account_config_dir: Option<String>) -> CommandCodeConfig {
     let Some(path) = config_path(account_config_dir.as_deref()) else {
         return CommandCodeConfig::default();
