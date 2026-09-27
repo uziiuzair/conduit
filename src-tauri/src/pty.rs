@@ -228,6 +228,12 @@ pub struct PtyManager {
     /// a RETIRE keeps both — the persisted port makes the resume spawn reuse them
     /// (`IdeHost::start_for_session` is idempotent).
     ide_host: std::sync::OnceLock<Arc<crate::ide_host::IdeHost>>,
+    /// Serializes spawn against teardown. `pty_spawn` runs on a worker thread (so a slow
+    /// process launch cannot freeze the UI), which turns its "already running? else create"
+    /// into a check-then-insert other threads can interleave with: two spawns of one id
+    /// would both miss and start two agents, and a kill landing mid-spawn would find
+    /// nothing and orphan the process the spawn then inserts. Held for the whole of both.
+    lifecycle: Mutex<()>,
 }
 
 /// Why a session's processes are being ended. The two verbs kill the same things; they
@@ -264,6 +270,7 @@ impl PtyManager {
             tmux: std::sync::OnceLock::new(),
             warm_spawns: DashMap::new(),
             ide_host: std::sync::OnceLock::new(),
+            lifecycle: Mutex::new(()),
         }
     }
 
@@ -343,6 +350,7 @@ impl PtyManager {
         ide_port: Option<u16>,
         on_event: Channel<String>,
     ) -> Result<(), String> {
+        let _lifecycle = self.lifecycle.lock().unwrap_or_else(|e| e.into_inner());
         // Already running → re-attach the live reader to the new channel and force
         // a repaint via a winsize nudge, rather than spawning a second process.
         // Single atomic lookup (no contains_key/get gap that could race kill()).
@@ -877,6 +885,7 @@ impl PtyManager {
     /// dispositions `Teardown` names, which is exactly why that decision is a tested table
     /// rather than a comment.
     fn tear_down(&self, session_id: &str, how: Teardown) {
+        let _lifecycle = self.lifecycle.lock().unwrap_or_else(|e| e.into_inner());
         // Freshen the snapshot BEFORE dropping the PTY: after the entry is gone the live
         // buffer is unreachable, and a retire that saved nothing would come back to
         // whatever the slow flush timer last happened to write.

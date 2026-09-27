@@ -232,7 +232,7 @@ pub fn history_items(store: &crate::store::Store, chat_id: &str) -> Vec<Value> {
 /// Replay a chat's history from its transcript on disk — the same parser the live
 /// stream uses, so reopen renders exactly what streaming rendered. Missing transcript
 /// (fresh chat, deleted store) degrades to empty, per the transcript-consumer rule.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn root_chat_history(chat_id: String, store: State<Arc<crate::store::Store>>) -> Vec<Value> {
     history_items(&store, &chat_id)
 }

@@ -235,7 +235,7 @@ pub fn list_plugins(store: State<'_, Arc<crate::store::Store>>) -> Vec<PluginDes
 }
 
 /// Return the plugin's `main.js` source, guarding against path escape.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn read_plugin_source(id: String) -> Result<String, String> {
     if !is_valid_id(&id) {
         return Err("invalid plugin id".into());
@@ -299,7 +299,7 @@ pub fn remove_plugin(id: String, store: State<'_, Arc<crate::store::Store>>) -> 
     Ok(())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn open_plugins_dir() -> Result<String, String> {
     Ok(plugins_dir().to_string_lossy().into_owned())
 }

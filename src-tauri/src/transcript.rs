@@ -107,7 +107,7 @@ pub const VIEW_LIMIT: usize = 400;
 /// Returns an empty vec (never an error) when there is simply nothing yet -- a session that
 /// has not spoken, or one whose transcript has not been written. The view treats empty as
 /// "nothing to show", so an error here would only turn a normal state into a red banner.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn session_transcript(
     session_id: String,
     limit: Option<usize>,

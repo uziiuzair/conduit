@@ -139,6 +139,14 @@ export function TerminalView({
    *  through either the stop transition or the reveal path, depending on whether the pane
    *  was on screen when the flag cleared. */
   const resetOnSpawnRef = useRef(false);
+  /** Keystrokes typed while `pty_spawn` is in flight, sent in order once it resolves.
+   *  `pty_spawn` runs off the UI thread (and one at a time), while `pty_write` stays on it
+   *  to keep keystroke order -- so a key pressed as a session opens would otherwise reach
+   *  Rust before the session exists and be dropped. Both used to share one thread, which
+   *  queued the write behind the spawn for free. Holds the spawn generation it waits on, so
+   *  a superseded spawn resolving late cannot release input meant for its replacement. */
+  const spawnPendingRef = useRef<number | null>(null);
+  const pendingInputRef = useRef<string[]>([]);
 
   const restoreOnOpen = useStore((s) => s.restoreSessionsOnOpen);
   const rendererPref = useStore((s) => s.terminalRenderer);
@@ -180,6 +188,15 @@ export function TerminalView({
       if (disposedRef.current || gen !== spawnGenRef.current) return;
       termRef.current?.write(b64ToBytes(msg));
     };
+    spawnPendingRef.current = gen;
+    const releaseInput = (deliver: boolean) => {
+      if (spawnPendingRef.current !== gen) return;
+      const queued = pendingInputRef.current;
+      pendingInputRef.current = [];
+      spawnPendingRef.current = null;
+      if (!deliver || disposedRef.current) return;
+      for (const data of queued) void invoke("pty_write", { sessionId, data }).catch(() => {});
+    };
     void invoke("pty_spawn", {
       sessionId,
       workingDirectory: wd,
@@ -197,6 +214,7 @@ export function TerminalView({
       onEvent: channel,
     })
       .then(() => {
+        releaseInput(true);
         // Cold-spawn repaint. When the agent resumes (`claude --resume <id>`, agy
         // `--conversation=<id>`) it replays into the alternate screen and nothing repaints
         // it, so the pane can come back blank or half-drawn — the long-standing "resume
@@ -212,7 +230,10 @@ export function TerminalView({
             .catch(() => {});
         }, 400);
       })
-      .catch((e) => termRef.current?.write(`\r\n[spawn error: ${e}]\r\n`));
+      .catch((e) => {
+        releaseInput(false);
+        termRef.current?.write(`\r\n[spawn error: ${e}]\r\n`);
+      });
   };
 
   // Create the xterm instance exactly once.
@@ -233,8 +254,13 @@ export function TerminalView({
     // The renderer addon is attached by its own effect below, not here: it has to be able
     // to swap when the preference changes, and this effect must stay one-shot because
     // re-running it would recreate the xterm and kill the PTY under it.
-    const writeSeq = (data: string) =>
+    const writeSeq = (data: string) => {
+      if (spawnPendingRef.current !== null) {
+        pendingInputRef.current.push(data);
+        return;
+      }
       void invoke("pty_write", { sessionId, data }).catch(() => {});
+    };
 
     term.onData((d) => writeSeq(d));
 
