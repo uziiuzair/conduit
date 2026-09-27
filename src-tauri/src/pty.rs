@@ -626,62 +626,46 @@ impl PtyManager {
         #[cfg(windows)]
         let sid_for_reader = session_id.clone();
 
-        // Reader thread: blocking reads → base64 → current sink. Send errors are
-        // ignored (the channel may be briefly absent during a reload); only a read
-        // EOF/error ends the thread.
+        // Two threads per session. The READER does blocking reads into the ring buffer and
+        // hands the raw bytes over; the FLUSHER coalesces them (see `OUTPUT_FRAME`) and
+        // sends each batch to the current sink. Sink state never ends either loop: only a
+        // read EOF/error ends the reader, and the flusher drains what is left and follows.
+        let (out_tx, out_rx) = std::sync::mpsc::channel::<Vec<u8>>();
         thread::spawn(move || {
             let engine = base64::engine::general_purpose::STANDARD;
-            let mut buf = [0u8; 16 * 1024];
             // Detach the sink after a long run of failed sends (dead channel that was
             // never re-attached, never detached via a clean window close, never killed)
             // — a safety net so a stuck Channel doesn't retry forever. This never ends
             // the loop: the child may still be alive, so send failure only clears the
-            // sink (see `send_to_sink`'s `Failed` arm below); the reader keeps reading
-            // into the ring buffer either way. Resets on any successful send, so reload
-            // gaps don't trip it.
+            // sink (see `send_to_sink`'s `Failed` arm below). Resets on any successful
+            // send, so reload gaps don't trip it.
             let mut consecutive_fails: u32 = 0;
-            // Only a real read EOF/error sets this — sink/channel state never ends the
-            // loop. No initializer: every path out of the loop below (`Ok(0)`/`Err(_)`)
-            // assigns before breaking, so it is always set by the time either `#[cfg]`
-            // arm below reads it.
-            let child_exited;
-            loop {
-                match reader.read(&mut buf) {
-                    Ok(0) => {
-                        child_exited = true;
-                        break;
+            let mut last_flush: Option<std::time::Instant> = None;
+            while let Some(batch) = next_output_batch(&out_rx, last_flush, OUTPUT_FRAME) {
+                last_flush = Some(std::time::Instant::now());
+                let encoded = engine.encode(&batch);
+                // Remote (bridge) fan-out is suppressed for a siloed session so its
+                // output never leaves the machine via a paired phone; the desktop sink
+                // below still receives everything (the human reads the silo directly).
+                if !suppress_for_reader.load(Ordering::Relaxed) {
+                    if let Ok(mut subs) = subs_for_reader.lock() {
+                        broadcast(&mut subs, &encoded);
                     }
-                    Ok(n) => {
-                        output_for_reader.push(&buf[..n]);
-                        let encoded = engine.encode(&buf[..n]);
-                        // Remote (bridge) fan-out is suppressed for a siloed session so its
-                        // output never leaves the machine via a paired phone; the desktop sink
-                        // below still receives everything (the human reads the silo directly).
-                        if !suppress_for_reader.load(Ordering::Relaxed) {
-                            if let Ok(mut subs) = subs_for_reader.lock() {
-                                broadcast(&mut subs, &encoded);
+                }
+                match send_to_sink(&sink, encoded) {
+                    SinkSend::Ok => consecutive_fails = 0,
+                    SinkSend::Detached => {} // window closed; ring buffer + scrollback keep running
+                    SinkSend::Failed => {
+                        consecutive_fails += 1;
+                        if consecutive_fails > 2000 {
+                            // The channel is dead but the child is alive: detach instead of the
+                            // old `break` that left a zombie entry whose next spawn re-attached
+                            // to silence.
+                            if let Ok(mut s) = sink.lock() {
+                                *s = None;
                             }
+                            consecutive_fails = 0;
                         }
-                        match send_to_sink(&sink, encoded) {
-                            SinkSend::Ok => consecutive_fails = 0,
-                            SinkSend::Detached => {} // window closed; ring buffer + scrollback keep running
-                            SinkSend::Failed => {
-                                consecutive_fails += 1;
-                                if consecutive_fails > 2000 {
-                                    // The channel is dead but the child is alive: detach instead of the
-                                    // old `break` that left a zombie entry whose next spawn re-attached
-                                    // to silence.
-                                    if let Ok(mut s) = sink.lock() {
-                                        *s = None;
-                                    }
-                                    consecutive_fails = 0;
-                                }
-                            }
-                        }
-                    }
-                    Err(_) => {
-                        child_exited = true;
-                        break;
                     }
                 }
             }
@@ -697,6 +681,28 @@ impl PtyManager {
                     let _ = ch.send(enc_notice);
                 }
             }
+        });
+
+        thread::spawn(move || {
+            let mut buf = [0u8; 16 * 1024];
+            // Only a real read EOF/error sets this — sink/channel state never ends the
+            // loop, and neither does the flusher (it only stops after this thread does).
+            let child_exited;
+            loop {
+                match reader.read(&mut buf) {
+                    Ok(0) | Err(_) => {
+                        child_exited = true;
+                        break;
+                    }
+                    Ok(n) => {
+                        output_for_reader.push(&buf[..n]);
+                        let _ = out_tx.send(buf[..n].to_vec());
+                    }
+                }
+            }
+            // Dropping the sender lets the flusher drain what is left, then print the
+            // exit notice after it -- never before the agent's last output.
+            drop(out_tx);
             // Free the dead session's handles/buffers and let a re-spawn of this id
             // cold-start instead of re-attaching a dead PTY. Only on a real child exit.
             // Windows-only so macOS behavior is untouched (see the clones above).
@@ -1152,6 +1158,52 @@ pub(crate) fn quote_arg(s: &str) -> String {
 /// A subscriber whose bounded buffer is full has the frame DROPPED (slow consumer —
 /// must never block the desktop webview); a subscriber whose receiver hung up is
 /// pruned from the list. Mutates `subs` in place.
+/// How long a busy terminal's output is held to coalesce it into one frame.
+///
+/// Every batch crosses to the webview as its own script evaluation, and on Windows each one
+/// is dispatched through the UI thread -- the same thread that delivers keystrokes. A TUI
+/// agent repaints in many small writes, so a dozen live sessions sent read-by-read keep that
+/// thread busy with hundreds of evaluations a second. The first chunk after a quiet spell
+/// is never held (keystroke echo stays immediate); only a stream arriving faster than this
+/// is merged. VS Code's terminal buffers its PTY data for the same reason.
+const OUTPUT_FRAME: std::time::Duration = std::time::Duration::from_millis(8);
+
+/// A single batch is capped so one flood cannot build an unbounded frame.
+const OUTPUT_BATCH_MAX: usize = 256 * 1024;
+
+/// The next batch of PTY output to send, or None once the reader is gone and nothing is left.
+///
+/// Blocks for the first chunk. If the previous flush was less than `frame` ago the output is
+/// streaming, so it keeps collecting until that frame boundary; either way it then takes
+/// whatever else is already queued.
+fn next_output_batch(
+    rx: &std::sync::mpsc::Receiver<Vec<u8>>,
+    last_flush: Option<std::time::Instant>,
+    frame: std::time::Duration,
+) -> Option<Vec<u8>> {
+    use std::sync::mpsc::RecvTimeoutError;
+    let mut batch = rx.recv().ok()?;
+    if let Some(deadline) = last_flush.map(|t| t + frame) {
+        while batch.len() < OUTPUT_BATCH_MAX {
+            let now = std::time::Instant::now();
+            if now >= deadline {
+                break;
+            }
+            match rx.recv_timeout(deadline - now) {
+                Ok(more) => batch.extend_from_slice(&more),
+                Err(RecvTimeoutError::Timeout) | Err(RecvTimeoutError::Disconnected) => break,
+            }
+        }
+    }
+    while batch.len() < OUTPUT_BATCH_MAX {
+        match rx.try_recv() {
+            Ok(more) => batch.extend_from_slice(&more),
+            Err(_) => break,
+        }
+    }
+    Some(batch)
+}
+
 fn broadcast(subs: &mut Vec<(u64, SyncSender<String>)>, frame: &str) {
     subs.retain(|(_, tx)| match tx.try_send(frame.to_string()) {
         Ok(()) => true,
@@ -1322,6 +1374,58 @@ mod tests {
     // imports (same pattern as the hooks.rs test module).
     use super::*;
     use std::sync::atomic::{AtomicU32, Ordering};
+
+    #[test]
+    fn output_batch_after_quiet_spell_is_not_held() {
+        // Keystroke echo: nothing flushed recently, so the chunk goes out alone and at once
+        // even though a long frame is configured.
+        let (tx, rx) = std::sync::mpsc::channel();
+        tx.send(b"a".to_vec()).unwrap();
+        let started = std::time::Instant::now();
+        let batch = next_output_batch(&rx, None, std::time::Duration::from_secs(5)).unwrap();
+        assert_eq!(batch, b"a");
+        assert!(started.elapsed() < std::time::Duration::from_secs(1));
+    }
+
+    #[test]
+    fn output_batch_merges_what_is_queued_in_order() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        for chunk in [&b"one "[..], b"two ", b"three"] {
+            tx.send(chunk.to_vec()).unwrap();
+        }
+        assert_eq!(
+            next_output_batch(&rx, None, OUTPUT_FRAME).unwrap(),
+            b"one two three"
+        );
+    }
+
+    #[test]
+    fn output_batch_while_streaming_waits_for_the_frame_boundary() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        tx.send(b"x".to_vec()).unwrap();
+        let later = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            tx.send(b"y".to_vec()).unwrap();
+        });
+        // Flushed just now, so this is a stream: "y" lands inside the frame and joins "x".
+        let batch = next_output_batch(
+            &rx,
+            Some(std::time::Instant::now()),
+            std::time::Duration::from_secs(2),
+        )
+        .unwrap();
+        later.join().unwrap();
+        assert_eq!(batch, b"xy");
+    }
+
+    #[test]
+    fn output_batch_ends_after_the_reader_is_gone() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        tx.send(b"last".to_vec()).unwrap();
+        drop(tx);
+        assert_eq!(next_output_batch(&rx, None, OUTPUT_FRAME).unwrap(), b"last");
+        assert!(next_output_batch(&rx, None, OUTPUT_FRAME).is_none());
+    }
 
     const ID: &str = "11111111-2222-3333-4444-555555555555";
 

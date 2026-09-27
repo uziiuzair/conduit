@@ -154,6 +154,21 @@ the changelog behind is incomplete work.
   login shell and `claude` falls off `PATH`. Both spawn sites — `pty.rs` and the
   `claude -p` titler in `lib.rs` — call `env_remove("npm_config_prefix")`. Keep that when
   editing spawn code.
+- **A command that spawns a process or reads more than a small file must be
+  `#[tauri::command(async)]`.** A plain sync Tauri command runs on the main (UI) thread on
+  every platform, and that thread also carries `pty_write` and every terminal-output
+  `Channel` delivery — so a polled `git` call there makes typed text appear late, and a
+  slow repo (seconds, e.g. cloud-synced) makes the whole app stall. `(async)` on a sync fn
+  runs it on the thread pool with no signature change. `pty_write` / `pty_resize` stay sync
+  on purpose: they are cheap, and their ORDER is the keystroke order. `pty_spawn` is
+  off-thread under two locks — `SPAWN_GATE` (lib.rs) keeps spawns one-at-a-time because
+  their setup read-modify-writes files sessions share, and `PtyManager`'s `lifecycle` keeps
+  a spawn and a teardown of the same session from interleaving — and `Terminal.tsx` holds
+  keystrokes until its spawn resolves.
+- **Terminal output is coalesced, not sent per read** (`pty::next_output_batch`,
+  `OUTPUT_FRAME`). Each send is one script evaluation on the UI thread, and TUI agents repaint
+  in many small writes. The first chunk after a quiet spell is never held, so keystroke echo
+  stays immediate; only a stream is merged into ≤ one frame per `OUTPUT_FRAME`.
 - **Secrets.** The plan-usage path reads Claude Code's OAuth token from the macOS Keychain
   (`security find-generic-password`) only on explicit user action, holds it in memory, and
   never writes it to disk. Don't log the token or persist it.
