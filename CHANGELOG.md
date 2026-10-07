@@ -3,6 +3,21 @@
 All notable changes to Conduit are documented here. This project uses
 [semantic versioning](https://semver.org/).
 
+## 0.40.1 — 2026-10-08
+
+- **Fixed — sessions pinned to another account now actually run under it.** A session
+  assigned to a non-default account (per session, per project, or as the global default)
+  silently ran under your normal login, because the account switch never reached the
+  agent once the session was kept alive in the background. Restart any session you had
+  pinned to another account to pick it up.
+- **Fixed — Detect accounts finds `CLAUDE_CONFIG_DIR` profiles.** A second Claude login
+  kept in its own folder (e.g. a `claude-work` alias that sets
+  `CLAUDE_CONFIG_DIR=~/.claude-work`) is now offered by Detect accounts, not only
+  profiles that keep a `.claude` folder inside.
+- **Fixed — plan usage connects for those accounts on macOS.** Connect plan usage now
+  finds such an account's sign-in in the Keychain, so its usage row fills in instead of
+  staying "not connected".
+
 ## 0.40.0 — 2026-09-24
 
 - **Changed — the session chat view speaks HQ's design language.** The rich session view

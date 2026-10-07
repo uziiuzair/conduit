@@ -522,26 +522,54 @@ fn read_credentials_file(dir: &std::path::Path) -> Option<String> {
 #[cfg(target_os = "macos")]
 fn read_oauth_token(config_dir: Option<&str>) -> Option<String> {
     if let Some(dir) = config_dir.filter(|d| !d.trim().is_empty()) {
-        // A registered account keeps its own `.credentials.json`; read ONLY that (config dir
-        // or its profile root) and never fall back to the login Keychain -- that would prompt
-        // for, and cache under this account's key, the DEFAULT account's token. Absent =>
-        // not connected.
-        return read_credentials_file(std::path::Path::new(dir));
+        // A registered account keeps its own `.credentials.json`; read that first (config dir
+        // or its profile root). Never fall back to the DEFAULT Keychain item -- that would
+        // prompt for, and cache under this account's key, the default account's token.
+        if let Some(t) = read_credentials_file(std::path::Path::new(dir)) {
+            return Some(t);
+        }
+        // A flat CLAUDE_CONFIG_DIR account on macOS keeps its login in the Keychain under
+        // its OWN item, suffixed by a hash of that dir. Only for a dir Conduit hands over as
+        // CLAUDE_CONFIG_DIR (see `agent::claude_profile_env`): a `.claude`-named dir runs
+        // with HOME redirected instead, and claude never sees the path to hash it.
+        return keychain_service_for_config_dir(dir).and_then(|svc| keychain_token(&svc));
     }
     // Env-default account only: the login Keychain (this is the read that prompts).
+    keychain_token("Claude Code-credentials")
+}
+
+/// `security find-generic-password -s <service> -w`, parsed. `-w` prints only the secret,
+/// which is never logged.
+#[cfg(target_os = "macos")]
+fn keychain_token(service: &str) -> Option<String> {
     let out = Command::new("security")
-        .args([
-            "find-generic-password",
-            "-s",
-            "Claude Code-credentials",
-            "-w",
-        ])
+        .args(["find-generic-password", "-s", service, "-w"])
         .output()
         .ok()?;
     if !out.status.success() {
         return None;
     }
     parse_oauth_token(&String::from_utf8_lossy(&out.stdout))
+}
+
+/// The Keychain item Claude Code uses for a `CLAUDE_CONFIG_DIR` login:
+/// `Claude Code-credentials-<first 8 hex of sha256(dir)>`, hashed over the exact string
+/// (a trailing `/` or `~` names a different item). Pinned against a real item on macOS
+/// (2026-10-08): `/Users/<u>/.claude-arlo` -> `...-40501f86`. None for a `.claude`-named
+/// dir, which is redirected via HOME and so uses the unsuffixed item of that profile.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn keychain_service_for_config_dir(dir: &str) -> Option<String> {
+    use sha2::{Digest, Sha256};
+    if std::path::Path::new(dir)
+        .file_name()
+        .and_then(|f| f.to_str())
+        == Some(".claude")
+    {
+        return None;
+    }
+    let digest = Sha256::digest(dir.as_bytes());
+    let hex: String = digest[..4].iter().map(|b| format!("{b:02x}")).collect();
+    Some(format!("Claude Code-credentials-{hex}"))
 }
 
 /// Read the Claude Code OAuth access token from its plain-file store on Windows.
@@ -621,6 +649,22 @@ pub async fn connect_claude_plan_usage(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn keychain_service_hashes_the_exact_config_dir() {
+        // Pinned against a real Keychain item Claude Code created for this dir.
+        assert_eq!(
+            keychain_service_for_config_dir("/Users/uzairhayat/.claude-arlo").as_deref(),
+            Some("Claude Code-credentials-40501f86")
+        );
+        // The hash is over the exact string: a trailing slash names a different item.
+        assert_ne!(
+            keychain_service_for_config_dir("/Users/uzairhayat/.claude-arlo/"),
+            keychain_service_for_config_dir("/Users/uzairhayat/.claude-arlo")
+        );
+        // A `.claude` dir runs with HOME redirected, so claude never hashes its path.
+        assert_eq!(keychain_service_for_config_dir("/Users/x/.claude"), None);
+    }
 
     const FIXTURE: &str = r#"{
       "version": 1,

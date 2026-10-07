@@ -432,7 +432,19 @@ impl PtyManager {
                     shell = shell,
                 )
             } else {
-                build_script(
+                // The account redirect and the adapter's env overrides must ride the script
+                // itself: under tmux, `cmd.env` (below) reaches only the tmux CLIENT, and the
+                // server forks every pane from its own environment -- so a session pinned to
+                // a non-default account silently ran under the default one.
+                let mut session_env: Vec<(String, String)> = adapter
+                    .env_overrides()
+                    .into_iter()
+                    .map(|(k, v)| (k.to_string(), v.to_string()))
+                    .collect();
+                if let Some(dir) = account_config_dir.as_deref() {
+                    session_env.extend(adapter.account_env(dir));
+                }
+                let script = build_script(
                     adapter.as_ref(),
                     &session_id,
                     hook_port,
@@ -450,7 +462,8 @@ impl PtyManager {
                     resume_token.as_deref(),
                     strict_mcp,
                     ide_port,
-                )
+                );
+                format!("{}{script}", env_export_prefix(&session_env))
             };
             // Persistence: run `inner` inside a tmux session named after this session id,
             // so the agent survives the app quitting. `new-session -A` is attach-or-create,
@@ -1243,6 +1256,28 @@ fn build_script(
     )
 }
 
+/// `export K='v' ...; ` for env that must reach the agent through the tmux server boundary
+/// (see the call site in `spawn`), or "" when there is none. Keys are adapter-supplied
+/// constants; anything that is not a plain env name is dropped rather than interpolated.
+/// Never put a secret here: the script is visible in `ps` for the session's lifetime.
+#[cfg_attr(windows, allow(dead_code))]
+fn env_export_prefix(env: &[(String, String)]) -> String {
+    let pairs: Vec<String> = env
+        .iter()
+        .filter(|(k, _)| {
+            !k.is_empty()
+                && !k.starts_with(|c: char| c.is_ascii_digit())
+                && k.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+        })
+        .map(|(k, v)| format!("{k}={}", shell_quote(v)))
+        .collect();
+    if pairs.is_empty() {
+        String::new()
+    } else {
+        format!("export {}; ", pairs.join(" "))
+    }
+}
+
 /// Windows counterpart of `build_script`: returns just the agent invocation (with its
 /// worktree/settings flags) to hand to `cmd.exe /K`. The working directory and Conduit's
 /// own env (CONDUIT_SESSION_ID/HOOK_PORT) are applied natively by `CommandBuilder`
@@ -1473,6 +1508,49 @@ mod tests {
         // No IDE announce → neither env var appears anywhere.
         assert!(!script.contains("CLAUDE_CODE_SSE_PORT"));
         assert!(!script.contains("ENABLE_IDE_INTEGRATION"));
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn env_export_prefix_quotes_values_and_drops_bad_keys() {
+        assert_eq!(env_export_prefix(&[]), "");
+        let env = vec![
+            (
+                "CLAUDE_CONFIG_DIR".to_string(),
+                "/Users/a b/.claude-arlo".to_string(),
+            ),
+            ("HOME".to_string(), "/it's".to_string()),
+            ("BAD;rm".to_string(), "x".to_string()),
+            ("1X".to_string(), "x".to_string()),
+        ];
+        assert_eq!(
+            env_export_prefix(&env),
+            "export CLAUDE_CONFIG_DIR='/Users/a b/.claude-arlo' HOME='/it'\\''s'; "
+        );
+        let only_bad = vec![("".to_string(), "x".to_string())];
+        assert_eq!(env_export_prefix(&only_bad), "");
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn account_env_rides_the_script_for_a_flat_config_dir() {
+        // A `CLAUDE_CONFIG_DIR=~/.claude-x claude` alias layout: the dir is not named
+        // `.claude`, so the redirect is CLAUDE_CONFIG_DIR, and it must be in the exported
+        // prefix (the only channel that survives the tmux server), not just cmd.env.
+        let tmp = std::env::temp_dir().join(format!("conduit-acct-{}", uuid::Uuid::new_v4()));
+        let dir = tmp.join(".claude-arlo");
+        std::fs::create_dir_all(&dir).unwrap();
+        use crate::agent::ProviderAdapter as _;
+        let env = crate::agent::ClaudeAdapter.account_env(dir.to_str().unwrap());
+        let prefix = env_export_prefix(&env);
+        assert_eq!(
+            prefix,
+            format!(
+                "export CLAUDE_CONFIG_DIR={}; ",
+                shell_quote(dir.to_str().unwrap())
+            )
+        );
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 
     #[cfg(not(windows))]

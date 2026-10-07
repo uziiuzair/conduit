@@ -586,20 +586,31 @@ fn push_candidate(out: &mut Vec<Account>, registered: &[String], label: &str, di
     });
 }
 
-/// If `dir` holds a `.claude` subdirectory, push it as a discovery candidate, labeled from
-/// `dir`'s own folder name (".claude-personal" -> "Personal"). Used by `discover_accounts` to
-/// find profiles under any home-child layout, not just `.claude-split`.
+/// Push `dir` as a discovery candidate if it is a Claude profile, labeled from `dir`'s own
+/// folder name (".claude-personal" -> "Personal"). Two layouts count:
+/// - HOME-redirect: `dir` holds a `.claude` subdirectory (a `claude-personal` launcher that
+///   sets HOME). The candidate is that inner `.claude`.
+/// - Flat `CLAUDE_CONFIG_DIR`: `dir` itself holds `.claude.json` directly (an alias like
+///   `CLAUDE_CONFIG_DIR=~/.claude-arlo claude`). The candidate is `dir`, which
+///   `agent::claude_profile_env` maps back to `CLAUDE_CONFIG_DIR` because it is not named
+///   `.claude`.
 fn scan_profile_dir(out: &mut Vec<Account>, registered: &[String], dir: &std::path::Path) {
     let inner = dir.join(".claude");
-    if !inner.is_dir() {
+    let candidate = if inner.is_dir() {
+        inner
+    } else if dir.file_name().and_then(|f| f.to_str()) != Some(".claude")
+        && dir.join(".claude.json").is_file()
+    {
+        dir.to_path_buf()
+    } else {
         return;
-    }
+    };
     let label = dir
         .file_name()
         .and_then(|f| f.to_str())
         .map(pretty_label)
         .unwrap_or_else(|| "Account".to_string());
-    push_candidate(out, registered, &label, inner);
+    push_candidate(out, registered, &label, candidate);
 }
 
 /// Turn a split-profile folder name (".claude-personal", "claude-work", ...) into a short
@@ -2730,6 +2741,45 @@ mod tests {
         // A missing state.json is a first launch: empty, and the backup is not consulted.
         fs::remove_file(&save_path).unwrap();
         assert!(load_state(&save_path).projects.is_empty());
+    }
+
+    #[test]
+    fn scan_profile_dir_finds_both_layouts() {
+        let tmp = std::env::temp_dir().join(format!("conduit-scan-{}", Uuid::new_v4()));
+        // HOME-redirect: <root>/.claude
+        let home_style = tmp.join(".claude-personal");
+        fs::create_dir_all(home_style.join(".claude")).unwrap();
+        // Flat CLAUDE_CONFIG_DIR: <dir>/.claude.json, no inner .claude
+        let flat = tmp.join(".claude-arlo");
+        fs::create_dir_all(&flat).unwrap();
+        fs::write(flat.join(".claude.json"), "{}").unwrap();
+        // Neither: a claude-ish folder with nothing account-shaped in it
+        let junk = tmp.join(".claude-junk");
+        fs::create_dir_all(junk.join("cache")).unwrap();
+
+        let mut out = Vec::new();
+        for d in [&home_style, &flat, &junk] {
+            scan_profile_dir(&mut out, &[], d);
+        }
+        let got: Vec<(String, String)> = out
+            .iter()
+            .map(|a| (a.label.clone(), a.config_dir.clone()))
+            .collect();
+        assert_eq!(
+            got,
+            vec![
+                (
+                    "Personal".to_string(),
+                    home_style.join(".claude").to_string_lossy().into_owned()
+                ),
+                ("Arlo".to_string(), flat.to_string_lossy().into_owned()),
+            ]
+        );
+        // Already registered => not offered again.
+        let mut again = Vec::new();
+        scan_profile_dir(&mut again, &[flat.to_string_lossy().into_owned()], &flat);
+        assert!(again.is_empty());
+        let _ = fs::remove_dir_all(&tmp);
     }
 
     #[test]
